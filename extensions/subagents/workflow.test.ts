@@ -115,3 +115,10 @@ test('parallel duplicate stages are reserved before asynchronous task validation
   assert.ok(calls<=1,`duplicate stage launched ${calls} children`);
  } finally {await rm(cwd,{recursive:true,force:true});}
 });
+
+test('FIFO capability, timeout and registered shutdown settle in a bounded subprocess', async () => {
+  const {execFile} = await import('node:child_process');
+  const {promisify} = await import('node:util');
+  const {stdout} = await promisify(execFile)(process.execPath, ['--import', 'tsx', 'tests/fifo-regression.fixture.ts'], {timeout: 15000, killSignal: 'SIGKILL'});
+  assert.match(stdout, /FIFO_REGRESSION_PASS/);
+});

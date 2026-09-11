@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
+import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
@@ -221,7 +222,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
         if (rel === '..' || rel.startsWith('../') || isAbsolute(rel))
           throw new Error('readFile escapes workflow cwd');
         await options.authorizeRead?.(path);
-        const file = await open(path, 'r');
+        const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
         try {
           if (!(await file.stat()).isFile())
             throw new Error('readFile requires a regular file');

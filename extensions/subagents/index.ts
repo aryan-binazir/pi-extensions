@@ -18,10 +18,11 @@ export default function subagents(pi: ExtensionAPI): void {
   let shuttingDown = false;
   const workflows = new Set<AbortController>();
   const workflowRuns = new Set<Promise<unknown>>();
+  const parent = () => ({ cwd: getActiveCwd(context?.cwd ?? process.cwd(), context?.sessionManager.getSessionId()), tools: pi.getActiveTools() });
   const createRegistry = () => new SubagentRegistry({
-    allowedTools: () => childPolicy(context?.cwd ?? process.cwd(), undefined, context?.sessionManager.getSessionId()).tools,
-    authorize: async task => { await assertChildTask(task, { approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request) : undefined }, context?.sessionManager.getSessionId()); },
-    invocation: task => piInvocation(task, childPolicy(task.cwd, task.tools, context?.sessionManager.getSessionId())),
+    allowedTools: () => childPolicy(context?.cwd ?? process.cwd(), undefined, context?.sessionManager.getSessionId(), parent()).tools,
+    authorize: async task => { await assertChildTask(task, { parent: parent(), approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request) : undefined }, context?.sessionManager.getSessionId()); },
+    invocation: task => piInvocation(task, childPolicy(task.cwd, task.tools, context?.sessionManager.getSessionId(), parent())),
     onUpdate: task => {
       if (context?.hasUI) context.ui.setWidget(`subagent:${task.id}`, [`${task.id.slice(0, 8)} · ${task.status} · ${task.usage.input} in / ${task.usage.output} out`, task.output.slice(-2000)]);
     },
@@ -79,15 +80,16 @@ export default function subagents(pi: ExtensionAPI): void {
       try {
         const run = runWorkflow({
           source: params.source, cwd, timeout: params.timeout, signal: controller.signal,
-          journalDirectory: join(getAgentDir(), 'workflow-journals'), policyIdentity: childPolicy(cwd, undefined, ctx.sessionManager.getSessionId()).replayIdentity,
-          allowedTools: () => childPolicy(cwd, undefined, ctx.sessionManager.getSessionId()).tools,
+          journalDirectory: join(getAgentDir(), 'workflow-journals'), policyIdentity: childPolicy(cwd, undefined, ctx.sessionManager.getSessionId(), parent()).replayIdentity,
+          allowedTools: () => childPolicy(cwd, undefined, ctx.sessionManager.getSessionId(), parent()).tools,
           approve: ctx.hasUI ? async source => {
             const reviewed = await ctx.ui.editor('Review workflow TypeScript; submit unchanged source to continue', source);
             return reviewed === source && await ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.');
           } : undefined,
-          validateTask: async task => { await assertChildTask(task, { approve: ctx.hasUI ? request => ctx.ui.confirm('Approve workflow child extensions', request) : undefined }, ctx.sessionManager.getSessionId()); },
+          validateTask: async task => { await assertChildTask(task, { parent: parent(), approve: ctx.hasUI ? request => ctx.ui.confirm('Approve workflow child extensions', request) : undefined }, ctx.sessionManager.getSessionId()); },
           approveReplay: ctx.hasUI ? stages => ctx.ui.confirm('Replay previously successful stages?', `These stages will NOT run again: ${stages.join(', ')}. Approve only if their outputs and side effects remain valid in the current workspace.`) : async () => false,
           authorizeRead: async path => {
+            if (!childPolicy(cwd, undefined, ctx.sessionManager.getSessionId(), parent()).tools.includes('read')) throw new Error('Read is outside parent permissions');
             const decision = await checkAction({ tool: 'read', input: { path }, cwd, provenance: 'workflow readFile' }, {}, ctx.sessionManager.getSessionId());
             if (!decision.allow) throw new Error(decision.reason);
           },

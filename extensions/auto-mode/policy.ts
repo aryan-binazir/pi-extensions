@@ -134,16 +134,17 @@ export function inheritedPolicy():AutoPolicy|undefined {
   policy.record('inherited',data.provenance);
   return policy;
 }
-export function childPolicy(cwd:string, tools?:string[], sessionId='default'):{env:Record<string,string>;extensions:string[];tools:string[];replayIdentity:string} {
-  const policy=policies.get(sessionId)??inheritedPolicy()??new AutoPolicy(cwd);
-  return {tools:[...policy.tools],replayIdentity:JSON.stringify({root:policy.root,cwd,inherited:policy.inherited,policy:policy.fingerprint(false)}),env:{PI_AGENT_POLICY:JSON.stringify({version:1,root:cwd,tools:tools?tools.filter(t=>policy.tools.includes(t)):policy.tools,inherited:true,directives:[...policy.directives],provenance:'Parent subagent/workflow task',policyFingerprint:policy.fingerprint()} satisfies Envelope)},extensions:[fileURLToPath(new URL('./index.ts',import.meta.url))]};
+export function childPolicy(cwd:string, tools?:string[], sessionId='default', parent?:{cwd:string;tools:string[]}):{env:Record<string,string>;extensions:string[];tools:string[];replayIdentity:string} {
+  const policy=policies.get(sessionId)??inheritedPolicy()??new AutoPolicy(parent?.cwd ?? cwd);
+  const allowed=policy.tools.filter(tool=>builtinTools.includes(tool) && (!parent || parent.tools.includes(tool)));
+  return {tools:allowed,replayIdentity:JSON.stringify({root:policy.root,cwd,parent,allowed,inherited:policy.inherited,policy:policy.fingerprint(false)}),env:{PI_AGENT_POLICY:JSON.stringify({version:1,root:cwd,tools:tools?tools.filter(t=>allowed.includes(t)):allowed,inherited:true,directives:[...policy.directives],provenance:'Parent subagent/workflow task',policyFingerprint:policy.fingerprint()} satisfies Envelope)},extensions:[fileURLToPath(new URL('./index.ts',import.meta.url))]};
 }
-export async function assertChildTask(task:{cwd:string;tools:string[];extensions?:string[]}, options:{approve?:(request:string)=>Promise<boolean>} = {}, sessionId='default'):Promise<void> {
-  const policy=policies.get(sessionId)??inheritedPolicy()??new AutoPolicy(task.cwd);
+export async function assertChildTask(task:{cwd:string;tools:string[];extensions?:string[]}, options:{approve?:(request:string)=>Promise<boolean>;parent?:{cwd:string;tools:string[]}} = {}, sessionId='default'):Promise<void> {
+  const policy=policies.get(sessionId)??inheritedPolicy()??new AutoPolicy(options.parent?.cwd ?? task.cwd);
   const root=await canonical(policy.root), cwd=await canonical(task.cwd);
-  if(!within(root,cwd)) throw new Error('Child cwd is outside parent workspace');
+  if(!within(root,cwd) || (options.parent && !within(await canonical(options.parent.cwd),cwd))) throw new Error('Child cwd is outside parent workspace');
   if(relative(root,cwd).split(/[\\/]/).some(sensitiveComponent)) throw new Error('Child cwd is sensitive or repository control data');
-  if(task.tools.some(t=>!policy.tools.includes(t))) throw new Error('Child tools exceed parent permissions');
+  if(task.tools.some(t=>!policy.tools.includes(t) || (options.parent && !options.parent.tools.includes(t)))) throw new Error('Child tools exceed parent permissions');
   if(task.extensions?.length) {
     for(const extension of task.extensions) {
       if(!isAbsolute(extension)) throw new Error('Child extensions must be absolute local paths');

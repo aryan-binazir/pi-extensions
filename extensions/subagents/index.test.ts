@@ -11,7 +11,7 @@ test('workflow registration blocks missing UI and protects sensitive reads throu
  const cwd=await mkdtemp(join(tmpdir(),'workflow-extension-'));
  const previousAgentDir=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent-home');
  const tools=new Map<string,any>();const events=new Map<string,any>();
- subagents({registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler)} as unknown as ExtensionAPI);
+ subagents({getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler)} as unknown as ExtensionAPI);
  const ctx={cwd,hasUI:false,mode:'tui',sessionManager:{getSessionId:()=> 'workflow-extension-test'},ui:{editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
  try {
   await assert.rejects(tools.get('workflow').execute('id',{source:'return 1;'},undefined,undefined,ctx),/approval/);
@@ -39,7 +39,7 @@ test('registered background tool launches guarded Pi and pushes completion to it
   await chmod(join(cwd,'pi'),0o700);
   process.env.PATH=`${cwd}:${previousPath??''}`;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent-home');
   setActivePolicy(new AutoPolicy(cwd),sessionId);
-  subagents({registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler),sendMessage:(message:any,options:any)=>notify({message,options})} as unknown as ExtensionAPI);
+  subagents({getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler),sendMessage:(message:any,options:any)=>notify({message,options})} as unknown as ExtensionAPI);
   await events.get('session_start')({},ctx);
   const response=await tools.get('subagent').execute('call',{task:'Read synthetic checkout',preset:'reader'},undefined,undefined,ctx);
   const deadline=setTimeout(()=>notify({message:{content:'{}'},options:{timeout:true}}),5000);
@@ -90,7 +90,7 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
     process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent-home');
     const policy = new AutoPolicy(cwd);
     setActivePolicy(policy, sessionId);
-    subagents({registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => { completions++; }} as unknown as ExtensionAPI);
+    subagents({getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => { completions++; }} as unknown as ExtensionAPI);
     await events.get('session_start')({}, ctx);
     const source = `return await api.spawn({task:'read',preset:'reader',extensions:[${JSON.stringify(join(cwd, 'trusted.ts'))}]},'read');`;
     const execute = () => tools.get('workflow').execute('call', {source}, undefined, undefined, ctx);
@@ -126,7 +126,7 @@ test('cancelled switches keep the registry usable; committed shutdown reaps chil
     await chmod(join(cwd, 'pi'), 0o700);
     process.env.PATH = `${cwd}:${previousPath ?? ''}`;
     setActivePolicy(new AutoPolicy(cwd), sessionId);
-    subagents({registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
+    subagents({getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
     await events.get('session_start')({}, ctx);
     const launch = () => tools.get('subagent').execute('call', {task: 'wait', preset: 'reader'}, undefined, undefined, ctx);
     await launch();
@@ -150,6 +150,64 @@ test('cancelled switches keep the registry usable; committed shutdown reaps chil
     await events.get('session_shutdown')?.();
     setActivePolicy(undefined, sessionId);
     if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    await rm(cwd, {recursive: true, force: true});
+  }
+});
+
+test('standalone registered subagents and workflows inherit active builtins and workspace without auto mode', async () => {
+  const {chmod} = await import('node:fs/promises');
+  const cwd = await mkdtemp(join(tmpdir(), 'standalone-subagents-'));
+  const previousPath = process.env.PATH, previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const tools = new Map<string, any>(), events = new Map<string, any>();
+  let active = ['read', 'subagent', 'workflow'];
+  const ctx = {cwd, hasUI: true, sessionManager: {getSessionId: () => 'standalone-only'}, ui: {
+    editor: async (_title: string, source: string) => source, confirm: async () => true, setWidget: () => {},
+  }};
+  subagents({getActiveTools: () => active, registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
+  const direct = (params: any) => tools.get('subagent').execute('call', params, undefined, undefined, ctx);
+  const workflow = (source: string) => tools.get('workflow').execute('call', {source}, undefined, undefined, ctx);
+  const directPolicy = async (preset?: string) => {
+    const response = await direct({task: 'valid direct child', preset});
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const task = (await tools.get('subagent_status').execute()).details.find((task: any) => task.id === response.details.id);
+      if (task.status === 'succeeded') return JSON.parse(task.output);
+      assert.ok(['queued', 'running'].includes(task.status), JSON.stringify(task));
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error('Direct child did not complete');
+  };
+  try {
+    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:process.env.PI_AGENT_POLICY}]}}));`);
+    await chmod(join(cwd, 'pi'), 0o700);
+    await writeFile(join(cwd, 'input'), 'safe');
+    process.env.PATH = `${cwd}:${previousPath ?? ''}`;
+    process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent-home');
+    await events.get('session_start')({}, ctx);
+    for (const tool of ['write', 'bash']) {
+      await assert.rejects(direct({task: 'escalate', tools: [tool]}), /exceed parent permissions/);
+      await assert.rejects(workflow(`return await api.spawn({task:'escalate',tools:['${tool}']},'${tool}');`), /exceed parent permissions/);
+    }
+    await assert.rejects(direct({task: 'escape', cwd: tmpdir()}), /outside parent workspace/);
+    await assert.rejects(workflow(`return await api.spawn({task:'escape',cwd:${JSON.stringify(tmpdir())}},'escape');`), /escapes workflow cwd/);
+    for (const preset of [undefined, 'reader', 'writer']) {
+      const response = await workflow(`return await api.spawn(${JSON.stringify({task: 'valid', preset})},'valid');`);
+      const policy = JSON.parse(response.details.output);
+      assert.deepEqual(policy.tools, ['read']);
+      assert.deepEqual((await directPolicy(preset)).tools, ['read']);
+      assert.equal(policy.root, await realpath(cwd));
+    }
+    active = ['subagent', 'workflow'];
+    for (const preset of [undefined, 'reader', 'writer']) {
+      const response = await workflow(`return await api.spawn(${JSON.stringify({task: 'reason only', preset})},'reason');`);
+      assert.deepEqual(JSON.parse(response.details.output).tools, []);
+      assert.deepEqual((await directPolicy(preset)).tools, []);
+    }
+    await assert.rejects(workflow('return await api.readFile("input");'), /outside parent permissions/);
+  } finally {
+    await events.get('session_shutdown')();
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     await rm(cwd, {recursive: true, force: true});
   }
 });

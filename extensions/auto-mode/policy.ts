@@ -59,7 +59,7 @@ export class AutoPolicy {
     if(JSON.stringify(next)!==JSON.stringify(this.tools)) {this.tools.splice(0,this.tools.length,...next);this.approvals.clear();}
     this.configured=true;
   }
-  fingerprint() { return createHash('sha256').update(JSON.stringify({version:1,mode:this.mode,tools:this.tools,declarations:[...this.declarations],directives:this.directives})).digest('hex'); }
+  fingerprint(includeDirectives = true) { return createHash('sha256').update(JSON.stringify({version:1,mode:this.mode,tools:this.tools,declarations:[...this.declarations],directives:includeDirectives ? this.directives : undefined})).digest('hex'); }
   record(kind:string, detail:string) { this.audit.push({kind,detail:detail.slice(0,4000),timestamp:Date.now()}); if(this.audit.length>500) this.audit.shift(); }
   directive(value:string) { this.directives.push(value); if(this.directives.length>12) this.directives.shift(); this.approvals.clear(); this.record('directive',value); }
   declare(value:Declaration) {
@@ -134,9 +134,9 @@ export function inheritedPolicy():AutoPolicy|undefined {
   policy.record('inherited',data.provenance);
   return policy;
 }
-export function childPolicy(cwd:string, tools?:string[], sessionId='default'):{env:Record<string,string>;extensions:string[]} {
+export function childPolicy(cwd:string, tools?:string[], sessionId='default'):{env:Record<string,string>;extensions:string[];tools:string[];replayIdentity:string} {
   const policy=policies.get(sessionId)??inheritedPolicy()??new AutoPolicy(cwd);
-  return {env:{PI_AGENT_POLICY:JSON.stringify({version:1,root:cwd,tools:tools?tools.filter(t=>policy.tools.includes(t)):policy.tools,inherited:true,directives:[...policy.directives],provenance:'Parent subagent/workflow task',policyFingerprint:policy.fingerprint()} satisfies Envelope)},extensions:[fileURLToPath(new URL('./index.ts',import.meta.url))]};
+  return {tools:[...policy.tools],replayIdentity:JSON.stringify({root:policy.root,cwd,inherited:policy.inherited,policy:policy.fingerprint(false)}),env:{PI_AGENT_POLICY:JSON.stringify({version:1,root:cwd,tools:tools?tools.filter(t=>policy.tools.includes(t)):policy.tools,inherited:true,directives:[...policy.directives],provenance:'Parent subagent/workflow task',policyFingerprint:policy.fingerprint()} satisfies Envelope)},extensions:[fileURLToPath(new URL('./index.ts',import.meta.url))]};
 }
 export async function assertChildTask(task:{cwd:string;tools:string[];extensions?:string[]}, options:{approve?:(request:string)=>Promise<boolean>} = {}, sessionId='default'):Promise<void> {
   const policy=policies.get(sessionId)??inheritedPolicy()??new AutoPolicy(task.cwd);

@@ -38,6 +38,7 @@ interface Entry {
 }
 export interface RegistryOptions {
   concurrency?: number;
+  allowedTools?: () => string[];
   invocation?: (spec: ValidTask) => { command: string; args: string[]; env?: NodeJS.ProcessEnv };
   authorize?: (spec: ValidTask) => Promise<void>;
   onUpdate?: (task: TaskResult) => void;
@@ -47,14 +48,14 @@ const READ_TOOLS = ['read', 'grep', 'find', 'ls'];
 const ALL_TOOLS = [...READ_TOOLS, 'write', 'edit', 'bash'];
 const CAP = 64 * 1024;
 
-export async function validateTask(spec: TaskSpec): Promise<ValidTask> {
+export async function validateTask(spec: TaskSpec, allowedTools?: string[]): Promise<ValidTask> {
   if (!spec || typeof spec.task !== 'string' || !spec.task.trim() || spec.task.length > 32000) throw new Error('Task brief must contain 1–32000 characters');
   if (typeof spec.cwd !== 'string' || !isAbsolute(spec.cwd)) throw new Error('Task cwd must be absolute');
   const cwd = await realpath(spec.cwd);
   if (!(await stat(cwd)).isDirectory()) throw new Error('Task cwd must be a directory');
   if (spec.model !== undefined && (typeof spec.model !== 'string' || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:/-]+$/.test(spec.model))) throw new Error('Model must be provider/model');
   if (spec.preset !== undefined && !['reader', 'writer'].includes(spec.preset)) throw new Error('Unknown preset');
-  const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS);
+  const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS).filter(tool => !allowedTools || allowedTools.includes(tool));
   if (!Array.isArray(tools) || tools.some(tool => typeof tool !== 'string' || !ALL_TOOLS.includes(tool)) || new Set(tools).size !== tools.length) throw new Error('Invalid builtin tool selection');
   if (spec.preset === 'reader' && tools.some(tool => !READ_TOOLS.includes(tool))) throw new Error('Reader preset cannot grant write tools');
   const timeout = spec.timeout ?? 300000;
@@ -83,7 +84,7 @@ export class SubagentRegistry {
   }
   async spawn(spec: TaskSpec): Promise<TaskHandle> {
     if (this.closed) throw new Error('Registry is shut down');
-    const validated = await validateTask(spec);
+    const validated = await validateTask(spec, this.options.allowedTools?.());
     await this.options.authorize?.(validated);
     if (this.closed) throw new Error('Registry is shut down');
     if (this.entries.size >= 1000) throw new Error('Session task limit reached');

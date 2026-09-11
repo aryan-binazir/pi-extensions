@@ -11,6 +11,7 @@ export interface WorkflowOptions {
   cwd: string;
   journalDirectory: string;
   policyIdentity: string;
+  allowedTools?: () => string[];
   approve?: (source: string) => Promise<boolean>;
   approveReplay?: (stages: string[]) => Promise<boolean>;
   authorizeRead?: (path: string) => Promise<void>;
@@ -189,7 +190,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
           if (input.cwd !== undefined && typeof input.cwd !== 'string')
             throw new Error('Invalid child cwd');
           // validateTask checks every task field at this untrusted IPC boundary.
-          const task = await validateTask({ ...input, cwd: input.cwd ? resolve(cwd, input.cwd) : cwd } as unknown as TaskSpec);
+          const task = await validateTask({ ...input, cwd: input.cwd ? resolve(cwd, input.cwd) : cwd } as unknown as TaskSpec, options.allowedTools?.());
           const childRelative = relative(cwd, task.cwd);
           if (childRelative === '..' || childRelative.startsWith('../') || isAbsolute(childRelative))
             throw new Error('Child cwd escapes workflow cwd');

@@ -58,7 +58,8 @@ The stash is memory-only and clears on session start, switch and reload. Vi mode
 
 The `subagent` tool starts a background Pi process with an explicit task brief,
 a `reader` or `writer` preset, optional tools/model/extensions/cwd, and a bounded
-timeout. It returns a task ID. Output and usage stream to the UI, and completion
+timeout. Default and preset tools are limited to the parent's active permissions;
+explicit tool requests outside those permissions are rejected. It returns a task ID. Output and usage stream to the UI, and completion
 is pushed into the parent conversation. `subagent_status` inspects the registry;
 `subagent_cancel` or `/subagents cancel ID` cancels a task. Same-directory writers
 queue behind one another. Timeouts, cancellation and session shutdown terminate
@@ -87,7 +88,8 @@ It exposes no host JavaScript objects as capabilities. This is not an OS sandbox
 Node permissions do not enforce a network boundary.
 
 Successful stages are journaled under an identity that includes source, checkout,
-policy and runtime versions. Resuming requires source approval and an explicit
+policy permissions and runtime versions. Ordinary user messages do not invalidate
+the journal; current directives still propagate to new children. Resuming requires source approval and an explicit
 replay confirmation. Replay reuses recorded results; it does not prove that prior
 file effects still exist. Confirm replay only after checking that those effects
 remain valid. Declining aborts without starting children. Failed stages run again,

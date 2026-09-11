@@ -88,7 +88,8 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
     await writeFile(join(cwd, 'trusted.ts'), 'export default () => {};');
     process.env.PATH = `${cwd}:${previousPath ?? ''}`;
     process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent-home');
-    setActivePolicy(new AutoPolicy(cwd), sessionId);
+    const policy = new AutoPolicy(cwd);
+    setActivePolicy(policy, sessionId);
     subagents({registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => { completions++; }} as unknown as ExtensionAPI);
     await events.get('session_start')({}, ctx);
     const source = `return await api.spawn({task:'read',preset:'reader',extensions:[${JSON.stringify(join(cwd, 'trusted.ts'))}]},'read');`;
@@ -96,6 +97,7 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
     await execute();
     assert.equal(completions, 1);
     assert.equal(approvals.filter(title => title.includes('child extensions')).length, 1);
+    policy.directive('Retry the exact same approved workflow after the failed turn');
     allowExtensions = false;
     await assert.rejects(execute(), /Child extension loading was not approved/);
     assert.equal(completions, 1, 'rejected replay must not launch a child');

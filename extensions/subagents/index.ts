@@ -19,6 +19,7 @@ export default function subagents(pi: ExtensionAPI): void {
   const workflows = new Set<AbortController>();
   const workflowRuns = new Set<Promise<unknown>>();
   const createRegistry = () => new SubagentRegistry({
+    allowedTools: () => childPolicy(context?.cwd ?? process.cwd(), undefined, context?.sessionManager.getSessionId()).tools,
     authorize: async task => { await assertChildTask(task, { approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request) : undefined }, context?.sessionManager.getSessionId()); },
     invocation: task => piInvocation(task, childPolicy(task.cwd, task.tools, context?.sessionManager.getSessionId())),
     onUpdate: task => {
@@ -78,7 +79,8 @@ export default function subagents(pi: ExtensionAPI): void {
       try {
         const run = runWorkflow({
           source: params.source, cwd, timeout: params.timeout, signal: controller.signal,
-          journalDirectory: join(getAgentDir(), 'workflow-journals'), policyIdentity: JSON.stringify(childPolicy(cwd, undefined, ctx.sessionManager.getSessionId()).env),
+          journalDirectory: join(getAgentDir(), 'workflow-journals'), policyIdentity: childPolicy(cwd, undefined, ctx.sessionManager.getSessionId()).replayIdentity,
+          allowedTools: () => childPolicy(cwd, undefined, ctx.sessionManager.getSessionId()).tools,
           approve: ctx.hasUI ? async source => {
             const reviewed = await ctx.ui.editor('Review workflow TypeScript; submit unchanged source to continue', source);
             return reviewed === source && await ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.');

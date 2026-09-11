@@ -97,3 +97,46 @@ export function clearBaseUndo(editor: Editor): void {
   internal.undoStack.clear();
   internal.snappedFromCursorCol = null;
 }
+
+export type PasteState = { pastes: Map<number, string>; counter: number };
+function pasteInternal(editor: Editor) {
+  const internal = editor as unknown as {
+    pastes: Map<number, string>;
+    pasteCounter: number;
+  };
+  if (!(internal.pastes instanceof Map) || typeof internal.pasteCounter !== "number")
+    throw new Error("Unsupported Pi paste registry (expected Pi 0.85.1)");
+  return internal;
+}
+export function readPastes(editor: Editor): PasteState {
+  const internal = pasteInternal(editor);
+  return { pastes: new Map(internal.pastes), counter: internal.pasteCounter };
+}
+export function writePastes(editor: Editor, state: PasteState): void {
+  const internal = pasteInternal(editor);
+  internal.pastes = new Map(state.pastes);
+  internal.pasteCounter = state.counter;
+}
+export function pasteMarkers(editor: Editor, text = editor.getText()) {
+  const { pastes } = pasteInternal(editor);
+  return [...text.matchAll(/\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g)]
+    .filter((match) => pastes.has(Number(match[1])));
+}
+/** Replace once so marker-shaped text inside a payload remains literal. */
+export function expandPastes(editor: Editor, text: string): string {
+  const { pastes } = pasteInternal(editor);
+  return text.replace(/\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g,
+    (marker, id: string) => pastes.get(Number(id)) ?? marker);
+}
+/** Stock Pi thresholds/marker format with safe whitespace-preserving payloads. */
+export function collapsePaste(editor: Editor, text: string): string {
+  const lines = text.split("\n").length;
+  if (lines <= 10 && text.length <= 1000) return text;
+  const internal = pasteInternal(editor);
+  let id = internal.pasteCounter + 1;
+  const reserved = editor.getText() + text;
+  while (internal.pastes.has(id) || reserved.includes(`[paste #${id}`)) id++;
+  internal.pasteCounter = id;
+  internal.pastes.set(id, text);
+  return lines > 10 ? `[paste #${id} +${lines} lines]` : `[paste #${id} ${text.length} chars]`;
+}

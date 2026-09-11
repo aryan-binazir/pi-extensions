@@ -11,6 +11,8 @@ import {
   projectDisplay,
   renderProjected,
   clearBaseUndo,
+  readPastes, writePastes, pasteMarkers, expandPastes, collapsePaste,
+  type PasteState,
 } from "./adapter.ts";
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const MAX_DRAFT = 1024 * 1024;
@@ -20,6 +22,7 @@ function safeDraft(text: string): string {
 type Snapshot = {
   text: string;
   pos: number;
+  payloads: PasteState;
 };
 export class ViEditor extends CustomEditor {
   private mode: "insert" | "normal" | "visual" | "line" = "insert";
@@ -69,15 +72,19 @@ export class ViEditor extends CustomEditor {
   }
   private baseInput(data: string): void {
     const submit = this.onSubmit;
-    this.onSubmit = (text) => {
+    const expanded = this.getExpandedText();
+    this.onSubmit = () => {
       this.setText("");
-      submit?.(text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""));
+      submit?.(expanded.trim().replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""));
     };
     try {
       super.handleInput(data);
     } finally {
       this.onSubmit = submit;
     }
+  }
+  override getExpandedText(): string {
+    return expandPastes(this, this.getText());
   }
   override insertTextAtCursor(text: string): void {
     text = safeDraft(text);
@@ -108,14 +115,18 @@ export class ViEditor extends CustomEditor {
     this.prefix = "";
     this.count = "";
     this.registerPending = false;
-    this.writeText(text);
-    this.move(text.length);
+    writePastes(this, { pastes: new Map(), counter: 0 });
+    this.writeText(collapsePaste(this, safeDraft(text)));
+    this.move(this.getText().length);
     clearBaseUndo(this);
     this.cursorShape();
   }
   private writeText(text: string): void {
     text = safeDraft(text);
+    this.boundaryText = "";
+    const payloads = readPastes(this);
     super.setText(text);
+    writePastes(this, payloads);
     clearBaseUndo(this);
     if (this.getText() !== text) {
       retainRawText(this, text);
@@ -126,7 +137,9 @@ export class ViEditor extends CustomEditor {
     const text = this.getText();
     if (this.boundaryText !== text) {
       this.boundaryText = text;
-      this.boundaries = [...segmenter.segment(text)].map((s) => s.index);
+      const markers = pasteMarkers(this);
+      this.boundaries = [...segmenter.segment(text)].map((s) => s.index)
+        .filter((p) => !markers.some((m) => p > m.index && p < m.index + m[0].length));
       this.boundaries.push(text.length);
     }
     let low = 0,
@@ -155,7 +168,7 @@ export class ViEditor extends CustomEditor {
     );
   }
   private snapshot(): Snapshot {
-    return { text: this.getExpandedText(), pos: this.pos() };
+    return { text: this.getText(), pos: this.pos(), payloads: readPastes(this) };
   }
   private checkpoint(s = this.snapshot()): void {
     this.undoHistory.push(s);
@@ -163,13 +176,15 @@ export class ViEditor extends CustomEditor {
     this.redoHistory = [];
   }
   private restore(s: Snapshot): void {
+    writePastes(this, s.payloads);
+    this.boundaryText = "";
     this.writeText(s.text);
     placeCursor(this, s.pos);
   }
   private move(p: number): void {
     const clamped = Math.max(0, Math.min(p, this.getText().length));
-    const segment = segmenter.segment(this.getText()).containing(clamped);
-    placeCursor(this, segment?.index ?? clamped);
+    const i = this.boundaryIndex(clamped);
+    placeCursor(this, this.boundaries[i] === clamped ? clamped : this.boundaries[Math.max(0, i - 1)]);
   }
   private lineStart(p = this.pos()): number {
     return p <= 0 ? 0 : this.getText().lastIndexOf("\n", p - 1) + 1;
@@ -251,6 +266,13 @@ export class ViEditor extends CustomEditor {
   private apply(op: string, a: number, b: number, line = false): void {
     this.preferredColumn = undefined;
     const text = this.getText();
+    for (const marker of pasteMarkers(this)) {
+      const end = marker.index + marker[0].length;
+      if (a < end && b > marker.index) {
+        a = Math.min(a, marker.index);
+        b = Math.max(b, end);
+      }
+    }
     if (line && op === "d" && a === b && a > 0 && text[a - 1] === "\n") a--;
     if (a >= b) {
       this.op = "";
@@ -258,7 +280,7 @@ export class ViEditor extends CustomEditor {
       this.register = '"';
       return;
     }
-    const value = { text: text.slice(a, b), line };
+    const value = { text: expandPastes(this, text.slice(a, b)), line };
     this.registers.set(this.register, value);
     this.registers.set('"', value);
     this.register = '"';
@@ -385,13 +407,14 @@ export class ViEditor extends CustomEditor {
             ? this.range()
             : [this.pos(), this.pos()];
         const text = this.getText();
-        this.writeText(text.slice(0, p) + payload + text.slice(selectionEnd));
+        const visible = collapsePaste(this, payload);
+        this.writeText(text.slice(0, p) + visible + text.slice(selectionEnd));
         if (this.mode === "visual" || this.mode === "line") {
           this.mode = "normal";
           this.cursorShape();
         }
         this.insertion = undefined;
-        this.move(p + payload.length);
+        this.move(p + visible.length);
         if (remaining) this.handleInput(remaining);
       }
       return;
@@ -423,6 +446,16 @@ export class ViEditor extends CustomEditor {
     }
     if (this.mode === "insert") {
       this.insertion ??= this.snapshot();
+      if (matchesKey(data, "backspace")) {
+        const p = this.pos();
+        const marker = pasteMarkers(this).find((m) => m.index + m[0].length === p);
+        if (marker) {
+          const text = this.getText();
+          this.writeText(text.slice(0, marker.index) + text.slice(p));
+          this.move(marker.index);
+          return;
+        }
+      }
       this.baseInput(data);
       return;
     }
@@ -446,7 +479,8 @@ export class ViEditor extends CustomEditor {
       if (r) {
         if (this.op) this.apply(this.op, ...r);
         else {
-          this.anchor = r[0];
+          this.move(r[0]);
+          this.anchor = this.pos();
           this.move(Math.max(r[0], r[1] - 1));
         }
       }
@@ -591,7 +625,7 @@ export class ViEditor extends CustomEditor {
         const t = this.getText();
         if (this.mode === "visual" || this.mode === "line") {
           const [a, b] = this.range();
-          if (r.text.length * n + t.length - (b - a) > MAX_DRAFT) return;
+          if (r.text.length * n + this.getExpandedText().length - expandPastes(this, t.slice(a, b)).length > MAX_DRAFT) return;
           let value = r.text.repeat(n);
           if (this.mode === "line" && t.slice(a, b).endsWith("\n") && !value.endsWith("\n"))
             value += "\n";
@@ -600,8 +634,8 @@ export class ViEditor extends CustomEditor {
             if (b < t.length && !value.endsWith("\n")) value += "\n";
           }
           this.checkpoint();
-          this.registers.set('"', { text: t.slice(a, b), line: this.mode === "line" });
-          this.writeText(t.slice(0, a) + value + t.slice(b));
+          this.registers.set('"', { text: expandPastes(this, t.slice(a, b)), line: this.mode === "line" });
+          this.writeText(t.slice(0, a) + collapsePaste(this, value) + t.slice(b));
           this.move(a);
           this.mode = "normal";
           this.anchor = 0;
@@ -613,7 +647,7 @@ export class ViEditor extends CustomEditor {
           data === "P"
             ? this.pos()
             : Math.min(this.lineEnd(), this.next(this.pos()));
-        if (r.text.length * n + this.getText().length > MAX_DRAFT) return;
+        if (r.text.length * n + this.getExpandedText().length > MAX_DRAFT) return;
         this.checkpoint();
         let value = r.text.repeat(n);
         if (r.line) {
@@ -625,7 +659,7 @@ export class ViEditor extends CustomEditor {
             value = "\n" + value.replace(/\n$/, "");
           else if (!value.endsWith("\n")) value += "\n";
         }
-        this.writeText(t.slice(0, p) + value + t.slice(p));
+        this.writeText(t.slice(0, p) + collapsePaste(this, value) + t.slice(p));
         this.move(p);
       }
       return;

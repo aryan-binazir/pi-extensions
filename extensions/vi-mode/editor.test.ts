@@ -383,7 +383,7 @@ test("refused oversized put preserves the redo history", () => {
   keys(e, 'gg"ayyxu"a9999p');
   assert.equal(e.getExpandedText().length, 2000);
   e.handleInput("\x12");
-  assert.equal(e.getExpandedText().length, 1999);
+  assert.equal(e.getExpandedText().length, 0); // Redo deletes the entire collapsed marker.
 });
 test("pending vi arguments forward save and stash shortcuts to core and extensions", () => {
   for (const prefix of ["di", '"', "r", "vi"]) {
@@ -446,4 +446,100 @@ test("visual register puts replace selection and leave normal mode", () => {
     keys(e, "u");
     assert.equal(e.getExpandedText(), "abc def");
   }
+});
+
+test("collapsed markers are atomic for motions, objects, visual edits, registers and undo", () => {
+  const e = editor();
+  const payload = "\t😀\r\npayload\rtext\n".repeat(100);
+  e.handleInput(`\x1b[200~${payload}\x1b[201~`);
+  const marker = e.getText();
+  assert.match(marker, /^\[paste #\d+ \+\d+ lines\]$/);
+  e.handleInput("z");
+  e.handleInput("\x1b");
+  keys(e, "0l");
+  assert.equal(e.getCursor().col, marker.length);
+  keys(e, "h");
+  assert.equal(e.getCursor().col, 0);
+  keys(e, 'v"ay');
+  keys(e, "v");
+  const rendered = e.render(12).join("");
+  for (const char of marker) assert.ok(rendered.includes(`\x1b[7m${char}\x1b[0m`));
+  keys(e, "x");
+  assert.equal(e.getExpandedText(), "z");
+  keys(e, "u");
+  assert.equal(e.getText(), marker + "z");
+  assert.equal(e.getExpandedText(), payload + "z");
+  e.handleInput("\x12");
+  assert.equal(e.getExpandedText(), "z");
+  keys(e, '"aP');
+  assert.equal(e.getExpandedText(), payload + "z");
+  keys(e, "0di[");
+  assert.equal(e.getExpandedText(), "z", "objects cannot leave a partial marker");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), payload + "z");
+});
+
+test("insert backspace and undo keep multiple collapsed payloads and IDs intact", () => {
+  const e = editor();
+  const first = "first\t\r\n".repeat(100), second = "second\n".repeat(100);
+  e.handleInput(`\x1b[200~${first}\x1b[201~`);
+  e.handleInput(`\x1b[200~${second}\x1b[201~`);
+  const markers = e.getText();
+  e.handleInput("\x7f");
+  assert.equal(e.getExpandedText(), first);
+  e.handleInput("\x1b");
+  keys(e, "u");
+  assert.equal(e.getText(), markers);
+  assert.equal(e.getExpandedText(), first + second);
+  e.handleInput("\x12");
+  assert.equal(e.getExpandedText(), first);
+  keys(e, "a");
+  e.handleInput(`\x1b[200~${second}\x1b[201~`);
+  assert.equal(e.getExpandedText(), first + second);
+});
+
+test("replacement collapses safe payloads, clears old history, and marker-like payload text stays literal", () => {
+  const e = editor();
+  const payload = "literal [paste #1] [paste #2]\t\r\n".repeat(100);
+  e.setText(payload + "\x1b\x9b\x00");
+  assert.match(e.getText(), /^\[paste #/);
+  assert.equal(e.getExpandedText(), payload);
+  const restored = editor();
+  restored.setText(e.getExpandedText());
+  assert.match(restored.getText(), /^\[paste #/);
+  assert.equal(restored.getExpandedText(), payload);
+  e.handleInput("\x1b");
+  keys(e, "0x");
+  e.setText("replacement");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), "replacement");
+});
+
+test("native forward delete and visual objects cannot split collapsed markers", () => {
+  const first = "first\n".repeat(100), second = "second\n".repeat(100);
+  const e = editor();
+  e.handleInput(`\x1b[200~${first}\x1b[201~`);
+  e.handleInput(`\x1b[200~${second}\x1b[201~`);
+  e.handleInput("\x1b[H"); // Native Home reaches the first marker boundary.
+  e.handleInput("\x1b[3~"); // Native Delete uses Pi's marker-aware segmenter.
+  assert.equal(e.getExpandedText(), second);
+  e.handleInput("\x1b");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), first + second);
+  keys(e, "0vi[x");
+  assert.equal(e.getExpandedText(), second);
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), first + second);
+});
+
+test("submission expands once, preserves literal marker-shaped payloads and uses core trimming", () => {
+  const e = editor();
+  const first = " first\n".repeat(100), second = "literal [paste #1]\n".repeat(100);
+  e.handleInput(`\x1b[200~${first}\x1b[201~`);
+  e.handleInput(`\x1b[200~${second}\x1b[201~`);
+  let submitted = "";
+  e.onSubmit = (text) => { submitted = text; };
+  e.handleInput("\r");
+  assert.equal(submitted, (first + second).trim());
+  assert.equal(e.getExpandedText(), "");
 });

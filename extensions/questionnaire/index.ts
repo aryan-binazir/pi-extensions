@@ -85,13 +85,13 @@ export default function questionnaire(pi: ExtensionAPI) {
           answers: [],
           reason: "A questionnaire is already active",
         });
-      inFlight = true;
       let cancel = () => {};
-      pi.events.emit("pi-interactive:questionnaire-waiting", {
-        toolCallId,
-        waiting: true,
-      });
       try {
+        inFlight = true;
+        pi.events.emit("pi-interactive:questionnaire-waiting", {
+          toolCallId,
+          waiting: true,
+        });
         const result = await ctx.ui.custom<Result>(
           (tui, theme, _keys, done) => {
             let tab = 0;
@@ -136,7 +136,12 @@ export default function questionnaire(pi: ExtensionAPI) {
             };
             editor.onSubmit = (value) => {
               const q = params.questions[tab];
-              if (!value.trim() || value.length > 16000 || !q) return;
+              if (!q) return;
+              if (!value.trim() || value.length > 16000) {
+                editor.setText(value);
+                tui.requestRender();
+                return;
+              }
               answers.set(q.id, {
                 id: q.id,
                 value,

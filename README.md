@@ -49,7 +49,7 @@ record declared progress; they do not prove completion.
 and effort handoff. It does not overwrite saved defaults. Plain `/new` keeps
 Pi's normal behavior. Closing a BTW overlay aborts its request and discards the
 side conversation; its answers never automatically enter the main conversation.
-The stash is memory-only and clears on session start, switch and reload. Vi mode preserves raw pasted text and keeps large pastes expanded; it does not use Pi's collapsed paste markers. The exact supported vi command set is documented in [ADR 001](docs/adr/001-editor.md). Counts apply to motions, operators, doubled line operators, `x`, `p/P` and `nG/ngg`; counts on insert entry, visual toggles, text objects and undo/redo are unsupported. Registers are lowercase `a-z` and the unnamed register.
+The stash is memory-only and clears on session start, switch and reload. Vi mode preserves raw pasted text while editing and stashing, but strips terminal control bytes when submitting a message. It keeps large pastes expanded; it does not use Pi's collapsed paste markers. The exact supported vi command set is documented in [ADR 001](docs/adr/001-editor.md). Counts apply to motions, operators, doubled line operators, `x`, `p/P` and `nG/ngg`; counts on insert entry, visual toggles, text objects and undo/redo are unsupported. Registers are lowercase `a-z` and the unnamed register.
 
 ## Development
 

@@ -218,3 +218,31 @@ test("legacy compaction excludes discarded messages and retains the tool-result 
   h.key("\u001b");
   await result;
 });
+
+test("missing or invalid model output limits still use a positive bounded token budget", async () => {
+  for (const maxTokens of [undefined, 0, -1, NaN]) {
+    const h = host();
+    h.ctx.model.maxTokens = maxTokens;
+    const result = h.commands.btw.handler("Question", h.ctx);
+    await tick();
+    assert.equal(h.requests[0].options.maxTokens, 4096);
+    h.key("\u001b");
+    await result;
+  }
+});
+
+test("an oversized followup stays editable and can be shortened without retyping", async () => {
+  const h = host();
+  const result = h.commands.btw.handler("", h.ctx);
+  h.key("\u001b[200~" + "x".repeat(16001) + "\u001b[201~");
+  h.key("\r");
+  assert.match(h.render(), /Question exceeds 16000/);
+  assert.equal(h.requests.length, 0);
+  h.key("\u007f");
+  h.key("\r");
+  await tick();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].context.messages.at(-1).content.length, 16000);
+  h.key("\u001b");
+  await result;
+});

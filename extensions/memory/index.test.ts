@@ -103,3 +103,47 @@ test('memory preserves existing ignore rules and refuses writes when complete ex
   assert.equal(await readFile(path, 'utf8'), unsafe);
   assert.match(JSON.stringify(await app.call({ action: 'read', scope: 'project', name: 'topic' })), /safe note/);
 });
+
+test('topic names cannot alias the index on case-insensitive filesystems', async () => {
+  const app = runtime(base);
+  await app.call({ action: 'write', scope: 'global', name: 'MEMORY.md', content: 'Index stays intact' });
+  for (const name of ['memory', 'memory.md', 'Memory', 'Memory.md', 'MEMORY', 'MEMORY.MD']) {
+    await assert.rejects(app.call({ action: 'write', scope: 'global', name, content: 'x'.repeat(8192) }), /reserved|slug/i);
+  }
+  assert.match(JSON.stringify(await app.call({ action: 'read', scope: 'global', name: 'MEMORY.md' })), /Index stays intact/);
+});
+
+test('overlapping registered memory calls retain both edits and respect delete ordering', async () => {
+  const app = runtime(base);
+  await app.call({ action: 'write', scope: 'global', name: 'concurrent', content: 'alpha beta' });
+  await Promise.all([
+    app.call({ action: 'update', scope: 'global', name: 'concurrent', old_text: 'alpha', content: 'ALPHA' }),
+    app.call({ action: 'update', scope: 'global', name: 'concurrent', old_text: 'beta', content: 'BETA' }),
+  ]);
+  assert.match(JSON.stringify(await app.call({ action: 'read', scope: 'global', name: 'concurrent' })), /ALPHA BETA/);
+  await Promise.all([
+    app.call({ action: 'update', scope: 'global', name: 'concurrent', old_text: 'ALPHA', content: 'finished' }),
+    app.call({ action: 'delete', scope: 'global', name: 'concurrent' }),
+  ]);
+  await assert.rejects(app.call({ action: 'read', scope: 'global', name: 'concurrent' }), /ENOENT/);
+  await app.call({ action: 'write', scope: 'global', name: 'after-failure', content: 'queue remains usable' });
+  assert.match(JSON.stringify(await app.call({ action: 'read', scope: 'global', name: 'after-failure' })), /queue remains usable/);
+});
+
+test('memory enforces UTF-8, plain text, and the exact 32 KiB topic boundary', async () => {
+  const { writeFile } = await import('node:fs/promises');
+  const project = join(base, 'content-validation'); await mkdir(project);
+  const app = runtime(project);
+  await app.call({ action: 'write', scope: 'project', name: 'boundary', content: 'x'.repeat(32768) });
+  const result = await app.call({ action: 'read', scope: 'project', name: 'boundary' });
+  const text = result.content[0]; assert.ok(text.type === 'text'); assert.equal(text.text.length, 32768);
+  await assert.rejects(app.call({ action: 'write', scope: 'project', name: 'oversized', content: 'é'.repeat(16385) }), /32768/);
+  await assert.rejects(app.call({ action: 'write', scope: 'project', name: 'control', content: 'before\x1b[2Jafter' }), /control/);
+  const dir = join(project, '.agents', 'memory');
+  await writeFile(join(dir, 'invalid-utf8.md'), Buffer.from([0xc3, 0x28]));
+  await assert.rejects(app.call({ action: 'read', scope: 'project', name: 'invalid-utf8' }), /encoded|encoding|utf/i);
+  await writeFile(join(dir, 'external-control.md'), 'before\x00after');
+  await assert.rejects(app.call({ action: 'read', scope: 'project', name: 'external-control' }), /control/);
+  await writeFile(join(dir, 'external-oversized.md'), 'x'.repeat(32769));
+  await assert.rejects(app.call({ action: 'read', scope: 'project', name: 'external-oversized' }), /32768/);
+});

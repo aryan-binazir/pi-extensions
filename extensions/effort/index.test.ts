@@ -121,3 +121,21 @@ test("cancelled new session has no handoff and shutdown closes slider", async ()
   h.hooks.session_shutdown();
   await result;
 });
+
+test("a new-session model can be supplied without a thinking level", async () => {
+  const old = host();
+  let fresh: ReturnType<typeof host>;
+  old.ctx.newSession = async ({ withSession }: any) => {
+    old.hooks.session_shutdown();
+    fresh = host();
+    fresh.ctx.sessionManager.getSessionFile = () => "/synthetic/model-only";
+    await withSession(fresh.ctx);
+    return { cancelled: false };
+  };
+  const result = old.commands.effort.handler("new test/test", old.ctx);
+  assert.match(old.render(), /Effort/);
+  old.key("\r");
+  await result;
+  assert.deepEqual(fresh!.changes, ["test", "high"]);
+  fresh!.hooks.session_shutdown();
+});

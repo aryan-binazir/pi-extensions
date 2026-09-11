@@ -1,3 +1,4 @@
+import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import assert from "node:assert/strict";
 import test from "node:test";
 import questionnaire from "./index.ts";
@@ -51,7 +52,7 @@ test("questionnaire single option returns a typed answer and clears waiting", as
   );
 });
 
-function host() {
+function host(onEmit?: (value: any) => void) {
   let tool: any;
   let component: any;
   const events: any[] = [];
@@ -63,7 +64,12 @@ function host() {
     on: (name: string, fn: any) => {
       hooks[name] = fn;
     },
-    events: { emit: (_: string, value: any) => events.push(value) },
+    events: {
+      emit: (_: string, value: any) => {
+        events.push(value);
+        onEmit?.(value);
+      },
+    },
   } as any);
   const ctx: any = {
     mode: "tui",
@@ -174,4 +180,103 @@ test("concurrent calls cannot replace the active questionnaire and cancellation 
   } finally {
     h.hooks.session_shutdown();
   }
+});
+
+test("a failed waiting notification does not wedge later questionnaires", async () => {
+  let fail = true;
+  const h = host((value) => {
+    if (value.waiting && fail) {
+      fail = false;
+      throw new Error("Synthetic emit failure");
+    }
+  });
+  const rejected = await h.run([question("a")]);
+  assert.equal(rejected.details.cancelled, true);
+  assert.match(rejected.details.reason, /Synthetic emit failure/);
+  const next = h.run([question("b")]);
+  h.key("\r");
+  assert.equal((await next).details.answers[0].id, "b");
+  assert.deepEqual(
+    h.events.map((e) => e.waiting),
+    [true, false, true, false],
+  );
+});
+
+test("free-only questions retain rejected long input for editing", async () => {
+  const h = host();
+  const pending = h.run([{ id: "free", prompt: "Write", options: [] }]);
+  try {
+    h.key("\r");
+    h.key("\u001b[200~" + "x".repeat(16001) + "\u001b[201~");
+    h.key("\r");
+    assert.equal(h.events.length, 1, "An oversized answer must not submit");
+    h.key("\u007f");
+    h.key("\r");
+    const result = await Promise.race([
+      pending,
+      new Promise<undefined>((resolve) => setTimeout(resolve, 30)),
+    ]);
+    assert.ok(result, "Rejected text should remain available to shorten");
+    assert.equal(result.details.answers[0].value.length, 16000);
+    assert.equal(result.details.answers[0].wasCustom, true);
+  } finally {
+    h.hooks.session_shutdown();
+  }
+});
+
+test("option-only navigation clamps and never opens free text", async () => {
+  const h = host();
+  const pending = h.run([{ ...question("a"), allowOther: false }]);
+  h.key("\u001b[A");
+  h.key("\u001b[B");
+  h.key("\u001b[B");
+  h.key("\r");
+  assert.deepEqual((await pending).details.answers, [
+    { id: "a", value: "yes", label: "Yes", wasCustom: false },
+  ]);
+});
+
+test("Pi's real custom UI bridge tolerates abort before the factory returns", async () => {
+  const h = host();
+  const controller = new AbortController();
+  const added: unknown[] = [];
+  const editor = { getText: () => "saved draft", setText() {} };
+  const terminal = {
+    requestRender() {},
+    setFocus() {},
+    terminal: { rows: 30, columns: 80 },
+  };
+  const bridgeHost = {
+    editor,
+    editorContainer: {
+      clear() {},
+      addChild(value: unknown) {
+        added.push(value);
+      },
+    },
+    ui: terminal,
+    keybindings: {},
+  };
+  // Exercise the installed Pi UI boundary with a synthetic terminal. The private
+  // bridge is used only by this compatibility regression, never by extensions.
+  const bridge = (InteractiveMode.prototype as any).showExtensionCustom;
+  h.ctx.ui.custom = (factory: any) =>
+    bridge.call(bridgeHost, (...args: any[]) => {
+      controller.abort();
+      const component = factory(...args);
+      h.hooks.session_shutdown(); // A second close cannot change the first result.
+      return component;
+    });
+  const result = await h.run([question("a")], controller.signal);
+  await Promise.resolve();
+  assert.equal(result.details.cancelled, true);
+  assert.deepEqual(
+    added,
+    [editor],
+    "The cancelled questionnaire must never be attached",
+  );
+  assert.deepEqual(
+    h.events.map((e) => e.waiting),
+    [true, false],
+  );
 });

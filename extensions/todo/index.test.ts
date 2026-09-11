@@ -53,3 +53,14 @@ test('invalid snapshots and malformed replacement cannot restore stale or corrup
   await app.hook('session_start'); assert.equal(app.widget(), undefined);
   await app.call([{ content: 'New', status: 'pending' }]); await app.hook('session_shutdown'); assert.equal(app.widget(), undefined);
 });
+
+test('todo accepts 100 tasks and rejects an oversized replacement without changing progress', async () => {
+  const app = runtime();
+  const tasks = Array.from({ length: 100 }, (_, index) => ({ content: `Task ${index + 1}`, status: 'pending' }));
+  await app.call(tasks);
+  assert.match(app.widget()!.join('\n'), /Task 100/);
+  const before = app.branch();
+  await assert.rejects(app.call([...tasks, { content: 'Task 101', status: 'pending' }]), /100/);
+  assert.deepEqual(app.branch(), before);
+  assert.doesNotMatch(app.widget()!.join('\n'), /Task 101/);
+});

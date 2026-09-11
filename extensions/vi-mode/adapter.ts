@@ -8,12 +8,14 @@ export function placeCursor(editor: Editor, offset: number): void {
       cursorCol: number;
     };
     preferredVisualCol: number | null;
+    snappedFromCursorCol: number | null;
   };
   if (!internal.state || typeof internal.state.cursorLine !== "number")
     throw new Error("Unsupported Pi editor cursor layout (expected Pi 0.85.1)");
   internal.state.cursorLine = before.length - 1;
   internal.state.cursorCol = before.at(-1)!.length;
   internal.preferredVisualCol = null;
+  internal.snappedFromCursorCol = null;
 }
 /** Preserve raw pasted bytes that public setText otherwise normalizes. */
 export function retainRawText(editor: Editor, text: string): void {
@@ -83,4 +85,15 @@ export function renderProjected(
     Object.assign(state, saved);
     internal.preferredVisualCol = preferred;
   }
+}
+
+export function clearBaseUndo(editor: Editor): void {
+  const internal = editor as unknown as {
+    undoStack: { clear(): void };
+    snappedFromCursorCol: number | null;
+  };
+  if (typeof internal.undoStack?.clear !== "function")
+    throw new Error("Unsupported Pi undo layout");
+  internal.undoStack.clear();
+  internal.snappedFromCursorCol = null;
 }

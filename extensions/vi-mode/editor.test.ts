@@ -194,3 +194,143 @@ test("counts on G and gg jump to the requested logical line", () => {
   keys(e, "gg");
   assert.deepEqual(e.getCursor(), { line: 0, col: 0 });
 });
+test("submission strips terminal controls while the draft and stash retain raw bytes", () => {
+  const e = editor();
+  const raw = "log \x1b]52;c;abc\x07 \x1b[2J\r\nend";
+  e.handleInput("\x1b[200~" + raw + "\x1b[201~");
+  assert.equal(e.getExpandedText(), raw);
+  let sent = "";
+  e.onSubmit = (text) => {
+    sent = text;
+  };
+  e.handleInput("\r");
+  assert.equal(sent, "log ]52;c;abc [2J\nend");
+});
+test("quote objects work and missing objects disarm operators without losing registers", () => {
+  const e = editor();
+  e.setText('say "hello" now');
+  e.handleInput("\x1b");
+  keys(e, '0wldi"');
+  assert.equal(e.getExpandedText(), 'say "" now');
+  e.setText("keep me\nsecond");
+  keys(e, 'gg"ayy');
+  keys(e, 'di"jw');
+  assert.equal(e.getExpandedText(), "keep me\nsecond");
+  keys(e, '"ap');
+  assert.equal(e.getExpandedText(), "keep me\nsecond\nkeep me");
+});
+test("unicode word objects and cw edge positions respect word boundaries", () => {
+  const e = editor();
+  e.setText("café bar");
+  e.handleInput("\x1b");
+  keys(e, "0diw");
+  assert.equal(e.getExpandedText(), " bar");
+  e.setText("naïve test");
+  keys(e, "0dw");
+  assert.equal(e.getExpandedText(), "test");
+  e.setText("alpha beta");
+  keys(e, "04lcwX");
+  e.handleInput("\x1b");
+  assert.equal(e.getExpandedText(), "alphX beta");
+  e.setText("alpha beta");
+  keys(e, "05lcwX");
+  e.handleInput("\x1b");
+  assert.equal(e.getExpandedText(), "alphaXbeta");
+});
+test("unsupported multi-key commands cannot reinterpret their argument destructively", () => {
+  for (const command of ["rx", "ra", "ma", "qa"]) {
+    const e = editor();
+    e.setText("alpha beta");
+    e.handleInput("\x1b");
+    keys(e, "0" + command);
+    assert.equal(e.getExpandedText(), "alpha beta");
+    keys(e, "x");
+    assert.equal(e.getExpandedText(), "lpha beta");
+  }
+});
+test("line operators preserve line boundaries and delete the final line completely", () => {
+  const e = editor();
+  e.setText("one\ntwo\nthree");
+  e.handleInput("\x1b");
+  keys(e, "2GccX");
+  e.handleInput("\x1b");
+  assert.equal(e.getExpandedText(), "one\nX\nthree");
+  e.setText("a\nb\nc");
+  keys(e, "Gdd");
+  assert.equal(e.getExpandedText(), "a\nb");
+  keys(e, "dd");
+  assert.equal(e.getExpandedText(), "a");
+  e.setText("a\nb\nc");
+  keys(e, "ggdj");
+  assert.equal(e.getExpandedText(), "c");
+  e.setText("a\nb\nc");
+  keys(e, "ggcjX");
+  e.handleInput("\x1b");
+  assert.equal(e.getExpandedText(), "X\nc");
+});
+test("vertical motions retain preferred column and horizontal motions stay on characters", () => {
+  const e = editor();
+  e.setText("aaaaaaaa\nb\ncccccccc");
+  e.handleInput("\x1b");
+  keys(e, "gg$jj");
+  assert.deepEqual(e.getCursor(), { line: 2, col: 7 });
+  e.setText("ab\ncd");
+  keys(e, "gg0lll");
+  assert.deepEqual(e.getCursor(), { line: 0, col: 1 });
+  e.setText("");
+  keys(e, "ddp");
+  assert.equal(e.getExpandedText(), "");
+});
+test("huge counted motions stop at boundaries and repeated paste remains bounded", () => {
+  const e = editor();
+  e.setText("a\nb\nc");
+  e.handleInput("\x1b");
+  keys(e, "gg9999d9999j");
+  assert.equal(e.getExpandedText(), "");
+  e.setText("x".repeat(2000));
+  keys(e, "ggyy9999p");
+  assert.ok(e.getExpandedText().length <= 1024 * 1024);
+});
+test("I uses first nonblank, visual paste replaces selection and native undo cannot restore another draft", () => {
+  const e = editor();
+  e.setText("  ab");
+  e.handleInput("\x1b");
+  keys(e, "IZ");
+  assert.equal(e.getExpandedText(), "  Zab");
+  e.handleInput("\x1b");
+  e.setText("abcdef");
+  keys(e, "0vll");
+  e.handleInput("\x1b[200~X\x1b[201~");
+  assert.equal(e.getExpandedText(), "Xdef");
+  e.setText("new");
+  e.handleInput("i");
+  e.handleInput("\x1f");
+  assert.equal(e.getExpandedText(), "new");
+  assert.ok(!e.render(50).at(-1)!.includes("..."));
+});
+test("programmatic image-path insertion participates in vi undo", () => {
+  const e = editor();
+  e.setText("draft");
+  e.handleInput("\x1b");
+  e.insertTextAtCursor(" /tmp/image.png");
+  assert.equal(e.getExpandedText(), "draft /tmp/image.png");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), "draft");
+});
+test("up/down yanks and counted line changes include complete lines without losing an empty final line", () => {
+  const e = editor();
+  e.setText("a\nb\nc");
+  e.handleInput("\x1b");
+  keys(e, "2Gdk");
+  assert.equal(e.getExpandedText(), "c");
+  e.setText("a\nb\nc");
+  keys(e, "ggyjGp");
+  assert.equal(e.getExpandedText(), "a\nb\nc\na\nb");
+  e.setText("one\ntwo\nthree");
+  keys(e, "gg2ccX");
+  e.handleInput("\x1b");
+  assert.equal(e.getExpandedText(), "X\nthree");
+  e.setText("a\n");
+  keys(e, "Gdd");
+  assert.equal(e.getExpandedText(), "a");
+});

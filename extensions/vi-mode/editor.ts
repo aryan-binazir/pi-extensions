@@ -10,7 +10,10 @@ import {
   retainRawText,
   projectDisplay,
   renderProjected,
+  clearBaseUndo,
 } from "./adapter.ts";
+const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const MAX_DRAFT = 1024 * 1024;
 type Snapshot = {
   text: string;
   pos: number;
@@ -37,11 +40,56 @@ export class ViEditor extends CustomEditor {
   private undoHistory: Snapshot[] = [];
   private redoHistory: Snapshot[] = [];
   private insertion?: Snapshot;
+  private discardArgument = false;
+  private preferredColumn: number | undefined;
+  private visualScroll = 0;
+  private boundaryText = "";
+  private boundaries = [0];
+  private wordClass(p: number): number {
+    const c = String.fromCodePoint(this.getText().codePointAt(p) ?? 32);
+    return /\s/u.test(c) ? 0 : /[\p{L}\p{N}\p{M}_]/u.test(c) ? 1 : 2;
+  }
+  private wordNext(p: number): number {
+    const kind = this.wordClass(p),
+      end = this.getText().length;
+    while (p < end && this.wordClass(p) === kind) p = this.next(p);
+    while (p < end && this.wordClass(p) === 0) p = this.next(p);
+    return p;
+  }
+  private wordEnd(p: number): number {
+    const end = this.getText().length;
+    while (p < end && this.wordClass(p) === 0) p = this.next(p);
+    const kind = this.wordClass(p);
+    while (this.next(p) < end && this.wordClass(this.next(p)) === kind)
+      p = this.next(p);
+    return p;
+  }
+  private baseInput(data: string): void {
+    const submit = this.onSubmit;
+    this.onSubmit = (text) =>
+      submit?.(text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""));
+    try {
+      super.handleInput(data);
+    } finally {
+      this.onSubmit = submit;
+    }
+  }
+  override insertTextAtCursor(text: string): void {
+    if (!text) return;
+    this.checkpoint();
+    const p = this.pos(),
+      draft = this.getText();
+    this.writeText(draft.slice(0, p) + text + draft.slice(p));
+    this.move(p + text.length);
+  }
+
   constructor(...args: ConstructorParameters<typeof CustomEditor>) {
     super(...args);
     this.cursorShape();
   }
   override setText(text: string): void {
+    this.preferredColumn = undefined;
+    this.discardArgument = false;
     this.undoHistory = [];
     this.redoHistory = [];
     this.insertion = undefined;
@@ -53,28 +101,39 @@ export class ViEditor extends CustomEditor {
     this.registerPending = false;
     this.writeText(text);
     this.move(text.length);
+    clearBaseUndo(this);
   }
   private writeText(text: string): void {
     super.setText(text);
+    clearBaseUndo(this);
     if (this.getText() !== text) {
       retainRawText(this, text);
       this.onChange?.(text);
     }
   }
+  private boundaryIndex(p: number): number {
+    const text = this.getText();
+    if (this.boundaryText !== text) {
+      this.boundaryText = text;
+      this.boundaries = [...segmenter.segment(text)].map((s) => s.index);
+      this.boundaries.push(text.length);
+    }
+    let low = 0,
+      high = this.boundaries.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (this.boundaries[mid] < p) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  }
   private next(p: number): number {
-    const segment = new Intl.Segmenter(undefined, { granularity: "grapheme" })
-      .segment(this.getText().slice(p))
-      [Symbol.iterator]()
-      .next().value;
-    return p + (segment?.segment.length ?? 0);
+    const i = this.boundaryIndex(p);
+    return this.boundaries[Math.min(this.boundaries.length - 1, i + 1)] ?? p;
   }
   private previous(p: number): number {
-    const segments = [
-      ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
-        this.getText().slice(0, p),
-      ),
-    ];
-    return segments.at(-1)?.index ?? 0;
+    const index = this.boundaryIndex(p);
+    return this.boundaries[Math.max(0, index - 1)] ?? 0;
   }
   private pos(): number {
     const c = this.getCursor();
@@ -98,9 +157,7 @@ export class ViEditor extends CustomEditor {
   }
   private move(p: number): void {
     const clamped = Math.max(0, Math.min(p, this.getText().length));
-    const segment = new Intl.Segmenter(undefined, { granularity: "grapheme" })
-      .segment(this.getText())
-      .containing(clamped);
+    const segment = segmenter.segment(this.getText()).containing(clamped);
     placeCursor(this, segment?.index ?? clamped);
   }
   private lineStart(p = this.pos()): number {
@@ -109,6 +166,11 @@ export class ViEditor extends CustomEditor {
   private lineEnd(p = this.pos()): number {
     const n = this.getText().indexOf("\n", p);
     return n < 0 ? this.getText().length : n;
+  }
+  private deleteEnd(n: number): number {
+    let p = this.pos();
+    for (let i = 0; i < n && p < this.lineEnd(); i++) p = this.next(p);
+    return p;
   }
   private lineTarget(number: number): number {
     const lines = this.getLines();
@@ -119,51 +181,49 @@ export class ViEditor extends CustomEditor {
     );
   }
   private motion(key: string, n: number): number | undefined {
-    const text = this.getText();
     let p = this.pos();
+    n = Math.min(10000, n);
+    if (key === "j" || key === "k") {
+      const cursor = this.getCursor();
+      this.preferredColumn ??= cursor.col;
+      const line = Math.max(
+        0,
+        Math.min(
+          this.getLines().length - 1,
+          cursor.line + (key === "j" ? n : -n),
+        ),
+      );
+      const start = this.getLines()
+        .slice(0, line)
+        .reduce((sum, l) => sum + l.length + 1, 0);
+      return Math.min(
+        start + this.preferredColumn,
+        Math.max(start, this.previous(this.lineEnd(start))),
+      );
+    }
+    this.preferredColumn = undefined;
     for (let i = 0; i < n; i++) {
+      const before: number = p;
       if (key === "h") p = Math.max(this.lineStart(p), this.previous(p));
-      else if (key === "l") p = Math.min(this.lineEnd(p), this.next(p));
-      else if (key === "0") p = this.lineStart(p);
+      else if (key === "l")
+        p = Math.min(
+          Math.max(this.lineStart(p), this.previous(this.lineEnd(p))),
+          this.next(p),
+        );
+      else if (key === "0") return this.lineStart(p);
       else if (key === "$")
-        p = Math.max(this.lineStart(p), this.previous(this.lineEnd(p)));
-      else if (key === "^")
-        p =
-          this.lineStart(p) +
-          (text.slice(this.lineStart(p)).match(/^[ \t]*/)?.[0].length ?? 0);
-      else if (key === "j" || key === "k") {
-        const col = p - this.lineStart(p);
-        if (key === "j" && this.lineEnd(p) < text.length) {
-          const start = this.lineEnd(p) + 1;
-          p = Math.min(start + col, this.lineEnd(start));
-        } else if (key === "k" && this.lineStart(p) > 0) {
-          const end = this.lineStart(p) - 1;
-          p = Math.min(this.lineStart(end) + col, end);
-        }
-      } else if (key === "e") {
-        p = Math.min(text.length, p + 1);
-        while (p < text.length && /\s/.test(text[p])) p++;
-        const word = /\w/.test(text[p] ?? "");
-        while (
-          p + 1 < text.length &&
-          !/\s/.test(text[p + 1]) &&
-          /\w/.test(text[p + 1]) === word
-        )
-          p++;
-      } else if (key === "w") {
-        const m = text.slice(p).match(/^(?:\w+|[^\w\s]+|\s+)\s*/u);
-        p += m?.[0].length ?? 0;
-      } else if (key === "b") {
-        p = Math.max(0, p - 1);
-        while (p > 0 && /\s/.test(text[p])) p--;
-        const word = /\w/.test(text[p] ?? "");
-        while (
-          p > 0 &&
-          !/\s/.test(text[p - 1]) &&
-          /\w/.test(text[p - 1]) === word
-        )
-          p--;
+        return Math.max(this.lineStart(p), this.previous(this.lineEnd(p)));
+      else if (key === "^") return this.lineTarget(this.getCursor().line + 1);
+      else if (key === "w") p = this.wordNext(p);
+      else if (key === "e") p = this.wordEnd(this.next(p));
+      else if (key === "b") {
+        p = this.previous(p);
+        while (p > 0 && this.wordClass(p) === 0) p = this.previous(p);
+        const kind = this.wordClass(p);
+        while (p > 0 && this.wordClass(this.previous(p)) === kind)
+          p = this.previous(p);
       } else return undefined;
+      if (p === before) break;
     }
     return p;
   }
@@ -178,7 +238,15 @@ export class ViEditor extends CustomEditor {
       : [a, this.next(b)];
   }
   private apply(op: string, a: number, b: number, line = false): void {
+    this.preferredColumn = undefined;
     const text = this.getText();
+    if (line && op === "d" && a === b && a > 0 && text[a - 1] === "\n") a--;
+    if (a >= b) {
+      this.op = "";
+      this.prefix = "";
+      this.register = '"';
+      return;
+    }
     const value = { text: text.slice(a, b), line };
     this.registers.set(this.register, value);
     this.registers.set('"', value);
@@ -186,7 +254,18 @@ export class ViEditor extends CustomEditor {
     if (op !== "y") {
       if (op === "c") this.insertion = this.snapshot();
       else this.checkpoint();
-      this.writeText(text.slice(0, a) + text.slice(b));
+      let replacement = "";
+      if (line && op === "c" && text.slice(a, b).endsWith("\n"))
+        replacement = "\n";
+      if (
+        line &&
+        op === "d" &&
+        b === text.length &&
+        a > 0 &&
+        text[a - 1] === "\n"
+      )
+        a--;
+      this.writeText(text.slice(0, a) + replacement + text.slice(b));
     }
     this.move(a);
     this.mode = op === "c" ? "insert" : "normal";
@@ -198,14 +277,16 @@ export class ViEditor extends CustomEditor {
     const t = this.getText(),
       p = this.pos();
     if (key === "w" || key === "W") {
-      const match = (c: string) => (key === "W" ? /\S/.test(c) : /\w/.test(c));
+      const kind =
+        key === "W" ? (this.wordClass(p) === 0 ? 0 : 1) : this.wordClass(p);
+      const kindAt = (pos: number) =>
+        key === "W" ? (this.wordClass(pos) === 0 ? 0 : 1) : this.wordClass(pos);
       let a = p,
         b = p;
-      while (a > 0 && match(t[a - 1])) a--;
-      while (b < t.length && match(t[b])) b++;
-      if (around) {
-        while (b < t.length && /\s/.test(t[b])) b++;
-      }
+      while (a > 0 && kindAt(this.previous(a)) === kind) a = this.previous(a);
+      while (b < t.length && kindAt(b) === kind) b = this.next(b);
+      if (around)
+        while (b < t.length && this.wordClass(b) === 0) b = this.next(b);
       return [a, b];
     }
     const pairs: Record<string, string> = {
@@ -288,9 +369,16 @@ export class ViEditor extends CustomEditor {
         if (this.insertion && this.insertion.text !== this.getText())
           this.checkpoint(this.insertion);
         this.checkpoint();
-        const p = this.pos();
+        const [p, selectionEnd] =
+          this.mode === "visual" || this.mode === "line"
+            ? this.range()
+            : [this.pos(), this.pos()];
         const text = this.getText();
-        this.writeText(text.slice(0, p) + payload + text.slice(p));
+        this.writeText(text.slice(0, p) + payload + text.slice(selectionEnd));
+        if (this.mode === "visual" || this.mode === "line") {
+          this.mode = "normal";
+          this.cursorShape();
+        }
         this.insertion = undefined;
         this.move(p + payload.length);
         if (remaining) this.handleInput(remaining);
@@ -299,7 +387,7 @@ export class ViEditor extends CustomEditor {
     }
     if (matchesKey(data, "escape")) {
       if (this.mode === "normal" && !this.op && !this.prefix && !this.count) {
-        super.handleInput(data);
+        this.baseInput(data);
         return;
       }
       if (
@@ -319,7 +407,7 @@ export class ViEditor extends CustomEditor {
     }
     if (this.mode === "insert") {
       this.insertion ??= this.snapshot();
-      super.handleInput(data);
+      this.baseInput(data);
       return;
     }
     if (data === "u" || matchesKey(data, "ctrl+r")) {
@@ -333,22 +421,6 @@ export class ViEditor extends CustomEditor {
       }
       return;
     }
-    if (this.registerPending) {
-      if (/^[a-z"]$/.test(data)) this.register = data;
-      this.registerPending = false;
-      return;
-    }
-    if (data === '"') {
-      this.registerPending = true;
-      return;
-    }
-    if (/^[1-9]$/.test(data) || (data === "0" && this.count)) {
-      this.count = (this.count + data).slice(0, 4);
-      return;
-    }
-    const hasCount = this.count !== "";
-    const n = Number(this.count || 1);
-    this.count = "";
     if (this.prefix === "i" || this.prefix === "a") {
       const r = this.object(data, this.prefix === "a");
       if (r) {
@@ -359,8 +431,37 @@ export class ViEditor extends CustomEditor {
         }
       }
       this.prefix = "";
+      this.op = "";
+      this.registerPending = false;
+      this.register = '"';
       return;
     }
+    if (this.discardArgument) {
+      this.discardArgument = false;
+      return;
+    }
+    if (["r", "m", "q"].includes(data)) {
+      this.discardArgument = true;
+      this.op = "";
+      this.prefix = "";
+      return;
+    }
+    if (this.registerPending) {
+      if (/^[a-z"]$/.test(data)) this.register = data;
+      this.registerPending = false;
+      return;
+    }
+    if (data === '"') {
+      this.registerPending = true;
+      return;
+    }
+    if (/^[1-9]$/.test(data) || (data === "0" && this.count)) {
+      this.count = String(Math.min(10000, Number(this.count + data)));
+      return;
+    }
+    const hasCount = this.count !== "";
+    const n = Number(this.count || 1);
+    this.count = "";
     if (
       (this.op || this.mode === "visual" || this.mode === "line") &&
       (data === "i" || data === "a")
@@ -384,7 +485,11 @@ export class ViEditor extends CustomEditor {
     if ("dcy".includes(data) && data.length === 1) {
       if (this.op === data) {
         let b = this.pos();
-        for (let i = 0; i < n * this.opCount; i++)
+        for (
+          let i = 0;
+          i < Math.min(10000, n * this.opCount) && b < this.getText().length;
+          i++
+        )
           b = Math.min(this.getText().length, this.lineEnd(b) + 1);
         this.apply(data, this.lineStart(), b, true);
       } else {
@@ -394,6 +499,7 @@ export class ViEditor extends CustomEditor {
       return;
     }
     let p: number | undefined;
+    if (data === "g" || data === "G") this.preferredColumn = undefined;
     if (this.prefix === "g") {
       this.prefix = "";
       if (data === "g") p = this.lineTarget(this.prefixCount);
@@ -404,13 +510,20 @@ export class ViEditor extends CustomEditor {
     } else if (data === "G")
       p = this.lineTarget(hasCount ? n : this.getLines().length);
     else
-      p = this.motion(
-        this.op === "c" && data === "w" ? "e" : data,
-        n * (this.op ? this.opCount : 1),
-      );
+      p = this.motion(data, Math.min(10000, n * (this.op ? this.opCount : 1)));
+    const changeWord =
+      this.op === "c" && data === "w" && this.wordClass(this.pos()) !== 0;
+    if (changeWord) {
+      p = this.pos();
+      for (let i = 0; i < Math.min(10000, n * this.opCount); i++) {
+        const before: number = p;
+        p = this.wordEnd(i === 0 ? p : this.wordNext(p));
+        if (p >= this.getText().length || (i > 0 && p === before)) break;
+      }
+    }
     if (p !== undefined) {
       if (this.op) {
-        if (data === "G" || data === "g") {
+        if (data === "G" || data === "g" || data === "j" || data === "k") {
           this.apply(
             this.op,
             this.lineStart(Math.min(this.pos(), p)),
@@ -422,8 +535,7 @@ export class ViEditor extends CustomEditor {
           );
           return;
         }
-        const inclusive =
-          data === "$" || data === "e" || (this.op === "c" && data === "w");
+        const inclusive = data === "$" || data === "e" || changeWord;
         this.apply(
           this.op,
           Math.min(this.pos(), p),
@@ -444,11 +556,7 @@ export class ViEditor extends CustomEditor {
       return;
     }
     if (data === "x") {
-      this.apply(
-        "d",
-        this.pos(),
-        Math.min(this.lineEnd(), this.motion("l", n) ?? this.pos()),
-      );
+      this.apply("d", this.pos(), this.deleteEnd(n));
       return;
     }
     if (data === "D" || data === "C") {
@@ -465,6 +573,7 @@ export class ViEditor extends CustomEditor {
           data === "P"
             ? this.pos()
             : Math.min(this.lineEnd(), this.next(this.pos()));
+        if (r.text.length * n + this.getText().length > MAX_DRAFT) return;
         let value = r.text.repeat(n);
         if (r.line) {
           p =
@@ -483,7 +592,7 @@ export class ViEditor extends CustomEditor {
     if ("iaIAoO".includes(data) && data.length === 1) {
       if (data === "a")
         this.move(Math.min(this.lineEnd(), this.next(this.pos())));
-      if (data === "I") this.move(this.lineStart());
+      if (data === "I") this.move(this.lineTarget(this.getCursor().line + 1));
       if (data === "A") this.move(this.lineEnd());
       this.insertion = this.snapshot();
       if (data === "o" || data === "O") {
@@ -497,7 +606,7 @@ export class ViEditor extends CustomEditor {
       return;
     }
     this.op = "";
-    if (data.length !== 1 || data.charCodeAt(0) < 32) super.handleInput(data);
+    if (data.length !== 1 || data.charCodeAt(0) < 32) this.baseInput(data);
   }
   private cursorShape(): void {
     this.tui.terminal.write(
@@ -514,6 +623,7 @@ export class ViEditor extends CustomEditor {
     return truncateToWidth(
       label + super.renderBottomBorder(width, hidden),
       width,
+      "",
     );
   }
   render(width: number): string[] {
@@ -525,6 +635,11 @@ export class ViEditor extends CustomEditor {
       b = projection.offsets[rawEnd];
     const text = projection.text;
     const cursor = projection.offsets[this.pos()];
+    const padding = Math.min(
+      this.getPaddingX(),
+      Math.max(0, Math.floor((width - 1) / 2)),
+    );
+    const layoutWidth = Math.max(1, width - 2 * padding - (padding ? 0 : 1));
     const rows: string[] = [];
     let row = "",
       cols = 0,
@@ -543,7 +658,7 @@ export class ViEditor extends CustomEditor {
         continue;
       }
       const w = visibleWidth(char);
-      if (cols + w > Math.max(1, width - 1)) {
+      if (cols + w > layoutWidth) {
         rows.push(row);
         row = "";
         cols = 0;
@@ -555,7 +670,7 @@ export class ViEditor extends CustomEditor {
       cols += w;
     }
     if (cursor === text.length) {
-      if (cols >= Math.max(1, width - 1)) {
+      if (cols >= layoutWidth) {
         rows.push(row);
         row = "";
       }
@@ -564,10 +679,15 @@ export class ViEditor extends CustomEditor {
     }
     rows.push(row);
     const max = Math.max(5, Math.floor(this.tui.terminal.rows * 0.3));
-    const start = Math.max(0, Math.min(cursorRow, rows.length - max));
+    if (cursorRow < this.visualScroll) this.visualScroll = cursorRow;
+    if (cursorRow >= this.visualScroll + max)
+      this.visualScroll = cursorRow - max + 1;
+    const start = Math.max(0, Math.min(this.visualScroll, rows.length - max));
     return [
       this.renderTopBorder(width, start),
-      ...rows.slice(start, start + max),
+      ...rows
+        .slice(start, start + max)
+        .map((row) => " ".repeat(padding) + row + " ".repeat(padding)),
       this.renderBottomBorder(width, Math.max(0, rows.length - start - max)),
     ];
   }

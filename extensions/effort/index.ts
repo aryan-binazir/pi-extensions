@@ -74,8 +74,12 @@ export default function effort(pi: ExtensionAPI) {
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const newSession = parts[0] === "new";
       if (newSession) parts.shift();
-      const requested = parts.shift();
-      const modelName = parts.shift();
+      let requested = parts.shift();
+      let modelName = parts.shift();
+      if (newSession && requested?.includes("/") && modelName === undefined) {
+        modelName = requested;
+        requested = undefined;
+      }
       if (parts.length || (!newSession && modelName)) {
         ctx.ui.notify(
           "Usage: /effort [LEVEL] or /effort new [LEVEL] [provider/model]",

@@ -120,6 +120,8 @@ export default function btw(pi: ExtensionAPI) {
             if (closed || busy || !raw.trim()) return;
             if (raw.length > MAX_QUESTION) {
               status = `Question exceeds ${MAX_QUESTION} characters`;
+              // Pi's Editor clears before onSubmit; put rejected input back.
+              editor.setText(raw);
               tui.requestRender();
               return;
             }
@@ -169,7 +171,10 @@ export default function btw(pi: ExtensionAPI) {
                   headers: auth.headers,
                   env: auth.env,
                   signal,
-                  maxTokens: Math.min(4096, model.maxTokens),
+                  maxTokens:
+                    Number.isFinite(model.maxTokens) && model.maxTokens > 0
+                      ? Math.max(1, Math.min(4096, Math.floor(model.maxTokens)))
+                      : 4096,
                   cacheRetention: "none",
                   sessionId: randomUUID(),
                 },

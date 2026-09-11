@@ -118,8 +118,8 @@ actions, approvals and provenance. Canonical workspace file operations use
 model-free checks. Recursive directory grep requires approval because Pi searches
 hidden files; grep of one verified safe file remains automatic. Uncertain calls
 use a bounded, tool-free classifier and may
-require an exact-action confirmation. Shell commands beyond literal `pwd`
-require approval even when the classifier says safe. Classifier errors,
+require an exact-action confirmation. Shell commands beyond literal `pwd` are classified. An eligible permitted action
+runs on `safe`, requests approval on `ask`, and is blocked on `unsafe`. Classifier errors,
 approval errors and required approval without an interactive UI block execution.
 
 Delegated children inherit a narrower workspace and tool list, user directives

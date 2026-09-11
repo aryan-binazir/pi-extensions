@@ -60,13 +60,13 @@ async function workflowRuntime() {
     // Check the actual permission model, including denied filesystem/process
     // capabilities, before sending any approved workflow to this executable.
     const { stdout } = await execute(runtime.execPath, [permissionFlag, '--input-type=module', '-e', `
-  import { readFileSync } from 'node:fs';
-  import { spawnSync } from 'node:child_process';
-  if (process.versions.bun || process.versions.node !== ${JSON.stringify(runtime.version)} || !process.permission || process.permission.has('fs.read') || process.permission.has('fs.write') || process.permission.has('child') || process.permission.has('worker')) process.exit(1);
-  for (const operation of [()=>readFileSync(process.execPath),()=>spawnSync(process.execPath,['--version'])]) {
-  try { operation(); process.exit(1); } catch (error) { if(error.code !== 'ERR_ACCESS_DENIED') process.exit(1); }
-  }
-  process.stdout.write('permissions-ok');
+ import { readFileSync } from 'node:fs';
+ import { spawnSync } from 'node:child_process';
+ if (process.versions.bun || process.versions.node !== ${JSON.stringify(runtime.version)} || !process.permission || process.permission.has('fs.read') || process.permission.has('fs.write') || process.permission.has('child') || process.permission.has('worker')) process.exit(1);
+ for (const operation of [()=>readFileSync(process.execPath),()=>spawnSync(process.execPath,['--version'])]) {
+ try { operation(); process.exit(1); } catch (error) { if(error.code !== 'ERR_ACCESS_DENIED') process.exit(1); }
+ }
+ process.stdout.write('permissions-ok');
  `], { env, timeout: 5000, maxBuffer: 4096 });
     if (stdout !== 'permissions-ok')
       throw new Error('Permission probe failed');
@@ -157,11 +157,13 @@ export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
     const worker = spawn(runtime.execPath, [runtime.permissionFlag, '--max-old-space-size=64', `--allow-fs-read=${workerPath}`, workerPath], { cwd, detached: true, env: { PATH: process.env.PATH }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
     let workerError = '';
     worker.stderr?.on('data', chunk => { workerError = (workerError + String(chunk)).slice(-8000); });
-    const stop = () => { if (worker.pid)
-      try {
-        process.kill(-worker.pid, 'SIGKILL');
-      }
-      catch { /* Already gone. */ } };
+    const stop = () => {
+      if (worker.pid)
+        try {
+          process.kill(-worker.pid, 'SIGKILL');
+        }
+        catch { /* Already gone. */ }
+    };
     const abortWorker = () => stop();
     controller.signal.addEventListener('abort', abortWorker, { once: true });
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -181,24 +183,24 @@ export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
           throw new Error('Invalid child task or stage label');
         if (activeStages.has(key))
           throw new Error('Concurrent duplicate spawn stage');
-        const input = args.task as Record<string, unknown>;
-        if (input.cwd !== undefined && typeof input.cwd !== 'string')
-          throw new Error('Invalid child cwd');
-        // validateTask checks every task field at this untrusted IPC boundary.
-        const task = await validateTask({ ...input, cwd: input.cwd ? resolve(cwd, input.cwd) : cwd } as unknown as TaskSpec);
-        const childRelative = relative(cwd, task.cwd);
-        if (childRelative === '..' || childRelative.startsWith('../') || isAbsolute(childRelative))
-          throw new Error('Child cwd escapes workflow cwd');
-        const signature = digest(JSON.stringify(task));
-        const cached = journal.stages[key];
-        if (cached) {
-          if (cached.signature !== signature)
-            throw new Error('Stage label reused for a different task');
-          await options.validateTask?.(task);
-          return cached.value;
-        }
         activeStages.add(key);
         try {
+          const input = args.task as Record<string, unknown>;
+          if (input.cwd !== undefined && typeof input.cwd !== 'string')
+            throw new Error('Invalid child cwd');
+          // validateTask checks every task field at this untrusted IPC boundary.
+          const task = await validateTask({ ...input, cwd: input.cwd ? resolve(cwd, input.cwd) : cwd } as unknown as TaskSpec);
+          const childRelative = relative(cwd, task.cwd);
+          if (childRelative === '..' || childRelative.startsWith('../') || isAbsolute(childRelative))
+            throw new Error('Child cwd escapes workflow cwd');
+          const signature = digest(JSON.stringify(task));
+          const cached = journal.stages[key];
+          if (cached) {
+            if (cached.signature !== signature)
+              throw new Error('Stage label reused for a different task');
+            await options.validateTask?.(task);
+            return cached.value;
+          }
           const value = await options.spawn(task, controller.signal);
           if (controller.signal.aborted)
             throw new Error('Workflow aborted');
@@ -247,8 +249,10 @@ export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
       return await new Promise((resolveResult, reject) => {
         let settled = false;
         worker.on('error', reject);
-        worker.on('close', code => { if (!settled)
-          reject(new Error(controller.signal.aborted ? 'Workflow aborted or timed out' : `Workflow worker exited ${code}: ${workerError}`)); });
+        worker.on('close', code => {
+          if (!settled)
+            reject(new Error(controller.signal.aborted ? 'Workflow aborted or timed out' : `Workflow worker exited ${code}: ${workerError}`));
+        });
         worker.on('message', (incoming: unknown) => {
           if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming))
             return;
@@ -285,8 +289,10 @@ export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
           pending.add(request);
           void request.finally(() => pending.delete(request));
         });
-        worker.send({ type: 'start', code: compiled.outputText }, error => { if (error)
-          reject(error); });
+        worker.send({ type: 'start', code: compiled.outputText }, error => {
+          if (error)
+            reject(error);
+        });
       });
     }
     finally {

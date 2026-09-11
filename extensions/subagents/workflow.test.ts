@@ -103,3 +103,15 @@ test('workflow rejects a Node candidate that cannot enforce permissions', async 
   await assert.rejects(runWorkflow({source:'return 1;',cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'permission-probe',approve:async()=>true,spawn:async()=>{throw new Error('must not spawn');}}),/permission capability probe failed/);
  } finally {process.env.PATH=previousPath;await rm(cwd,{recursive:true,force:true});}
 });
+
+test('parallel duplicate stages are reserved before asynchronous task validation', async () => {
+ const cwd=await mkdtemp(join(tmpdir(),'workflow-stage-race-'));
+ let calls=0;
+ try {
+  await assert.rejects(runWorkflow({cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'race',approve:async()=>true,
+   source:'return await api.parallel([()=>api.spawn({task:"read"},"same"),()=>api.spawn({task:"read"},"same")]);',
+   spawn:async()=>{calls++;await new Promise(resolve=>setTimeout(resolve,30));return 'done';},
+  }),/Concurrent duplicate spawn stage/);
+  assert.ok(calls<=1,`duplicate stage launched ${calls} children`);
+ } finally {await rm(cwd,{recursive:true,force:true});}
+});

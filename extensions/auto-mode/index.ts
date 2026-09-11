@@ -13,6 +13,8 @@ export default function autoMode(pi: ExtensionAPI) {
     if(nextSessionId!==sessionId) { setActivePolicy(undefined,sessionId);policy?.approvals.clear(); }
     sessionId=nextSessionId;
     policy ??= new AutoPolicy(getActiveCwd(ctx.cwd, sessionId));
+    const active=new Set(pi.getActiveTools());
+    policy.configureTools(pi.getAllTools().map(tool=>tool.name).filter(name=>active.has(name)));
     if(!policy.inherited && policy.root!==getActiveCwd(ctx.cwd, sessionId)) { policy.root=getActiveCwd(ctx.cwd, sessionId);policy.approvals.clear();policy.record('workspace',policy.root); }
     setActivePolicy(policy,sessionId);
     ctx.ui.setStatus('auto-mode', `Auto ${invalid ? 'BLOCKED' : policy.mode}${policy.inherited ? ' (inherited)' : ''}`);
@@ -51,6 +53,7 @@ export default function autoMode(pi: ExtensionAPI) {
     if(invalid) return {block:true,reason:'Invalid inherited policy; execution blocked'};
     const p=initialize(ctx);
     const decision=await p.check({tool:event.toolName,input:event.input,cwd:getActiveCwd(ctx.cwd, sessionId),provenance:'Pi tool_call'}, {
+      toolMetadata:pi.getAllTools().find(tool=>tool.name===event.toolName),
       context:JSON.stringify(ctx.sessionManager.getBranch().filter(entry=>entry.type==='message' && (entry.message.role==='user' || entry.message.role==='assistant' || entry.message.role==='toolResult')).slice(-12)).slice(-12000),
       approve:ctx.hasUI ? request=>ctx.ui.confirm('Approve this exact tool action?',request) : undefined,
       classify:ctx.model ? async(request,signal)=>{

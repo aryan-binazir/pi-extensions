@@ -7,7 +7,7 @@ import { childPolicy, inheritedPolicy, setActivePolicy, AutoPolicy, assertChildT
 function fixture() {
   const handlers:Record<string,any>={},commands:Record<string,any>={};
   const entries:unknown[]=[];
-  autoMode({on:(name:string,handler:any)=>{handlers[name]=handler;},events:{on:()=>{},emit:()=>{}},registerCommand:(name:string,command:any)=>{commands[name]=command;},appendEntry:(_name:string,entry:unknown)=>{entries.push(entry);}} as any);
+  autoMode({on:(name:string,handler:any)=>{handlers[name]=handler;},events:{on:()=>{},emit:()=>{}},getAllTools:()=>['read','write','edit','bash','grep','find','ls'].map(name=>({name})),getActiveTools:()=>['read','write','edit','bash','grep','find','ls'],registerCommand:(name:string,command:any)=>{commands[name]=command;},appendEntry:(_name:string,entry:unknown)=>{entries.push(entry);}} as any);
   const ctx:any={cwd:tmpdir(),hasUI:false,mode:'print',ui:{setStatus:()=>{},notify:()=>{}},sessionManager:{getBranch:()=>[],getSessionId:()=>'default'}};
   return {handlers,commands,ctx,entries};
 }
@@ -66,7 +66,7 @@ test('real subprocess enforces inherited guard before a child filesystem write',
       import autoMode from ${JSON.stringify(new URL('./index.ts',import.meta.url).href)};
       import {writeFile} from 'node:fs/promises';
       const hooks={};
-      autoMode({on:(n,h)=>hooks[n]=h,events:{on(){},emit(){}},registerCommand(){},appendEntry(){}});
+      autoMode({on:(n,h)=>hooks[n]=h,events:{on(){},emit(){}},getAllTools:()=>['read','write'].map(name=>({name})),getActiveTools:()=>['read','write'],registerCommand(){},appendEntry(){}});
       const ctx={cwd:${JSON.stringify(dir)},hasUI:false,mode:'print',ui:{setStatus(){}},sessionManager:{getBranch:()=>[],getSessionId:()=>'default'}};
       await hooks.session_start({},ctx);
       const decision=await hooks.tool_call({toolName:'write',toolCallId:'real-child',input:{path:${JSON.stringify(target)},content:'bad'}},ctx);

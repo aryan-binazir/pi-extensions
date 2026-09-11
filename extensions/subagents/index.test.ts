@@ -111,3 +111,43 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
     await rm(cwd, {recursive: true, force: true});
   }
 });
+
+test('cancelled switches keep the registry usable; committed shutdown reaps children', async () => {
+  const {chmod} = await import('node:fs/promises');
+  const cwd = await mkdtemp(join(tmpdir(), 'subagent-switch-'));
+  const previousPath = process.env.PATH;
+  const sessionId = 'subagent-switch-test';
+  const tools = new Map<string, any>(), events = new Map<string, any>();
+  const ctx = {cwd, hasUI: false, mode: 'print', sessionManager: {getSessionId: () => sessionId}};
+  try {
+    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:String(process.pid)}}));setInterval(()=>{},1000);`);
+    await chmod(join(cwd, 'pi'), 0o700);
+    process.env.PATH = `${cwd}:${previousPath ?? ''}`;
+    setActivePolicy(new AutoPolicy(cwd), sessionId);
+    subagents({registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
+    await events.get('session_start')({}, ctx);
+    const launch = () => tools.get('subagent').execute('call', {task: 'wait', preset: 'reader'}, undefined, undefined, ctx);
+    await launch();
+    // Another extension cancels the request after all before-switch handlers run.
+    await events.get('session_before_switch')?.({reason: 'resume'}, ctx);
+    await launch();
+    const status = async () => (await tools.get('subagent_status').execute()).details;
+    let running = await status();
+    const deadline = Date.now() + 5000;
+    while (running.some((task: any) => !task.output) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      running = await status();
+    }
+    assert.equal(running.length, 2);
+    assert.ok(running.every((task: any) => task.status === 'running' && Number(task.output) > 0));
+    const pids = running.map((task: any) => Number(task.output));
+    await events.get('session_shutdown')({reason: 'resume'}, ctx);
+    assert.ok((await status()).every((task: any) => task.status === 'cancelled'));
+    for (const pid of pids) assert.throws(() => process.kill(pid, 0), {code: 'ESRCH'});
+  } finally {
+    await events.get('session_shutdown')?.();
+    setActivePolicy(undefined, sessionId);
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    await rm(cwd, {recursive: true, force: true});
+  }
+});

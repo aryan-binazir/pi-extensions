@@ -10,6 +10,7 @@ export interface PolicyIO {
   classify?: (request: string, signal: AbortSignal) => Promise<'safe'|'ask'|'unsafe'>;
   approve?: (request: string) => Promise<boolean>;
   context?: string;
+  toolMetadata?: unknown;
 }
 export type Declaration = { version: 1; source: 'local'; extension: string; tool: string } & (
   { effect: 'read'|'write'; pathArgument: string } | { effect: 'managed'; pathArgument?: never }
@@ -50,15 +51,22 @@ export class AutoPolicy {
   readonly directives: string[] = [];
   private readonly scope=randomUUID();
   private declarations = new Map<string,Declaration>();
-  constructor(public root: string, readonly tools: string[] = [...builtinTools], readonly inherited = false) {}
+  private configured = false;
+  private readonly inheritedTools: string[];
+  constructor(public root: string, readonly tools: string[] = [...builtinTools], readonly inherited = false) { this.inheritedTools=[...tools]; }
+  configureTools(names:string[]) {
+    const next=[...new Set(names)].filter(name=>!this.inherited || this.inheritedTools.includes(name));
+    if(JSON.stringify(next)!==JSON.stringify(this.tools)) {this.tools.splice(0,this.tools.length,...next);this.approvals.clear();}
+    this.configured=true;
+  }
   fingerprint() { return createHash('sha256').update(JSON.stringify({version:1,mode:this.mode,tools:this.tools,declarations:[...this.declarations],directives:this.directives})).digest('hex'); }
   record(kind:string, detail:string) { this.audit.push({kind,detail:detail.slice(0,4000),timestamp:Date.now()}); if(this.audit.length>500) this.audit.shift(); }
-  directive(value:string) { this.directives.push(value.slice(0,4000)); if(this.directives.length>12) this.directives.shift(); this.approvals.clear(); this.record('directive',value); }
+  directive(value:string) { this.directives.push(value); if(this.directives.length>12) this.directives.shift(); this.approvals.clear(); this.record('directive',value); }
   declare(value:Declaration) {
     if(value.version!==1 || value.source!=='local' || !isAbsolute(value.extension) || !value.tool || !['read','write','managed'].includes(value.effect) || (value.effect !== 'managed' && !value.pathArgument) || (value.effect === 'managed' && value.pathArgument !== undefined)) throw new Error('Only versioned trusted local declarations are accepted');
     if (builtinTools.includes(value.tool)) throw new Error('Cannot replace a builtin declaration');
     if(this.inherited && !this.tools.includes(value.tool)) throw new Error('Declaration exceeds inherited tools');
-    if(!this.tools.includes(value.tool)) this.tools.push(value.tool);
+    if(!this.configured && !this.tools.includes(value.tool)) this.tools.push(value.tool);
     this.declarations.set(value.tool,{...value}); this.approvals.clear(); this.record('declaration',JSON.stringify(value));
   }
   async check(action:Action, io:PolicyIO = {}):Promise<Decision> {
@@ -67,7 +75,7 @@ export class AutoPolicy {
     try {
       const root=await canonical(this.root), cwd=await canonical(action.cwd);
       const declaration=this.declarations.get(action.tool);
-      if(this.inherited && !this.tools.includes(action.tool)) return finish(false,'unsafe','Tool is outside inherited permissions');
+      if((this.inherited || this.configured) && !this.tools.includes(action.tool)) return finish(false,'unsafe',this.inherited?'Tool is outside inherited permissions':'Tool is outside active permissions');
       const argument = declaration?.pathArgument ?? (['read','write','edit','grep','find','ls'].includes(action.tool)?'path':undefined);
       const raw=argument ? action.input[argument] : undefined;
       if(argument && typeof raw!=='string' && !(raw===undefined && ['grep','find','ls'].includes(action.tool))) return finish(false,'unsafe','Invalid file path argument');
@@ -82,14 +90,20 @@ export class AutoPolicy {
       const directorySearch=action.tool==='grep' && (!path || !(await stat(path).catch(()=>undefined))?.isFile());
       if(bounded && path && !sensitive && !directorySearch) return finish(true,'safe',declaration ? `Local declaration ${declaration.extension} v1` : 'Canonical workspace file operation');
       if(bounded && action.tool==='bash' && action.input.command==='pwd') return finish(true,'safe','Literal pwd');
-      const request=JSON.stringify({action:{...action,cwd},resolvedPath:path,root,directives:this.directives,context:(io.context??'').slice(-12000)});
+      const payload={action:{...action,cwd},resolvedPath:path,root,directives:this.directives,toolMetadata:io.toolMetadata};
+      const complete=JSON.stringify(payload);
+      if(complete.length>24000) return finish(false,'unsafe','Complete action, directives or metadata exceed classifier limit; blocked');
+      let context=(io.context??'').slice(-12000);
+      let request=JSON.stringify({...payload,context});
+      while(request.length>24000 && context.length) {context=context.slice(Math.max(1,Math.ceil((request.length-24000)/2)));request=JSON.stringify({...payload,context});}
+      if(request.length>24000) request=complete;
       const key=createHash('sha256').update(JSON.stringify({version:1,scope:this.scope,action:{...action,cwd},resolvedPath:path,root,policy:this.fingerprint()})).digest('hex');
       if(this.approvals.has(key)) return finish(true,'safe','Existing exact approval');
       let classification:Decision['classification']='ask';
       if(io.classify) {
         const controller=new AbortController();
         let timer:ReturnType<typeof setTimeout>|undefined;
-        try { classification=await Promise.race([io.classify(request.slice(0,24000),controller.signal),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('Classifier timed out'));},10000);})]); }
+        try { classification=await Promise.race([io.classify(request,controller.signal),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('Classifier timed out'));},10000);})]); }
         catch { return finish(false,'unsafe','Classifier failed; blocked'); }
         finally { clearTimeout(timer); }
         if(!['safe','ask','unsafe'].includes(classification)) return finish(false,'unsafe','Invalid classifier result; blocked');

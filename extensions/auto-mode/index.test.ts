@@ -5,7 +5,7 @@ import autoMode from './index.ts';
 
 test('classifier uses bounded reasoning, conversation messages, canonical verdicts and RPC approval', async () => {
   const handlers = new Map<string, (...args: any[]) => any>();
-  autoMode({on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), events: {on() {}, emit() {}}, registerCommand() {}, appendEntry() {}} as unknown as ExtensionAPI);
+  autoMode({on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), events: {on() {}, emit() {}}, getAllTools:()=>['read','write','edit','bash','grep','find','ls'].map(name=>({name})),getActiveTools:()=>['read','write','edit','bash','grep','find','ls'],registerCommand() {}, appendEntry() {}} as unknown as ExtensionAPI);
   let request = '', options: any, approval = '', answer = '"Ask".', failure = false;
   const ctx = {
     cwd: '/tmp', hasUI: true, mode: 'rpc',
@@ -47,7 +47,7 @@ test('classifier uses bounded reasoning, conversation messages, canonical verdic
 test('classifier preserves the SDK Anthropic minimum thinking budget on the wire', async () => {
   const {streamSimple} = await import('@earendil-works/pi-ai/api/anthropic-messages');
   const handlers = new Map<string, (...args: any[]) => any>();
-  autoMode({on: (name: string, fn: (...args: any[]) => any) => handlers.set(name, fn), events: {on() {}, emit() {}}, registerCommand() {}, appendEntry() {}} as unknown as ExtensionAPI);
+  autoMode({on: (name: string, fn: (...args: any[]) => any) => handlers.set(name, fn), events: {on() {}, emit() {}}, getAllTools:()=>['read','write','edit','bash','grep','find','ls'].map(name=>({name})),getActiveTools:()=>['read','write','edit','bash','grep','find','ls'],registerCommand() {}, appendEntry() {}} as unknown as ExtensionAPI);
   let payload: any;
   const model: any = {id:'claude-sonnet-4-5', name:'Synthetic Claude', api:'anthropic-messages', provider:'anthropic', baseUrl:'https://example.invalid', reasoning:true, input:['text'], cost:{input:0,output:0,cacheRead:0,cacheWrite:0}, contextWindow:200000, maxTokens:64000};
   const ctx: any = {cwd:'/tmp',hasUI:false,mode:'print',model,sessionManager:{getSessionId:()=> 'anthropic-wire',getBranch:()=>[]},ui:{setStatus() {}},modelRegistry:{
@@ -64,5 +64,18 @@ test('classifier preserves the SDK Anthropic minimum thinking budget on the wire
     assert.equal(payload.thinking.type,'enabled');
     assert.ok(payload.thinking.budget_tokens >= 1024,JSON.stringify(payload.thinking));
     assert.ok(payload.max_tokens > payload.thinking.budget_tokens);
+  } finally {await handlers.get('session_shutdown')!({},ctx);}
+});
+
+test('production hook uses registered active intersection for parent delegation',async()=>{
+  const {assertChildTask}=await import('./policy.ts');
+  const handlers=new Map<string,(...args:any[])=>any>();
+  autoMode({on:(name:string,handler:(...args:any[])=>any)=>handlers.set(name,handler),events:{on(){},emit(){}},registerCommand(){},appendEntry(){},getAllTools:()=>[{name:'read'},{name:'write'}],getActiveTools:()=>['read','unregistered']} as unknown as ExtensionAPI);
+  const ctx={cwd:'/tmp',hasUI:false,ui:{setStatus(){}},sessionManager:{getSessionId:()=>'restricted-hook',getBranch:()=>[]}} as unknown as ExtensionContext;
+  await handlers.get('session_start')!({},ctx);
+  try {
+    await assertChildTask({cwd:'/tmp',tools:['read']},{},'restricted-hook');
+    await assert.rejects(assertChildTask({cwd:'/tmp',tools:['write']},{},'restricted-hook'),/permissions/);
+    await assert.rejects(assertChildTask({cwd:'/tmp',tools:['unregistered']},{},'restricted-hook'),/permissions/);
   } finally {await handlers.get('session_shutdown')!({},ctx);}
 });

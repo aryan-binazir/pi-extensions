@@ -63,8 +63,8 @@ export default function worktree(pi: ExtensionAPI): void {
         if (command === 'remove' || command === 'cleanup') {
           const force = words.includes('--force');
           const confirm = (message: string) => ctx.ui.confirm('Remove worktree', message);
-          const path = resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), words.filter(word => word !== '--force').join(' ') || '.');
-          const results = command === 'cleanup' ? await trees.cleanup({ force, confirm }) : [{ path, ...await trees.remove(path, { force, confirm }) }];
+          const path = command === 'remove' ? await realpath(resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), words.filter(word => word !== '--force').join(' ') || '.')) : undefined;
+          const results = command === 'cleanup' ? await trees.cleanup({ force, confirm }) : [{ path: path!, ...await trees.remove(path!, { force, confirm }) }];
           if (results.some(result => result.removed && resolve(result.path) === resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId())))) activate(ctx, ctx.cwd);
           ctx.ui.notify(results.map(result => `${result.path}: ${result.removed ? 'removed' : result.reason}`).join('\n') || 'No worktrees to clean', 'info');
           return;

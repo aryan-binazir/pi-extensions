@@ -45,7 +45,7 @@ export default function subagents(pi: ExtensionAPI): void {
     await Promise.allSettled(workflowRuns);
   };
   pi.on('session_shutdown', stopAll);
-  pi.on('session_before_switch', stopAll);
+  // A before-switch handler can cancel the switch; committed switches emit shutdown.
   pi.registerTool({
     name: 'subagent', label: 'Subagent', description: 'Start a background Pi agent with only an explicit task brief, bounded tools, and inherited policy. Returns task ID immediately; completion is pushed into this conversation. Context separation is not an OS sandbox. Same-directory writers serialize. Explicit child extensions may contribute hooks and commands; their custom tools are excluded by the built-in tool allowlist.', parameters: taskSchema,
     async execute(_id, params, signal, _update, ctx) {

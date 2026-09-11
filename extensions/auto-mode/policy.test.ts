@@ -121,3 +121,27 @@ test('managed local declarations retain workspace and inherited tool boundaries'
   assert.equal((await child.check(action)).allow,true);
   assert.equal((await child.check({...action,cwd:'/etc'},{approve:async()=>true})).allow,false);
 });
+
+test('classifier never receives a truncated action or directive',async()=>{
+  const policy=new AutoPolicy(tmpdir());
+  let calls=0;
+  const io={classify:async()=>{calls++;return 'safe' as const;},approve:async()=>true};
+  const command='git status --short'+' '.repeat(25000)+'; rm -rf ../important';
+  assert.equal((await policy.check({tool:'bash',input:{command},cwd:tmpdir()},io)).allow,false);
+  assert.equal(calls,0);
+  policy.directive('x'.repeat(25000)+'Never delete anything');
+  assert.equal((await policy.check({tool:'bash',input:{command:'git status'},cwd:tmpdir()},io)).allow,false);
+  assert.equal(calls,0);
+});
+
+test('configured tool intersection restricts children and cannot expand inherited permissions',async()=>{
+  const policy=new AutoPolicy(tmpdir());
+  policy.configureTools(['read']);
+  setActivePolicy(policy,'configured-parent');
+  try {await assert.rejects(assertChildTask({cwd:tmpdir(),tools:['write']},{},'configured-parent'),/permissions/);}
+  finally {setActivePolicy(undefined,'configured-parent');}
+  const child=new AutoPolicy(tmpdir(),['read'],true);
+  child.configureTools(['read','write','bash']);
+  assert.deepEqual(child.tools,['read']);
+  assert.equal((await child.check({tool:'write',input:{path:'file'},cwd:tmpdir()},{classify:async()=>'safe',approve:async()=>true})).allow,false);
+});

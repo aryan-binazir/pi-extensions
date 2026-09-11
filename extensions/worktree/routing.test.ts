@@ -106,12 +106,47 @@ test('worktree remove preserves quoted path spaces and original aliases restore 
     worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand: (name: string, value: any) => commands[name] = value } as any);
     await handlers.session_start({}, ctx);
     assert.equal(status, undefined);
+    await mkdir(join(original, 'some  directory'));
+    await mkdir(join(original, 'other  directory'));
     await commands.worktree.handler('remove "some  directory" --force', ctx);
-    assert.equal(removedPath, join(alias, 'some  directory'));
+    assert.equal(removedPath, join(original, 'some  directory'));
     await commands.worktree.handler("remove 'other  directory'", ctx);
-    assert.equal(removedPath, join(alias, 'other  directory'));
+    assert.equal(removedPath, join(original, 'other  directory'));
     await commands.worktree.handler('remove "unclosed', ctx);
     assert.match(notices.at(-1) ?? '', /Unclosed quote/);
     await handlers.session_shutdown({}, ctx);
   } finally { Worktrees.prototype.remove = originalRemove; await rm(home, { recursive: true, force: true }); }
+});
+
+
+test('removing active checkout through an alias resets routing before the canonical path disappears', async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'pi-route-remove-alias-')));
+  const { mkdir, symlink } = await import('node:fs/promises');
+  const { Worktrees } = await import('./manager.ts');
+  const commands: Record<string, any> = {};
+  const originalRemove = Worktrees.prototype.remove;
+  try {
+    const active = join(home, 'active'); await mkdir(active);
+    const alias = join(home, 'alias'); await symlink(active, alias);
+    setActiveCwd(home, active, 'remove-alias');
+    Worktrees.prototype.remove = async function(path) {
+      assert.equal(path, active);
+      await rm(path, { recursive: true });
+      return { removed: true };
+    };
+    const entries: any[] = [];
+    const notices: string[] = [];
+    const ctx: any = { cwd: home, hasUI: true, isIdle: () => true, ui: { setStatus() {}, notify: (value: string) => notices.push(value), confirm: async () => true }, sessionManager: { getSessionId: () => 'remove-alias' } };
+    worktree({ on() {}, registerTool() {}, appendEntry: (_type: string, data: any) => entries.push(data), registerCommand: (name: string, value: any) => commands[name] = value } as any);
+    await commands.worktree.handler(`remove "${alias}"`, ctx);
+    assert.equal(getActiveCwd(home, 'remove-alias'), home);
+    assert.deepEqual(entries, [{ version: 1, path: home }]);
+    assert.equal(notices.at(-1), `${active}: removed`);
+    await commands.worktree.handler(`remove "${alias}"`, ctx);
+    assert.match(notices.at(-1) ?? '', /ENOENT/);
+  } finally {
+    Worktrees.prototype.remove = originalRemove;
+    setActiveCwd(home, undefined, 'remove-alias');
+    await rm(home, { recursive: true, force: true });
+  }
 });

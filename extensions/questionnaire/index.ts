@@ -221,6 +221,7 @@ export default function questionnaire(pi: ExtensionAPI) {
               render(width: number) {
                 const w = Math.max(1, width);
                 const lines: string[] = [];
+                let focusLine = 0;
                 if (params.questions.length > 1)
                   lines.push(
                     params.questions
@@ -236,6 +237,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 const q = params.questions[tab];
                 if (q) {
                   lines.push(q.prompt);
+                  focusLine = lines.length + selected;
                   q.options.forEach((o, i) =>
                     lines.push(
                       `${selected === i ? ">" : " "} ${o.label}${o.description ? ` — ${o.description}` : ""}`,
@@ -256,19 +258,25 @@ export default function questionnaire(pi: ExtensionAPI) {
                       : "Answer every question before submitting",
                   );
                 }
-                const result = lines.flatMap((line) =>
-                  wrapTextWithAnsi(stripTerminalSequences(line), w),
+                const wrapped = lines.map((line) =>
+                  wrapTextWithAnsi(stripTerminalSequences(line).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""), w),
                 );
-                if (editing) result.push(...editor.render(w));
-                result.push(
-                  ...wrapTextWithAnsi(
-                    editing
-                      ? "Enter saves • Esc returns • Ctrl+C cancels questionnaire"
-                      : "↑↓ select • Tab/←→ tabs • Enter confirm • Esc cancels",
-                    w,
-                  ),
-                );
-                return result;
+                const content = wrapped.flat();
+                const focusRow = wrapped.slice(0, focusLine).reduce((n, rows) => n + rows.length, 0);
+                const height = Math.max(1, (tui.terminal?.rows ?? 24) - 2);
+                const footer = wrapTextWithAnsi(
+                  editing
+                    ? "Enter saves • Esc returns • Ctrl+C cancels questionnaire"
+                    : "↑↓ select • Tab/←→ tabs • Enter confirm • Esc cancels",
+                  w,
+                ).slice(0, Math.max(1, Math.floor(height / 4)));
+                const editorBudget = Math.max(0, height - footer.length - 1);
+                const editorRows = editing && editorBudget > 0 ? editor.render(w).slice(-editorBudget) : [];
+                const available = Math.max(0, height - footer.length - editorRows.length);
+                const start = Math.max(0, Math.min(
+                  focusRow - Math.floor(available / 2), content.length - available,
+                ));
+                return [...content.slice(start, start + available), ...editorRows, ...footer];
               },
             };
           },

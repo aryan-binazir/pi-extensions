@@ -40,11 +40,11 @@ test("bracketed paste is one undo transaction and never interpreted as vi comman
   const payload = "i".repeat(5000) + "\nhello";
   e.handleInput("\x1b[200~" + payload.slice(0, 80));
   e.handleInput(payload.slice(80) + "\x1b[201~");
-  assert.equal(e.getExpandedText(), "draft" + payload);
+  assert.equal(e.getExpandedText(), "draf" + payload + "t");
   keys(e, "u");
   assert.equal(e.getExpandedText(), "draft");
   e.handleInput("\x12");
-  assert.equal(e.getExpandedText(), "draft" + payload);
+  assert.equal(e.getExpandedText(), "draf" + payload + "t");
 });
 test("insert edits, nested objects, and counted line changes preserve cursor and undo", () => {
   const e = editor();
@@ -313,7 +313,7 @@ test("programmatic image-path insertion participates in vi undo", () => {
   e.setText("draft");
   e.handleInput("\x1b");
   e.insertTextAtCursor(" /tmp/image.png");
-  assert.equal(e.getExpandedText(), "draft /tmp/image.png");
+  assert.equal(e.getExpandedText(), "draf /tmp/image.pngt");
   keys(e, "u");
   assert.equal(e.getExpandedText(), "draft");
 });
@@ -384,4 +384,66 @@ test("refused oversized put preserves the redo history", () => {
   assert.equal(e.getExpandedText().length, 2000);
   e.handleInput("\x12");
   assert.equal(e.getExpandedText().length, 1999);
+});
+test("pending vi arguments forward save and stash shortcuts to core and extensions", () => {
+  for (const prefix of ["di", '"', "r", "vi"]) {
+    for (const chord of ["\x13", "\x1b[115;5u", "\x1b[115;6u"]) {
+      const e = editor();
+      e.setText("keep draft");
+      e.handleInput("\x1b");
+      keys(e, prefix);
+      let forwarded = "";
+      e.onExtensionShortcut = (data) => { forwarded = data; return true; };
+      e.handleInput(chord);
+      assert.equal(forwarded, chord);
+      assert.equal(e.getExpandedText(), "keep draft");
+    }
+  }
+});
+test("submitting a draft clears vi undo and insertion history", () => {
+  for (const insert of [false, true]) {
+    const e = editor();
+    let sent = "";
+    e.onSubmit = (text) => { sent = text; };
+    keys(e, "first draft");
+    e.handleInput("\x1b");
+    keys(e, "0x");
+    if (insert) keys(e, "i");
+    e.handleInput("\r");
+    assert.equal(sent, "irst draft");
+    if (insert) e.handleInput("\x1b");
+    keys(e, "u");
+    assert.equal(e.getExpandedText(), "");
+    e.handleInput("\x12");
+    assert.equal(e.getExpandedText(), "");
+  }
+});
+test("leaving insert mode places the normal cursor on the preceding grapheme", () => {
+  const e = editor();
+  keys(e, "abc");
+  e.handleInput("\x1b");
+  keys(e, "x");
+  assert.equal(e.getExpandedText(), "ab");
+  e.setText("old tail");
+  keys(e, "0cwnew");
+  e.handleInput("\x1b");
+  keys(e, "x");
+  assert.equal(e.getExpandedText(), "ne tail");
+  e.setText("😀");
+  keys(e, "A");
+  e.handleInput("\x1b");
+  keys(e, "x");
+  assert.equal(e.getExpandedText(), "");
+});
+test("visual register puts replace selection and leave normal mode", () => {
+  for (const put of ["p", "P"]) {
+    const e = editor();
+    e.setText("abc def");
+    e.handleInput("\x1b");
+    keys(e, "0yiwwvl" + put);
+    assert.equal(e.getExpandedText(), "abc abcf");
+    assert.ok(e.render(40).at(-1)!.includes("NORMAL"));
+    keys(e, "u");
+    assert.equal(e.getExpandedText(), "abc def");
+  }
 });

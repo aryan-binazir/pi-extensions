@@ -69,8 +69,10 @@ export class ViEditor extends CustomEditor {
   }
   private baseInput(data: string): void {
     const submit = this.onSubmit;
-    this.onSubmit = (text) =>
+    this.onSubmit = (text) => {
+      this.setText("");
       submit?.(text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""));
+    };
     try {
       super.handleInput(data);
     } finally {
@@ -408,6 +410,8 @@ export class ViEditor extends CustomEditor {
         this.insertion.text !== this.getText()
       )
         this.checkpoint(this.insertion);
+      if (this.mode === "insert")
+        this.move(Math.max(this.lineStart(), this.previous(this.pos())));
       this.insertion = undefined;
       this.mode = "normal";
       this.op = "";
@@ -419,6 +423,10 @@ export class ViEditor extends CustomEditor {
     }
     if (this.mode === "insert") {
       this.insertion ??= this.snapshot();
+      this.baseInput(data);
+      return;
+    }
+    if ((data.length !== 1 || data.charCodeAt(0) < 32) && !matchesKey(data, "ctrl+r")) {
       this.baseInput(data);
       return;
     }
@@ -581,6 +589,26 @@ export class ViEditor extends CustomEditor {
       this.register = '"';
       if (r) {
         const t = this.getText();
+        if (this.mode === "visual" || this.mode === "line") {
+          const [a, b] = this.range();
+          if (r.text.length * n + t.length - (b - a) > MAX_DRAFT) return;
+          let value = r.text.repeat(n);
+          if (this.mode === "line" && t.slice(a, b).endsWith("\n") && !value.endsWith("\n"))
+            value += "\n";
+          if (this.mode === "visual" && r.line) {
+            if (a > this.lineStart(a)) value = "\n" + value;
+            if (b < t.length && !value.endsWith("\n")) value += "\n";
+          }
+          this.checkpoint();
+          this.registers.set('"', { text: t.slice(a, b), line: this.mode === "line" });
+          this.writeText(t.slice(0, a) + value + t.slice(b));
+          this.move(a);
+          this.mode = "normal";
+          this.anchor = 0;
+          this.visualScroll = 0;
+          this.cursorShape();
+          return;
+        }
         let p =
           data === "P"
             ? this.pos()

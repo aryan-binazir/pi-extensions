@@ -280,3 +280,26 @@ test("Pi's real custom UI bridge tolerates abort before the factory returns", as
     [true, false],
   );
 });
+test("long option lists keep the selected answer inside a bounded viewport", async () => {
+  const h = host();
+  const running = h.run([{ id: "long", prompt: "Choose an option", allowOther: false,
+    options: Array.from({ length: 20 }, (_, i) => ({ value: String(i), label: `Option-${i}`, description: "x".repeat(100) })) }]);
+  for (let i = 0; i < 20; i++) {
+    const rows = h.render(80);
+    assert.ok(rows.length <= 24, `rendered ${rows.length} rows`);
+    assert.ok(rows.join("\n").includes(`> Option-${i}`));
+    h.key("\x1b[B");
+  }
+  h.key("\r");
+  assert.equal((await running).details.answers[0].value, "19");
+});
+test("questionnaire strips residual terminal controls from model-provided labels", async () => {
+  const h = host();
+  const running = h.run([{ id: "safe", prompt: "safe\x1bcRESET", options: [{ value: "a", label: "answer\x07\x9b31m" }] }]);
+  const rendered = h.render().join("\n");
+  assert.ok(!rendered.includes("\x1bc"));
+  assert.ok(!rendered.includes("\x07"));
+  assert.ok(!rendered.includes("\x9b"));
+  h.key("\x1b");
+  await running;
+});

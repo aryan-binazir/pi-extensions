@@ -246,3 +246,13 @@ test("an oversized followup stays editable and can be shortened without retyping
   h.key("\u001b");
   await result;
 });
+test("BTW strips residual terminal reset controls from provider output", async () => {
+  const h = host([{ type: "text_delta", delta: "safe\x1bcRESET\x07\x9b31mtext" }]);
+  const running = h.commands.btw.handler("Question", h.ctx);
+  await tick();
+  assert.ok(!h.render().includes("\x1bc"));
+  assert.ok(!h.render().includes("\x07"));
+  assert.ok(!h.render().includes("\x9b"));
+  h.key("\x1b");
+  await running;
+});

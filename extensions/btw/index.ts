@@ -247,7 +247,7 @@ export default function btw(pi: ExtensionAPI) {
               const display =
                 answer || turns.at(-1)?.answer || "Ask a side question below.";
               const lines = wrapTextWithAnsi(
-                stripTerminalSequences(display),
+                stripTerminalSequences(display).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""),
                 w,
               );
               const height = Math.max(
@@ -262,7 +262,7 @@ export default function btw(pi: ExtensionAPI) {
                   w,
                 ),
                 ...lines.slice(Math.max(0, end - height), end),
-                ...wrapTextWithAnsi(stripTerminalSequences(status), w),
+                ...wrapTextWithAnsi(stripTerminalSequences(status).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""), w),
                 ...(busy ? [] : editor.render(w)),
               ];
             },

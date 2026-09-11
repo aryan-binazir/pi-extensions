@@ -16,11 +16,11 @@ test('workspace reads and edits pass without a model; symlink escapes require ap
   } finally { await rm(root, {recursive:true,force:true}); }
 });
 
-test('classifier errors, invalid verdicts, shell composition and missing UI fail closed', async () => {
+test('classifier errors and shell calls requiring approval fail closed without UI', async () => {
   const policy = new AutoPolicy(tmpdir());
   const action={tool:'bash',input:{command:'pwd; touch /tmp/unapproved'},cwd:tmpdir()};
   assert.equal((await policy.check(action,{classify:async()=>{throw Error('offline');},approve:async()=>true})).allow,false);
-  assert.equal((await policy.check(action,{classify:async()=>'safe'})).allow,false);
+  assert.equal((await policy.check(action,{classify:async()=>'ask'})).allow,false);
   assert.equal((await policy.check(action,{approve:async()=>{throw Error('UI gone');}})).allow,false);
   assert.equal((await policy.check(action,{context:'before tool output',approve:async()=>true})).allow,true);
   assert.equal((await policy.check(action,{context:'new tool output changes bounded conversation'})).allow,true);

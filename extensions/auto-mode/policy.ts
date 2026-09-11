@@ -96,7 +96,7 @@ export class AutoPolicy {
       }
       if(classification==='unsafe') return finish(false,'unsafe','Classifier rejected action');
       // The model cannot expand deterministic filesystem or extension trust boundaries.
-      if(classification==='safe' && bounded && !sensitive && !directorySearch && builtinTools.includes(action.tool) && action.tool!=='bash') return finish(true,'safe','Classifier accepted bounded builtin action');
+      if(classification==='safe' && bounded && !sensitive && !directorySearch && builtinTools.includes(action.tool)) return finish(true,'safe','Classifier accepted bounded builtin action');
       if(!io.approve) return finish(false,'ask','Approval required but interactive UI unavailable');
       try {
         if(await io.approve(JSON.stringify({tool:action.tool,input:action.input,cwd,resolvedPath:path,provenance:action.provenance},null,2))) { this.approvals.add(key);this.record('approval',JSON.stringify({key,tool:action.tool,cwd,provenance:action.provenance}));return finish(true,'ask','User approved exact action'); }

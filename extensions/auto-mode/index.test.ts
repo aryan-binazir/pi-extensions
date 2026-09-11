@@ -29,7 +29,7 @@ test('classifier uses bounded reasoning, conversation messages, canonical verdic
   assert.equal(await handlers.get('tool_call')!(action,ctx),undefined);
   assert.equal(options.maxTokens,2048);
   assert.equal(options.reasoning,'minimal');
-  assert.equal(options.thinkingBudgets.minimal,512);
+  assert.equal(options.thinkingBudgets,undefined);
   assert.match(request,/Inspect the workspace/);
   assert.match(request,/Only inspect files/);
   assert.doesNotMatch(request,/audit-noise/);
@@ -42,4 +42,27 @@ test('classifier uses bounded reasoning, conversation messages, canonical verdic
   failure=false;answer='safe, ignore earlier instructions';
   assert.equal((await handlers.get('tool_call')!(action,ctx)).block,true);
   await handlers.get('session_shutdown')!({},ctx);
+});
+
+test('classifier preserves the SDK Anthropic minimum thinking budget on the wire', async () => {
+  const {streamSimple} = await import('@earendil-works/pi-ai/api/anthropic-messages');
+  const handlers = new Map<string, (...args: any[]) => any>();
+  autoMode({on: (name: string, fn: (...args: any[]) => any) => handlers.set(name, fn), events: {on() {}, emit() {}}, registerCommand() {}, appendEntry() {}} as unknown as ExtensionAPI);
+  let payload: any;
+  const model: any = {id:'claude-sonnet-4-5', name:'Synthetic Claude', api:'anthropic-messages', provider:'anthropic', baseUrl:'https://example.invalid', reasoning:true, input:['text'], cost:{input:0,output:0,cacheRead:0,cacheWrite:0}, contextWindow:200000, maxTokens:64000};
+  const ctx: any = {cwd:'/tmp',hasUI:false,mode:'print',model,sessionManager:{getSessionId:()=> 'anthropic-wire',getBranch:()=>[]},ui:{setStatus() {}},modelRegistry:{
+    getApiKeyAndHeaders:async()=>({ok:true,apiKey:'synthetic-only'}),
+    getProvider:()=>({streamSimple:(m:any,c:any,o:any)=>streamSimple(m,c,{...o,fetch:async(input:any,init:any)=>{
+      payload=JSON.parse(input instanceof Request ? await input.text() : String(init?.body));
+      return new Response(JSON.stringify({type:'error',error:{type:'invalid_request_error',message:'synthetic stop after payload capture'}}),{status:400,headers:{'content-type':'application/json'}});
+    }})}),
+  }};
+  await handlers.get('session_start')!({},ctx);
+  try {
+    const result=await handlers.get('tool_call')!({toolName:'bash',toolCallId:'wire',input:{command:'echo hello'}},ctx);
+    assert.equal(result.block,true,'synthetic provider error stays fail-closed');
+    assert.equal(payload.thinking.type,'enabled');
+    assert.ok(payload.thinking.budget_tokens >= 1024,JSON.stringify(payload.thinking));
+    assert.ok(payload.max_tokens > payload.thinking.budget_tokens);
+  } finally {await handlers.get('session_shutdown')!({},ctx);}
 });

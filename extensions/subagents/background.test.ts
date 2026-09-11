@@ -17,7 +17,7 @@ async function fixture(run:(host:any)=>Promise<void>){
   await chmod(join(cwd,'pi'),0o700);process.env.PATH=cwd+':'+priorPath;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent');
   setActivePolicy(new AutoPolicy(cwd),sessionId);
   const ctx={cwd,hasUI:true,mode:'tui',sessionManager:{getSessionId:()=>sessionId},ui:{setWidget(){},editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
-  subagents({registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand(){},on:(name:string,fn:any)=>hooks.set(name,fn),sendMessage(){},events:{emit:(name:string,value:any)=>{if(name==='pi-interactive:background-activity')activity.push(value);}}} as any);
+  subagents({getActiveTools:()=>['read','write','edit','bash','grep','find','ls'],registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand(){},on:(name:string,fn:any)=>hooks.set(name,fn),sendMessage(){},events:{emit:(name:string,value:any)=>{if(name==='pi-interactive:background-activity')activity.push(value);}}} as any);
   await hooks.get('session_start')({},ctx);
   const execute=(name:string,args:any)=>tools.get(name).execute('fixture',args,undefined,undefined,ctx);
   const finish=async()=>{const end=Date.now()+5000;while(!activity.some(a=>!a.active)&&Date.now()<end)await new Promise(r=>setTimeout(r,10));assert.equal(activity.length,2);assert.deepEqual(activity,[{id:activity[0].id,active:true},{id:activity[0].id,active:false}]);};

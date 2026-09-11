@@ -11,7 +11,7 @@ test("questionnaire single option returns a typed answer and clears waiting", as
       tool = t;
     },
     on() {},
-    events: { emit: (...args: any[]) => events.push(args) },
+    events: { on: () => () => {}, emit: (...args: any[]) => events.push(args) },
   } as any);
   const ctx = {
     mode: "tui",
@@ -65,6 +65,7 @@ function host(onEmit?: (value: any) => void) {
       hooks[name] = fn;
     },
     events: {
+      on: () => () => {},
       emit: (_: string, value: any) => {
         events.push(value);
         onEmit?.(value);

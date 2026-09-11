@@ -1,10 +1,10 @@
 # Pi interactive tools
 
-Seven independently selectable extensions for Pi 0.85.1. Install from this
+Ten independently selectable extensions for Pi 0.85.1. Install from this
 private Git repository using your existing GitHub SSH access:
 
 ```sh
-pi install git:git@github.com:aryan-binazir/pi-extension@amb/interactive-tools
+pi install git:git@github.com:aryan-binazir/pi-extension@amb/agent-workflows
 ```
 
 After this branch lands, use the desired release or main ref. Installation uses
@@ -24,6 +24,9 @@ A single extension can also be loaded with
 | BTW | `/btw`, `/side` | Private side conversation from a snapshot of the current context, streamed with the current provider and no tools. |
 | Vi mode | Editor keyboard input | Insert, normal and visual modes with motions, operators, registers and undo/redo. |
 | Prompt stash | `Ctrl+Shift+S` | Stash, restore or swap one draft slot; a footer indicator shows occupancy. |
+| Subagents | `subagent`, TypeScript workflows | Isolated task contexts, bounded background execution and approved workflow replay. |
+| Worktree | `/worktree` | Create or reuse a checkout and route the current session's shell and relative file tools. |
+| Auto mode | `/auto on\|off\|status\|audit` | Pre-execution policy, exact approvals and inherited child limits. |
 
 ## Memory and sessions
 
@@ -51,6 +54,80 @@ Pi's normal behavior. Closing a BTW overlay aborts its request and discards the
 side conversation; its answers never automatically enter the main conversation.
 The stash is memory-only and clears on session start, switch and reload. Vi mode preserves pasted tabs, carriage returns and newlines while editing and stashing. It strips unsafe terminal controls at insertion, and normal submission additionally strips carriage returns. Large pastes use Pi-style collapsed markers. Motions, selections and edits treat each marker atomically, and undo, registers, stash and editor replacement retain its payload. The exact supported vi command set is documented in [ADR 001](docs/adr/001-editor.md). Counts apply to motions, operators, doubled line operators, `x`, `p/P` and `nG/ngg`; counts on insert entry, visual toggles, text objects and undo/redo are unsupported. Registers are lowercase `a-z` and the unnamed register.
 
+## Subagents and TypeScript workflows
+
+The `subagent` tool starts a background Pi process with an explicit task brief,
+a `reader` or `writer` preset, optional tools/model/extensions/cwd, and a bounded
+timeout. It returns a task ID. Output and usage stream to the UI, and completion
+is pushed into the parent conversation. `subagent_status` inspects the registry;
+`subagent_cancel` or `/subagents cancel ID` cancels a task. Same-directory writers
+queue behind one another. Timeouts, cancellation and session shutdown terminate
+process groups, including ordinary descendants. A descendant that deliberately
+creates a new session can escape portable process-group cleanup.
+
+Workflows require a separate Node executable on `PATH` (22.19+ in the 22.x series, or 24+), including when Pi itself runs on Bun. Its version and permission enforcement are probed before execution; missing or unsupported Node fails explicitly.
+
+The `workflow` tool accepts a TypeScript async function body. The user reviews
+the exact source and confirms execution. For example:
+
+```ts
+const plan = await api.spawn({
+  task: "Inspect this checkout and describe the smallest fix. Do not edit.",
+  preset: "reader"
+}, "inspect");
+return plan;
+```
+
+The worker exposes `spawn(task, stage)`, `parallel(functions)`,
+`retry(attempts, function)`, `checkpoint(key, function)` and bounded
+`readFile(path, maxBytes)`. Every child uses the same validation and inherited
+policy as a direct subagent. The worker has a scrubbed environment, Node
+filesystem/process permissions, a memory limit and a wall-clock timeout.
+It exposes no host JavaScript objects as capabilities. This is not an OS sandbox;
+Node permissions do not enforce a network boundary.
+
+Successful stages are journaled under an identity that includes source, checkout,
+policy and runtime versions. Resuming requires source approval and an explicit
+replay confirmation. Replay reuses recorded results; it does not prove that prior
+file effects still exist. Confirm replay only after checking that those effects
+remain valid. Declining aborts without starting children. Failed stages run again,
+and unfinished capability calls prevent a successful workflow result.
+
+## Worktrees and auto mode
+
+`/worktree feature` creates or reuses `amb/feature` at
+`~/repos/.worktrees/<repo>/feature`. Use `--branch exact/name` to preserve an
+explicit branch and `--base ref` to choose a starting ref. `/worktree list`
+shows checkouts; `/worktree original` restores the original directory.
+Active Herdr sessions use Herdr's worktree APIs; other environments use Git.
+
+The conversation stays in the same session. Built-in bash, user shell commands
+and relative file-tool paths use the active checkout. Absolute paths keep their
+meaning. Pi's session storage, loaded instructions/resources and arbitrary
+extension internals retain the original session directory. The footer and
+per-turn instructions state this boundary. Read the new checkout's instructions
+before editing.
+
+`/worktree remove /absolute/path` requires confirmation and skips dirty trees.
+`--force` explicitly allows dirty removal. `/worktree cleanup` additionally
+requires a merged GitHub PR whose head still matches the checkout. These
+commands preserve branch refs.
+
+Auto mode starts on. `/auto on|off|status|audit` controls it and shows recent
+actions, approvals and provenance. Canonical workspace file operations use
+model-free checks. Recursive directory grep requires approval because Pi searches
+hidden files; grep of one verified safe file remains automatic. Uncertain calls
+use a bounded, tool-free classifier and may
+require an exact-action confirmation. Shell commands beyond literal `pwd`
+require approval even when the classifier says safe. Classifier errors,
+approval errors and required approval without an interactive UI block execution.
+
+Delegated children inherit a narrower workspace and tool list, user directives
+and a mandatory guard they cannot disable. Trusted installed local extensions
+can register versioned tool declarations; remote read-only hints do not grant
+trust. These checks cover tool calls. They do not sandbox arbitrary extension
+JavaScript or turn separate agent contexts into an OS sandbox.
+
 ## Development
 
 ```sh
@@ -67,4 +144,4 @@ Architecture decisions and the precise editor compatibility boundary are in
 
 The repository's `bin/pi` is a copy of the existing mise launcher. This package
 does not change host launchers, shell aliases, global defaults or authentication.
-Subagents, worktrees, auto mode and external integrations belong to later PRs.
+External integrations belong to a later PR.

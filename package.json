@@ -2,7 +2,7 @@
   "name": "@aryan-binazir/pi-interactive-tools",
   "version": "0.1.0",
   "private": true,
-  "description": "Independent interactive extensions for Pi",
+  "description": "Independent interactive tools and agent workflows for Pi",
   "type": "module",
   "keywords": [
     "pi-package"
@@ -20,7 +20,10 @@
       "./extensions/effort/index.ts",
       "./extensions/btw/index.ts",
       "./extensions/vi-mode/index.ts",
-      "./extensions/prompt-stash/index.ts"
+      "./extensions/prompt-stash/index.ts",
+      "./extensions/subagents/index.ts",
+      "./extensions/worktree/index.ts",
+      "./extensions/auto-mode/index.ts"
     ]
   },
   "scripts": {
@@ -41,12 +44,14 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.85.1",
     "@types/node": "^22.19.0",
-    "typescript": "~5.9.3",
     "tsx": "^4.20.0",
     "eslint": "^9.39.0",
     "typescript-eslint": "^8.46.0",
     "@earendil-works/pi-ai": "0.85.1",
     "@earendil-works/pi-tui": "0.85.1",
     "typebox": "1.3.7"
+  },
+  "dependencies": {
+    "typescript": "~5.9.3"
   }
 }

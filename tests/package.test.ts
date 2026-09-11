@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import { DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
 
 const root = resolve(import.meta.dirname, '..');
-const intended = ['questionnaire', 'memory', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash'];
+const intended = ['questionnaire', 'memory', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'auto-mode'];
 
-test('Pi package discovers exactly seven entrypoints and independently loads each', async () => {
+test('Pi package discovers exactly ten entrypoints and independently loads each', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-package-test-'));
   try {
     const settingsManager = SettingsManager.inMemory({ packages: [root] });
@@ -31,6 +31,9 @@ test('Pi package discovers exactly seven entrypoints and independently loads eac
         btw: {tools: [], commands: ['btw', 'side'], shortcuts: []},
         'vi-mode': {tools: [], commands: [], shortcuts: []},
         'prompt-stash': {tools: [], commands: [], shortcuts: ['ctrl+shift+s']},
+        subagents: {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []},
+        worktree: {tools: ['bash'], commands: ['worktree'], shortcuts: []},
+        'auto-mode': {tools: [], commands: ['auto'], shortcuts: []},
       };
       assert.deepEqual([...extension.tools.keys()].sort(), expected[feature].tools, feature);
       assert.deepEqual([...extension.commands.keys()].sort(), expected[feature].commands, feature);
@@ -47,6 +50,6 @@ test('Pi package discovers exactly seven entrypoints and independently loads eac
     const loader = new DefaultResourceLoader({cwd: temp, agentDir: join(temp, 'agent'), settingsManager, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true});
     await loader.reload();
     assert.deepEqual(loader.getExtensions().errors, []);
-    assert.equal(loader.getExtensions().extensions.length, 7);
+    assert.equal(loader.getExtensions().extensions.length, 10);
   } finally { await rm(temp, {recursive: true, force: true}); }
 });

@@ -280,6 +280,7 @@ export default function questionnaire(pi: ExtensionAPI) {
               },
             };
           },
+          { overlay: true },
         );
         return finish(
           result ?? { cancelled: true, answers: [], reason: "UI closed" },

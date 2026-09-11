@@ -543,3 +543,59 @@ test("submission expands once, preserves literal marker-shaped payloads and uses
   assert.equal(submitted, (first + second).trim());
   assert.equal(e.getExpandedText(), "");
 });
+
+test("native editing in normal and pending modes participates in vi undo and redo", () => {
+  const payload = "synthetic\n".repeat(100);
+  for (const pending of ["", "di", '"', "r", "v", "V"])
+    for (const [position, input] of [["0", "\x1b[3~"], ["0", "\x17"]]) {
+      const e = editor();
+      e.setText(payload);
+      keys(e, "\x1b" + position + pending);
+      if (input === "\x17") e.handleInput("\x1b[F");
+      e.handleInput(input);
+      assert.equal(e.getExpandedText(), "", `${pending} native edit`);
+      e.handleInput("u");
+      assert.equal(e.getExpandedText(), payload, `${pending} native undo`);
+      e.handleInput("\x12");
+      assert.equal(e.getExpandedText(), "");
+    }
+});
+
+test("Kitty printables execute vi commands and encoded paste controls decode before filtering", () => {
+  for (const input of ["\x1b[68;2u", "\x1b[100:68;2u"]) {
+    const e = editor(); e.setText("alpha beta"); keys(e, "\x1b0");
+    e.handleInput(input); assert.equal(e.getText(), "");
+  }
+  const e = editor(); e.setText("alpha\nbeta"); keys(e, "\x1bgg0");
+  e.handleInput("\x1b[100u"); e.handleInput("\x1b[100u");
+  assert.equal(e.getText(), "beta");
+  e.setText("");
+  e.handleInput("\x1b[200~one\x1b[106;5utwo\x1b[105;5uend\x1b[97;5u\x1b[201~");
+  assert.equal(e.getExpandedText(), "one\ntwo\tend");
+});
+
+test("unsupported g commands consume their argument without editing", () => {
+  for (const command of ["gD", "gC", "gx", "go", "gP", "gd", "gq"]) {
+    const e = editor(); e.setText("alpha beta"); keys(e, "\x1b0" + command);
+    assert.equal(e.getText(), "alpha beta", command);
+    keys(e, "x"); assert.equal(e.getText(), "lpha beta", command + " is cancelled");
+  }
+});
+
+test("confirming a slash completion submits the completed command", async () => {
+  const e = editor();
+  e.setAutocompleteProvider({
+    async getSuggestions(lines, line, col) {
+      const prefix = lines[line].slice(0, col);
+      return prefix.startsWith("/") ? {prefix, items: [{value: "/btw", label: "/btw"}]} : null;
+    },
+    applyCompletion(lines, line, _col, item) {
+      const next = [...lines]; next[line] = item.value + " ";
+      return {lines: next, cursorLine: line, cursorCol: next[line].length};
+    },
+  });
+  let sent = ""; e.onSubmit = text => { sent = text; };
+  keys(e, "/bt"); await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(e.isShowingAutocomplete(), true);
+  e.handleInput("\r"); assert.equal(sent, "/btw");
+});

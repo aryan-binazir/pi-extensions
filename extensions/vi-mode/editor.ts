@@ -1,6 +1,7 @@
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import {
   matchesKey,
+  decodeKittyPrintable,
   CURSOR_MARKER,
   visibleWidth,
   truncateToWidth,
@@ -12,7 +13,7 @@ import {
   renderProjected,
   clearBaseUndo,
   readPastes, writePastes, pasteMarkers, expandPastes, collapsePaste,
-  type PasteState,
+  type PasteState, installEditorHandoff,
 } from "./adapter.ts";
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const MAX_DRAFT = 1024 * 1024;
@@ -72,13 +73,17 @@ export class ViEditor extends CustomEditor {
   }
   private baseInput(data: string): void {
     const submit = this.onSubmit;
-    const expanded = this.getExpandedText();
-    this.onSubmit = () => {
+    const before = this.mode === "insert" ? undefined : this.snapshot();
+    const history = this.undoHistory;
+    this.onSubmit = (expanded) => {
       this.setText("");
       submit?.(expanded.trim().replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""));
     };
     try {
       super.handleInput(data);
+      // Public replacement/submission replaces the history array and must stay a reset.
+      if (before && history === this.undoHistory && before.text !== this.getText())
+        this.checkpoint(before);
     } finally {
       this.onSubmit = submit;
     }
@@ -98,6 +103,7 @@ export class ViEditor extends CustomEditor {
 
   constructor(...args: ConstructorParameters<typeof CustomEditor>) {
     super(...args);
+    installEditorHandoff(this);
     this.cursorShape();
   }
   override setText(text: string): void {
@@ -396,7 +402,11 @@ export class ViEditor extends CustomEditor {
       this.paste += data;
       const end = this.paste.indexOf("\x1b[201~");
       if (end >= 0) {
-        const payload = safeDraft(this.paste.slice(0, end)),
+        const payload = safeDraft(this.paste.slice(0, end).replace(/\x1b\[(\d+);5u/g, (sequence, code: string) => {
+          const cp = Number(code);
+          return cp >= 97 && cp <= 122 ? String.fromCharCode(cp - 96)
+            : cp >= 65 && cp <= 90 ? String.fromCharCode(cp - 64) : sequence;
+        })),
           remaining = this.paste.slice(end + 6);
         this.paste = undefined;
         if (this.insertion && this.insertion.text !== this.getText())
@@ -459,6 +469,7 @@ export class ViEditor extends CustomEditor {
       this.baseInput(data);
       return;
     }
+    data = decodeKittyPrintable(data) ?? data;
     if ((data.length !== 1 || data.charCodeAt(0) < 32) && !matchesKey(data, "ctrl+r")) {
       this.baseInput(data);
       return;
@@ -497,6 +508,10 @@ export class ViEditor extends CustomEditor {
     if (this.registerPending) {
       if (/^[a-z"]$/.test(data)) this.register = data;
       this.registerPending = false;
+      return;
+    }
+    if (this.prefix === "g" && data !== "g") {
+      this.prefix = ""; this.op = ""; this.count = "";
       return;
     }
     if (["r", "m", "q"].includes(data)) {

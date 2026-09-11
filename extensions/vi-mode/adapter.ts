@@ -1,3 +1,4 @@
+import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import type { Editor } from "@earendil-works/pi-tui";
 // Pi 0.85.1 has public cursor reads but no cursor setter. Keep this coupling here.
 export function placeCursor(editor: Editor, offset: number): void {
@@ -139,4 +140,46 @@ export function collapsePaste(editor: Editor, text: string): string {
   internal.pasteCounter = id;
   internal.pastes.set(id, text);
   return lines > 10 ? `[paste #${id} +${lines} lines]` : `[paste #${id} ${text.length} chars]`;
+}
+
+// Pi 0.85.1 copies getText() without its paste registry before extension shutdown.
+// Keep this compatibility fix at that exact runtime boundary, including /reload.
+const viEditor = Symbol.for("pi-interactive:vi-editor");
+const handoffInstalled = Symbol.for("pi-interactive:editor-handoff");
+export function installEditorHandoff(editor?: Editor): void {
+  if (editor) {
+  Object.defineProperty(editor, viEditor, { value: true });
+  // Stock submission expands recursively; use the same single pass as draft reads.
+  Object.defineProperty(editor, "expandPasteMarkers", {
+    value: (text: string) => expandPastes(editor, text),
+  });
+  }
+  const prototype = InteractiveMode.prototype as unknown as {
+    [handoffInstalled]?: boolean;
+    setCustomEditorComponent: (factory: unknown) => void;
+  };
+  if (prototype[handoffInstalled]) return;
+  const original = prototype.setCustomEditorComponent;
+  if (typeof original !== "function") throw new Error("Unsupported Pi editor handoff layout");
+  prototype.setCustomEditorComponent = function (this: { editor: Editor }, factory: unknown) {
+    const source = this.editor;
+    if (!((source as unknown as { pastes?: unknown }).pastes instanceof Map)) {
+      original.call(this, factory);
+      return;
+    }
+    const text = source.getText();
+    const payloads = readPastes(source);
+    original.call(this, factory);
+    if (!(viEditor in source) && !(viEditor in this.editor) && payloads.pastes.size === 0) return;
+    if (!((this.editor as unknown as { pastes?: unknown }).pastes instanceof Map)) {
+      this.editor.setText(expandPastes(source, text));
+      return;
+    }
+    // setText resets the destination's history; then restore the exact visible draft.
+    this.editor.setText("");
+    retainRawText(this.editor, text);
+    writePastes(this.editor, payloads);
+    placeCursor(this.editor, text.length);
+  };
+  Object.defineProperty(prototype, handoffInstalled, { value: true });
 }

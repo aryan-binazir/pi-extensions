@@ -160,6 +160,7 @@ export default function effort(pi: ExtensionAPI) {
                 },
               };
             },
+          { overlay: true },
           );
         } finally {
           closeSlider = undefined;

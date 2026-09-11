@@ -7,7 +7,7 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import type { ServerConfig } from './client.ts';
 import { configure } from './fixture-server.mjs';
 
-export async function startFixture(kind:'stdio'|'http'|'sse') {
+export async function startFixture(kind:'stdio'|'http'|'sse',jsonResponse=false) {
   if(kind==='stdio') return {config:{command:process.execPath,args:[fileURLToPath(new URL('./fixture-server.mjs',import.meta.url))]} satisfies ServerConfig,close:async()=>{}};
   const sessions:Server[]=[];
   let legacy:SSEServerTransport|undefined;
@@ -22,7 +22,7 @@ export async function startFixture(kind:'stdio'|'http'|'sse') {
       if(kind==='sse') {await legacy!.handlePostMessage(req,res);return;}
       if(!modern || req.method==='POST' && !req.headers['mcp-session-id']){
         const server=configure(new Server({name:'fixture',version:'1.0'},{capabilities:{tools:{},resources:{},prompts:{}}}));
-        modern=new StreamableHTTPServerTransport({sessionIdGenerator:randomUUID,enableJsonResponse:false});sessions.push(server);await server.connect(modern);
+        modern=new StreamableHTTPServerTransport({sessionIdGenerator:randomUUID,enableJsonResponse:jsonResponse});sessions.push(server);await server.connect(modern);
       }
       await modern.handleRequest(req,res);
     } catch { if(!res.headersSent)res.writeHead(500);res.end(); }

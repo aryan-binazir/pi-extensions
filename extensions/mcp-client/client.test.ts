@@ -59,12 +59,15 @@ test('call deadlines cancel server work, filters reject hidden tools, and stdio 
   }finally{await c.close();await fixture.close();}
 });
 
-for (const transport of ['http','sse'] as const) test(`${transport} rejects oversized response before exposing model output`, async () => {
- const fixture=await startFixture(transport);const connection=new McpConnection('bounded', {...fixture.config,timeoutMs:1000});
- try {await connection.connect();await assert.rejects(connection.call('echo',{text:'x'.repeat(2*1024*1024+1)}));}
- finally {await connection.close();await fixture.close();}
+for (const [transport,jsonResponse] of [['http',false],['http',true],['sse',false]] as const) test(`${transport} json=${jsonResponse} promptly rejects oversize and reconnects for a new call`, async () => {
+ const fixture=await startFixture(transport,jsonResponse);const connection=new McpConnection('bounded', {...fixture.config,timeoutMs:3000});
+ try {
+  await connection.connect();const start=Date.now();
+  await assert.rejects(connection.call('echo',{text:'x'.repeat(2*1024*1024+1)}),/exceeds 2 MiB/);
+  assert.ok(Date.now()-start<1500,'Size violation must reject before the request deadline');
+  assert.equal(((await connection.call('echo',{text:'new call'})).content as {text:string}[])[0].text,'new call');
+ } finally {await connection.close();await fixture.close();}
 });
-
 
 test('SDK UnauthorizedError retains the actionable OAuth instruction',async()=>{
  const {UnauthorizedError}=await import('@modelcontextprotocol/sdk/client/auth.js');

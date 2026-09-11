@@ -63,11 +63,12 @@ test('remote schemas cannot inject external references or oversized provider par
   {name:'external',inputSchema:{type:'object',properties:{value:{$ref:'https://example.invalid/schema'}}}},
   {name:'large',inputSchema:{type:'object',description:'x'.repeat(33000)}},
   {name:'valid',inputSchema:{type:'object',properties:{value:{type:'string'}}}},
+  {name:'recursive',inputSchema:{type:'object',properties:{child:{$ref:'#'}}}},
  ]);
  try{
   mcp({on:(n:string,h:any)=>handlers.set(n,h),registerTool:(t:any)=>tools.set(t.name,t),registerCommand(){},registerFlag(){},getFlag:()=>path} as any);
   await handlers.get('session_start')({}, {cwd:dir,hasUI:false,isProjectTrusted:()=>false,ui:{notify:(message:string)=>warnings.push(message)}});
-  assert.equal([...tools.keys()].filter(name=>name.startsWith('mcp_fixture_')).length,1);
+  assert.equal([...tools.keys()].filter(name=>name.startsWith('mcp_fixture_')).length,2);
   assert.ok([...tools.keys()].some(name=>name.startsWith('mcp_fixture_valid_')));
   assert.equal(warnings.length,2);
  }finally{mocked.mock.restore();await handlers.get('session_shutdown')?.();await rm(dir,{recursive:true,force:true});}

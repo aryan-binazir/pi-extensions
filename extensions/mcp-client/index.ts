@@ -14,7 +14,7 @@ function schemaAllowed(schema: unknown): boolean {
     if (depth > 32) return false;
     if (!value || typeof value !== 'object') return true;
     return Object.entries(value).every(([key, nested]) => {
-      if (['$ref', '$dynamicRef', '$recursiveRef'].includes(key) && (typeof nested !== 'string' || !nested.startsWith('#/'))) return false;
+      if (['$ref', '$dynamicRef', '$recursiveRef'].includes(key) && (typeof nested !== 'string' || nested !== '#' && !nested.startsWith('#/'))) return false;
       return check(nested, depth + 1);
     });
   };

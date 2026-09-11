@@ -45,7 +45,9 @@ export function validateConfig(value:unknown):McpConfig {
 function variables(values:Record<string,string>={}):Record<string,string> {
   return Object.fromEntries(Object.entries(values).map(([key,value])=>[key,value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g,(_,name:string)=>{const v=process.env[name];if(v===undefined)throw new Error('MCP environment reference unavailable');return v;})]));
 }
+class ResponseLimitError extends Error {}
 export function publicError(error:unknown):Error {
+  if(error instanceof ResponseLimitError)return error;
   const e=error as {name?:string;code?:number;status?:number};
   if(e?.name==='AbortError')return new Error('MCP request cancelled');
   if(e?.code===-32001 || e?.name==='TimeoutError')return new Error('MCP request timed out');
@@ -60,18 +62,19 @@ export function boundedResult(value:unknown,maxBytes=65536):string {
 }
 // Bound bytes before the SDK parses JSON or buffers an SSE event. Long-lived
 // SSE connections may carry many bounded events without a cumulative cutoff.
-async function boundedFetch(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> {
+async function boundedFetch(input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1], onLimit: (error: Error) => void): Promise<Response> {
   const response = await fetch(input, {...init, redirect: 'error'});
   if (!response.body) return response;
   const eventStream = response.headers.get('content-type')?.includes('text/event-stream');
   let bytes = 0, lineBytes = 0, previousCR = false;
+  const limit = () => { const error = new ResponseLimitError('MCP response exceeds 2 MiB; connection reset, pending actions were not retried'); onLimit(error); throw error; };
   const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       if (!eventStream) {
         bytes += chunk.byteLength;
-        if (bytes > 2 * 1024 * 1024) throw new Error('MCP response exceeds 2 MiB');
+        if (bytes > 2 * 1024 * 1024) limit();
       } else for (const byte of chunk) {
-        if (++bytes > 2 * 1024 * 1024) throw new Error('MCP event exceeds 2 MiB');
+        if (++bytes > 2 * 1024 * 1024) limit();
         if (byte === 13 || byte === 10 && !previousCR) {
           if (lineBytes === 0) bytes = 0;
           lineBytes = 0;
@@ -89,6 +92,8 @@ export class McpConnection {
   private oauth?:SessionOAuth;
   private connecting?:Promise<Tool[]>;
   private stopped=false;
+  private reconnect=false;
+  private responseErrors=new WeakMap<Client,Error>();
   constructor(readonly name:string,readonly config:ServerConfig,readonly cwd=process.cwd()) {validateConfig({servers:{[name]:config}});}
   private options(signal?:AbortSignal,onprogress?:(progress:Progress)=>void) {return {signal,timeout:this.config.timeoutMs??15000,maxTotalTimeout:this.config.timeoutMs??15000,resetTimeoutOnProgress:false,onprogress};}
   async connect():Promise<Tool[]> {
@@ -101,9 +106,16 @@ export class McpConnection {
     if(this.client)return this.tools();
     const client=new Client({name:'pi-mcp-client',version:'0.1.0'},{capabilities:{}});
     const config=this.config;
-    const transport=config.command ? new StdioClientTransport({command:config.command,args:config.args,env:{...getDefaultEnvironment(),...variables(config.env)},cwd:this.cwd,stderr:'ignore',maxBufferSize:2*1024*1024}) : config.transport==='sse' ? new SSEClientTransport(new URL(config.url!),{authProvider:this.oauth,fetch:boundedFetch,requestInit:{headers:variables(config.headers),redirect:'error'},eventSourceInit:{fetch:(url,init)=>boundedFetch(url,{...init,headers:{...variables(config.headers),...Object.fromEntries(new Headers(init?.headers))},redirect:'error'})}}) : new StreamableHTTPClientTransport(new URL(config.url!),{authProvider:this.oauth,requestInit:{headers:variables(config.headers),redirect:'error'},fetch:boundedFetch,reconnectionOptions:{maxRetries:0,maxReconnectionDelay:1000,initialReconnectionDelay:1000,reconnectionDelayGrowFactor:1}});
+    const request:typeof fetch=(input,init)=>boundedFetch(input,init,error=>{
+      this.responseErrors.set(client,error);
+      if(this.client===client){this.client=undefined;this.reconnect=true;}
+      // Protocol onclose rejects every pending request immediately. Never replay
+      // the failed action; only a later explicit call may open a fresh session.
+      void client.close().catch(()=>{});
+    });
+    const transport=config.command ? new StdioClientTransport({command:config.command,args:config.args,env:{...getDefaultEnvironment(),...variables(config.env)},cwd:this.cwd,stderr:'ignore',maxBufferSize:2*1024*1024}) : config.transport==='sse' ? new SSEClientTransport(new URL(config.url!),{authProvider:this.oauth,fetch:request,requestInit:{headers:variables(config.headers),redirect:'error'},eventSourceInit:{fetch:(url,init)=>request(url,{...init,headers:{...variables(config.headers),...Object.fromEntries(new Headers(init?.headers))},redirect:'error'})}}) : new StreamableHTTPClientTransport(new URL(config.url!),{authProvider:this.oauth,requestInit:{headers:variables(config.headers),redirect:'error'},fetch:request,reconnectionOptions:{maxRetries:0,maxReconnectionDelay:1000,initialReconnectionDelay:1000,reconnectionDelayGrowFactor:1}});
     this.transport=transport;
-    try{await client.connect(transport,this.options());if(this.stopped){await client.close();throw new Error('Closed');}this.client=client;return await this.tools();}
+    try{await client.connect(transport,this.options());if(this.stopped){await client.close();throw new Error('Closed');}this.client=client;this.reconnect=false;return await this.tools();}
     catch(error){await client.close().catch(()=>{});this.client=undefined;throw publicError(error);}
   }
   async authenticate(show:(url:string)=>void):Promise<Tool[]> {
@@ -120,7 +132,7 @@ export class McpConnection {
       return await this.connect();
     } catch(error){throw publicError(error);} finally {await this.oauth.close();}
   }
-  private async invoke<T>(fn:(client:Client)=>Promise<T>):Promise<T> {if(!this.client)throw new Error('MCP server is disconnected');try{return await fn(this.client);}catch(error){throw publicError(error);}}
+  private async invoke<T>(fn:(client:Client)=>Promise<T>):Promise<T> {if(!this.client&&this.reconnect&&!this.stopped)await this.connect();const client=this.client;if(!client)throw new Error('MCP server is disconnected');try{return await fn(client);}catch(error){throw this.responseErrors.get(client)??publicError(error);}}
   async tools():Promise<Tool[]> {
     return this.invoke(async c=>{if(!c.getServerCapabilities()?.tools)return [];const items:Tool[]=[];let cursor:string|undefined;for(let page=0;page<32;page++){const result=await c.listTools(cursor?{cursor}:undefined,this.options());if(items.length+result.tools.length>256)throw new Error('Tool limit exceeded');items.push(...result.tools);if(items.length>256)throw new Error('Tool limit exceeded');cursor=result.nextCursor;if(!cursor)return items.filter(t=>(!this.config.allowTools || this.config.allowTools.includes(t.name)) && !this.config.denyTools?.includes(t.name));}throw new Error('Pagination limit exceeded');});
   }

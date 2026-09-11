@@ -162,13 +162,13 @@ test("display projection maps raw cursor positions and restores state when rende
   assert.equal(e.getExpandedText(), "a\t😀\rZ");
   assert.deepEqual(e.getCursor(), rawCursor);
 });
-test("raw terminal controls in a paste display as symbols rather than escape instructions", () => {
+test("unsafe terminal controls are removed before draft display", () => {
   const e = editor();
   const payload = "\x1b[31mred\x07\x9b0m";
   e.handleInput("\x1b[200~" + payload + "\x1b[201~");
   const rendered = e.render(50).join("\n");
-  assert.equal(e.getExpandedText(), payload);
-  assert.ok(rendered.includes("␛[31mred␇\\x9b0m"));
+  assert.equal(e.getExpandedText(), "[31mred0m");
+  assert.ok(rendered.includes("[31mred0m"));
   assert.ok(!rendered.includes("\x1b[31m"));
 });
 test("end-of-line deletion and character selection preserve whole graphemes", () => {
@@ -194,11 +194,11 @@ test("counts on G and gg jump to the requested logical line", () => {
   keys(e, "gg");
   assert.deepEqual(e.getCursor(), { line: 0, col: 0 });
 });
-test("submission strips terminal controls while the draft and stash retain raw bytes", () => {
+test("draft ingestion strips unsafe controls and submission also strips carriage returns", () => {
   const e = editor();
   const raw = "log \x1b]52;c;abc\x07 \x1b[2J\r\nend";
   e.handleInput("\x1b[200~" + raw + "\x1b[201~");
-  assert.equal(e.getExpandedText(), raw);
+  assert.equal(e.getExpandedText(), "log ]52;c;abc [2J\r\nend");
   let sent = "";
   e.onSubmit = (text) => {
     sent = text;
@@ -333,4 +333,55 @@ test("up/down yanks and counted line changes include complete lines without losi
   e.setText("a\n");
   keys(e, "Gdd");
   assert.equal(e.getExpandedText(), "a");
+});
+test("streaming follow-up reads cannot export pasted terminal escape controls", () => {
+  for (const normal of [false, true]) {
+    const e = editor();
+    if (normal) e.handleInput("\x1b");
+    e.handleInput("\x1b[200~log \x1b]52;c;PAYLOAD\x07\x9b0m\t\r\nend\x1b[201~");
+    let queued = "";
+    e.onAction("app.message.followUp", () => { queued = e.getExpandedText(); });
+    e.handleInput("\x1b\r");
+    assert.equal(queued, "log ]52;c;PAYLOAD0m\t\r\nend");
+    e.setText("external \x1b[2J\x07");
+    assert.equal(e.getExpandedText(), "external [2J");
+    e.insertTextAtCursor("\x1b]52;c;X\x07");
+    assert.equal(e.getExpandedText(), "external [2J]52;c;X");
+  }
+});
+test("restoring another draft cancels visual and line selections", () => {
+  for (const selection of ["v", "V"]) {
+    const e = editor();
+    e.setText("hello world");
+    e.handleInput("\x1b");
+    keys(e, "0" + selection + "lll");
+    e.setText("short");
+    assert.ok(e.render(40).at(-1)!.includes("NORMAL"));
+    assert.ok(!e.render(40).join("\n").includes("\x1b[7ms"));
+    keys(e, "d");
+    assert.equal(e.getExpandedText(), "short");
+  }
+});
+test("named r m q registers work and Escape cancels unsupported command arguments", () => {
+  for (const name of ["r", "m", "q"]) {
+    const e = editor();
+    e.setText("keep me\nsecond");
+    e.handleInput("\x1b");
+    keys(e, 'gg"' + name + 'yyG"' + name + 'p');
+    assert.equal(e.getExpandedText(), "keep me\nsecond\nkeep me");
+    e.setText("alpha");
+    keys(e, "0" + name);
+    e.handleInput("\x1b");
+    keys(e, "x");
+    assert.equal(e.getExpandedText(), "lpha");
+  }
+});
+test("refused oversized put preserves the redo history", () => {
+  const e = editor();
+  e.setText("x".repeat(2000));
+  e.handleInput("\x1b");
+  keys(e, 'gg"ayyxu"a9999p');
+  assert.equal(e.getExpandedText().length, 2000);
+  e.handleInput("\x12");
+  assert.equal(e.getExpandedText().length, 1999);
 });

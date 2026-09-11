@@ -14,6 +14,9 @@ import {
 } from "./adapter.ts";
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const MAX_DRAFT = 1024 * 1024;
+function safeDraft(text: string): string {
+  return text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "");
+}
 type Snapshot = {
   text: string;
   pos: number;
@@ -75,6 +78,7 @@ export class ViEditor extends CustomEditor {
     }
   }
   override insertTextAtCursor(text: string): void {
+    text = safeDraft(text);
     if (!text) return;
     this.checkpoint();
     const p = this.pos(),
@@ -88,6 +92,9 @@ export class ViEditor extends CustomEditor {
     this.cursorShape();
   }
   override setText(text: string): void {
+    if (this.mode === "visual" || this.mode === "line") this.mode = "normal";
+    this.anchor = 0;
+    this.visualScroll = 0;
     this.preferredColumn = undefined;
     this.discardArgument = false;
     this.undoHistory = [];
@@ -102,8 +109,10 @@ export class ViEditor extends CustomEditor {
     this.writeText(text);
     this.move(text.length);
     clearBaseUndo(this);
+    this.cursorShape();
   }
   private writeText(text: string): void {
+    text = safeDraft(text);
     super.setText(text);
     clearBaseUndo(this);
     if (this.getText() !== text) {
@@ -363,7 +372,7 @@ export class ViEditor extends CustomEditor {
       this.paste += data;
       const end = this.paste.indexOf("\x1b[201~");
       if (end >= 0) {
-        const payload = this.paste.slice(0, end),
+        const payload = safeDraft(this.paste.slice(0, end)),
           remaining = this.paste.slice(end + 6);
         this.paste = undefined;
         if (this.insertion && this.insertion.text !== this.getText())
@@ -386,7 +395,10 @@ export class ViEditor extends CustomEditor {
       return;
     }
     if (matchesKey(data, "escape")) {
-      if (this.mode === "normal" && !this.op && !this.prefix && !this.count) {
+      const discarded = this.discardArgument;
+      this.discardArgument = false;
+      this.visualScroll = 0;
+      if (this.mode === "normal" && !this.op && !this.prefix && !this.count && !discarded && !this.registerPending) {
         this.baseInput(data);
         return;
       }
@@ -440,15 +452,15 @@ export class ViEditor extends CustomEditor {
       this.discardArgument = false;
       return;
     }
+    if (this.registerPending) {
+      if (/^[a-z"]$/.test(data)) this.register = data;
+      this.registerPending = false;
+      return;
+    }
     if (["r", "m", "q"].includes(data)) {
       this.discardArgument = true;
       this.op = "";
       this.prefix = "";
-      return;
-    }
-    if (this.registerPending) {
-      if (/^[a-z"]$/.test(data)) this.register = data;
-      this.registerPending = false;
       return;
     }
     if (data === '"') {
@@ -550,6 +562,7 @@ export class ViEditor extends CustomEditor {
       return;
     }
     if (data === "v" || data === "V") {
+      this.visualScroll = 0;
       this.mode = data === "v" ? "visual" : "line";
       this.anchor = this.pos();
       this.cursorShape();
@@ -567,13 +580,13 @@ export class ViEditor extends CustomEditor {
       const r = this.registers.get(this.register);
       this.register = '"';
       if (r) {
-        this.checkpoint();
         const t = this.getText();
         let p =
           data === "P"
             ? this.pos()
             : Math.min(this.lineEnd(), this.next(this.pos()));
         if (r.text.length * n + this.getText().length > MAX_DRAFT) return;
+        this.checkpoint();
         let value = r.text.repeat(n);
         if (r.line) {
           p =
@@ -644,9 +657,7 @@ export class ViEditor extends CustomEditor {
     let row = "",
       cols = 0,
       cursorRow = 0;
-    for (const { segment: char, index: i } of new Intl.Segmenter(undefined, {
-      granularity: "grapheme",
-    }).segment(text)) {
+    for (const { segment: char, index: i } of segmenter.segment(text)) {
       if (char === "\n") {
         if (i === cursor) {
           cursorRow = rows.length;

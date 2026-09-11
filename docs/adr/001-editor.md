@@ -1,0 +1,16 @@
+# 001: A vi editor and independent draft stash
+
+Status: accepted for Pi 0.85.1.
+
+Pi's CustomEditor preserves application shortcuts, completion and submission. ViEditor extends it and owns modal editing, logical-line motions, operator ranges, text objects, registers and bounded undo history. Tests send real editor inputs and inspect submitted/expanded text and selection rendering. It starts in insert mode.
+
+Supported keys are Escape, i/a/I/A/o/O, h/j/k/l, w/b/e, 0/^/$, gg/G, decimal counts, d/c/y with motions, dd/cc/yy, x/D/C, v/V, iw/aw/iW/aW and paired bracket/quote objects, named a-z and unnamed registers, p/P, u and Ctrl+R. This is a defined vi subset, not a complete Vim implementation. Search, macros, repeat-dot, marks and clipboard registers are not implemented.
+
+Public APIs provide text reads, expanded paste reads, input, insertion and editor installation. They provide no cursor setter, and normalize tabs and carriage returns on text writes. `adapter.ts` isolates two version-specific operations: moving the cursor and retaining raw pasted text. It validates the private state shape and fails explicitly if incompatible. Development pins Pi 0.85.1 and regression tests cover actual editor inputs, raw pasted text, Unicode movement and undo. Upgrading Pi requires rerunning these tests.
+
+Bracketed paste is buffered across input chunks and applied as a single undoable operation. Vi commands never interpret its contents. Character motions use grapheme boundaries. Large vi pastes remain expanded, rather than stock Pi paste markers; the viewport still limits visible rows. Visual mode renders highlighted character or logical-line selections. For rendering only, tabs project to four spaces, CR and other C0 controls to visible control symbols, and C1 controls to escaped hex text. Offset mapping puts the cursor and selection on the projected text. The adapter restores raw state in `finally`, including when rendering throws. This preserves payload bytes without sending pasted terminal control sequences or relying on terminal tab widths. Terminal cursor shape uses DECSCUSR, with a mode label as the fallback for terminals that ignore it. Linux PTY checks exercise the installed TUI, while cursor appearance in a real terminal emulator and macOS desktop behavior remain manual checks.
+
+Prompt stash registers its own shortcut and footer status without replacing the editor. Pi 0.85.1's `getEditorText()` calls `getExpandedText()` internally, so a collapsed paste is saved as its actual payload. The slot is in memory only and clears on session start/shutdown, including reload, resume and fork. A nonempty draft swaps with the saved slot; an empty draft restores and empties the slot. No shared events or persistent settings are needed.
+
+
+Ctrl+Shift+S requires a terminal that reports the shifted control chord, such as Kitty keyboard protocol. A legacy terminal sends Ctrl+S for both physical chords, which this extension deliberately does not claim. Tests verify the registered shortcut against Pi's decoder with the protocol both enabled and disabled; legacy Ctrl+S never stashes. The stash stores the editor's expanded text. Stock Pi has already normalized tabs and line endings during paste before stash reads them; vi mode preserves the original bytes, and its stash round-trip does too.

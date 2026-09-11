@@ -7,7 +7,7 @@ import { childPolicy, inheritedPolicy, setActivePolicy, AutoPolicy, assertChildT
 function fixture() {
   const handlers:Record<string,any>={},commands:Record<string,any>={};
   const entries:unknown[]=[];
-  autoMode({on:(name:string,handler:any)=>{handlers[name]=handler;},events:{on:()=>{}},registerCommand:(name:string,command:any)=>{commands[name]=command;},appendEntry:(_name:string,entry:unknown)=>{entries.push(entry);}} as any);
+  autoMode({on:(name:string,handler:any)=>{handlers[name]=handler;},events:{on:()=>{},emit:()=>{}},registerCommand:(name:string,command:any)=>{commands[name]=command;},appendEntry:(_name:string,entry:unknown)=>{entries.push(entry);}} as any);
   const ctx:any={cwd:tmpdir(),hasUI:false,mode:'print',ui:{setStatus:()=>{},notify:()=>{}},sessionManager:{getBranch:()=>[],getSessionId:()=>'default'}};
   return {handlers,commands,ctx,entries};
 }
@@ -66,7 +66,7 @@ test('real subprocess enforces inherited guard before a child filesystem write',
       import autoMode from ${JSON.stringify(new URL('./index.ts',import.meta.url).href)};
       import {writeFile} from 'node:fs/promises';
       const hooks={};
-      autoMode({on:(n,h)=>hooks[n]=h,events:{on(){}},registerCommand(){},appendEntry(){}});
+      autoMode({on:(n,h)=>hooks[n]=h,events:{on(){},emit(){}},registerCommand(){},appendEntry(){}});
       const ctx={cwd:${JSON.stringify(dir)},hasUI:false,mode:'print',ui:{setStatus(){}},sessionManager:{getBranch:()=>[],getSessionId:()=>'default'}};
       await hooks.session_start({},ctx);
       const decision=await hooks.tool_call({toolName:'write',toolCallId:'real-child',input:{path:${JSON.stringify(target)},content:'bad'}},ctx);
@@ -103,4 +103,21 @@ test('package runs auto policy after owned routing and delegation extensions',as
   const {readFile}=await import('node:fs/promises');
   const manifest=JSON.parse(await readFile(new URL('../../package.json',import.meta.url),'utf8'));
   assert.equal(manifest.pi.extensions.at(-1),'./extensions/auto-mode/index.ts');
+});
+
+test('session switches remove the previous active policy registration',async()=>{
+  const {handlers,commands,ctx}=fixture();
+  let id='switch-old';
+  ctx.sessionManager.getSessionId=()=>id;
+  try {
+    await handlers.session_start({},ctx);
+    await commands.auto.handler('off',ctx);
+    const {checkAction}=await import('./policy.ts');
+    const action={tool:'bash',input:{command:'echo needs approval'},cwd:tmpdir()};
+    assert.equal((await checkAction(action,{},id)).allow,true);
+    id='switch-new';
+    await handlers.session_start({},ctx);
+    assert.equal((await checkAction(action,{},'switch-old')).allow,false);
+    assert.equal((await checkAction(action,{},id)).allow,false);
+  } finally {await handlers.session_shutdown();setActivePolicy(undefined,'switch-old');}
 });

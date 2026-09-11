@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { test } from 'node:test';
-import { DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, ModelRuntime, SessionManager, DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
 
 const root = resolve(import.meta.dirname, '..');
 const intended = ['questionnaire', 'memory', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'auto-mode'];
@@ -52,4 +52,36 @@ test('Pi package discovers exactly ten entrypoints and independently loads each'
     assert.deepEqual(loader.getExtensions().errors, []);
     assert.equal(loader.getExtensions().extensions.length, 10);
   } finally { await rm(temp, {recursive: true, force: true}); }
+});
+
+
+test('bundled tools declare their own managed effects to auto mode in a real headless session', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'pi-managed-tools-'));
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    const agentDir = join(temp, 'agent');
+    const settingsManager = SettingsManager.inMemory({packages: [root]});
+    const resourceLoader = new DefaultResourceLoader({cwd: temp, agentDir, settingsManager, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true});
+    await resourceLoader.reload();
+    const modelRuntime = await ModelRuntime.create({authPath: join(agentDir, 'auth.json'), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false});
+    ({session} = await createAgentSession({cwd: temp, agentDir, settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(temp), modelRuntime}));
+    await session.bindExtensions({});
+    const runner = session.extensionRunner!;
+    const errors: unknown[] = [];
+    runner.onError(error => errors.push(error));
+    for (const [toolName, input] of [
+      ['memory', {action: 'write', scope: 'project', name: 'fixture', content: 'synthetic memory'}],
+      ['todo_write', {todos: [{content: 'Synthetic task', status: 'pending'}]}],
+      ['questionnaire', {questions: [{id: 'test', prompt: 'Test?', options: [], allowOther: true}]}],
+    ] as const) {
+      const decision = await runner.emitToolCall({type: 'tool_call', toolName, toolCallId: `managed-${toolName}`, input});
+      assert.notEqual(decision?.block, true, `${toolName}: ${decision?.reason}`);
+      const tool = session.getToolDefinition(toolName)!;
+      await tool.execute(`managed-${toolName}`, input, undefined, undefined, runner.createContext());
+    }
+    const unknown = await runner.emitToolCall({type: 'tool_call', toolName: 'untrusted_remote_tool', toolCallId: 'unknown', input: {}});
+    assert.equal(unknown?.block, true);
+    assert.deepEqual(errors, []);
+    await runner.emit({type: 'session_shutdown', reason: 'quit'});
+  } finally {session?.dispose(); await rm(temp, {recursive: true, force: true});}
 });

@@ -59,7 +59,7 @@ test('notification errors settle tasks and do not strand queued writers', async 
   const first=await registry.spawn({task:'one',cwd:tmpdir()});
   const second=await registry.spawn({task:'two',cwd:tmpdir()});
   const results=await Promise.all([first.done,second.done]);
-  assert.ok(results.every(r=>r.status==='succeeded' && r.error?.includes('UI gone')));
+  assert.ok(results.every(r=>r.status==='succeeded' && r.notificationError?.includes('UI gone')));
  } finally {await registry.shutdown();}
 });
 
@@ -93,4 +93,34 @@ test('invalid task model, tools, preset, cwd, extensions and timeout never launc
   }
   assert.equal(launched,0);
  } finally {await registry.shutdown();}
+});
+
+test('split UTF-8 stdout and stderr retain non-ASCII text', async () => {
+  const script = `
+    const record=Buffer.from(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'café 🚀'}})+'\\n');
+    const split=record.indexOf(Buffer.from('é'))+1;
+    process.stdout.write(record.subarray(0,split));
+    process.stderr.write(Buffer.from([0xf0,0x9f]));
+    setTimeout(()=>{process.stdout.write(record.subarray(split));process.stderr.write(Buffer.from([0x9a,0x80]));},50);
+  `;
+  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', script]})});
+  try {
+    const result = await (await registry.spawn({task: 'unicode', cwd: tmpdir()})).done;
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.output, 'café 🚀');
+    assert.equal(result.stderr, '🚀');
+  } finally { await registry.shutdown(); }
+});
+
+test('notification failures preserve the original child error', async () => {
+  const registry = new SubagentRegistry({
+    invocation: () => ({command: process.execPath, args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'error',errorMessage:'provider refused request'}}))`]}),
+    onComplete: () => { throw new Error('UI gone'); },
+  });
+  try {
+    const result = await (await registry.spawn({task: 'fail', cwd: tmpdir()})).done;
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error, 'provider refused request');
+    assert.match(result.notificationError!, /UI gone/);
+  } finally { await registry.shutdown(); }
 });

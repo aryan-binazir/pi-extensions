@@ -11,7 +11,9 @@ export interface PolicyIO {
   approve?: (request: string) => Promise<boolean>;
   context?: string;
 }
-export interface Declaration { version: 1; source: 'local'; extension: string; tool: string; effect: 'read'|'write'; pathArgument: string }
+export type Declaration = { version: 1; source: 'local'; extension: string; tool: string } & (
+  { effect: 'read'|'write'; pathArgument: string } | { effect: 'managed'; pathArgument?: never }
+);
 interface Envelope { version: 1; root: string; tools: string[]; inherited: true; directives: string[]; provenance: string; policyFingerprint: string }
 const builtinTools = ['read','write','edit','bash','grep','find','ls'];
 export async function canonical(path: string): Promise<string> {
@@ -53,7 +55,7 @@ export class AutoPolicy {
   record(kind:string, detail:string) { this.audit.push({kind,detail:detail.slice(0,4000),timestamp:Date.now()}); if(this.audit.length>500) this.audit.shift(); }
   directive(value:string) { this.directives.push(value.slice(0,4000)); if(this.directives.length>12) this.directives.shift(); this.approvals.clear(); this.record('directive',value); }
   declare(value:Declaration) {
-    if(value.version!==1 || value.source!=='local' || !isAbsolute(value.extension) || !value.tool || !value.pathArgument || !['read','write'].includes(value.effect)) throw new Error('Only versioned trusted local declarations are accepted');
+    if(value.version!==1 || value.source!=='local' || !isAbsolute(value.extension) || !value.tool || !['read','write','managed'].includes(value.effect) || (value.effect !== 'managed' && !value.pathArgument) || (value.effect === 'managed' && value.pathArgument !== undefined)) throw new Error('Only versioned trusted local declarations are accepted');
     if (builtinTools.includes(value.tool)) throw new Error('Cannot replace a builtin declaration');
     if(this.inherited && !this.tools.includes(value.tool)) throw new Error('Declaration exceeds inherited tools');
     if(!this.tools.includes(value.tool)) this.tools.push(value.tool);
@@ -72,6 +74,7 @@ export class AutoPolicy {
       const path=argument && (raw===undefined && ['grep','find','ls'].includes(action.tool) || typeof raw==='string') ? await canonical(declaration ? resolve(cwd,typeof raw==='string'?raw:'.') : await piFilePath(typeof raw==='string'?raw:'.',cwd,action.tool==='read')) : undefined;
       const bounded=within(root,cwd) && (!path || within(root,path));
       if(this.inherited && !bounded) return finish(false,'unsafe','Path is outside inherited workspace');
+      if(bounded && declaration?.effect==='managed') return finish(true,'safe',`Trusted local managed operation ${declaration.extension} v1`);
       // Protect repository metadata and instructions from model-free modification.
       const sensitive=path && relative(root,path).split(/[\\/]/).some(sensitiveComponent);
       // Pi grep includes hidden files. Only a specific regular file can use
@@ -96,7 +99,7 @@ export class AutoPolicy {
       if(classification==='safe' && bounded && !sensitive && !directorySearch && builtinTools.includes(action.tool) && action.tool!=='bash') return finish(true,'safe','Classifier accepted bounded builtin action');
       if(!io.approve) return finish(false,'ask','Approval required but interactive UI unavailable');
       try {
-        if(await io.approve(request)) { this.approvals.add(key);this.record('approval',JSON.stringify({key,tool:action.tool,cwd,provenance:action.provenance}));return finish(true,'ask','User approved exact action'); }
+        if(await io.approve(JSON.stringify({tool:action.tool,input:action.input,cwd,resolvedPath:path,provenance:action.provenance},null,2))) { this.approvals.add(key);this.record('approval',JSON.stringify({key,tool:action.tool,cwd,provenance:action.provenance}));return finish(true,'ask','User approved exact action'); }
       } catch { return finish(false,'ask','Approval failed; blocked'); }
       return finish(false,'ask','User declined action');
     } catch { return finish(false,'unsafe','Policy validation failed; blocked'); }

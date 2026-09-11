@@ -29,6 +29,13 @@ export class Worktrees {
       throw error;
     }
   }
+  private async defaultBase(): Promise<string> {
+    try { return await this.run('git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']); } catch { /* Local-only repositories may have no remote default. */ }
+    for (const branch of ['main', 'master']) {
+      try { await this.run('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]); return branch; } catch { /* Try the next conventional default. */ }
+    }
+    throw new Error('Cannot determine the default branch; specify --base <ref>');
+  }
   async open(name: string, options: { branch?: string; base?: string } = {}): Promise<Checkout> {
     const branch = options.branch ?? (name.includes('/') ? name : `amb/${name}`);
     const leaf = name.includes('/') ? name.slice(name.indexOf('/') + 1) : name;
@@ -44,13 +51,13 @@ export class Worktrees {
     const path = join(this.options.home ?? homedir(), 'repos', '.worktrees', basename(existing[0].path), leaf);
     await mkdir(resolve(path, '..'), { recursive: true });
     if (herdr !== undefined) {
-      await this.run('herdr', ['worktree', 'create', '--cwd', this.cwd, '--branch', branch, '--base', options.base ?? 'main', '--path', path, '--no-focus']);
+      await this.run('herdr', ['worktree', 'create', '--cwd', this.cwd, '--branch', branch, '--base', options.base ?? await this.defaultBase(), '--path', path, '--no-focus']);
     } else {
       let branchExists = false;
       try { await this.run('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]); branchExists = true; } catch (error) {
         if ((error as { code?: number }).code !== 1) throw error;
       }
-      await this.run('git', branchExists ? ['worktree', 'add', '--', path, branch] : ['worktree', 'add', '-b', branch, '--', path, options.base ?? 'main']);
+      await this.run('git', branchExists ? ['worktree', 'add', '--', path, branch] : ['worktree', 'add', '-b', branch, '--', path, options.base ?? await this.defaultBase()]);
     }
     const created = await this.list();
     const canonical = await realpath(path);
@@ -84,15 +91,19 @@ export class Worktrees {
     const results = [];
     for (const checkout of await this.list()) {
       if (checkout.primary || !checkout.branch) continue;
-      if (within(await realpath(checkout.path), await realpath(this.cwd))) { results.push({ path: checkout.path, removed: false, reason: 'original session directory' }); continue; }
-      let merged: boolean;
       try {
-        const prs = JSON.parse(await this.run('gh', ['pr', 'list', '--head', checkout.branch, '--state', 'all', '--json', 'state,headRefOid,mergedAt', '--limit', '100'])) as Array<{ state: string; headRefOid: string; mergedAt: string | null }>;
-        const head = await this.run('git', ['-C', checkout.path, 'rev-parse', 'HEAD']);
-        merged = prs.some(pr => pr.state === 'MERGED' && pr.mergedAt && pr.headRefOid === head);
-      } catch { results.push({ path: checkout.path, removed: false, reason: 'PR merge status unavailable' }); continue; }
-      if (!merged) { results.push({ path: checkout.path, removed: false, reason: 'no merged PR at checkout HEAD' }); continue; }
-      results.push({ path: checkout.path, ...await this.remove(checkout.path, options) });
+        if (within(await realpath(checkout.path), await realpath(this.cwd))) { results.push({ path: checkout.path, removed: false, reason: 'original session directory' }); continue; }
+        let merged: boolean;
+        try {
+          const prs = JSON.parse(await this.run('gh', ['pr', 'list', '--head', checkout.branch, '--state', 'all', '--json', 'state,headRefOid,mergedAt', '--limit', '100'])) as Array<{ state: string; headRefOid: string; mergedAt: string | null }>;
+          const head = await this.run('git', ['-C', checkout.path, 'rev-parse', 'HEAD']);
+          merged = prs.some(pr => pr.state === 'MERGED' && pr.mergedAt && pr.headRefOid === head);
+        } catch { results.push({ path: checkout.path, removed: false, reason: 'PR merge status unavailable' }); continue; }
+        if (!merged) { results.push({ path: checkout.path, removed: false, reason: 'no merged PR at checkout HEAD' }); continue; }
+        results.push({ path: checkout.path, ...await this.remove(checkout.path, options) });
+      } catch (error) {
+        results.push({ path: checkout.path, removed: false, reason: error instanceof Error ? error.message : String(error) });
+      }
     }
     return results;
   }

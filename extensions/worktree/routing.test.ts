@@ -63,3 +63,55 @@ test('two coexisting sessions at one original cwd keep independent active checko
   assert.equal(getActiveCwd('/tmp/original', 'session-two'), '/tmp/two');
   setActiveCwd('/tmp/original', undefined, 'session-two');
 });
+
+test('session switches clear the prior routing entry without clearing another session', async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'pi-route-switch-')));
+  const handlers: Record<string, (...args: any[]) => any> = {};
+  let sessionId = 'old';
+  const ctx: any = { cwd: home, hasUI: false, sessionManager: { getSessionId: () => sessionId, getBranch: () => [] } };
+  try {
+    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
+    await handlers.session_start({}, ctx);
+    setActiveCwd(home, '/tmp/old-route', 'old');
+    setActiveCwd(home, '/tmp/independent-route', 'independent');
+    sessionId = 'new';
+    await handlers.session_start({}, ctx);
+    assert.equal(getActiveCwd(home, 'old'), home);
+    assert.equal(getActiveCwd(home, 'independent'), '/tmp/independent-route');
+    setActiveCwd(home, '/tmp/new-route', 'new');
+    sessionId = 'tree';
+    await handlers.session_tree({}, ctx);
+    assert.equal(getActiveCwd(home, 'new'), home);
+  } finally {
+    for (const id of ['old', 'new', 'tree', 'independent']) setActiveCwd(home, undefined, id);
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('worktree remove preserves quoted path spaces and original aliases restore without status', async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'pi-route-command-')));
+  const { mkdir, symlink } = await import('node:fs/promises');
+  const { Worktrees } = await import('./manager.ts');
+  const handlers: Record<string, (...args: any[]) => any> = {};
+  const commands: Record<string, any> = {};
+  const originalRemove = Worktrees.prototype.remove;
+  try {
+    const original = join(home, 'original'); await mkdir(original);
+    const alias = join(home, 'alias'); await symlink(original, alias);
+    let status: string | undefined = 'initial';
+    let removedPath = '';
+    const notices: string[] = [];
+    Worktrees.prototype.remove = async function(path) { removedPath = path; return { removed: false, reason: 'test only' }; };
+    const ctx: any = { cwd: alias, hasUI: true, isIdle: () => true, ui: { setStatus: (_key: string, value: string | undefined) => status = value, notify: (value: string) => notices.push(value), confirm: async () => true }, sessionManager: { getSessionId: () => 'quoted', getBranch: () => [{ type: 'custom', customType: 'agent-workflows:worktree', data: { version: 1, path: alias } }] } };
+    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand: (name: string, value: any) => commands[name] = value } as any);
+    await handlers.session_start({}, ctx);
+    assert.equal(status, undefined);
+    await commands.worktree.handler('remove "some  directory" --force', ctx);
+    assert.equal(removedPath, join(alias, 'some  directory'));
+    await commands.worktree.handler("remove 'other  directory'", ctx);
+    assert.equal(removedPath, join(alias, 'other  directory'));
+    await commands.worktree.handler('remove "unclosed', ctx);
+    assert.match(notices.at(-1) ?? '', /Unclosed quote/);
+    await handlers.session_shutdown({}, ctx);
+  } finally { Worktrees.prototype.remove = originalRemove; await rm(home, { recursive: true, force: true }); }
+});

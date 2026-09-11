@@ -98,3 +98,52 @@ test('unopened Herdr worktrees and unavailable server use Git; original session 
     assert.equal((await trees.remove(fallback.path, { confirm: async () => true })).removed, true);
   } finally { process.env.PATH = previousPath; await rm(home, { recursive: true, force: true }); }
 });
+
+test('cleanup preserves outcomes and continues past unmanaged and missing checkouts', async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'pi-worktree-mixed-')));
+  const previousPath = process.env.PATH;
+  try {
+    const repo = join(home, 'repo'); await mkdir(repo);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-b', 'main'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'init');
+    const trees = new Worktrees(repo, { home, herdr: false });
+    const managed = await trees.open('managed');
+    const stale = await trees.open('stale');
+    const afterStale = await trees.open('zz-after-stale');
+    const unmanaged = join(home, 'z-unmanaged');
+    git('worktree', 'add', '-b', 'unmanaged', unmanaged);
+    await rm(stale.path, { recursive: true });
+    const bin = join(home, 'bin'); await mkdir(bin);
+    await writeFile(join(bin, 'gh'), `#!/bin/sh\nprintf '%s' '[{"state":"MERGED","mergedAt":"2026-01-01","headRefOid":"${git('rev-parse', 'HEAD').trim()}"}]'\n`, { mode: 0o755 });
+    process.env.PATH = `${bin}:${previousPath}`;
+    let confirmations = 0;
+    const results = await trees.cleanup({ confirm: async () => { confirmations++; return true; } });
+    assert.equal(confirmations, 2);
+    assert.deepEqual(results.find(item => item.path === afterStale.path), { path: afterStale.path, removed: true });
+    assert.deepEqual(results.find(item => item.path === managed.path), { path: managed.path, removed: true });
+    assert.match(results.find(item => item.path === stale.path)?.reason ?? '', /ENOENT/);
+    assert.match(results.find(item => item.path === unmanaged)?.reason ?? '', /outside the managed/);
+    assert.equal(await realpath(unmanaged), unmanaged);
+    await rm(join(home, 'repos'), { recursive: true });
+    const missingLayout = await trees.cleanup({ confirm: async () => { throw new Error('must not approve'); } });
+    assert.equal(missingLayout.length, 2);
+    assert.ok(missingLayout.every(item => !item.removed && item.reason?.includes('ENOENT')));
+    assert.equal(await realpath(unmanaged), unmanaged);
+  } finally { process.env.PATH = previousPath; await rm(home, { recursive: true, force: true }); }
+});
+
+test('new branches use master or the remote default and require a base when neither exists', async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'pi-worktree-base-')));
+  try {
+    const repo = join(home, 'repo'); await mkdir(repo);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-b', 'master'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'init');
+    const trees = new Worktrees(repo, { home, herdr: false });
+    assert.equal((await trees.open('from-master')).branch, 'amb/from-master');
+    git('branch', '-m', 'trunk');
+    await assert.rejects(trees.open('needs-base'), /specify --base/);
+    git('update-ref', 'refs/remotes/origin/trunk', 'HEAD');
+    git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk');
+    assert.equal((await trees.open('from-remote')).branch, 'amb/from-remote');
+  } finally { await rm(home, { recursive: true, force: true }); }
+});

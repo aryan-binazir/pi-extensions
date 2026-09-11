@@ -6,7 +6,11 @@ import { getActiveCwd, resolveToolPath, setActiveCwd } from './routing.ts';
 const entryType = 'agent-workflows:worktree';
 export default function worktree(pi: ExtensionAPI): void {
   const paint = (ctx: ExtensionContext) => { if (ctx.hasUI) ctx.ui.setStatus(entryType, getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()) === ctx.cwd ? undefined : `Worktree: ${getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId())}`); };
+  let previousSession: { cwd: string; id: string } | undefined;
   const restore = async (ctx: ExtensionContext) => {
+    const id = ctx.sessionManager.getSessionId();
+    if (previousSession && (previousSession.cwd !== ctx.cwd || previousSession.id !== id)) setActiveCwd(previousSession.cwd, undefined, previousSession.id);
+    previousSession = { cwd: ctx.cwd, id };
     setActiveCwd(ctx.cwd, undefined, ctx.sessionManager.getSessionId());
     let path: unknown;
     for (const entry of ctx.sessionManager.getBranch()) {
@@ -16,7 +20,12 @@ export default function worktree(pi: ExtensionAPI): void {
       }
     }
     if (typeof path === 'string' && isAbsolute(path)) {
-      try { if ((await stat(path)).isDirectory()) setActiveCwd(ctx.cwd, await realpath(path), ctx.sessionManager.getSessionId()); }
+      try {
+        if ((await stat(path)).isDirectory()) {
+          const canonical = await realpath(path);
+          if (canonical !== await realpath(ctx.cwd)) setActiveCwd(ctx.cwd, canonical, ctx.sessionManager.getSessionId());
+        }
+      }
       catch { if (ctx.hasUI) ctx.ui.notify('Saved worktree no longer exists; using original session directory', 'warning'); }
     }
     paint(ctx);
@@ -44,17 +53,18 @@ export default function worktree(pi: ExtensionAPI): void {
     description: 'Worktree: <name> [--branch branch] [--base ref], list, original, remove <path> [--force], cleanup [--force]',
     async handler(args, ctx) {
       if (!ctx.isIdle()) { if (ctx.hasUI) ctx.ui.notify('Wait for the active turn before switching worktrees', 'warning'); return; }
-      const words = args.trim().split(/\s+/).filter(Boolean);
-      const command = words.shift() ?? 'list';
-      const trees = new Worktrees(ctx.cwd);
       try {
+        const words = commandWords(args);
+        const command = words.shift() ?? 'list';
+        const trees = new Worktrees(ctx.cwd);
         if (command === 'original') { activate(ctx, ctx.cwd); return; }
         if (command === 'list') { if (ctx.hasUI) ctx.ui.notify((await trees.list()).map(item => `${item.branch || '(detached)'} ${item.path}`).join('\n'), 'info'); return; }
         if (!ctx.hasUI) throw new Error('Worktree mutations require an interactive confirmation UI');
         if (command === 'remove' || command === 'cleanup') {
           const force = words.includes('--force');
           const confirm = (message: string) => ctx.ui.confirm('Remove worktree', message);
-          const results = command === 'cleanup' ? await trees.cleanup({ force, confirm }) : [{ path: resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), words.filter(word => word !== '--force').join(' ') || '.'), ...await trees.remove(resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), words.filter(word => word !== '--force').join(' ') || '.'), { force, confirm }) }];
+          const path = resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), words.filter(word => word !== '--force').join(' ') || '.');
+          const results = command === 'cleanup' ? await trees.cleanup({ force, confirm }) : [{ path, ...await trees.remove(path, { force, confirm }) }];
           if (results.some(result => result.removed && resolve(result.path) === resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId())))) activate(ctx, ctx.cwd);
           ctx.ui.notify(results.map(result => `${result.path}: ${result.removed ? 'removed' : result.reason}`).join('\n') || 'No worktrees to clean', 'info');
           return;
@@ -70,4 +80,22 @@ export default function worktree(pi: ExtensionAPI): void {
       } catch (error) { if (ctx.hasUI) ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error'); else throw error; }
     },
   });
+}
+
+// Split command arguments without changing spaces inside quoted paths.
+function commandWords(args: string): string[] {
+  const words: string[] = [];
+  let word = '', quote = '', started = false;
+  for (const character of args) {
+    if (quote) {
+      if (character === quote) quote = ''; else word += character;
+    } else if (character === '"' || character === "'") {
+      quote = character; started = true;
+    } else if (/\s/.test(character)) {
+      if (started) { words.push(word); word = ''; started = false; }
+    } else { word += character; started = true; }
+  }
+  if (quote) throw new Error('Unclosed quote in worktree command');
+  if (started) words.push(word);
+  return words;
 }

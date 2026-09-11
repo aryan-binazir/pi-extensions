@@ -145,3 +145,7 @@ Architecture decisions and the precise editor compatibility boundary are in
 The repository's `bin/pi` is a copy of the existing mise launcher. This package
 does not change host launchers, shell aliases, global defaults or authentication.
 External integrations belong to a later PR.
+
+Workflow replay is deliberately opt-in. Declining replay stops that invocation. To rerun every stage, change the source (for example, add a revision comment), review it again, and approve the resulting fresh journal. Each synchronous worker evaluation is limited to 100 ms independently of the overall workflow timeout. A journal write failure stops subsequent journal writes in that invocation; rerun after correcting storage rather than retrying unjournaled effects.
+
+Bundled memory, todo and questionnaire tools declare their own managed storage/UI effects to auto mode through versioned local declarations. This preserves their original behavior without trusting unknown tools by name. Managed declarations trust the installed extension to bound its internal effects; inherited child tool limits still apply.

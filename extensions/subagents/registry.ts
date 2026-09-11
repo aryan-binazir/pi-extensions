@@ -21,6 +21,7 @@ export interface TaskResult {
   stderr: string;
   usage: { input: number; output: number };
   error?: string;
+  notificationError?: string;
 }
 export interface TaskHandle { id: string; done: Promise<TaskResult> }
 interface ValidTask extends TaskSpec { tools: string[]; extensions: string[]; timeout: number }
@@ -152,6 +153,8 @@ export class SubagentRegistry {
       const invocation = this.options.invocation?.(entry.spec) ?? piInvocation(entry.spec);
       entry.process = spawn(invocation.command, invocation.args, {cwd: entry.spec.cwd, env: invocation.env ?? process.env, detached: true, stdio: ['ignore', 'pipe', 'pipe']});
       entry.timer = setTimeout(() => this.cancel(entry.result.id, true), entry.spec.timeout);
+      entry.process.stdout?.setEncoding('utf8');
+      entry.process.stderr?.setEncoding('utf8');
       entry.process.stdout?.on('data', chunk => {
         pending += String(chunk);
         let end: number;
@@ -180,7 +183,7 @@ export class SubagentRegistry {
     // Queued cancellation does not hold a process slot.
     if (entry.process || entry.result.status === 'failed') { this.running--; if (entry.writer) this.writers.delete(entry.spec.cwd); }
     const snapshot = structuredClone(entry.result);
-    try { this.options.onComplete?.(snapshot); } catch (error) { entry.result.error = `Completion notification failed: ${String(error).slice(0,1000)}`; }
+    try { this.options.onComplete?.(snapshot); } catch (error) { entry.result.notificationError = `Completion notification failed: ${String(error).slice(0,1000)}`; }
     finally { entry.resolve(structuredClone(entry.result)); this.pump(); }
   }
 }

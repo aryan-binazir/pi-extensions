@@ -104,3 +104,20 @@ test('child cwd narrowing cannot erase a sensitive parent directory component',a
     await assert.rejects(assertChildTask({cwd:join(root,'credentials'),tools:['read']},{},'sensitive-cwd'),/sensitive|control/);
   } finally {setActivePolicy(undefined,'sensitive-cwd');await rm(root,{recursive:true,force:true});}
 });
+
+test('managed local declarations retain workspace and inherited tool boundaries',async()=>{
+  const action={tool:'memory',input:{action:'read',name:'note'},cwd:tmpdir()};
+  const declaration={version:1,source:'local',extension:'/trusted/memory/index.ts',tool:'memory',effect:'managed'} as const;
+  const policy=new AutoPolicy(tmpdir());
+  assert.equal((await policy.check(action)).allow,false);
+  policy.declare(declaration);
+  assert.equal((await policy.check(action)).allow,true);
+  assert.equal((await policy.check({...action,cwd:'/etc'})).allow,false);
+  assert.throws(()=>new AutoPolicy(tmpdir(),['read'],true).declare(declaration),/inherited/);
+  assert.throws(()=>policy.declare({...declaration,source:'remote'} as any),/trusted local/);
+  assert.throws(()=>policy.declare({...declaration,pathArgument:'path'} as any),/trusted local/);
+  const child=new AutoPolicy(tmpdir(),['memory'],true);
+  child.declare(declaration);
+  assert.equal((await child.check(action)).allow,true);
+  assert.equal((await child.check({...action,cwd:'/etc'},{approve:async()=>true})).allow,false);
+});

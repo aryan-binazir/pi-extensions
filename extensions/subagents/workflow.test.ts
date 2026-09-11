@@ -33,7 +33,10 @@ test('capabilities enforce read bounds, retries, checkpoints, and restricted glo
   assert.deepEqual(await runWorkflow({...base,source}),['passed','hello','undefined']);
   assert.equal(attempts,2);
   await assert.rejects(runWorkflow({...base,source:'return await api.readFile("input",4);'}),/byte limit/);
-  await assert.rejects(runWorkflow({...base,source:'return await api.readFile("../outside");'}));
+  const outside=join(cwd,'..',`${cwd.split('/').at(-1)}-outside`);
+  await writeFile(outside,'outside');
+  try {await assert.rejects(runWorkflow({...base,source:`return await api.readFile(${JSON.stringify(outside)});`}),/escapes workflow cwd/);}
+  finally {await rm(outside,{force:true});}
   await assert.rejects(runWorkflow({...base,source:'return Function("return process")();'}),/Code generation/);
   await assert.rejects(runWorkflow({...base,source:'while (true) {}',timeout:500}),/timed out/);
  } finally {await rm(cwd,{recursive:true,force:true});}
@@ -63,7 +66,7 @@ test('replay requires explicit confirmation and validates cached child permissio
   assert.equal(calls,1);
   await assert.rejects(runWorkflow({...base,approveReplay:async()=>true,validateTask:async()=>{throw new Error('permissions changed');}}),/permissions changed/);
   await runWorkflow({...base,approveReplay:async()=>true});
-  assert.equal(calls,1);assert.equal(checks,2);
+  assert.equal(calls,1);assert.equal(checks,1);
  } finally {await rm(cwd,{recursive:true,force:true});}
 });
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -51,7 +51,7 @@ test('registered background tool launches guarded Pi and pushes completion to it
   assert.equal(task.status,'succeeded');assert.equal(task.id,response.details.id);
   assert.deepEqual(task.usage,{input:3,output:4});
   const child=JSON.parse(task.output);
-  assert.equal(child.policy.inherited,true);assert.equal(child.policy.root,cwd);
+  assert.equal(child.policy.inherited,true);assert.equal(child.policy.root,await realpath(cwd));
   assert.deepEqual(child.policy.tools,['read','grep','find','ls']);
   assert.ok(child.args.includes('--no-session'));assert.ok(child.args.includes('--no-extensions'));
   const extension=child.args[child.args.indexOf('-e')+1];
@@ -63,4 +63,51 @@ test('registered background tool launches guarded Pi and pushes completion to it
   if(previousAgentDir===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=previousAgentDir;
   await rm(cwd,{recursive:true,force:true});
  }
+});
+
+test('RPC UI approves extensions once per real spawn and reauthorizes cached workflow stages', async () => {
+  const {chmod} = await import('node:fs/promises');
+  const cwd = await mkdtemp(join(tmpdir(), 'workflow-rpc-'));
+  const previousPath = process.env.PATH, previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const sessionId = 'workflow-rpc-test';
+  const tools = new Map<string, any>(), events = new Map<string, any>();
+  const approvals: string[] = [];
+  let allowExtensions = true;
+  let completions = 0;
+  const ctx = {
+    cwd, hasUI: true, mode: 'rpc', sessionManager: {getSessionId: () => sessionId},
+    ui: {
+      editor: async (_title: string, source: string) => source,
+      confirm: async (title: string) => { approvals.push(title); return title.includes('child extensions') ? allowExtensions : true; },
+      setWidget: () => {},
+    },
+  };
+  try {
+    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}));`);
+    await chmod(join(cwd, 'pi'), 0o700);
+    await writeFile(join(cwd, 'trusted.ts'), 'export default () => {};');
+    process.env.PATH = `${cwd}:${previousPath ?? ''}`;
+    process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent-home');
+    setActivePolicy(new AutoPolicy(cwd), sessionId);
+    subagents({registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => { completions++; }} as unknown as ExtensionAPI);
+    await events.get('session_start')({}, ctx);
+    const source = `return await api.spawn({task:'read',preset:'reader',extensions:[${JSON.stringify(join(cwd, 'trusted.ts'))}]},'read');`;
+    const execute = () => tools.get('workflow').execute('call', {source}, undefined, undefined, ctx);
+    await execute();
+    assert.equal(completions, 1);
+    assert.equal(approvals.filter(title => title.includes('child extensions')).length, 1);
+    allowExtensions = false;
+    await assert.rejects(execute(), /Child extension loading was not approved/);
+    assert.equal(completions, 1, 'rejected replay must not launch a child');
+    allowExtensions = true;
+    await execute();
+    assert.equal(completions, 1, 'approved replay must reuse the cached child');
+    assert.equal(approvals.filter(title => title.includes('child extensions')).length, 3);
+  } finally {
+    await events.get('session_shutdown')?.();
+    setActivePolicy(undefined, sessionId);
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(cwd, {recursive: true, force: true});
+  }
 });

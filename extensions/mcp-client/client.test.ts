@@ -58,3 +58,16 @@ test('call deadlines cancel server work, filters reject hidden tools, and stdio 
     await assert.rejects(c.connect(),/closed/);
   }finally{await c.close();await fixture.close();}
 });
+
+for (const transport of ['http','sse'] as const) test(`${transport} rejects oversized response before exposing model output`, async () => {
+ const fixture=await startFixture(transport);const connection=new McpConnection('bounded', {...fixture.config,timeoutMs:1000});
+ try {await connection.connect();await assert.rejects(connection.call('echo',{text:'x'.repeat(2*1024*1024+1)}));}
+ finally {await connection.close();await fixture.close();}
+});
+
+
+test('SDK UnauthorizedError retains the actionable OAuth instruction',async()=>{
+ const {UnauthorizedError}=await import('@modelcontextprotocol/sdk/client/auth.js');
+ const {publicError}=await import('./client.ts');
+ assert.match(publicError(new UnauthorizedError()).message,/mcp-auth/);
+});

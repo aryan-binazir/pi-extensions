@@ -22,6 +22,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { CallToolResultSchema, type Progress, type Tool } from '@modelcontextprotocol/sdk/types.js';
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { SessionOAuth } from './oauth.ts';
 
 export function validateConfig(value:unknown):McpConfig {
@@ -48,7 +49,7 @@ export function publicError(error:unknown):Error {
   const e=error as {name?:string;code?:number;status?:number};
   if(e?.name==='AbortError')return new Error('MCP request cancelled');
   if(e?.code===-32001 || e?.name==='TimeoutError')return new Error('MCP request timed out');
-  if(e?.name==='UnauthorizedError' || e?.code===401 || e?.status===401)return new Error('MCP authentication required; use /mcp-auth SERVER');
+  if(error instanceof UnauthorizedError || e?.name==='UnauthorizedError' || e?.code===401 || e?.status===401)return new Error('MCP authentication required; use /mcp-auth SERVER');
   if(e?.code===403 || e?.status===403)return new Error('MCP authorization denied (403)');
   return new Error('MCP request failed; server unavailable, invalid response, or protocol error');
 }
@@ -56,6 +57,31 @@ export function boundedResult(value:unknown,maxBytes=65536):string {
   const text=JSON.stringify(value);
   if(Buffer.byteLength(text)<=maxBytes)return text;
   return Buffer.from(text).subarray(0,maxBytes-64).toString('utf8')+'\n[MCP output truncated]';
+}
+// Bound bytes before the SDK parses JSON or buffers an SSE event. Long-lived
+// SSE connections may carry many bounded events without a cumulative cutoff.
+async function boundedFetch(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> {
+  const response = await fetch(input, {...init, redirect: 'error'});
+  if (!response.body) return response;
+  const eventStream = response.headers.get('content-type')?.includes('text/event-stream');
+  let bytes = 0, lineBytes = 0, previousCR = false;
+  const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      if (!eventStream) {
+        bytes += chunk.byteLength;
+        if (bytes > 2 * 1024 * 1024) throw new Error('MCP response exceeds 2 MiB');
+      } else for (const byte of chunk) {
+        if (++bytes > 2 * 1024 * 1024) throw new Error('MCP event exceeds 2 MiB');
+        if (byte === 13 || byte === 10 && !previousCR) {
+          if (lineBytes === 0) bytes = 0;
+          lineBytes = 0;
+        } else if (byte !== 10 || !previousCR) lineBytes++;
+        previousCR = byte === 13;
+      }
+      controller.enqueue(chunk);
+    },
+  }));
+  return new Response(body, {status: response.status, statusText: response.statusText, headers: response.headers});
 }
 export class McpConnection {
   private client?:Client;
@@ -75,7 +101,7 @@ export class McpConnection {
     if(this.client)return this.tools();
     const client=new Client({name:'pi-mcp-client',version:'0.1.0'},{capabilities:{}});
     const config=this.config;
-    const transport=config.command ? new StdioClientTransport({command:config.command,args:config.args,env:{...getDefaultEnvironment(),...variables(config.env)},cwd:this.cwd,stderr:'ignore',maxBufferSize:2*1024*1024}) : config.transport==='sse' ? new SSEClientTransport(new URL(config.url!),{authProvider:this.oauth,fetch:(url,init)=>fetch(url,{...init,redirect:'error'}),requestInit:{headers:variables(config.headers),redirect:'error'},eventSourceInit:{fetch:(url,init)=>fetch(url,{...init,headers:{...variables(config.headers),...Object.fromEntries(new Headers(init?.headers))},redirect:'error'})}}) : new StreamableHTTPClientTransport(new URL(config.url!),{authProvider:this.oauth,requestInit:{headers:variables(config.headers),redirect:'error'},fetch:(url,init)=>fetch(url,{...init,redirect:'error'}),reconnectionOptions:{maxRetries:0,maxReconnectionDelay:1000,initialReconnectionDelay:1000,reconnectionDelayGrowFactor:1}});
+    const transport=config.command ? new StdioClientTransport({command:config.command,args:config.args,env:{...getDefaultEnvironment(),...variables(config.env)},cwd:this.cwd,stderr:'ignore',maxBufferSize:2*1024*1024}) : config.transport==='sse' ? new SSEClientTransport(new URL(config.url!),{authProvider:this.oauth,fetch:boundedFetch,requestInit:{headers:variables(config.headers),redirect:'error'},eventSourceInit:{fetch:(url,init)=>boundedFetch(url,{...init,headers:{...variables(config.headers),...Object.fromEntries(new Headers(init?.headers))},redirect:'error'})}}) : new StreamableHTTPClientTransport(new URL(config.url!),{authProvider:this.oauth,requestInit:{headers:variables(config.headers),redirect:'error'},fetch:boundedFetch,reconnectionOptions:{maxRetries:0,maxReconnectionDelay:1000,initialReconnectionDelay:1000,reconnectionDelayGrowFactor:1}});
     this.transport=transport;
     try{await client.connect(transport,this.options());if(this.stopped){await client.close();throw new Error('Closed');}this.client=client;return await this.tools();}
     catch(error){await client.close().catch(()=>{});this.client=undefined;throw publicError(error);}
@@ -96,15 +122,15 @@ export class McpConnection {
   }
   private async invoke<T>(fn:(client:Client)=>Promise<T>):Promise<T> {if(!this.client)throw new Error('MCP server is disconnected');try{return await fn(this.client);}catch(error){throw publicError(error);}}
   async tools():Promise<Tool[]> {
-    return this.invoke(async c=>{if(!c.getServerCapabilities()?.tools)return [];const items:Tool[]=[];let cursor:string|undefined;for(let page=0;page<32;page++){const result=await c.listTools(cursor?{cursor}:undefined,this.options());items.push(...result.tools);if(items.length>256)throw new Error('Tool limit exceeded');cursor=result.nextCursor;if(!cursor)return items.filter(t=>(!this.config.allowTools || this.config.allowTools.includes(t.name)) && !this.config.denyTools?.includes(t.name));}throw new Error('Pagination limit exceeded');});
+    return this.invoke(async c=>{if(!c.getServerCapabilities()?.tools)return [];const items:Tool[]=[];let cursor:string|undefined;for(let page=0;page<32;page++){const result=await c.listTools(cursor?{cursor}:undefined,this.options());if(items.length+result.tools.length>256)throw new Error('Tool limit exceeded');items.push(...result.tools);if(items.length>256)throw new Error('Tool limit exceeded');cursor=result.nextCursor;if(!cursor)return items.filter(t=>(!this.config.allowTools || this.config.allowTools.includes(t.name)) && !this.config.denyTools?.includes(t.name));}throw new Error('Pagination limit exceeded');});
   }
   async call(name:string,args:Record<string,unknown>,signal?:AbortSignal,progress?:(p:Progress)=>void) {
     if(this.config.denyTools?.includes(name) || this.config.allowTools && !this.config.allowTools.includes(name))throw new Error('MCP tool excluded by configuration');
     try{return await this.invoke(c=>c.callTool({name,arguments:args},CallToolResultSchema,this.options(signal,progress)));}catch(error){if(signal?.aborted)throw new Error('MCP request cancelled');throw error;}
   }
-  resources(signal?:AbortSignal) {return this.invoke(async c=>{const all=[];let cursor:string|undefined;for(let i=0;i<32;i++){const r=await c.listResources(cursor?{cursor}:undefined,this.options(signal));all.push(...r.resources);if(all.length>256)throw new Error('Resource limit exceeded');if(!r.nextCursor)return all;cursor=r.nextCursor;}throw new Error('Pagination limit exceeded');});}
+  resources(signal?:AbortSignal) {return this.invoke(async c=>{const all=[];let cursor:string|undefined;for(let i=0;i<32;i++){const r=await c.listResources(cursor?{cursor}:undefined,this.options(signal));if(all.length+r.resources.length>256)throw new Error('Resource limit exceeded');all.push(...r.resources);if(all.length>256)throw new Error('Resource limit exceeded');if(!r.nextCursor)return all;cursor=r.nextCursor;}throw new Error('Pagination limit exceeded');});}
   read(uri:string,signal?:AbortSignal) {return this.invoke(c=>c.readResource({uri},this.options(signal)));}
-  prompts(signal?:AbortSignal) {return this.invoke(async c=>{const all=[];let cursor:string|undefined;for(let i=0;i<32;i++){const r=await c.listPrompts(cursor?{cursor}:undefined,this.options(signal));all.push(...r.prompts);if(all.length>256)throw new Error('Prompt limit exceeded');if(!r.nextCursor)return all;cursor=r.nextCursor;}throw new Error('Pagination limit exceeded');});}
+  prompts(signal?:AbortSignal) {return this.invoke(async c=>{const all=[];let cursor:string|undefined;for(let i=0;i<32;i++){const r=await c.listPrompts(cursor?{cursor}:undefined,this.options(signal));if(all.length+r.prompts.length>256)throw new Error('Prompt limit exceeded');all.push(...r.prompts);if(all.length>256)throw new Error('Prompt limit exceeded');if(!r.nextCursor)return all;cursor=r.nextCursor;}throw new Error('Pagination limit exceeded');});}
   prompt(name:string,args:Record<string,string>,signal?:AbortSignal) {return this.invoke(c=>c.getPrompt({name,arguments:args},this.options(signal)));}
-  async close(){this.stopped=true;this.oauth?.invalidateCredentials('all');await this.oauth?.close();await this.client?.close();await this.transport?.close();this.client=undefined;}
+  async close(){this.stopped=true;this.oauth?.invalidateCredentials('all');try{await this.oauth?.close();await this.client?.close();}finally{try{await this.transport?.close();}finally{this.client=undefined;}}}
 }

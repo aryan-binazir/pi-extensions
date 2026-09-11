@@ -59,3 +59,7 @@ test('DNS used by the request rejects private addresses before connecting',async
 test('legitimate captcha search results are not treated as a challenge',()=>{
  assert.equal(parseResults(fixture.replace('A &amp; B','How CAPTCHA works'),1)[0].title,'How CAPTCHA works');
 });
+
+test('anchors without href never become fabricated search results',()=>{
+ assert.deepEqual(parseResults('<div class="result"><a class="result__a">Missing link</a></div><div class="no-results"></div>',5),[]);
+});

@@ -52,3 +52,23 @@ test('session replacement invalidates old registered callbacks and project trust
     const current=tools.get(old.name);assert.match((await current.execute('3',{text:'current'},undefined,undefined,ctx)).content[0].text,/current/);
   }finally{await handlers.get('session_shutdown')();await fixture.close();await rm(dir,{recursive:true,force:true});}
 });
+
+
+test('remote schemas cannot inject external references or oversized provider parameters',async()=>{
+ const {McpConnection}=await import('./client.ts');
+ const dir=await mkdtemp(join(tmpdir(),'pi-mcp-schema-'));const path=join(dir,'mcp.json');
+ await writeFile(path,JSON.stringify({servers:{fixture:{url:'http://127.0.0.1:1',consent:'allow'}}}));
+ const tools=new Map<string,any>(),handlers=new Map<string,any>();const warnings:string[]=[];
+ const mocked=test.mock.method(McpConnection.prototype,'connect',async()=>[
+  {name:'external',inputSchema:{type:'object',properties:{value:{$ref:'https://example.invalid/schema'}}}},
+  {name:'large',inputSchema:{type:'object',description:'x'.repeat(33000)}},
+  {name:'valid',inputSchema:{type:'object',properties:{value:{type:'string'}}}},
+ ]);
+ try{
+  mcp({on:(n:string,h:any)=>handlers.set(n,h),registerTool:(t:any)=>tools.set(t.name,t),registerCommand(){},registerFlag(){},getFlag:()=>path} as any);
+  await handlers.get('session_start')({}, {cwd:dir,hasUI:false,isProjectTrusted:()=>false,ui:{notify:(message:string)=>warnings.push(message)}});
+  assert.equal([...tools.keys()].filter(name=>name.startsWith('mcp_fixture_')).length,1);
+  assert.ok([...tools.keys()].some(name=>name.startsWith('mcp_fixture_valid_')));
+  assert.equal(warnings.length,2);
+ }finally{mocked.mock.restore();await handlers.get('session_shutdown')?.();await rm(dir,{recursive:true,force:true});}
+});

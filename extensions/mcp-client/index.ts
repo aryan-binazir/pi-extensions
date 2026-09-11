@@ -8,6 +8,18 @@ async function readConfig(path:string,optional=false):Promise<McpConfig> {
   try {const raw=await readFile(path);if(raw.byteLength>1048576)throw new Error('MCP configuration exceeds 1 MiB');return validateConfig(JSON.parse(raw.toString('utf8')));}
   catch(error){if(optional && (error as NodeJS.ErrnoException).code==='ENOENT')return {servers:{}};throw new Error('MCP configuration is missing or invalid');}
 }
+function schemaAllowed(schema: unknown): boolean {
+  if (Buffer.byteLength(JSON.stringify(schema)) > 32768) return false;
+  const check = (value: unknown, depth: number): boolean => {
+    if (depth > 32) return false;
+    if (!value || typeof value !== 'object') return true;
+    return Object.entries(value).every(([key, nested]) => {
+      if (['$ref', '$dynamicRef', '$recursiveRef'].includes(key) && (typeof nested !== 'string' || !nested.startsWith('#/'))) return false;
+      return check(nested, depth + 1);
+    });
+  };
+  return check(schema, 0);
+}
 export default function mcp(pi:ExtensionAPI) {
   const connections=new Map<string,McpConnection>();
   let config:McpConfig={servers:{}};
@@ -31,6 +43,7 @@ export default function mcp(pi:ExtensionAPI) {
     const registrationGeneration=generation;
     const tools=authenticate ? await connection.authenticate(url=>ctx.ui.notify(`Open this authorization URL in your browser:\n${url}`,'info')) : await connection.connect();
     for(const tool of tools) {
+      if(!schemaAllowed(tool.inputSchema)){ctx.ui.notify(`MCP ${server}: excluded tool with oversized, deeply nested or external-reference schema`, 'warning');continue;}
       const name=toolName(server,tool.name);
       pi.registerTool({name,label:`MCP ${server}: ${tool.name}`,description:`External MCP tool. ${tool.description?.slice(0,2000)??tool.name}`,
         parameters:Type.Unsafe<Record<string,unknown>>(tool.inputSchema),

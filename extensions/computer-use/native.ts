@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { isAbsolute, join } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -62,6 +63,8 @@ export class LinuxDesktop implements DesktopBackend {
 export class MacDesktop implements DesktopBackend {
   private child?: ChildProcessWithoutNullStreams;
   private buffer = '';
+  private decoder = new StringDecoder('utf8');
+  private failure?: Error;
   private serial = 0;
   private directory?: string;
   private closed = false;
@@ -79,7 +82,7 @@ export class MacDesktop implements DesktopBackend {
     child.on('error', () => this.fail(new Error('macOS Swift runtime unavailable; install Apple Command Line Tools')));
     child.on('close', () => this.fail(new Error('macOS desktop helper exited; check Swift Command Line Tools and Screen Recording/Accessibility permissions')));
     child.stdout.on('data', (chunk: Buffer) => {
-      this.buffer += chunk.toString('utf8');
+      this.buffer += this.decoder.write(chunk);
       if (this.buffer.length > maxBytes * 1.5) return this.fail(new Error('macOS response exceeds output limit'));
       let newline: number;
       while ((newline = this.buffer.indexOf('\n')) >= 0) {
@@ -96,8 +99,10 @@ export class MacDesktop implements DesktopBackend {
         } catch { this.fail(new Error('Invalid macOS desktop protocol response')); }
       }
     });
+    await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', () => reject(new Error('macOS Swift runtime unavailable; install Apple Command Line Tools'))); });
   }
   private fail(error: Error) {
+    this.failure = error;
     const pending = this.pending; this.pending = undefined;
     if (this.child?.pid) { try { process.kill(-this.child.pid, 'SIGKILL'); } catch { this.child.kill('SIGKILL'); } }
     pending?.reject(error);
@@ -105,6 +110,7 @@ export class MacDesktop implements DesktopBackend {
   async run(action: DesktopAction, signal: AbortSignal): Promise<DesktopResult> {
     signal.throwIfAborted(); this.setup ??= this.ensure(); await this.setup; signal.throwIfAborted();
     if (this.closed) throw new Error('macOS desktop session closed');
+    if (this.failure) throw this.failure;
     const id = ++this.serial;
     const abort = () => this.fail(new Error('macOS desktop request aborted'));
     signal.addEventListener('abort', abort, { once: true });

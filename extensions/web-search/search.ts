@@ -15,6 +15,7 @@ export function parseResults(html:string,limit:number):SearchResult[] {
  const results:SearchResult[]=[];const seen=new Set<string>();
  for(const link of links){
   try {
+   if(typeof link.attribs.href!=='string'||!link.attribs.href.trim())continue;
    let url=new URL(link.attribs.href,'https://html.duckduckgo.com');
    if(['duckduckgo.com','html.duckduckgo.com'].includes(url.hostname)&&url.pathname==='/l/')url=new URL(url.searchParams.get('uddg')??'');
    if(!['http:','https:'].includes(url.protocol)||url.username||url.password)continue;

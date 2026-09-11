@@ -1,7 +1,10 @@
 import { clampThinkingLevel, type Api, type Model, type Provider } from '@earendil-works/pi-ai';
-// Resolve the installed root, then its exported helper: Pi aliases unknown
-// pi-ai subpaths onto compat.js. Both root entrypoints live in dist/.
-const { buildBaseOptions } = await import(new URL('./api/simple-options.js',import.meta.resolve('@earendil-works/pi-ai')).href) as typeof import('@earendil-works/pi-ai/api/simple-options');
+// This helper needs a filesystem runtime dependency; Pi's virtual root alias
+// does not resolve import.meta.resolve or arbitrary package subpaths.
+let buildBaseOptions: typeof import('@earendil-works/pi-ai/api/simple-options').buildBaseOptions | undefined;
+try {
+ buildBaseOptions = (await import(new URL('./api/simple-options.js', import.meta.resolve('@earendil-works/pi-ai')).href)).buildBaseOptions;
+} catch { /* Leave base providers usable if the optional fast adapter is unavailable. */ }
 const WRAPPED=Symbol.for('pi-interactive:fast-provider');
 export const FAST_SUFFIX='~fast';
 function supported(model:Model<Api>):boolean {
@@ -12,6 +15,8 @@ function supported(model:Model<Api>):boolean {
  } catch {return false;}
 }
 export function withFastModels(original:Provider):Provider {
+ if(!buildBaseOptions)return original;
+ const baseOptions=buildBaseOptions;
  if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED]) return original;
  const aliases=(models:readonly Model<Api>[])=>models.flatMap(model=>supported(model)&&!model.id.endsWith(FAST_SUFFIX)?[model,{...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}]:[model]);
  const resolve=(model:Model<Api>)=>{
@@ -34,7 +39,7 @@ export function withFastModels(original:Provider):Provider {
    if(!resolved.fast)return original.streamSimple(model,context,options);
    const level=options?.reasoning?clampThinkingLevel(resolved.model,options.reasoning):undefined;
    return original.stream(resolved.model,context,{
-    ...buildBaseOptions(resolved.model,context,options,options?.apiKey),
+    ...baseOptions(resolved.model,context,options,options?.apiKey),
     toolChoice:options?.toolChoice,reasoningEffort:level==='off'?undefined:level,serviceTier:'priority',
    });
   },

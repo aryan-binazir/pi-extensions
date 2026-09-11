@@ -28,7 +28,7 @@ export default function fastMode(pi:ExtensionAPI):void {
    if(!current){ctx.ui.notify('No selected model','error');return;}
    const active=current.id.endsWith(FAST_SUFFIX);
    const enabled=args.trim()?args.trim()==='on':!active;
-   const id=current.id.replace(/~fast$/,'')+(enabled?FAST_SUFFIX:'');
+   const id=(active?current.id.slice(0,-FAST_SUFFIX.length):current.id)+(enabled?FAST_SUFFIX:'');
    const next=ctx.modelRegistry.find(current.provider,id);
    if(!next || (!active && next===current && enabled)){ctx.ui.notify('Fast mode is unavailable for this provider path','error');return;}
    const effort=pi.getThinkingLevel();

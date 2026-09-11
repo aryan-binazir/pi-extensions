@@ -22,6 +22,7 @@ test('Linux power distinguishes AC, battery and missing information',async()=>{
  try{
   assert.equal(await readPower('linux',dir),'unknown');
   await mkdir(join(dir,'AC'));await writeFile(join(dir,'AC/type'),'Mains');await writeFile(join(dir,'AC/online'),'1');
+  await mkdir(join(dir,'AA-broken'));await writeFile(join(dir,'AA-broken/type'),'Mains');
   assert.equal(await readPower('linux',dir),'ac');
   await writeFile(join(dir,'AC/online'),'0');assert.equal(await readPower('linux',dir),'battery');
   await writeFile(join(dir,'AC/online'),'garbage');assert.equal(await readPower('linux',dir),'unknown');
@@ -37,7 +38,7 @@ test('Linux inhibitor uses a pipe, and cleanup reaps the real synthetic child',a
   assert.equal(args.at(-1),'/bin/cat');child=spawn('/bin/cat',[],options);return child;
  }) as typeof spawn;
  const inhibitor=startInhibitor('linux',launch)!;
- assert.ok(seen.includes('--what=idle:sleep'));assert.ok(seen.includes('--no-ask-password'));
+ assert.ok(seen.includes('--what=idle'));assert.ok(!seen.includes('--what=idle:sleep'));assert.ok(seen.includes('--no-ask-password'));
  assert.ok(child!.stdin);
  await inhibitor.stop();assert.equal(inhibitor.alive(),false);
  assert.notEqual(child!.exitCode,null);
@@ -61,4 +62,11 @@ test('macOS adapter uses idle-only caffeinate tied to parent PID',async()=>{
   return spawn(process.execPath,['-e','process.stdin.resume()'],options);
  }) as typeof spawn;
  const inhibitor=startInhibitor('darwin',launch)!;await inhibitor.stop();assert.equal(inhibitor.alive(),false);
+});
+
+test('missing inhibitor backs off instead of retrying each watchdog tick',async()=>{
+ let now=0,starts=0;
+ const keeper=new PowerKeeper({now:()=>now,power:async()=> 'ac',start:()=>{starts++;return undefined;}});
+ try {await keeper.setAgent(true);for(now=2000;now<30000;now+=2000)await keeper.check();assert.equal(starts,1);await keeper.check();assert.equal(starts,2);}
+ finally {await keeper.shutdown();}
 });

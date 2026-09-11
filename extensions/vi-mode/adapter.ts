@@ -176,10 +176,16 @@ export function installEditorHandoff(editor?: Editor): void {
       return;
     }
     // setText resets the destination's history; then restore the exact visible draft.
-    this.editor.setText("");
-    retainRawText(this.editor, text);
+    if (viEditor in this.editor) {
+      this.editor.setText("");
+      retainRawText(this.editor, text);
+    } else {
+      // Stock rendering relies on setText's CRLF/tab normalization.
+      this.editor.setText(text);
+    }
     writePastes(this.editor, payloads);
-    placeCursor(this.editor, text.length);
+    placeCursor(this.editor, this.editor.getText().length);
+    if (viEditor in this.editor) this.editor.onChange?.(text);
   };
   Object.defineProperty(prototype, handoffInstalled, { value: true });
 }

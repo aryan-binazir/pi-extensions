@@ -14,6 +14,7 @@ export default function viMode(pi: ExtensionAPI): void {
       retainRawText(active, draft);
       writePastes(active, payloads);
       placeCursor(active, draft.length);
+      active.onChange?.(draft);
       return true;
     };
   };

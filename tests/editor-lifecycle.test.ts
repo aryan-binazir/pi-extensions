@@ -64,3 +64,21 @@ check('real extension event wiring preserves typed and mixed drafts through stas
   await toggle(); await toggle(); assert.equal(h.app.editor.getText(), visible); assert.equal(h.app.editor.getExpandedText(), expanded);
   h.emit('session_shutdown');
 });
+check('stock editor handoff normalizes inline CR and tabs for safe rendering', () => {
+  const h = host();
+  h.app.editor.handleInput('\x1b[200~alpha\r\nbeta\tgamma\x1b[201~');
+  h.app.setCustomEditorComponent(undefined);
+  assert.equal(h.app.editor.getText(), 'alpha\nbeta    gamma');
+  const frame = h.app.editor.render(60).join('\n');
+  assert.ok(!frame.includes('\r') && !frame.includes('\t'));
+  h.emit('session_shutdown');
+});
+check('stash restoration notifies Pi of the restored draft', async () => {
+  const h = host(); let changed = '';
+  h.app.editor.onChange = (text: string) => { changed = text; };
+  keys(h.app.editor, '!echo synthetic');
+  const toggle = () => h.shortcuts.get('ctrl+shift+s').handler(h.ctx);
+  await toggle(); assert.equal(changed, '');
+  await toggle(); assert.equal(changed, '!echo synthetic');
+  h.emit('session_shutdown');
+});

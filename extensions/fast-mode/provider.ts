@@ -12,7 +12,7 @@ function supported(model:Model<Api>):boolean {
  } catch {return false;}
 }
 export function withFastModels(original:Provider):Provider {
- if((original as any)[WRAPPED]) return original;
+ if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED]) return original;
  const aliases=(models:readonly Model<Api>[])=>models.flatMap(model=>supported(model)&&!model.id.endsWith(FAST_SUFFIX)?[model,{...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}]:[model]);
  const resolve=(model:Model<Api>)=>{
   if(!model.id.endsWith(FAST_SUFFIX))return {model,fast:false};

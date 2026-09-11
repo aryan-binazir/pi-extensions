@@ -10,7 +10,7 @@ export function publicAddress(address:string):boolean {
 export function parseResults(html:string,limit:number):SearchResult[] {
  if(/id=["\'](?:challenge-form|anomaly-modal)|action=["\'][^"\']*anomaly\.js/i.test(html))throw new Error('Search challenge/captcha; no results retrieved');
  const doc=parseDocument(html);
- const hasClass=(node:any,name:string)=>String(node.attribs?.class??'').split(/\s+/).includes(name);
+ const hasClass=(node:Parameters<typeof DomUtils.textContent>[0],name:string)=>String('attribs' in node ? node.attribs.class??'' : '').split(/\s+/).includes(name);
  const links=DomUtils.findAll(node=>node.name==='a'&&hasClass(node,'result__a'),doc.children);
  const results:SearchResult[]=[];const seen=new Set<string>();
  for(const link of links){
@@ -22,7 +22,7 @@ export function parseResults(html:string,limit:number):SearchResult[] {
    let parent=link.parent;
    while(parent && !hasClass(parent,'result'))parent=parent.parent;
    const snippet=parent&&'children' in parent?DomUtils.findOne(node=>hasClass(node,'result__snippet'),parent.children,true):null;
-   const text=(node:any)=>DomUtils.textContent(node).replace(/\s+/g,' ').trim();
+   const text=(node:Parameters<typeof DomUtils.textContent>[0])=>DomUtils.textContent(node).replace(/\s+/g,' ').trim();
    const title=text(link).slice(0,512);if(!title)continue;
    results.push({title,url:url.href,snippet:snippet?text(snippet).slice(0,2000):''});seen.add(url.href);
    if(results.length>=limit)break;

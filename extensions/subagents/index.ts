@@ -32,6 +32,12 @@ export default function subagents(pi: ExtensionAPI): void {
     },
   });
   let registry = createRegistry();
+  const trackedSpawn = async (task: TaskSpec) => {
+    const handle = await registry.spawn(task);
+    pi.events.emit('pi-interactive:background-activity', { id: handle.id, active: true });
+    void handle.done.then(() => pi.events.emit('pi-interactive:background-activity', { id: handle.id, active: false }));
+    return handle;
+  };
   const normalize = (task: Omit<TaskSpec, 'cwd'> & { cwd?: string }, ctx: ExtensionContext): TaskSpec => ({ ...task, cwd: resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), task.cwd ?? '.') });
   pi.on('session_start', (_event, ctx) => {
     context = ctx;
@@ -53,7 +59,7 @@ export default function subagents(pi: ExtensionAPI): void {
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
       context = ctx;
-      const handle = await registry.spawn(normalize(params, ctx));
+      const handle = await trackedSpawn(normalize(params, ctx));
       if (signal?.aborted) registry.cancel(handle.id);
       return result({ id: handle.id, status: 'queued', notification: 'Completion will be delivered automatically' });
     },
@@ -95,7 +101,7 @@ export default function subagents(pi: ExtensionAPI): void {
           },
           spawn: async (task, taskSignal) => {
             taskSignal.throwIfAborted();
-            const handle = await registry.spawn(task);
+            const handle = await trackedSpawn(task);
             const cancel = () => registry.cancel(handle.id);
             taskSignal.addEventListener('abort', cancel, { once: true });
             if (taskSignal.aborted) cancel();

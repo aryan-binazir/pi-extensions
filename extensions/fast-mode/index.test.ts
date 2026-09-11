@@ -52,3 +52,33 @@ test('Codex fast sends priority using existing subscription auth and reasoning',
  assert.equal(payload.reasoning.effort,'low');assert.equal(headers!.get('chatgpt-account-id'),'fixture-account');assert.equal(headers!.get('authorization'),'Bearer '+token);
  assert.equal(output.usage.cost.input,base.cost.input*0.001*(base.id==='gpt-5.5'?2.5:2));assert.equal(provider.auth,original.auth);
 });
+
+import { mkdtemp,writeFile,rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { InMemoryCredentialStore,InMemoryModelsStore } from '@earendil-works/pi-ai';
+
+test('repeated fast installation preserves unique models through real models.json composition',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-fast-overlay-'));
+ try {
+  const modelsPath=join(dir,'models.json');
+  await writeFile(modelsPath,JSON.stringify({providers:{openai:{modelOverrides:{'gpt-5.5':{name:'Custom model name'}}}}}));
+  const runtime=await ModelRuntime.create({modelsPath,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
+  let command:any;let startup:any;let registrations=0;
+  const base=runtime.getModel('openai','gpt-5.5')!;assert.equal(base.name,'Custom model name');
+  const ctx:any={model:base,modelRegistry:{getProvider:(id:string)=>runtime.getProvider(id),find:(id:string,name:string)=>runtime.getModel(id,name)},ui:{notify(){}}};
+  fastMode({registerProvider:(provider:any)=>{registrations++;runtime.registerNativeProvider(provider);},on:(_name:string,handler:any)=>{startup=handler;},registerCommand:(_name:string,entry:any)=>{command=entry;},getThinkingLevel:()=> 'low',setThinkingLevel:()=>{},setModel:async(model:any)=>{ctx.model=model;return true;}} as any);
+  await startup({reason:'new'},ctx);
+  const installed=registrations;
+  const count=runtime.getModels('openai').length;
+  for(let i=0;i<5;i++){
+   await command.handler('',ctx);
+   const models=runtime.getModels('openai');
+   assert.equal(models.length,count,'Repeated /fast must not grow the model list');
+   assert.equal(new Set(models.map(m=>m.id)).size,models.length);
+   assert.equal(ctx.model.id,i%2===0?'gpt-5.5~fast':'gpt-5.5');
+  }
+  assert.equal(registrations,installed,'Composed providers must not accumulate wrapper layers');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

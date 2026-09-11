@@ -67,7 +67,7 @@ async function boundedFetch(input: Parameters<typeof fetch>[0], init: Parameters
   if (!response.body) return response;
   const eventStream = response.headers.get('content-type')?.includes('text/event-stream');
   let bytes = 0, lineBytes = 0, previousCR = false;
-  const limit = () => { const error = new ResponseLimitError('MCP response exceeds 2 MiB; connection reset, pending actions were not retried'); onLimit(error); throw error; };
+  const limit = () => { const error = new ResponseLimitError('An MCP response on this connection exceeds 2 MiB; connection reset, pending actions were not retried'); onLimit(error); throw error; };
   const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       if (!eventStream) {
@@ -106,14 +106,24 @@ export class McpConnection {
     if(this.client)return this.tools();
     const client=new Client({name:'pi-mcp-client',version:'0.1.0'},{capabilities:{}});
     const config=this.config;
-    const request:typeof fetch=(input,init)=>boundedFetch(input,init,error=>{
+    client.onclose=()=>{if(this.client===client)this.client=undefined;};
+    const request:typeof fetch=(input,init)=>{
+      const url=new URL(input instanceof Request?input.url:input);
+      if(url.username || url.password || url.hash || !['https:','http:'].includes(url.protocol) || url.protocol==='http:' && !['127.0.0.1','localhost','[::1]'].includes(url.hostname))throw new Error('MCP requires HTTPS or loopback HTTP');
+      // SDK authentication discovery can target another origin. Configured
+      // MCP headers belong only to this server, never its authorization host.
+      const headers=new Headers(url.origin===new URL(config.url!).origin?variables(config.headers):undefined);
+      if(input instanceof Request)input.headers.forEach((value,key)=>headers.set(key,value));
+      new Headers(init?.headers).forEach((value,key)=>headers.set(key,value));
+      return boundedFetch(input,{...init,headers},error=>{
       this.responseErrors.set(client,error);
       if(this.client===client){this.client=undefined;this.reconnect=true;}
       // Protocol onclose rejects every pending request immediately. Never replay
       // the failed action; only a later explicit call may open a fresh session.
       void client.close().catch(()=>{});
-    });
-    const transport=config.command ? new StdioClientTransport({command:config.command,args:config.args,env:{...getDefaultEnvironment(),...variables(config.env)},cwd:this.cwd,stderr:'ignore',maxBufferSize:2*1024*1024}) : config.transport==='sse' ? new SSEClientTransport(new URL(config.url!),{authProvider:this.oauth,fetch:request,requestInit:{headers:variables(config.headers),redirect:'error'},eventSourceInit:{fetch:(url,init)=>request(url,{...init,headers:{...variables(config.headers),...Object.fromEntries(new Headers(init?.headers))},redirect:'error'})}}) : new StreamableHTTPClientTransport(new URL(config.url!),{authProvider:this.oauth,requestInit:{headers:variables(config.headers),redirect:'error'},fetch:request,reconnectionOptions:{maxRetries:0,maxReconnectionDelay:1000,initialReconnectionDelay:1000,reconnectionDelayGrowFactor:1}});
+      });
+    };
+    const transport=config.command ? new StdioClientTransport({command:config.command,args:config.args,env:{...getDefaultEnvironment(),...variables(config.env)},cwd:this.cwd,stderr:'ignore',maxBufferSize:2*1024*1024}) : config.transport==='sse' ? new SSEClientTransport(new URL(config.url!),{authProvider:this.oauth,fetch:request,requestInit:{redirect:'error'}}) : new StreamableHTTPClientTransport(new URL(config.url!),{authProvider:this.oauth,requestInit:{redirect:'error'},fetch:request,reconnectionOptions:{maxRetries:0,maxReconnectionDelay:1000,initialReconnectionDelay:1000,reconnectionDelayGrowFactor:1}});
     this.transport=transport;
     try{await client.connect(transport,this.options());if(this.stopped){await client.close();throw new Error('Closed');}this.client=client;this.reconnect=false;return await this.tools();}
     catch(error){await client.close().catch(()=>{});this.client=undefined;throw publicError(error);}

@@ -74,3 +74,18 @@ test('SDK UnauthorizedError retains the actionable OAuth instruction',async()=>{
  const {publicError}=await import('./client.ts');
  assert.match(publicError(new UnauthorizedError()).message,/mcp-auth/);
 });
+
+test('explicit reconnect replaces an exited stdio server without replaying its pending action',async()=>{
+ const fixture=await startFixture('stdio');const connection=new McpConnection('restart',{...fixture.config,timeoutMs:1500});
+ try {
+  await connection.connect();
+  const pid=Number(((await connection.call('echo',{text:'process-id'})).content as {text:string}[])[0].text);
+  const pending=assert.rejects(connection.call('echo',{text:'in-flight',delay:10000}),/failed|disconnected/);
+  process.kill(pid,'SIGTERM');
+  await pending;
+  await connection.connect();
+  const newPid=Number(((await connection.call('echo',{text:'process-id'})).content as {text:string}[])[0].text);
+  assert.notEqual(newPid,pid);
+  assert.equal(((await connection.call('echo',{text:'after restart'})).content as {text:string}[])[0].text,'after restart');
+ }finally{await connection.close();await fixture.close();}
+});

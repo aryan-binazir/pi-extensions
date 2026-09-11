@@ -17,7 +17,9 @@ function supported(model:Model<Api>):boolean {
 export function withFastModels(original:Provider):Provider {
  if(!buildBaseOptions)return original;
  const baseOptions=buildBaseOptions;
- if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED]) return original;
+ // Pi models.json overlays recompose provider objects and discard symbols,
+ // but retain the fast aliases. Treat those as the installed adapter too.
+ if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED] || original.getModels().some(model=>model.id.endsWith(FAST_SUFFIX))) return original;
  const aliases=(models:readonly Model<Api>[])=>models.flatMap(model=>supported(model)&&!model.id.endsWith(FAST_SUFFIX)?[model,{...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}]:[model]);
  const resolve=(model:Model<Api>)=>{
   if(!model.id.endsWith(FAST_SUFFIX))return {model,fast:false};

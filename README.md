@@ -71,6 +71,8 @@ creates a new session can escape portable process-group cleanup.
 
 The default deadline is one hour, including approval and queue time. Children
 inherit the selected parent model and thinking level unless explicitly overridden.
+Fast aliases use the base model without the priority-tier extension. Aborting the
+parent turn also stops its children.
 A Node supervisor watches an inherited owner pipe and cleans up on owner loss;
 this is supervision, not machine-wide subscription control. Four consecutive
 identical failed tool calls stop a child as `stalled`; productive work and successful
@@ -78,8 +80,10 @@ polling are not turn-limited. No new token or spending quotas are imposed.
 Use `subagent_cancel` with `id: "all"`, or `/subagents cancel all`, to stop current
 children and workflows without disabling future delegation.
 
-Direct completions are compact and batched; cancellation does not trigger a model
-turn. Workflow stages return only to their awaiting workflow. Status is paginated
+Direct completions and individual cancellations are compact and batched. A batch
+containing only cancellations does not trigger a model turn. Cancel-all returns a
+count and suppresses individual notifications. Workflow stages return only to
+their awaiting workflow. Status is paginated
 (`offset`, `limit`, or `id` with `outputOffset`); the registry retains 50 completed
 results alongside outstanding work. Oversized JSON records are skipped and flagged,
 not treated as a reason to kill an otherwise healthy child. Incomplete terminal
@@ -195,8 +199,10 @@ It starts asynchronously with work, then requests at most once per minute with a
 30-second deadline. Snapshots contain at most four running children, queued
 counts and four recent completed children, with clipped briefs/output and usage;
 no parent history is sent. Reports are capped at 2,000 characters and delivered
-on the next turn without waking the parent. `subagent_status` also exposes tracker
+as bounded JSON observations marked as untrusted model-generated data, not
+instructions or authority, on the next turn without waking the parent.
+`subagent_status` also exposes tracker
 status/errors while preserving task details. Missing model/auth never selects a
 fallback. The tracker has no tools or execution authority; deterministic task
 supervision remains independent. Idle, cancel-all and shutdown abort tracking;
-later delegation starts it again.
+tracker errors survive going idle. Later delegation starts tracking again.

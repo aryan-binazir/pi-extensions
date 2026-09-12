@@ -70,7 +70,10 @@ export async function validateTask(spec: TaskSpec, allowedTools?: string[]): Pro
   if (typeof spec.cwd !== 'string' || !isAbsolute(spec.cwd)) throw new Error('Task cwd must be absolute');
   const cwd = await realpath(spec.cwd);
   if (!(await stat(cwd)).isDirectory()) throw new Error('Task cwd must be a directory');
-  if (spec.model !== undefined && (typeof spec.model !== 'string' || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:/-]+$/.test(spec.model))) throw new Error('Model must be provider/model');
+  // Fast aliases belong to the parent's extension; discovery-free children use
+  // the real base model, preserving any explicit thinking suffix.
+  const model = typeof spec.model === 'string' ? spec.model.replace(/^(openai(?:-codex)?\/.+)~fast(?=:(?:off|minimal|low|medium|high|xhigh|max)$|$)/, '$1') : spec.model;
+  if (model !== undefined && (typeof model !== 'string' || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:/-]+$/.test(model))) throw new Error('Model must be provider/model');
   if (spec.thinking !== undefined && !/^(off|minimal|low|medium|high|xhigh|max)$/.test(spec.thinking)) throw new Error('Invalid thinking level');
   if (spec.preset !== undefined && !['reader', 'writer'].includes(spec.preset)) throw new Error('Unknown preset');
   const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS).filter(tool => !allowedTools || allowedTools.includes(tool));
@@ -87,7 +90,7 @@ export async function validateTask(spec: TaskSpec, allowedTools?: string[]): Pro
     if (!(await stat(canonical)).isFile()) throw new Error('Extension must be a file');
     extensions.push(canonical);
   }
-  return { ...spec, cwd, tools: [...tools], extensions, timeout };
+  return { ...spec, model, cwd, tools: [...tools], extensions, timeout };
 }
 
 /** Separate context windows, not an OS sandbox. All children share host permissions. */
@@ -204,13 +207,22 @@ export class SubagentRegistry {
     let lastStopReason: string | undefined;
     let failedCall = '';
     let consecutiveFailures = 0;
+    const toolCalls = new Map<string, string>();
     let lastUpdateAt = 0;
     const consume = (line: string) => {
       try {
         const event = JSON.parse(line);
+        if (event.type === 'tool_execution_start' && typeof event.toolCallId === 'string' && event.toolCallId.length <= 256) {
+          toolCalls.delete(event.toolCallId);
+          if (event.args !== undefined) {
+            // Retain only bounded fingerprints, never the potentially large arguments.
+            toolCalls.set(event.toolCallId, createHash('sha256').update(JSON.stringify([event.toolName, event.args])).digest('hex'));
+            if (toolCalls.size > 1024) toolCalls.delete(toolCalls.keys().next().value!);
+          }
+        }
         if (event.type === 'tool_execution_end') {
-          const fingerprint = event.isError === true
-            ? createHash('sha256').update(JSON.stringify([event.toolName, event.args])).digest('hex') : '';
+          const fingerprint = event.isError === true ? toolCalls.get(event.toolCallId) ?? '' : '';
+          toolCalls.delete(event.toolCallId);
           consecutiveFailures = fingerprint ? (fingerprint === failedCall ? consecutiveFailures + 1 : 1) : 0;
           failedCall = fingerprint;
           if (consecutiveFailures >= 4 && this.cancel(entry.result.id)) {
@@ -236,7 +248,8 @@ export class SubagentRegistry {
               if (typeof value === 'number' && Number.isFinite(value) && value >= 0) cost[key] += value;
             }
           }
-          entry.result.output = (message.content ?? []).filter((c: {type: string}) => c.type === 'text').map((c: {text: string}) => c.text).join('\n').slice(-CAP);
+          const finalText = (message.content ?? []).filter((c: {type: string; text?: string}) => c.type === 'text' && c.text).map((c: {text: string}) => c.text).join('\n').slice(-CAP);
+          if (finalText) entry.result.output = finalText;
           assistantError = message.stopReason === 'error' || message.stopReason === 'aborted'
             ? String(message.errorMessage ?? message.stopReason).slice(0, CAP) : undefined;
         }
@@ -265,8 +278,8 @@ export class SubagentRegistry {
             if (pendingBytes + bytes > CAP * 4) {
               const prefix = (pending + segment.slice(0, 4096)).slice(0, 4096);
               const kind = /^\s*\{\s*"type"\s*:\s*"([^"]+)"/.exec(prefix)?.[1];
-              const toolMessage = kind === 'message_end' && /"role"\s*:\s*"toolResult"/.test(prefix);
-              if (!toolMessage && (!kind || !['tool_execution_start', 'tool_execution_update', 'tool_execution_end', 'message_update', 'agent_end'].includes(kind))) {
+              const nonAssistantMessage = kind === 'message_end' && /"message"\s*:\s*\{\s*"role"\s*:\s*"(?:toolResult|user)"/.test(prefix);
+              if (!nonAssistantMessage && (!kind || !['tool_execution_start', 'tool_execution_update', 'tool_execution_end', 'message_update', 'agent_end', 'turn_end', 'entry_appended', 'message_start', 'compaction_end'].includes(kind))) {
                 lastStopReason = undefined;
                 assistantError = undefined;
                 entry.result.usageIncomplete = true;
@@ -274,7 +287,7 @@ export class SubagentRegistry {
               skipping = true;
               entry.result.droppedRecords++;
               pending = '';
-              failedCall = ''; consecutiveFailures = 0;
+              failedCall = ''; consecutiveFailures = 0; toolCalls.clear();
             } else { pending += segment; pendingBytes += bytes; }
           }
           if (end < 0) break;

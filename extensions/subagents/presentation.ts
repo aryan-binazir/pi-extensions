@@ -21,7 +21,7 @@ export function taskView(task: TaskResult, outputBytes = 512, outputOffset?: num
     model: task.model && clipJson(task.model, 256), thinking: task.thinking,
     task: clipJson(task.task, 128), cwd: clipJson(task.cwd, 512),
     usage: task.usage, usageIncomplete: task.usageIncomplete,
-    output, outputLength: task.output.length, outputTruncated: output !== task.output,
+    output, outputLength: task.output.length, outputTruncated: output.length < source.length,
     nextOutputOffset: outputOffset !== undefined && outputOffset + output.length < task.output.length ? outputOffset + output.length : undefined,
     stderr: clipJson(task.stderr, outputBytes > 512 ? 1024 : 128, true),
     error: task.error && clipJson(task.error, 512),

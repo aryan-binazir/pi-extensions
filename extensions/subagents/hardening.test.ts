@@ -113,7 +113,7 @@ test('exit zero is not success when the final assistant outcome is absent or inc
 });
 
 test('an oversized image record does not kill a child that subsequently completes', async () => {
-  const script = `const line=JSON.stringify({type:'tool_execution_end',toolName:'read',result:{content:[{type:'image',data:'A'.repeat(400000)}]}})+'\\n';let offset=0;const timer=setInterval(()=>{process.stdout.write(line.slice(offset,offset+32768));offset+=32768;if(offset>=line.length){clearInterval(timer);console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'Image inspected'}]}}));}},2);`;
+  const script = `const line=JSON.stringify({type:'tool_execution_end',toolCallId:'image',toolName:'read',isError:false,result:{content:[{type:'image',data:'A'.repeat(400000)}]}})+'\\n';let offset=0;const timer=setInterval(()=>{process.stdout.write(line.slice(offset,offset+32768));offset+=32768;if(offset>=line.length){clearInterval(timer);console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'Image inspected'}]}}));}},2);`;
   const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', script]})});
   try {
     const result = await (await registry.spawn({task: 'inspect image', cwd: tmpdir()})).done;
@@ -124,8 +124,8 @@ test('an oversized image record does not kill a child that subsequently complete
 });
 
 test('four consecutive identical failing calls return control instead of retrying forever', async () => {
-  const event = {type: 'tool_execution_end', toolName: 'bash', args: {command: 'missing-command'}, isError: true, result: {content: [{type: 'text', text: 'not found'}]}};
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', `for(let i=0;i<4;i++)console.log(${JSON.stringify(JSON.stringify(event))});setInterval(()=>{},1000);`]})});
+  const events = toolCall('loop', 'bash', {command: 'missing-command'}, true);
+  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', `for(let i=0;i<4;i++)for(const event of ${JSON.stringify(events)})console.log(JSON.stringify({...event,toolCallId:String(i)}));setInterval(()=>{},1000);`]})});
   try {
     const result = await (await registry.spawn({task: 'repetitive failure', cwd: tmpdir(), timeout: 500})).done;
     assert.equal(result.status, 'stalled');
@@ -136,10 +136,10 @@ test('four consecutive identical failing calls return control instead of retryin
 test('productive edit/test cycles and repeated successful polling are not turn-limited', async () => {
   const events: unknown[] = [];
   for (let i = 0; i < 30; i++) {
-    events.push({type: 'tool_execution_end', toolName: 'bash', args: {command: 'npm test'}, isError: true});
-    events.push({type: 'tool_execution_end', toolName: 'edit', args: {path: 'code.ts'}, isError: false});
+    events.push(...toolCall(`test-${i}`, 'bash', {command: 'npm test'}, true));
+    events.push(...toolCall(`edit-${i}`, 'edit', {path: 'code.ts', oldText: 'old', newText: 'new'}, false));
   }
-  for (let i = 0; i < 30; i++) events.push({type: 'tool_execution_end', toolName: 'bash', args: {command: 'git status'}, isError: false});
+  for (let i = 0; i < 30; i++) events.push(...toolCall(`poll-${i}`, 'bash', {command: 'git status'}, false));
   events.push({type: 'message_end', message: {role: 'assistant', stopReason: 'stop', content: [{type: 'text', text: 'Productive work finished'}]}});
   const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', `for(const event of ${JSON.stringify(events)})console.log(JSON.stringify(event));`]})});
   try {
@@ -198,3 +198,101 @@ test('a recovered provider failure does not turn completed work into a failed ta
     assert.equal(result.output, 'Completed');
   } finally { await registry.shutdown(); }
 });
+
+// Pi AgentEvent puts arguments on start only; end carries the result and call ID.
+function toolCall(toolCallId: string, toolName: string, args: object, isError: boolean) {
+  return [
+    {type: 'tool_execution_start', toolCallId, toolName, args},
+    {type: 'tool_execution_end', toolCallId, toolName, result: {content: [{type: 'text', text: 'result'}], details: {}}, isError},
+  ];
+}
+
+async function eventResult(script: string) {
+  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', script]})});
+  try { return await (await registry.spawn({task: 'event regression', cwd: tmpdir(), timeout: 3000})).done; }
+  finally { await registry.shutdown(); }
+}
+const terminal = {type: 'message_end', message: {role: 'assistant', stopReason: 'stop', content: [{type: 'text', text: 'Complete'}], usage: {input: 3, output: 2}}};
+
+for (const mode of ['different', 'missing', 'interleaved', 'consumed', 'evicted', 'dropped-start']) {
+  test(`failing read probes with ${mode} arguments cannot falsely stall`, async () => {
+    const calls = Array.from({length: 4}, (_, i) => toolCall(String(i), 'read', {path: `missing-${i}`}, true));
+    let events = calls.flat();
+    if (mode === 'missing') events = calls.map(call => call[1]);
+    if (mode === 'interleaved') events = [...calls.map(call => call[0]), ...calls.map(call => call[1]).reverse()];
+    if (mode === 'consumed') events = [calls[0][0], ...Array(4).fill(calls[0][1])];
+    if (mode === 'evicted') events = [...Array.from({length: 1100}, (_, i) => toolCall(String(i), 'read', {path: 'same'}, true)[0]), ...calls.map(call => call[1])];
+    const prefix = mode === 'dropped-start' ? `console.log(JSON.stringify({type:'tool_execution_start',toolCallId:'0',toolName:'read',args:{path:'x'.repeat(400000)}}));` : '';
+    if (mode === 'dropped-start') events = Array(4).fill(calls[0][1]);
+    const result = await eventResult(`${prefix}for(const event of ${JSON.stringify([...events, terminal])})console.log(JSON.stringify(event));`);
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.output, 'Complete');
+  });
+}
+
+for (const kind of ['turn_end', 'entry_appended', 'message_start', 'compaction_end']) {
+  test(`oversized redundant ${kind} preserves terminal outcome and complete usage`, async () => {
+    const result = await eventResult(`
+      const terminal=${JSON.stringify(terminal)};
+      console.log(JSON.stringify(terminal));
+      const message={...terminal.message,content:[{type:'text',text:'x'.repeat(400000)}]};
+      const events={
+        turn_end:{type:'turn_end',message,toolResults:[]},
+        entry_appended:{type:'entry_appended',entry:{type:'message',id:'one',parentId:null,timestamp:new Date().toISOString(),message}},
+        message_start:{type:'message_start',message},
+        compaction_end:{type:'compaction_end',reason:'manual',result:{summary:'x'.repeat(400000),firstKeptEntryId:'one',tokensBefore:10},aborted:false,willRetry:false}
+      };
+      console.log(JSON.stringify(events[${JSON.stringify(kind)}]));
+    `);
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.usageIncomplete, undefined);
+    assert.deepEqual(result.usage, terminal.message.usage);
+    assert.equal(result.droppedRecords, 1);
+  });
+}
+
+for (const content of [[], [{type: 'thinking', thinking: 'thought'}], [{type: 'text', text: ''}], [{type: 'text', text: ''}, {type: 'text', text: ''}], [{type: 'text', text: 'Final answer'}]]) {
+  test(`final assistant content ${JSON.stringify(content)} preserves or replaces streamed text`, async () => {
+    const result = await eventResult(`
+      const message=${JSON.stringify({...terminal.message, content})};
+      console.log(JSON.stringify({type:'message_update',message,assistantMessageEvent:{type:'text_delta',contentIndex:0,delta:'The answer is 42.',partial:message}}));
+      console.log(JSON.stringify({type:'message_end',message}));
+    `);
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.output, content.some(c => c.type === 'text' && 'text' in c && c.text) ? 'Final answer' : 'The answer is 42.');
+  });
+}
+
+for (const role of ['user', 'toolResult']) {
+  test(`oversized ${role} message_end does not invalidate assistant usage`, async () => {
+    const result = await eventResult(`
+      console.log(JSON.stringify(${JSON.stringify(terminal)}));
+      console.log(JSON.stringify({type:'message_end',message:{role:${JSON.stringify(role)},toolCallId:'read',toolName:'read',isError:false,timestamp:0,content:[{type:'text',text:'x'.repeat(400000)}]}}));
+    `);
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.usageIncomplete, undefined);
+    assert.deepEqual(result.usage, terminal.message.usage);
+  });
+}
+
+test('a dropped assistant outcome leaves usage incomplete even after a later success', async () => {
+  const result = await eventResult(`
+    console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'toolUse',content:[{type:'text',text:'x'.repeat(400000)}],usage:{input:100,output:100}}}));
+    console.log(JSON.stringify(${JSON.stringify(terminal)}));
+  `);
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.usageIncomplete, true);
+  assert.deepEqual(result.usage, terminal.message.usage);
+});
+
+for (const interruption of ['success', 'unknown']) {
+  test(`${interruption} tool end breaks a consecutive failed-call streak`, async () => {
+    const events = [
+      ...Array.from({length: 3}, (_, i) => toolCall(String(i), 'read', {path: 'missing'}, true)).flat(),
+      ...(interruption === 'success' ? toolCall('break', 'read', {path: 'missing'}, false) : [toolCall('break', 'read', {path: 'missing'}, true)[1]]),
+      ...toolCall('last', 'read', {path: 'missing'}, true), terminal,
+    ];
+    const result = await eventResult(`for(const event of ${JSON.stringify(events)})console.log(JSON.stringify(event));`);
+    assert.equal(result.status, 'succeeded');
+  });
+}

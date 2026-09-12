@@ -272,7 +272,7 @@ export class ViEditor extends CustomEditor {
         ]
       : [a, this.next(b)];
   }
-  private apply(op: string, a: number, b: number, line = false): void {
+  private apply(op: string, a: number, b: number, line = false, insertOnEmpty = false): void {
     this.preferredColumn = undefined;
     const text = this.getText();
     for (const marker of pasteMarkers(this)) {
@@ -284,6 +284,11 @@ export class ViEditor extends CustomEditor {
     }
     if (line && op === "d" && a === b && a > 0 && text[a - 1] === "\n") a--;
     if (a >= b) {
+      if (op === "c" && insertOnEmpty) {
+        this.insertion = this.snapshot();
+        this.mode = "insert";
+        this.cursorShape();
+      }
       this.op = "";
       this.prefix = "";
       this.register = '"';
@@ -487,6 +492,17 @@ export class ViEditor extends CustomEditor {
         to.push(this.snapshot());
         this.restore(s);
       }
+      this.mode = "normal";
+      this.anchor = 0;
+      this.visualScroll = 0;
+      this.preferredColumn = undefined;
+      this.op = "";
+      this.count = "";
+      this.prefix = "";
+      this.register = '"';
+      this.registerPending = false;
+      this.discardArgument = false;
+      this.cursorShape();
       return;
     }
     if (this.prefix === "i" || this.prefix === "a") {
@@ -564,7 +580,7 @@ export class ViEditor extends CustomEditor {
           i++
         )
           b = Math.min(this.getText().length, this.lineEnd(b) + 1);
-        this.apply(data, this.lineStart(), b, true);
+        this.apply(data, this.lineStart(), b, true, data === "c");
       } else {
         this.op = data;
         this.opCount = n;
@@ -596,6 +612,12 @@ export class ViEditor extends CustomEditor {
     }
     if (p !== undefined) {
       if (this.op) {
+        if ((data === "j" || data === "k") && this.lineStart(p) === this.lineStart()) {
+          this.op = "";
+          this.prefix = "";
+          this.register = '"';
+          return;
+        }
         if (data === "G" || data === "g" || data === "j" || data === "k") {
           this.apply(
             this.op,
@@ -634,7 +656,7 @@ export class ViEditor extends CustomEditor {
       return;
     }
     if (data === "D" || data === "C") {
-      this.apply(data === "D" ? "d" : "c", this.pos(), this.lineEnd());
+      this.apply(data === "D" ? "d" : "c", this.pos(), this.lineEnd(), false, data === "C");
       return;
     }
     if (data === "p" || data === "P") {
@@ -645,17 +667,18 @@ export class ViEditor extends CustomEditor {
         if (this.mode === "visual" || this.mode === "line") {
           const [a, b] = this.range();
           if (r.text.length * n + this.getExpandedText().length - expandPastes(this, t.slice(a, b)).length > MAX_DRAFT) return;
-          let value = r.text.repeat(n);
-          if (this.mode === "line" && t.slice(a, b).endsWith("\n") && !value.endsWith("\n"))
-            value += "\n";
-          if (this.mode === "visual" && r.line) {
-            if (a > this.lineStart(a)) value = "\n" + value;
-            if (b < t.length && !value.endsWith("\n")) value += "\n";
+          let value = r.text.repeat(n), before = "", after = "";
+          if (this.mode === "line") {
+            if (t.slice(a, b).endsWith("\n") || value.endsWith("\n")) after = "\n";
+          } else if (r.line) {
+            if (a > this.lineStart(a)) before = "\n";
+            if (b < t.length || value.endsWith("\n")) after = "\n";
           }
+          if (after) value = value.replace(/\n$/, "");
           this.checkpoint();
           this.registers.set('"', { text: expandPastes(this, t.slice(a, b)), line: this.mode === "line" });
-          this.writeText(t.slice(0, a) + collapsePaste(this, value) + t.slice(b));
-          this.move(a);
+          this.writeText(t.slice(0, a) + before + collapsePaste(this, value) + after + t.slice(b));
+          this.move(a + before.length);
           this.mode = "normal";
           this.anchor = 0;
           this.visualScroll = 0;
@@ -668,18 +691,19 @@ export class ViEditor extends CustomEditor {
             : Math.min(this.lineEnd(), this.next(this.pos()));
         if (r.text.length * n + this.getExpandedText().length > MAX_DRAFT) return;
         this.checkpoint();
-        let value = r.text.repeat(n);
+        let value = r.text.repeat(n), before = "", after = "";
         if (r.line) {
           p =
             data === "P"
               ? this.lineStart()
               : Math.min(t.length, this.lineEnd() + 1);
           if (p === t.length && t && !t.endsWith("\n"))
-            value = "\n" + value.replace(/\n$/, "");
-          else if (!value.endsWith("\n")) value += "\n";
+            before = "\n";
+          else after = "\n";
+          value = value.replace(/\n$/, "");
         }
-        this.writeText(t.slice(0, p) + collapsePaste(this, value) + t.slice(p));
-        this.move(p);
+        this.writeText(t.slice(0, p) + before + collapsePaste(this, value) + after + t.slice(p));
+        this.move(p + before.length);
       }
       return;
     }

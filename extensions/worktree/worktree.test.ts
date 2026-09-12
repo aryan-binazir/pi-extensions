@@ -5,6 +5,67 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Worktrees } from './manager.ts';
+import worktree from './index.ts';
+import { getActiveCwd, setActiveCwd } from './routing.ts';
+
+test('remove requires one nonempty path argument without confirmation or routing changes', async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'pi-worktree-remove-args-')));
+  const sessionId = 'remove-args';
+  const commands: Record<string, any> = {};
+  try {
+    const repo = join(home, 'repo'); await mkdir(repo);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-b', 'main'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'init');
+    const trees = new Worktrees(repo, { home, herdr: false });
+    const checkout = await trees.open('active');
+    setActiveCwd(repo, checkout.path, sessionId);
+    let confirmations = 0;
+    const notices: Array<{ message: string; level: string }> = [];
+    const entries: unknown[] = [];
+    const ctx: any = {
+      cwd: repo, hasUI: true, isIdle: () => true,
+      sessionManager: { getSessionId: () => sessionId },
+      ui: { notify: (message: string, level: string) => notices.push({ message, level }), setStatus() {}, confirm: async () => { confirmations++; return true; } },
+    };
+    worktree({ on() {}, registerTool() {}, appendEntry: (...args: unknown[]) => entries.push(args), registerCommand: (name: string, command: any) => commands[name] = command } as any);
+    for (const args of ['remove', 'remove --force', 'remove /a/one /a/two', 'remove /a/one --force /a/two', 'remove "" --force']) {
+      await t.test(args, async () => {
+        notices.length = 0;
+        await commands.worktree.handler(args, ctx);
+        assert.deepEqual(notices, [{ message: 'Usage: /worktree remove <path> [--force]', level: 'error' }]);
+        assert.equal(confirmations, 0);
+        assert.deepEqual(entries, []);
+        assert.equal(getActiveCwd(repo, sessionId), checkout.path);
+        assert.equal(await realpath(checkout.path), checkout.path);
+      });
+    }
+  } finally { setActiveCwd(join(home, 'repo'), undefined, sessionId); await rm(home, { recursive: true, force: true }); }
+});
+
+test('refuses a deleted checkout and allows reopening after explicit Git recovery', async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'pi-worktree-deleted-')));
+  try {
+    const repo = join(home, 'repo'); await mkdir(repo);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-b', 'main'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'init');
+    const trees = new Worktrees(repo, { home, herdr: false });
+    const checkout = await trees.open('task');
+    await rm(checkout.path, { recursive: true });
+    await assert.rejects(trees.open('task'), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Worktree directory is unavailable/);
+      assert.ok(error.message.includes(checkout.path));
+      return true;
+    });
+    await writeFile(checkout.path, 'not a checkout directory');
+    await assert.rejects(trees.open('task'), /Worktree directory is unavailable/);
+    await rm(checkout.path);
+    git('worktree', 'remove', '--force', checkout.path);
+    const reopened = await trees.open('task');
+    assert.equal(await realpath(reopened.path), checkout.path);
+    assert.equal(reopened.branch, checkout.branch);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
 
 test('creates Herdr-layout checkout, preserves explicit branch and reuses existing checkout', async () => {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'pi-worktree-')));

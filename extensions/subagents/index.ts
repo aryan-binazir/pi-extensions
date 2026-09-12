@@ -3,6 +3,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil
 import { Type } from 'typebox';
 import { assertChildTask, delegationScope, assertWorkflowRead } from './scope.ts';
 import { getActiveCwd } from '../worktree/routing.ts';
+import { childGuard } from '../sentinel/bridge.ts';
 import { piInvocation, SubagentRegistry, type TaskSpec } from './registry.ts';
 import { runWorkflow } from './workflow.ts';
 
@@ -22,7 +23,7 @@ export default function subagents(pi: ExtensionAPI): void {
   const createRegistry = () => new SubagentRegistry({
     allowedTools: () => delegationScope(parent()).tools,
     authorize: async task => { await assertChildTask(task, { parent: parent(), approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request) : undefined }); },
-    invocation: task => piInvocation(task),
+    invocation: task => piInvocation(task, context ? childGuard(context.cwd, context.sessionManager.getSessionId()) : undefined),
     onUpdate: task => {
       if (context?.hasUI) context.ui.setWidget(`subagent:${task.id}`, [`${task.id.slice(0, 8)} · ${task.status} · ${task.usage.input} in / ${task.usage.output} out`, task.output.slice(-2000)]);
     },

@@ -1,6 +1,6 @@
 # Pi interactive tools
 
-Thirteen independently selectable extensions for Pi 0.85.1. Install from this
+Fourteen independently selectable extensions for Pi 0.85.1. Install from this
 private Git repository using your existing GitHub SSH access:
 
 ```sh
@@ -29,6 +29,7 @@ A single extension can also be loaded with
 | Computer use | Desktop tools | Pi directs screenshots and input through native Linux or macOS adapters. See [desktop setup](extensions/computer-use/README.md). |
 | Fast mode | `/fast` | Toggle supported base/fast model entries while retaining provider authentication and reasoning. [Provider support](docs/adr/006-search-fast-power.md). |
 | Auto-caffeinate | Agent lifecycle | Temporarily inhibit idle sleep during work on confirmed AC power, including background tasks. |
+| Sentinel | `/auto on`, `/auto off`, `/sentinel reload` | Default-off adaptive Luna review, with user-owned standing preferences and inherited child coverage. [Setup and boundaries](extensions/sentinel/README.md). |
 
 ## Memory and sessions
 
@@ -118,8 +119,21 @@ requires a merged GitHub PR whose head still matches the checkout. These
 commands preserve branch refs.
 
 Delegated children are launched with a validated workspace and builtin tool list.
-There is no global tool classifier or mandatory child guard. These launch-time
-checks do not sandbox child tools or trusted extension JavaScript.
+When Sentinel is enabled, children additionally inherit its classifier, blocking
+reviewer, user policy, and root authorization. Without Sentinel, only launch-time
+checks apply. Neither mode sandboxes child tools or trusted extension JavaScript.
+
+## Sentinel preferences
+
+Auto review is **off by default for new chats**. Use `/auto on` to review your
+preferences and enable it for the current session, or `/auto off` to disable it.
+Sentinel uses `openai-codex/gpt-5.6-luna` for asynchronous trajectory scoring and
+`openai-codex/codex-auto-review` for blocking review when a recent low-risk score
+cannot be reused. Your standing preferences belong in
+`~/.pi/agent/sentinel-policy.md`; both stages receive them. Optional settings live
+in `~/.pi/agent/sentinel.json`. Mid-session file changes block until reviewed with
+`/sentinel reload`. See [Sentinel documentation](extensions/sentinel/README.md)
+for examples, authentication, adaptive-review limits and subagent inheritance.
 
 ## Development
 

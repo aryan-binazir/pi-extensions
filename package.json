@@ -26,7 +26,8 @@
       "./extensions/mcp-client/index.ts",
       "./extensions/computer-use/index.ts",
       "./extensions/fast-mode/index.ts",
-      "./extensions/auto-caffeinate/index.ts"
+      "./extensions/auto-caffeinate/index.ts",
+      "./extensions/sentinel/index.ts"
     ]
   },
   "scripts": {

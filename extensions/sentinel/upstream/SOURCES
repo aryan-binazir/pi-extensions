@@ -1,0 +1,12 @@
+Third-party prompt assets
+Copyright 2025 OpenAI. Apache-2.0; see LICENSE and NOTICE.
+Revision: 944d6fd1ba4baab69dbedd205282dc72ec20abb5
+
+classifier_instructions.md:
+https://github.com/openai/codex/blob/944d6fd1ba4baab69dbedd205282dc72ec20abb5/codex-rs/ext/guardian-v2/src/async_scorer/classifier_instructions.md
+policy.md:
+https://github.com/openai/codex/blob/944d6fd1ba4baab69dbedd205282dc72ec20abb5/codex-rs/core/assets/guardian/policy.md
+reviewer_instructions.md:
+https://github.com/openai/codex/blob/944d6fd1ba4baab69dbedd205282dc72ec20abb5/codex-rs/core/assets/guardian/policy_template.md
+
+Assets are unmodified. Runtime adaptations are in ../prompts.ts.

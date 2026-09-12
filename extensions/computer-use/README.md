@@ -10,7 +10,7 @@ Pi reasons about screenshots and calls five tools directly. There is no nested m
 | `computer_type` | Types literal text into the focused application, at most 10,000 characters. |
 | `computer_scroll` | Scrolls at the current pointer position; positive dx is right, positive dy is down. |
 
-These tools act on the actual logged-in desktop. Inspect focus before typing. A successful mutation reports dispatch, not application success. A cancelled or failed mutation may have partly executed; inspect before deciding to repeat it. The extension never retries a mutation. Pi's normal tool execution applies; there is no separate automatic classifier.
+These tools act on the actual logged-in desktop. Inspect focus before typing. A successful mutation reports dispatch, not application success. A cancelled or failed mutation may have partly executed; inspect before deciding to repeat it. The extension never retries a mutation. Pi's normal tool execution applies. When the optional Sentinel extension is loaded, these calls also receive its adaptive classification/review; there is no separate desktop-specific classifier.
 
 ## Linux, including Hyprland
 

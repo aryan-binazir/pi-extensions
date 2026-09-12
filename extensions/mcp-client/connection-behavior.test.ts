@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -204,7 +204,7 @@ test('stdio uses explicit cwd and environment forwarding with explicit overrides
     await c.connect();
     const result = await c.call('echo', { text: 'process-context' });
     const context = JSON.parse((result.content as { text: string }[])[0].text);
-    assert.deepEqual(context, { cwd: dir, inherited: 'synthetic-inherited', override: 'explicit' });
+    assert.deepEqual(context, { cwd: await realpath(dir), inherited: 'synthetic-inherited', override: 'explicit' });
   } finally {
     await c.close(); await rm(dir, { recursive: true, force: true });
     if (oldInherited === undefined) delete process.env.MCP_FIXTURE_INHERITED; else process.env.MCP_FIXTURE_INHERITED = oldInherited;

@@ -10,10 +10,14 @@ const ints = (...n: number[]) => { const b = Buffer.alloc(n.length * 4); n.forEa
 const string = (s: string) => { const b = Buffer.alloc(Math.ceil((Buffer.byteLength(s) + 1) / 4) * 4); b.write(s); return Buffer.concat([ints(Buffer.byteLength(s) + 1), b]); };
 const msg = (id: number, op: number, body: Buffer) => Buffer.concat([ints(id, ((body.length + 8) << 16) | op), body]);
 
-test('real Unix wire transport discovers output, binds pointer to it, clicks and scrolls', async () => {
+test('real Unix wire transport discovers output, binds pointer to it, clicks and scrolls', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-wayland-')); const socket = join(dir, 'wayland-test');
+  let removeGlobal: number | undefined;
+  let onDisconnect!: () => void;
+  const disconnected = new Promise<void>(resolve => { onDisconnect = resolve; });
   const requests: { id: number; op: number; body: Buffer }[] = [];
   const server = createServer(s => {
+    s.once('close', onDisconnect);
     let buffer = Buffer.alloc(0);
     s.on('data', data => {
       buffer = Buffer.concat([buffer, data]);
@@ -25,8 +29,11 @@ test('real Unix wire transport discovers output, binds pointer to it, clicks and
           const registry = body.readUInt32LE(0);
           s.write(msg(registry, 0, Buffer.concat([ints(10), string('zwlr_virtual_pointer_manager_v1'), ints(2)])));
           s.write(msg(registry, 0, Buffer.concat([ints(11), string('wl_output'), ints(4)])));
-        } else if (id === 1 && op === 0) s.write(msg(body.readUInt32LE(0), 0, ints(42)));
-        else if (id === 2 && op === 0 && body.readUInt32LE(0) === 11) {
+          s.write(msg(registry, 0, Buffer.concat([ints(12), string('wl_seat'), ints(7)])));
+        } else if (id === 1 && op === 0) {
+          if (removeGlobal !== undefined) { s.write(msg(2, 1, ints(removeGlobal))); removeGlobal = undefined; }
+          s.write(msg(body.readUInt32LE(0), 0, ints(42)));
+        } else if (id === 2 && op === 0 && body.readUInt32LE(0) === 11) {
           const output = body.readUInt32LE(body.length - 4); s.write(msg(output, 4, string('HEADLESS-1')));
         }
       }
@@ -53,6 +60,21 @@ test('real Unix wire transport discovers output, binds pointer to it, clicks and
     assert.equal(edge.body.readUInt32LE(8), 999999);
     const axis = requests.find(r => r.op === 3 && r.body.length === 12)!;
     assert.equal(axis.body.readInt32LE(8), -512);
+    await t.test('unrelated global removal keeps the output usable', async () => {
+      removeGlobal = 12;
+      await pointer.click('HEADLESS-1', .25, .5, 'left', new AbortController().signal);
+      assert.deepEqual(await pointer.outputs(new AbortController().signal), ['HEADLESS-1']);
+    });
+    await t.test('output global removal invalidates pointer operations', async () => {
+      removeGlobal = 11;
+      await assert.rejects(pointer.click('HEADLESS-1', .25, .5, 'left', new AbortController().signal), /Wayland registry changed/);
+      await assert.rejects(pointer.outputs(new AbortController().signal), /Wayland registry changed/);
+    });
+    await t.test('disconnected connections retain the original output-removal error', async () => {
+      await disconnected;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await assert.rejects(pointer.outputs(new AbortController().signal), /Wayland registry changed/);
+    });
   } finally { pointer.close(); await new Promise<void>(r => server.close(() => r())); await rm(dir, { recursive: true }); }
 });
 

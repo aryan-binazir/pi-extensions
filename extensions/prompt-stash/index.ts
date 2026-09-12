@@ -20,7 +20,14 @@ export default function promptStash(pi: ExtensionAPI): void {
       const captured: { text: string; restore?: () => boolean } = { text: current };
       // Optional vi integration retains which spans were pasted versus hand typed.
       pi.events?.emit("pi-interactive:stash-capture", captured);
-      if (!slot?.restore?.()) ctx.ui.setEditorText(slot?.text ?? "");
+      if (!slot?.restore?.()) {
+        // Bracketed paste strips control bytes; reduced UI adapters may lack it.
+        const hasControlBytes = slot && /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(slot.text);
+        if (slot && ctx.ui.pasteToEditor && !hasControlBytes) {
+          ctx.ui.setEditorText("");
+          ctx.ui.pasteToEditor(slot.text);
+        } else ctx.ui.setEditorText(slot?.text ?? "");
+      }
       slot = current === "" ? undefined : captured;
       ctx.ui.setStatus(
         "prompt-stash",

@@ -43,3 +43,19 @@ test('already cancelled calls do not create a native transport', async () => {
   await assert.rejects(session.run({ action: 'type', text: 'never' }, abort.signal));
   assert.equal(created, 0); await session.close();
 });
+
+test('failed mutation retains its unknown-outcome warning when transport close rejects', async () => {
+  const failure = new Error('Disconnected during typing');
+  const session = new DesktopSession(() => ({
+    async run() { throw failure; },
+    async close() { throw new Error('Close failed'); },
+  }));
+  try {
+    await assert.rejects(session.run({ action: 'type', text: 'once' }), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Desktop mutation failed or was cancelled; outcome may be partial or unknown/);
+      assert.equal(error.cause, failure);
+      return true;
+    });
+  } finally { await session.close(); }
+});

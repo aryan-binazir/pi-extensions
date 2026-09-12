@@ -57,7 +57,8 @@ export class DesktopSession {
           if (signal.aborted) abort();
         })]);
       } catch (error) {
-        this.backend = undefined; await backend.close();
+        this.backend = undefined;
+        try { await backend.close(); } catch (closeError) { if (inspect) throw closeError; }
         if (!inspect) throw new Error(`Desktop mutation failed or was cancelled; outcome may be partial or unknown. Inspect before deciding whether to repeat. ${error instanceof Error ? error.message.slice(0, 500) : 'Transport failure'}`, { cause: error });
         if (attempt || signal.aborted) throw error;
       } finally { if (abort) signal.removeEventListener('abort', abort); }

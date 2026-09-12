@@ -68,6 +68,45 @@ test('OAuth rejects Unicode state without crashing, ignores mismatches, and shut
   }finally{await oauth.close();}
 });
 
+test('closed OAuth listener rejects interactive reauthorization but retains refresh credentials', async () => {
+  const { publicError } = await import('./client.ts');
+  let shown = 0;
+  const oauth = await SessionOAuth.start({ clientId: 'synthetic-client' }, () => { shown++; });
+  oauth.saveTokens({ access_token: 'synthetic-access', token_type: 'Bearer', refresh_token: 'synthetic-refresh' });
+  try {
+    assert.equal(oauth.clientMetadata.client_name, 'Harbor MCP');
+    await oauth.close();
+    for (const action of [() => oauth.redirectToAuthorization(new URL('https://auth.example/authorize')), () => oauth.saveCodeVerifier('new-verifier')]) {
+      assert.throws(action, error => { assert.match(publicError(error).message, /authentication required; use \/mcp-auth/); return true; });
+    }
+    assert.equal(shown, 0);
+    assert.equal(oauth.tokens()?.refresh_token, 'synthetic-refresh');
+    oauth.saveTokens({ access_token: 'refreshed-synthetic', token_type: 'Bearer' });
+    assert.equal(oauth.tokens()?.access_token, 'refreshed-synthetic');
+  } finally { await oauth.close(); }
+});
+
+test('startup deadline aborts pending OAuth discovery fetches', async () => {
+  const originalFetch = globalThis.fetch;
+  let discoveryAborted = false, authorizations = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    if (url.pathname === '/mcp') return new Response(null, { status: 401, headers: { 'www-authenticate': 'Bearer resource_metadata="https://auth.example/metadata"' } });
+    const signal = init?.signal;
+    assert.ok(signal, 'discovery fetch needs the startup signal');
+    return new Promise<Response>((_resolve, reject) => {
+      const abort = () => { discoveryAborted = true; reject(signal.reason); };
+      if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
+    });
+  };
+  const c = new McpConnection('deadline-auth', { url: 'https://mcp.example/mcp', oauth: { clientId: 'synthetic' }, startupTimeoutMs: 50 });
+  try {
+    await assert.rejects(c.authenticate(() => { authorizations++; }));
+    assert.equal(discoveryAborted, true);
+    assert.equal(authorizations, 0);
+  } finally { await c.close(); globalThis.fetch = originalFetch; }
+});
+
 test('configuration rejects unsafe transports and output caps do not retain unbounded details',()=>{
   assert.throws(()=>validateConfig({servers:{x:{url:'http://remote.example/mcp'}}}),/HTTPS/);
   assert.throws(()=>validateConfig({servers:{x:{command:'x',timeoutMs:0}}}),/limit/);

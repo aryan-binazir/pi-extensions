@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
-import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
+import { UnauthorizedError, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { OAuthClientInformationMixed, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 
 /** Session-only credentials; the SDK owns discovery, registration, PKCE and refresh. */
@@ -10,6 +10,7 @@ export class SessionOAuth implements OAuthClientProvider {
   private verifier?:string;
   private nonce=randomBytes(32).toString('hex');
   private server?:Server;
+  private closed=false;
   private timer?:ReturnType<typeof setTimeout>;
   private receive!:(code:string)=>void;
   private reject!:(error:Error)=>void;
@@ -33,15 +34,15 @@ export class SessionOAuth implements OAuthClientProvider {
     provider.timer=setTimeout(()=>provider.reject(new Error('OAuth timed out')),120000);provider.timer.unref();
     return provider;
   }
-  get clientMetadata(){return {client_name:'Pi MCP client',redirect_uris:[this.redirectUrl],grant_types:['authorization_code','refresh_token'],response_types:['code'],token_endpoint_auth_method:'none',...(this.config.scope?{scope:this.config.scope}:{})};}
+  get clientMetadata(){return {client_name:'Harbor MCP',redirect_uris:[this.redirectUrl],grant_types:['authorization_code','refresh_token'],response_types:['code'],token_endpoint_auth_method:'none',...(this.config.scope?{scope:this.config.scope}:{})};}
   state(){return this.nonce;}
   clientInformation(){return this.information;}
   saveClientInformation(value:OAuthClientInformationMixed){this.information=value;}
   tokens(){return this.savedTokens;}
   saveTokens(value:OAuthTokens){this.savedTokens=value;}
-  redirectToAuthorization(url:URL){if(url.protocol!=='https:' && !['127.0.0.1','localhost','[::1]'].includes(url.hostname))throw new Error('OAuth requires HTTPS');this.authorizationStarted=true;this.show(url.href);}
-  saveCodeVerifier(value:string){this.verifier=value;}
+  redirectToAuthorization(url:URL){if(this.closed)throw new UnauthorizedError('MCP authentication required; use /mcp-auth SERVER');if(url.protocol!=='https:' && !['127.0.0.1','localhost','[::1]'].includes(url.hostname))throw new Error('OAuth requires HTTPS');this.authorizationStarted=true;this.show(url.href);}
+  saveCodeVerifier(value:string){if(this.closed)throw new UnauthorizedError('MCP authentication required; use /mcp-auth SERVER');this.verifier=value;}
   codeVerifier(){if(!this.verifier)throw new Error('OAuth verifier unavailable');return this.verifier;}
   invalidateCredentials(scope:'all'|'client'|'tokens'|'verifier'|'discovery'){if(scope==='all'||scope==='client')this.information=undefined;if(scope==='all'||scope==='tokens')this.savedTokens=undefined;if(scope==='all'||scope==='verifier')this.verifier=undefined;}
-  async close(){clearTimeout(this.timer);this.reject(new Error('OAuth session closed'));const server=this.server;this.server=undefined;if(server){server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}}
+  async close(){this.closed=true;clearTimeout(this.timer);this.reject(new Error('OAuth session closed'));const server=this.server;this.server=undefined;if(server){server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}}
 }

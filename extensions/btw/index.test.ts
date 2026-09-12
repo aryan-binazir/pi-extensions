@@ -10,6 +10,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
   const commands: Record<string, any> = {};
   const hooks: Record<string, any> = {};
   const requests: any[] = [];
+  const frames: string[] = [];
   let component: any;
   const terminal = { rows: 40, columns: 80 };
   const ctx: any = {
@@ -37,7 +38,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
         assert.equal(options.overlayOptions.offsetY, -1);
         return new Promise((resolve) => {
           component = factory(
-            { requestRender() {}, terminal },
+            { requestRender() { if (component) frames.push(component.render(80).join("\n")); }, terminal },
             {
               fg: (_: string, value: string) => value,
               bg: (color: string, value: string) => {
@@ -65,6 +66,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
     commands,
     hooks,
     requests,
+    frames,
     terminal,
     lines: (width = 80): string[] => component.render(width),
     key: (s: string) => component.handleInput(s),
@@ -120,6 +122,26 @@ test("BTW keeps the input area in place while connecting and streaming", async (
   h.key("\u001b");await result;
 });
 
+test("BTW requests an Answering repaint before the first stream event", async () => {
+  const h = host();
+  let finish!: () => void;
+  const waiting = new Promise<void>((resolve) => { finish = resolve; });
+  h.ctx.modelRegistry.getProvider = () => ({
+    streamSimple: () => ({
+      async *[Symbol.asyncIterator]() {
+        await waiting;
+        yield { type: "text_delta", delta: "Delayed answer" };
+      },
+    }),
+  });
+  const result = h.commands.btw.handler("Question", h.ctx);
+  await tick();
+  assert.ok(h.frames.some((frame) => frame.includes("Answering…")));
+  assert.ok(h.frames.every((frame) => !frame.includes("Delayed answer")));
+  finish();await tick();
+  h.key("\u001b");await result;
+});
+
 test("BTW shows the full side transcript and queues followups without losing a draft", async () => {
   const h = host();
   let finish!: () => void;
@@ -156,6 +178,79 @@ test("BTW shows the full side transcript and queues followups without losing a d
   assert.doesNotMatch(transcript, /queued/);
   h.key("\u001b");await result;
 });
+
+test("BTW omits model history when all earlier queued turns failed", async () => {
+  const h = host([
+    { type: "error", error: { errorMessage: "synthetic failure" } },
+  ]);
+  const result = h.commands.btw.handler("First question", h.ctx);
+  h.key("Queued question");h.key("\r");
+  await tick();
+  assert.equal(h.requests.length, 2);
+  assert.deepEqual(h.requests[1].context.messages.map((message: any) => message.content), [
+    "Conversation snapshot:\n", "Queued question",
+  ]);
+  assert.match(h.render(), /Side request failed: synthetic failure/);
+  assert.doesNotMatch(h.render(), /\(No answer\)/);
+  h.key("\u001b");await result;
+});
+
+for (const failure of ["auth", "stream", "partial stream"]) {
+  test(`BTW keeps ${failure} failures visible across queued turns and out of model history`, async () => {
+    const h = host();
+    const result = h.commands.btw.handler("Successful question", h.ctx);
+    await tick();
+    let fail!: () => void;
+    const failing = new Promise<void>((resolve) => { fail = resolve; });
+    let connect!: () => void;
+    const connecting = new Promise<void>((resolve) => { connect = resolve; });
+    let authCalls = 0;
+    h.ctx.modelRegistry.getApiKeyAndHeaders = async () => {
+      if (++authCalls === 1 && failure === "auth") {
+        await failing;
+        return { ok: false, error: "synthetic failure" };
+      }
+      if (authCalls === 2) await connecting;
+      return { ok: true, apiKey: "synthetic-key" };
+    };
+    h.ctx.modelRegistry.getProvider = () => ({
+      streamSimple: (_model: any, context: any) => {
+        h.requests.push({ context });
+        const shouldFail = authCalls === 1;
+        return {
+          async *[Symbol.asyncIterator]() {
+            if (shouldFail) {
+              if (failure === "partial stream")
+                yield { type: "text_delta", delta: "Unfinished reply" };
+              await failing;
+              yield { type: "error", error: { errorMessage: "synthetic failure" } };
+            } else {
+              yield { type: "text_delta", delta: "Queued answer" };
+            }
+          },
+        };
+      },
+    });
+    h.key("Failed question");h.key("\r");
+    await tick();
+    h.key("Queued question");h.key("\r");
+    fail();await tick();
+    assert.match(h.render(), /Connecting/);
+    assert.match(h.render(), /Side request failed: synthetic failure/);
+    assert.doesNotMatch(h.render(), /\(No answer\)/);
+    if (failure === "partial stream") assert.match(h.render(), /Unfinished reply/);
+    connect();await tick();
+    const history = h.requests.at(-1).context.messages.filter((message: any) =>
+      message.content.startsWith("Earlier side conversation:"));
+    assert.deepEqual(history.map((message: any) => message.content), [
+      "Earlier side conversation:\nUser: Successful question\nAssistant: Side answer",
+    ]);
+    assert.equal(h.requests.at(-1).context.messages.at(-1).content, "Queued question");
+    assert.match(h.render(), /Side request failed: synthetic failure/);
+    assert.match(h.render(), /Queued answer/);
+    h.key("\u001b");await result;
+  });
+}
 
 test("side chat uses normal user backgrounds and Agent labels while streaming and completed", async () => {
   const h = host();

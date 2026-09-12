@@ -61,7 +61,8 @@ export async function loadConfig(agentDir: string): Promise<SentinelConfig> {
 }
 
 export async function loadPreferences(config: SentinelConfig, agentDir: string): Promise<string> {
-  // Only the default absent file means no preferences; an explicitly selected missing file is an error.
+  // Absence of the default path means no preferences, even when selected explicitly.
+  // A missing non-default path is an error.
   const text = await readBounded(config.policyFile, 32768, config.policyFile === resolve(agentDir, 'sentinel-policy.md'));
   if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)|\p{Bidi_Control}/u.test(text)) throw new Error('Sentinel preferences contain invisible terminal or bidirectional controls; use plain visible text');
   return text;

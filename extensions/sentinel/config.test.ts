@@ -14,6 +14,8 @@ test('user-owned config defaults, explicit policy paths, strict validation and b
     assert.equal(config.reviewer, 'openai-codex/codex-auto-review');
     assert.equal(config.maxToolCallLag, 2);
     assert.equal(await loadPreferences(config, home), '');
+    await writeFile(join(home, 'sentinel.json'), JSON.stringify({ policyFile: config.policyFile }));
+    assert.equal(await loadPreferences(await loadConfig(home), home), '', 'the default path stays optional when explicitly selected');
     await writeFile(config.policyFile, 'Never push to production without asking me.');
     assert.match(await loadPreferences(config, home), /Never push/);
     for (const hidden of ['\x1b[8mHidden approval\x1b[0m', 'safe\rhidden', '\u202ehidden']) {

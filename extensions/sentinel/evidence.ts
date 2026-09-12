@@ -82,6 +82,18 @@ export function collectEvidence(ctx: ExtensionContext, instructions: string, inh
     if (rendered !== raw) reasons.add('execution_entry_budget');
     historySize += rendered.length; recent.unshift({ role: record.role, content: rendered });
   }
+  // The initial delegated brief caps child scope for its entire lifetime, not just
+  // while it happens to fit in the rolling execution history.
+  let delegatedTask: string | undefined;
+  if (inherited) {
+    const task = records.find(record => record.role === 'delegated_task');
+    if (!task) reasons.add('delegated_task_unavailable');
+    else {
+      const raw = JSON.stringify(content(task.content));
+      delegatedTask = bounded(raw, MAX_USERS);
+      if (raw.length > MAX_USERS) reasons.add('delegated_task_budget');
+    }
+  }
   if (!inherited && !rawUsers.length && userImageSources.length) reasons.add('user_input_provenance_unavailable');
   const users = inherited?.users ?? rawUsers;
   const trustedInstructions = inherited?.instructions ?? instructions;
@@ -102,9 +114,10 @@ export function collectEvidence(ctx: ExtensionContext, instructions: string, inh
     trusted_instructions: inherited ? undefined : authorization.instructions,
     trusted_user_messages: inherited ? undefined : JSON.stringify(authorization.users),
     untrusted_instructions: bounded(untrustedInstructions, MAX_INSTRUCTIONS),
+    delegated_task: delegatedTask,
     evidence: recent, image_order: imageHashes,
     history_window: { max_entries: 20, max_characters: MAX_HISTORY, trimmed_by_bytes: historyTrimmedByBytes, older_entries_omitted: recent.length < records.length },
     complete, incomplete_reasons: [...reasons],
   });
-  return { text, images, complete, incompleteReasons: [...reasons], authorization, identity: digest({ authorization, complete, externalSteering, untrustedInstructions }) };
+  return { text, images, complete, incompleteReasons: [...reasons], authorization, identity: digest({ authorization, complete, externalSteering, untrustedInstructions, delegatedTask }) };
 }

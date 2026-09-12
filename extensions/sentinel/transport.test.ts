@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -88,4 +88,30 @@ test('blocking inspection enforces round, call-count and aggregate-output budget
     assert.equal(results[0].isError, false); assert.equal(results[1].isError, true);
     assert.ok(results.reduce((size: number, result: any) => size + result.content[0].text.length, 0) <= 64000);
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('missing find is an inspection error and reviewer can then deny without installing', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'sentinel-missing-find-'));
+  const env = { ...process.env }, fetch = globalThis.fetch;
+  const captures: any[] = [];
+  let fetched = false;
+  try {
+    process.env.PATH = home;
+    process.env.PI_CODING_AGENT_DIR = join(home, 'absent-agent');
+    globalThis.fetch = async () => { fetched = true; throw new Error('fetch tripwire'); };
+    const output = await sample(context([
+      { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'find-1', name: 'find', arguments: { pattern: '*.txt' } }] },
+      { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: '{"outcome":"deny","rationale":"Inspection unavailable."}' }] },
+    ], captures), 'test/reviewer', 'reviewer', { ...input, cwd: home }, new AbortController().signal);
+    assert.equal(JSON.parse(output).outcome, 'deny');
+    assert.equal(captures[1].messages.at(-1).isError, true);
+    assert.match(captures[1].messages.at(-1).content[0].text, /Do not assume the target is safe/);
+    assert.equal(fetched, false);
+    assert.deepEqual(await readdir(home), []);
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in env)) delete process.env[key];
+    Object.assign(process.env, env);
+    globalThis.fetch = fetch;
+    await rm(home, { recursive: true, force: true });
+  }
 });

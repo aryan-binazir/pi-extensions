@@ -38,6 +38,20 @@ test('delegation briefs do not expand inherited root authority', () => {
   assert.equal(parsed.evidence[0].role, 'delegated_task');
 });
 
+test('child task scope survives the execution window without becoming root authority', () => {
+  const root = { instructions: 'Root policy', users: ['Maintain the project.'], complete: true };
+  const brief = 'Only read source. Do not modify files.';
+  const entries = [message('user', brief), ...Array.from({ length: 50 }, () => message('toolResult', 'x'.repeat(10000)))];
+  const result = collectEvidence(ctx(entries), '', root);
+  const parsed = JSON.parse(result.text);
+  assert.equal(result.complete, true);
+  assert.equal(JSON.parse(parsed.delegated_task), brief);
+  assert.ok(!parsed.evidence.some((entry: { role: string }) => entry.role === 'delegated_task'));
+  assert.deepEqual(JSON.parse(parsed.root_authorization).users, root.users);
+  assert.ok(collectEvidence(ctx([]), '', root).incompleteReasons.includes('delegated_task_unavailable'));
+  assert.ok(collectEvidence(ctx([message('user', 'x'.repeat(140000))]), '', root).incompleteReasons.includes('delegated_task_budget'));
+});
+
 test('custom follow-up messages are visible untrusted evidence and invalidate older identity', () => {
   const original = [user('Only inspect.')];
   const first = collectEvidence(ctx(original), '');
@@ -87,7 +101,7 @@ test('instructions are separately budgeted and completeness participates in iden
   const entries = [user('Only read.')];
   const result = collectEvidence(ctx(entries), 'AGENTS '.repeat(6000));
   assert.equal(result.complete, true); assert.ok(result.authorization.instructions.length > 32000);
-  assert.equal(collectEvidence(ctx(entries), '', result.authorization).complete, true);
+  assert.equal(collectEvidence(ctx([message('user', 'Only inspect.')]), '', result.authorization).complete, true);
   const incomplete = collectEvidence(ctx([...entries, message('toolResult', 'x'.repeat(70000))]), 'AGENTS '.repeat(6000));
   assert.notEqual(result.identity, incomplete.identity);
   assert.deepEqual(incomplete.incompleteReasons, ['execution_entry_budget']);

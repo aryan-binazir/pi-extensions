@@ -67,8 +67,9 @@ Unknown keys, invalid JSON, symlinks, non-regular files, invalid UTF-8 and read
 failures block enabled review. Invisible terminal/bidirectional controls in preferences
 are rejected so they cannot conceal policy text during confirmation. Config is
 limited to 8 KiB; preferences to 32 KiB.
-Missing default files mean defaults/no extra preferences; an explicitly selected
-missing policy file is an error.
+Missing default files mean defaults/no extra preferences. The default policy path
+stays optional even when selected explicitly; a missing non-default path is an error.
+The confirmation dialog displays `(none)` when there are no standing preferences.
 
 Pi supplies provider authentication, OAuth refresh, headers, environment and base
 URL. Luna must be present in the model catalog. The blocking model can be addressed
@@ -87,6 +88,10 @@ copied into Sentinel settings, child snapshots, or decision logs.
    blocking assessment. Blocking reviews never populate the trajectory cache.
 4. The reviewer can investigate with `read`, `grep`, `find` and `ls` only: no shell,
    network, mutation or extension tools. Reads are UTF-8 regular files up to 2 MiB.
+   Search requires an already-installed `rg` and `fd`/`fdfind` in Pi's bin directory
+   or PATH; missing dependencies fail without downloading/installing anything.
+   Search subprocesses use fixed read-only arguments, bounded output and cancellation.
+   Grep skips files reported larger than 2 MiB and reports that limitation.
 5. Invalid decisions, cancellation, timeouts and mid-review authorization/policy
    changes fail closed. Where available, denials explain the reviewer's rationale.
 
@@ -134,7 +139,9 @@ visual user authority as incomplete rather than claiming to have transmitted it.
 When Sentinel is enabled, the bundled direct-subagent and workflow launch paths
 inject the guard **last**, even with normal extension discovery disabled. A private live
 snapshot carries root user authority and confirmed policy identity. A child brief
-is not independent user approval. Children reread root authority before each call;
+is not independent user approval. Its initial scope is retained separately from the
+rolling execution window (128K character budget); missing/truncated scope is incomplete.
+Children reread root authority before each call;
 confirmed policy updates propagate. Model/settings changes require restarting
 existing children. If files change while the parent is off, guarded children block;
 the parent can confirm with `/sentinel reload`, then turn off again. Normal parent

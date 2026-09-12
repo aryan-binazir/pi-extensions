@@ -33,6 +33,7 @@ interface Entry {
   process?: ChildProcess;
   timer?: NodeJS.Timeout;
   killTimer?: NodeJS.Timeout;
+  groupKilled?: boolean;
   writer: boolean;
   finished: boolean;
 }
@@ -57,6 +58,7 @@ export async function validateTask(spec: TaskSpec, allowedTools?: string[]): Pro
   if (spec.preset !== undefined && !['reader', 'writer'].includes(spec.preset)) throw new Error('Unknown preset');
   const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS).filter(tool => !allowedTools || allowedTools.includes(tool));
   if (!Array.isArray(tools) || tools.some(tool => typeof tool !== 'string' || !ALL_TOOLS.includes(tool)) || new Set(tools).size !== tools.length) throw new Error('Invalid builtin tool selection');
+  if (allowedTools && tools.some(tool => !allowedTools.includes(tool))) throw new Error('Explicit child tools exceed parent permissions');
   if (spec.preset === 'reader' && tools.some(tool => !READ_TOOLS.includes(tool))) throw new Error('Reader preset cannot grant write tools');
   const timeout = spec.timeout ?? 300000;
   if (!Number.isInteger(timeout) || timeout < 10 || timeout > 3600000) throw new Error('Timeout must be 10–3600000 milliseconds');
@@ -117,7 +119,9 @@ export class SubagentRegistry {
     await Promise.all([...this.entries.values()].map(e => e.done));
   }
   private signal(entry: Entry, signal: NodeJS.Signals) {
-    if (!entry.process?.pid) return;
+    if (!entry.process?.pid || entry.groupKilled) return;
+    // A SIGKILL attempt is final: the pid and process group may be recycled afterwards.
+    if (signal === 'SIGKILL') entry.groupKilled = true;
     try { process.kill(-entry.process.pid, signal); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') entry.process.kill(signal); }
   }
   private pump() {
@@ -166,13 +170,14 @@ export class SubagentRegistry {
       entry.process.on('error', error => { entry.result.error = error.message; sawError = true; });
       entry.process.on('close', code => {
         if (pending) consume(pending);
-        // A child can exit while grandchildren retain descriptors or keep running.
-        this.signal(entry, 'SIGKILL');
         if (entry.result.status === 'running') entry.result.status = code === 0 && !sawError ? 'succeeded' : 'failed';
         this.finish(entry);
       });
       // Reap descendants even when they inherited pipes from an exited parent.
-      entry.process.on('exit', () => this.signal(entry, 'SIGKILL'));
+      entry.process.on('exit', () => {
+        this.signal(entry, 'SIGKILL');
+        clearTimeout(entry.timer); clearTimeout(entry.killTimer);
+      });
     } catch (error) {
       entry.result.status = 'failed'; entry.result.error = String(error); this.finish(entry);
     }

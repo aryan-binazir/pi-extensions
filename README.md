@@ -25,28 +25,11 @@ A single extension can also be loaded with
 | Prompt stash | `Ctrl+Shift+S` | Stash, restore or swap one draft slot; a footer indicator shows occupancy. |
 | Subagents | `subagent`, TypeScript workflows | Isolated task contexts, bounded background execution and approved workflow replay. |
 | Worktree | `/worktree` | Create or reuse a checkout and route the current session's shell and relative file tools. |
-| MCP client (legacy) | MCP tools, resources and prompts | Bundled implementation; disable when using the recommended external adapter. See [MCP plugin setup](docs/mcp-plugin-setup.md). |
+| MCP client | MCP tools, resources and prompts | Bundled implementation. See [MCP client documentation](extensions/mcp-client/README.md). |
 | Web search | `web_search` | Bounded DuckDuckGo HTML search returning links and snippets, with explicit failure results. [Limits](docs/adr/006-search-fast-power.md). |
 | Computer use | Desktop tools | Pi directs screenshots and input through native Linux or macOS adapters. See [desktop setup](extensions/computer-use/README.md). |
 | Fast mode | `/fast` | Toggle supported base/fast model entries while retaining provider authentication and reasoning. [Provider support](docs/adr/006-search-fast-power.md). |
 | Auto-caffeinate | Agent lifecycle | Temporarily inhibit idle sleep during work on confirmed AC power, including background tasks. |
-
-## Recommended external MCP plugin
-
-Use the community-maintained [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter)
-for MCP integrations such as Linear and Notion. Install it separately through Pi's
-package manager—not as a modification to Pi core or a dependency of this repository.
-
-```sh
-pi install npm:pi-mcp-adapter
-pi config
-```
-
-In `pi config`, disable this package's `extensions/mcp-client/index.ts` to avoid
-conflicting MCP tools and commands. Restart Pi, then run `/mcp setup`.
-See the [new-machine setup guide](docs/mcp-plugin-setup.md) for exact settings,
-service authentication, and updates. Installing this repository alone does not
-install the external adapter.
 
 ## Memory and sessions
 

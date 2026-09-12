@@ -1,5 +1,5 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import assert from "node:assert/strict";
 import test from "node:test";
 import questionnaire from "./index.ts";
@@ -74,6 +74,7 @@ function host(onEmit?: (value: any) => void) {
       },
     },
   } as any);
+  const terminal = { rows: 24, columns: 80 };
   const ctx: any = {
     mode: "tui",
     ui: {
@@ -81,7 +82,7 @@ function host(onEmit?: (value: any) => void) {
         new Promise((resolve) => {
           uiOptions = options;
           component = factory(
-            { requestRender() {}, terminal: { rows: 24, columns: 80 } },
+            { requestRender() {}, terminal },
             { fg: (_: string, s: string) => s },
             {},
             resolve,
@@ -90,6 +91,7 @@ function host(onEmit?: (value: any) => void) {
     },
   };
   return {
+    terminal,
     events,
     hooks,
     ctx,
@@ -335,4 +337,95 @@ test("questionnaire strips residual terminal controls from model-provided labels
   assert.ok(!rendered.includes("\x9b"));
   h.key("\x1b");
   await running;
+});
+
+test("long tabs keep every active question and Submit visible", async () => {
+  const h = host();
+  const running = h.run(Array.from({ length: 6 }, (_, i) => ({
+    ...question(`q${i}`), label: `Question-${i} ${"label".repeat(9)}`,
+  })));
+  try {
+    for (let i = 0; i < 6; i++) {
+      for (const width of [40, 80]) {
+        const rows = h.render(width);
+        assert.match(rows.join("\n"), new RegExp(`\\[ .*Question-${i}.*\\]`));
+        assert.match(rows.join("\n"), /Submit/);
+        assert.ok(rows.every((row: string) => visibleWidth(row) <= width));
+      }
+      h.key("\t");
+    }
+    assert.match(h.render(40).join("\n"), /\[ Submit \]/);
+  } finally {
+    h.key("\x1b");
+    await running;
+  }
+});
+
+
+test("six-row terminals retain prompt, selection, editor and cancellation controls", async () => {
+  const h = host();
+  h.terminal.rows = 6;
+  const running = h.run([question("small"), question("next")]);
+  try {
+    const check = (expected: RegExp) => {
+      const rows = h.render(80);
+      assert.ok(rows.length <= 3);
+      assert.match(rows.join("\n"), /Choose small/);
+      assert.match(stripTerminalSequences(rows.join("\n")), expected);
+    };
+    check(/Esc cancel/);
+    check(/❯ 1. Yes/);
+    h.key("\x1b[B");
+    h.key("\r");
+    h.key("Draft answer");
+    check(/Draft answer/);
+    check(/Ctrl\+C cancel/);
+    h.key("\x1b[200~\nsecond\nthird\nfourth\nfifth\nsixth\x1b[201~");
+    for (let i = 0; i < 5; i++) h.key("\x1b[A");
+    check(/Draft answer/);
+    assert.ok(h.render(80).some((line: string) => line.includes("\x1b[7m")), "The editor cursor must remain visible");
+    h.key("\x1b");
+    h.key("\x1b[A");
+    h.key("\r");
+    h.key("\r");
+    const review = h.render(80);
+    assert.ok(review.length <= 3);
+    assert.match(review.join("\n"), /Submit.*Review your answers/);
+    assert.match(review.join("\n"), /Enter to submit all answers/);
+    assert.match(review.join("\n"), /Esc cancel/);
+  } finally {
+    h.key("\x03");
+    await running;
+  }
+});
+
+test("long prompts use spare terminal rows and disclose remaining text", async () => {
+  const h = host();
+  const running = h.run([{ ...question("long"),
+    prompt: Array.from({ length: 30 }, (_, i) => `Prompt line ${i + 1}`).join("\n"),
+  }]);
+  try {
+    const rows = h.render(80);
+    assert.match(rows.join("\n"), /Prompt line 4/);
+    assert.match(rows.join("\n"), /prompt truncated/);
+    assert.match(rows.join("\n"), /❯ 1. Yes/);
+    assert.match(rows.join("\n"), /Esc cancel/);
+    assert.ok(rows.length <= 24);
+    h.terminal.rows = 48;
+    const expanded = h.render(80).join("\n");
+    assert.match(expanded, /Prompt line 30/);
+    assert.doesNotMatch(expanded, /prompt truncated/);
+    h.terminal.rows = 6;
+    const compact = h.render(80);
+    assert.ok(compact.length <= 3);
+    assert.match(compact.join("\n"), /Prompt line 1/);
+    assert.match(compact.join("\n"), /prompt truncated/);
+    assert.match(compact.join("\n"), /Esc cancel/);
+    const narrow = stripTerminalSequences(h.render(20).join("\n"));
+    assert.match(narrow, /Prompt line 1.*…/);
+    assert.match(narrow, /Esc cancel/);
+  } finally {
+    h.key("\x1b");
+    await running;
+  }
 });

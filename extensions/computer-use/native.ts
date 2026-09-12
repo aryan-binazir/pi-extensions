@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { WaylandPointer } from './wayland.ts';
+import { linuxSessionEnvironment } from './linux-session.ts';
 import type { DesktopAction, DesktopBackend, DesktopResult } from './desktop.ts';
 
 const maxBytes = 16 * 1024 * 1024;
@@ -17,19 +18,20 @@ export function pngResult(bytes: Buffer, output: string): DesktopResult {
 export class LinuxDesktop implements DesktopBackend {
   private pointer?: WaylandPointer;
   private children = new Set<ChildProcessWithoutNullStreams>();
+  private sessionEnv?: NodeJS.ProcessEnv;
   constructor(private readonly env: NodeJS.ProcessEnv = process.env) {}
+  private environment() { return this.sessionEnv ??= linuxSessionEnvironment(this.env); }
   private wayland() {
     if (!this.pointer) {
-      const display = this.env.WAYLAND_DISPLAY;
-      if (!display || (!isAbsolute(display) && !this.env.XDG_RUNTIME_DIR)) throw new Error('Wayland unavailable: WAYLAND_DISPLAY and XDG_RUNTIME_DIR must identify the current session');
-      this.pointer = new WaylandPointer(isAbsolute(display) ? display : join(this.env.XDG_RUNTIME_DIR!, display));
+      const env = this.environment(), display = env.WAYLAND_DISPLAY!;
+      this.pointer = new WaylandPointer(isAbsolute(display) ? display : join(env.XDG_RUNTIME_DIR!, display));
     }
     return this.pointer;
   }
   private command(command: string, args: string[], signal: AbortSignal, input?: string): Promise<Buffer> {
     signal.throwIfAborted();
     return new Promise((resolve, reject) => {
-      const child = spawn(command, args, { env: this.env, stdio: 'pipe' }); this.children.add(child);
+      const child = spawn(command, args, { env: this.environment(), stdio: 'pipe' }); this.children.add(child);
       const chunks: Buffer[] = []; let size = 0; let failure: Error | undefined;
       const abort = () => { failure = new Error('Desktop command aborted'); child.kill('SIGKILL'); };
       signal.addEventListener('abort', abort, { once: true });

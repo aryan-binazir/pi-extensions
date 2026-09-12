@@ -1,4 +1,5 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import assert from "node:assert/strict";
 import test from "node:test";
 import questionnaire from "./index.ts";
@@ -55,6 +56,7 @@ test("questionnaire single option returns a typed answer and clears waiting", as
 function host(onEmit?: (value: any) => void) {
   let tool: any;
   let component: any;
+  let uiOptions: any;
   const events: any[] = [];
   const hooks: Record<string, any> = {};
   questionnaire({
@@ -75,10 +77,11 @@ function host(onEmit?: (value: any) => void) {
   const ctx: any = {
     mode: "tui",
     ui: {
-      custom: (factory: any) =>
+      custom: (factory: any, options: any) =>
         new Promise((resolve) => {
+          uiOptions = options;
           component = factory(
-            { requestRender() {} },
+            { requestRender() {}, terminal: { rows: 24, columns: 80 } },
             { fg: (_: string, s: string) => s },
             {},
             resolve,
@@ -94,6 +97,7 @@ function host(onEmit?: (value: any) => void) {
       tool.execute("id", { questions }, signal, undefined, ctx),
     key: (key: string) => component.handleInput(key),
     render: (width = 60) => component.render(width),
+    options: () => uiOptions,
   };
 }
 const question = (id: string) => ({
@@ -288,12 +292,40 @@ test("long option lists keep the selected answer inside a bounded viewport", asy
   for (let i = 0; i < 20; i++) {
     const rows = h.render(80);
     assert.ok(rows.length <= 24, `rendered ${rows.length} rows`);
-    assert.ok(rows.join("\n").includes(`> Option-${i}`));
+    assert.ok(rows.join("\n").includes(`❯ ${i + 1}. Option-${i}`));
     h.key("\x1b[B");
   }
   h.key("\r");
   assert.equal((await running).details.answers[0].value, "19");
 });
+test("questionnaire replaces the input area with subtle rules across widths and input modes", async () => {
+  const h = host();
+  const running = h.run([question("a"), question("b")]);
+  assert.deepEqual(h.options(), { overlay: false });
+  const checkFrame = () => {
+    for (const width of [1, 5, 6, 20, 80, 120]) {
+      const rows = h.render(width);
+      assert.ok(rows.length <= 24);
+      assert.ok(rows.every((row: string) => visibleWidth(row) <= width));
+      if (width >= 6) {
+        assert.equal(rows[0], "─".repeat(width));
+        assert.equal(rows.at(-1), "─".repeat(width));
+        assert.ok(rows.every((row: string) => !/[│╭╯]/.test(row)));
+      }
+    }
+  };
+  checkFrame();
+  h.key("\x1b[B");
+  h.key("\r");
+  h.key("Custom 日本語 answer");
+  checkFrame();
+  h.key("\r");
+  h.key("\r");
+  checkFrame();
+  h.key("\r");
+  assert.equal((await running).details.cancelled, false);
+});
+
 test("questionnaire strips residual terminal controls from model-provided labels", async () => {
   const h = host();
   const running = h.run([{ id: "safe", prompt: "safe\x1bcRESET", options: [{ value: "a", label: "answer\x07\x9b31m" }] }]);

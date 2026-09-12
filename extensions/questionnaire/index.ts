@@ -3,6 +3,7 @@ import {
   Editor,
   matchesKey,
   stripTerminalSequences,
+  truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -154,7 +155,9 @@ export default function questionnaire(pi: ExtensionAPI) {
               advance();
             };
             return {
-              invalidate() {},
+              get focused() { return editor.focused; },
+              set focused(value: boolean) { editor.focused = value; },
+              invalidate() { editor.invalidate(); },
               handleInput(data: string) {
                 if (settled) return;
                 if (matchesKey(data, "ctrl+c")) {
@@ -220,68 +223,67 @@ export default function questionnaire(pi: ExtensionAPI) {
                 tui.requestRender();
               },
               render(width: number) {
-                const w = Math.max(1, width);
-                const lines: string[] = [];
-                let focusLine = 0;
-                if (params.questions.length > 1)
-                  lines.push(
-                    params.questions
-                      .map(
-                        (q, i) =>
-                          `${tab === i ? ">" : ""}${answers.has(q.id) ? "✓" : "○"} ${q.label || q.id}`,
-                      )
-                      .concat(
-                        `${tab === params.questions.length ? ">" : ""} Submit`,
-                      )
-                      .join(" | "),
-                  );
+                const w = Math.max(1, width - 2);
+                const height = Math.max(1, Math.min(18, (tui.terminal?.rows ?? 24) - 4));
+                const clean = (text: string) => stripTerminalSequences(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
                 const q = params.questions[tab];
-                if (q) {
-                  lines.push(q.prompt);
-                  focusLine = lines.length + selected;
-                  q.options.forEach((o, i) =>
-                    lines.push(
-                      `${selected === i ? ">" : " "} ${o.label}${o.description ? ` — ${o.description}` : ""}`,
-                    ),
-                  );
-                  if (q.allowOther !== false)
-                    lines.push(
-                      `${selected === q.options.length ? ">" : " "} Type an answer`,
-                    );
-                } else {
-                  for (const q of params.questions)
-                    lines.push(
-                      `${q.label || q.id}: ${answers.get(q.id)?.label ?? "(unanswered)"}`,
-                    );
-                  lines.push(
-                    answers.size === params.questions.length
-                      ? "Enter to submit all answers"
-                      : "Answer every question before submitting",
-                  );
+                const tabs = params.questions.map((item, i) => {
+                  const label = `${answers.has(item.id) ? "✓ " : ""}${clean(item.label || item.id)}`;
+                  return theme.fg(tab === i ? "accent" : "muted", tab === i ? `[ ${label} ]` : label);
+                });
+                tabs.push(theme.fg(q ? "muted" : "accent", q ? "Submit" : "[ Submit ]"));
+                const header = params.questions.length > 1
+                  ? tabs.join("   ")
+                  : theme.fg("accent", "Question");
+                const prompt = q ? clean(q.prompt) : "Review your answers";
+                const promptRows = wrapTextWithAnsi(prompt, w).slice(0, 3);
+                const content: string[] = [];
+                let focusRow = 0;
+                if (q && !editing) {
+                  const options = [...q.options];
+                  if (q.allowOther !== false) options.push({ value: "", label: "Type something else" });
+                  options.forEach((option, i) => {
+                    if (selected === i) focusRow = content.length;
+                    const color = selected === i ? "accent" : "text";
+                    content.push(...wrapTextWithAnsi(
+                      theme.fg(color, `${selected === i ? "❯" : " "} ${i + 1}. ${clean(option.label)}`), w,
+                    ));
+                    if (option.description) content.push(...wrapTextWithAnsi(
+                      theme.fg("muted", `     ${clean(option.description)}`), w,
+                    ));
+                  });
+                } else if (!q) {
+                  for (const item of params.questions) content.push(...wrapTextWithAnsi(
+                    `${clean(item.label || item.id)}: ${clean(answers.get(item.id)?.label ?? "(unanswered)")}`, w,
+                  ));
+                  content.push(theme.fg("accent", answers.size === params.questions.length
+                    ? "Enter to submit all answers" : "Answer every question before submitting"));
+                  focusRow = content.length - 1;
                 }
-                const wrapped = lines.map((line) =>
-                  wrapTextWithAnsi(stripTerminalSequences(line).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""), w),
-                );
-                const content = wrapped.flat();
-                const focusRow = wrapped.slice(0, focusLine).reduce((n, rows) => n + rows.length, 0);
-                const height = Math.max(1, (tui.terminal?.rows ?? 24) - 2);
-                const footer = wrapTextWithAnsi(
-                  editing
-                    ? "Enter saves • Esc returns • Ctrl+C cancels questionnaire"
-                    : "↑↓ select • Tab/←→ tabs • Enter confirm • Esc cancels",
-                  w,
-                ).slice(0, Math.max(1, Math.floor(height / 4)));
-                const editorBudget = Math.max(0, height - footer.length - 1);
-                const editorRows = editing && editorBudget > 0 ? editor.render(w).slice(-editorBudget) : [];
-                const available = Math.max(0, height - footer.length - editorRows.length);
-                const start = Math.max(0, Math.min(
-                  focusRow - Math.floor(available / 2), content.length - available,
-                ));
-                return [...content.slice(start, start + available), ...editorRows, ...footer];
+                // Keep the question and controls stationary while long options scroll.
+                const available = Math.max(1, height - promptRows.length - 6);
+                const start = Math.max(0, Math.min(focusRow, content.length - available));
+                const body = editing
+                  ? editor.render(Math.max(10, w)).slice(-available)
+                  : content.slice(start, start + available);
+                const hint = editing
+                  ? "Enter save · Esc back · Ctrl+C cancel"
+                  : `↑↓ choose · Enter select${params.questions.length > 1 ? " · Tab next" : ""} · Esc cancel`;
+                const rule = theme.fg("borderMuted", "─".repeat(Math.max(0, width)));
+                return [
+                  rule,
+                  ` ${header}`,
+                  "",
+                  ...promptRows.map((line) => ` ${line}`),
+                  "",
+                  ...body.map((line) => ` ${line}`),
+                  ` ${theme.fg("dim", hint)}`,
+                  rule,
+                ].slice(0, height).map((line) => truncateToWidth(line, width));
               },
             };
           },
-          { overlay: true },
+          { overlay: false },
         );
         return finish(
           result ?? { cancelled: true, answers: [], reason: "UI closed" },

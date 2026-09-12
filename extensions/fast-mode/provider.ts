@@ -20,18 +20,24 @@ export function withFastModels(original:Provider,view:Provider=original):Provide
  // Pi models.json overlays recompose provider objects and discard symbols,
  // but retain the fast aliases. Treat those as the installed adapter too.
  if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED] || original.getModels().some(model=>model.id.endsWith(FAST_SUFFIX))) return original;
- const eligible=new Set(view.getModels().filter(supported).map(model=>model.id));
+ // Snapshot eligibility before registration; reading the composed view later would recurse.
+ const eligible=new Map(view.getModels().filter(supported).map(model=>[model.id,model]));
+ const custom=[...eligible.values()].filter(model=>!original.getModels().some(base=>base.id===model.id)&&!model.id.endsWith(FAST_SUFFIX));
  const aliases=(models:readonly Model<Api>[])=>models.flatMap(model=>eligible.has(model.id)&&supported(model)&&!model.id.endsWith(FAST_SUFFIX)?[model,{...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}]:[model]);
  const resolve=(model:Model<Api>)=>{
   if(!model.id.endsWith(FAST_SUFFIX))return {model,fast:false};
-  const base=original.getModels().find(m=>m.id===model.id.slice(0,-FAST_SUFFIX.length));
+  const baseId=model.id.slice(0,-FAST_SUFFIX.length);
+  const base=original.getModels().find(m=>m.id===baseId)??custom.find(model=>model.id===baseId);
   if(!base || !supported(base))throw new Error('Fast model no longer available');
   // Preserve auth-resolved request headers/base URL while restoring base pricing and id.
   return {model:{...model,id:base.id,cost:base.cost},fast:true};
  };
  const wrapped:Provider={
   ...original,
-  getModels:()=>aliases(original.getModels()),
+  getModels:()=>{
+   const models=original.getModels();
+   return [...aliases(models),...custom.filter(model=>!models.some(base=>base.id===model.id)).map(model=>({...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}))];
+  },
   filterModels:original.filterModels ? (models,credential)=>{
    const bases=models.filter(m=>!m.id.endsWith(FAST_SUFFIX));
    return aliases(original.filterModels!(bases,credential));

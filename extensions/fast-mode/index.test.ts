@@ -71,7 +71,7 @@ test('fast installation preserves unique models and reflects models.json refresh
   const ctx:any={model:base,modelRegistry:new ModelRegistry(runtime),ui:{notify(){}}};
   fastMode({registerProvider:(provider:any)=>{registrations++;runtime.registerNativeProvider(provider);},on:(_name:string,handler:any)=>{startup=handler;},registerCommand:(_name:string,entry:any)=>{command=entry;},getThinkingLevel:()=> 'low',setThinkingLevel:()=>{},setModel:async(model:any)=>{ctx.model=model;return true;}} as any);
   await startup({reason:'new'},ctx);
-  assert.equal(typeof ctx.modelRegistry.getRegisteredNativeProvider('openai')!.refreshModels,'function','Native wrapper must preserve the runtime catalog refresh chain');
+  assert.equal(typeof ctx.modelRegistry.getRegisteredNativeProvider('openai')!.refreshModels,'function','Native wrapper must retain catalog refreshModels rather than use a bare factory');
   const installed=registrations;
   const count=runtime.getModels('openai').length;
   for(let i=0;i<5;i++){
@@ -82,7 +82,7 @@ test('fast installation preserves unique models and reflects models.json refresh
    assert.equal(ctx.model.id,i%2===0?'gpt-5.5~fast':'gpt-5.5');
   }
   assert.equal(registrations,installed,'Composed providers must not accumulate wrapper layers');
-  // Settle registration's asynchronous refresh before changing the config file.
+  // Refresh the initial configuration before changing the config file.
   await ctx.modelRegistry.refresh({allowNetwork:false});
   await writeFile(modelsPath,JSON.stringify({providers:{}}));
   await ctx.modelRegistry.refresh({allowNetwork:false});
@@ -123,3 +123,31 @@ for(const [name,config] of [
   }finally{await rm(dir,{recursive:true,force:true});}
  });
 }
+
+test('config-declared direct models retain usable fast aliases',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-fast-custom-'));
+ try {
+  const modelsPath=join(dir,'models.json');
+  const definition={...openaiProvider().getModels().find(model=>model.id==='gpt-5.5')!,id:'gpt-custom',name:'Custom direct model'};
+  await writeFile(modelsPath,JSON.stringify({providers:{openai:{models:[definition]}}}));
+  const runtime=await ModelRuntime.create({modelsPath,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
+  const registry=new ModelRegistry(runtime);
+  let command:any;
+  const ctx:any={model:registry.find('openai','gpt-custom'),modelRegistry:registry,ui:{notify(){}}};
+  fastMode({registerProvider:(provider:any)=>runtime.registerNativeProvider(provider),on:()=>{},registerCommand:(_name:string,entry:any)=>{command=entry;},getThinkingLevel:()=> 'low',setThinkingLevel:()=>{},setModel:async(model:any)=>{ctx.model=model;return true;}} as any);
+  await command.handler('on',ctx);
+  assert.equal(ctx.model.id,'gpt-custom~fast');
+  await registry.refresh({allowNetwork:false});
+  let payload:any;
+  const fetch:typeof globalThis.fetch=async(_url,init)=>{
+   payload=JSON.parse(String(init?.body));
+   return new Response('data: '+JSON.stringify({type:'response.completed',response:{status:'completed',usage:{input_tokens:0,output_tokens:0}}})+'\n\n',{headers:{'content-type':'text/event-stream'}});
+  };
+  const output=await registry.getRegisteredNativeProvider('openai')!.streamSimple(ctx.model,{messages:[]},{apiKey:'fixture-key',reasoning:'low',fetch,maxRetries:0}).result();
+  assert.equal(output.stopReason,'stop',output.errorMessage);
+  assert.equal(payload.model,'gpt-custom');
+  assert.equal(payload.service_tier,'priority');
+  const models=runtime.getModels('openai');
+  assert.equal(new Set(models.map(model=>model.id)).size,models.length);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

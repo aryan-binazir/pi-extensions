@@ -134,9 +134,11 @@ test('project writes repair empty and whitespace-only ignore files', async () =>
   const app = runtime(project);
   for (const blank of ['', ' \t\r\n']) {
     await writeFile(join(dir, '.gitignore'), blank);
-    await app.call({ action: 'write', scope: 'project', name: 'topic', content: 'repaired note' });
+    const content = `repaired ${JSON.stringify(blank)}`;
+    await app.call({ action: 'write', scope: 'project', name: 'topic', content });
     assert.equal(await readFile(join(dir, '.gitignore'), 'utf8'), '*\n');
-    assert.match(JSON.stringify(await app.call({ action: 'read', scope: 'project', name: 'topic' })), /repaired note/);
+    const result = await app.call({ action: 'read', scope: 'project', name: 'topic' });
+    assert.deepEqual(result.content, [{ type: 'text', text: content }]);
   }
 });
 
@@ -151,6 +153,9 @@ test('memory preserves existing ignore rules and refuses writes when complete ex
   await assert.rejects(app.call({ action: 'write', scope: 'project', name: 'topic', content: 'must not be saved' }), /ignore/i);
   assert.equal(await readFile(path, 'utf8'), unsafe);
   assert.match(JSON.stringify(await app.call({ action: 'read', scope: 'project', name: 'topic' })), /safe note/);
+  const comments = ' \n# User-owned comment\n'; await writeFile(path, comments);
+  await assert.rejects(app.call({ action: 'write', scope: 'project', name: 'topic', content: 'must not be saved' }), /ignore/i);
+  assert.equal(await readFile(path, 'utf8'), comments);
 });
 
 test('topic names cannot alias the index on case-insensitive filesystems', async () => {

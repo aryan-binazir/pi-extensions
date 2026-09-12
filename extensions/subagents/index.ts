@@ -35,7 +35,8 @@ export default function subagents(pi: ExtensionAPI): void {
     if (shuttingDown || !count) return;
     const tasks: ReturnType<typeof taskView>[] = [];
     for (const notice of pending) {
-      const compact = {...notice, output: clipJson(notice.output, 1024, true)};
+      const output = clipJson(notice.output, 1024, true);
+      const compact = {...notice, output, outputTruncated: notice.outputTruncated || output.length < notice.output.length};
       if (Buffer.byteLength(JSON.stringify([...tasks, compact]), 'utf8') <= 12000) tasks.push(compact);
     }
     const value = count === 1 ? pending[0] : {tasks, additionalCompletions: count - tasks.length};

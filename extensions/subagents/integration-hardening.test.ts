@@ -35,6 +35,15 @@ async function fixture(run: (host: any) => Promise<void>) {
   }
 }
 
+test('batch re-clipping marks omitted output even when each original notice fitted', async () => fixture(async ({execute, settle, notifications}: any) => {
+  const children = await Promise.all([1, 2].map(i => execute('subagent', {task: String(i) + 'x'.repeat(1700), preset: 'reader'})));
+  await Promise.all(children.map(child => settle(child.details.id)));
+  await new Promise(resolve => setTimeout(resolve, 350));
+  const batch = notifications.find((notice: any) => notice.type === 'subagent-complete' && notice.task.tasks);
+  assert.equal(batch?.task.tasks.length, 2);
+  assert.ok(batch.task.tasks.every((task: any) => task.outputTruncated && task.output.length < task.outputLength));
+}));
+
 test('fast-mode aliases resolve to the base model for direct and workflow children', async () => fixture(async ({execute, ctx, settle}: any) => {
   ctx.model = {provider: 'openai-codex', id: 'gpt-5.6-luna~fast'};
   const child = await execute('subagent', {task: 'fast alias', preset: 'reader'});

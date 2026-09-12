@@ -10,7 +10,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
   const commands: Record<string, any> = {};
   const hooks: Record<string, any> = {};
   const requests: any[] = [];
-  const frames: string[] = [];
+  let renderRequests = 0;
   let component: any;
   const terminal = { rows: 40, columns: 80 };
   const ctx: any = {
@@ -38,7 +38,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
         assert.equal(options.overlayOptions.offsetY, -1);
         return new Promise((resolve) => {
           component = factory(
-            { requestRender() { if (component) frames.push(component.render(80).join("\n")); }, terminal },
+            { requestRender() { renderRequests++; }, terminal },
             {
               fg: (_: string, value: string) => value,
               bg: (color: string, value: string) => {
@@ -66,7 +66,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
     commands,
     hooks,
     requests,
-    frames,
+    get renderRequests() { return renderRequests; },
     terminal,
     lines: (width = 80): string[] => component.render(width),
     key: (s: string) => component.handleInput(s),
@@ -135,9 +135,11 @@ test("BTW requests an Answering repaint before the first stream event", async ()
     }),
   });
   const result = h.commands.btw.handler("Question", h.ctx);
+  const beforeAnswering = h.renderRequests;
   await tick();
-  assert.ok(h.frames.some((frame) => frame.includes("Answering…")));
-  assert.ok(h.frames.every((frame) => !frame.includes("Delayed answer")));
+  assert.ok(h.renderRequests > beforeAnswering);
+  assert.match(h.render(), /Answering…/);
+  assert.doesNotMatch(h.render(), /Delayed answer/);
   finish();await tick();
   h.key("\u001b");await result;
 });
@@ -214,8 +216,8 @@ for (const failure of ["auth", "stream", "partial stream"]) {
       return { ok: true, apiKey: "synthetic-key" };
     };
     h.ctx.modelRegistry.getProvider = () => ({
-      streamSimple: (_model: any, context: any) => {
-        h.requests.push({ context });
+      streamSimple: (_model: any, context: any, options: any) => {
+        h.requests.push({ context, options });
         const shouldFail = authCalls === 1;
         return {
           async *[Symbol.asyncIterator]() {

@@ -282,7 +282,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 const promptLimit = Math.max(1, budget - Math.min(editing ? editorRows.length : Math.min(content.length, Math.ceil(budget / 2)), budget - 1));
                 const promptRows = wrappedPrompt.slice(0, promptLimit);
                 if (wrappedPrompt.length > promptRows.length) {
-                  const indicator = w >= 32 ? " … [prompt truncated]" : "…";
+                  const indicator = w - promptPrefix.length >= 32 ? " … [prompt truncated]" : "…";
                   const last = promptRows.length - 1;
                   promptRows[last] = `${truncateToWidth(promptRows[last], Math.max(0, w - indicator.length), "")}${indicator}`;
                 }

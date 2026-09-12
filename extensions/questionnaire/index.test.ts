@@ -473,3 +473,23 @@ test("long prompts share space with choices within the fullscreen height cap", a
     await running;
   }
 });
+
+test("compact navigation and overflow notice leave the question text visible", async () => {
+  const h = host();
+  h.terminal.rows = 6;
+  const running = h.run([{ ...question("database"), prompt: "Which database should this application use?" }, question("next")]);
+  try {
+    for (const width of [20, 34, 40, 80]) {
+      const rows = h.render(width);
+      const text = stripTerminalSequences(rows.join("\n"));
+      assert.ok(rows.length <= 3);
+      assert.match(text, /1\/3/);
+      assert.match(text, /Which/);
+      assert.match(text, /Esc cancel/);
+      assert.ok(rows.every((row: string) => visibleWidth(row) <= width));
+    }
+  } finally {
+    h.key("\x1b");
+    await running;
+  }
+});

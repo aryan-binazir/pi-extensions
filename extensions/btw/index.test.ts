@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import btw from "./index.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
   const commands: Record<string, any> = {};
@@ -30,6 +31,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
       notify() {},
       custom: (factory: any, options: any) => {
         assert.equal(options.overlay, true);
+        assert.equal(options.overlayOptions.offsetY, -1);
         return new Promise((resolve) => {
           component = factory(
             { requestRender() {}, terminal },
@@ -65,11 +67,15 @@ test("BTW fills its overlay from opening through the first answer and resize", a
   const h = host();
   const result = h.commands.btw.handler("", h.ctx);
   assert.equal(h.lines().length, 36);
+  assert.match(h.lines()[0], /^┌─+┐$/);
+  assert.match(h.lines().at(-1)!, /^└─+┘$/);
+  assert.ok(h.lines().every((line) => visibleWidth(line) === 80));
   h.key("First question");h.key("\r");
   assert.equal(h.lines().length, 36);
   await tick();
   assert.equal(h.lines().length, 36);
   assert.match(h.render(), /Side answer/);
+  assert.doesNotMatch(h.render(), /Enter a followup/);
   for (const rows of [60, 20, 5, 1]) {
     h.terminal.rows = rows;
     assert.equal(h.lines(20).length, Math.max(1, Math.floor(rows * 0.9)));

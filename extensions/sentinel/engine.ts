@@ -49,7 +49,7 @@ function assessment(value: unknown): Assessment {
     user_authorization: v.user_authorization as Assessment['user_authorization'], rationale: v.rationale as string | undefined };
 }
 
-/** Sentinel v2 routing: sample asynchronously, reuse recent low evidence, and
+/** Sentinel routing: sample asynchronously, reuse recent low evidence, and
  * await a separate approval review on every fallback. Reviews never seed scores.
  * Cancellation bounds engine work even if a callback ignores its signal. Such a
  * callback's underlying I/O cannot be forcibly stopped; transports must honor abort. */
@@ -100,7 +100,8 @@ export class SentinelEngine {
       this.identity = input.identity;
     }
     const generation = this.generation;
-    this.schedule(input, index, generation, signal);
+    if (input.complete) this.schedule(input, index, generation, signal);
+    else this.latestFailed = index; // Do not pay for a score that cannot be reused.
     if (signal?.aborted || generation !== this.generation) return deny('aborted');
     const score = this.score;
     const reason = input.complete !== true ? 'incomplete_input'

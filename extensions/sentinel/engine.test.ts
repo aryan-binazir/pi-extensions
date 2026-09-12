@@ -190,7 +190,7 @@ test('incomplete input always reaches review unchanged and cannot seed reusable 
     await flush();
     const incomplete = engine.decide({ ...input, complete: false });
     assert.equal(reviews[1].input.complete, false);
-    scores[1].result.resolve('low');
+    assert.equal(scores.length, 1, 'incomplete evidence must not launch an unusable classifier');
     reviews[1].result.resolve({ outcome: 'deny' });
     assert.equal((await incomplete).reason, 'incomplete_input');
     await flush();

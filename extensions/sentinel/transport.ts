@@ -15,6 +15,7 @@ class RequestFailure extends Error {}
 /** The hidden reviewer is addressable even when omitted from Pi's model picker. */
 export function resolveReviewModel(ctx: ExtensionContext, spec: string): Model<Api> {
   const slash = spec.indexOf('/');
+  if (slash <= 0 || slash === spec.length - 1) throw new Error('Sentinel model must be provider/model');
   const provider = spec.slice(0, slash), id = spec.slice(slash + 1);
   const found = ctx.modelRegistry.find(provider, id);
   if (found) return found;
@@ -72,7 +73,7 @@ export async function sample(ctx: ExtensionContext, spec: string, stage: 'classi
       }
       const response = await stream.result();
       signal.throwIfAborted();
-      if (response.stopReason === 'error') throw new RequestFailure('Sentinel reviewer request failed');
+      if (response.stopReason === 'error') throw new RequestFailure(`Sentinel ${stage} request failed`);
       if (response.stopReason === 'aborted' || response.stopReason === 'length') throw new Error(`Sentinel response ended with ${response.stopReason}`);
       const calls = response.content.filter(part => part.type === 'toolCall');
       if (calls.length === 0) {
@@ -124,8 +125,8 @@ export async function review(ctx: ExtensionContext, spec: string, input: ModelRe
   const text = await withRetry(ctx, spec, 'reviewer', input, signal);
   try { return JSON.parse(text) as Assessment; }
   catch {
-    const start = text.indexOf('{'), end = text.lastIndexOf('}');
-    if (start < 0 || end < start) throw new Error('Invalid Sentinel assessment');
-    return JSON.parse(text.slice(start, end + 1)) as Assessment;
+    const fenced = /^\s*```(?:json)?\s*\n([\s\S]*?)\n```\s*$/i.exec(text);
+    if (!fenced) throw new Error('Invalid Sentinel assessment');
+    return JSON.parse(fenced[1]) as Assessment;
   }
 }

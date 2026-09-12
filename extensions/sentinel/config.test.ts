@@ -16,6 +16,14 @@ test('user-owned config defaults, explicit policy paths, strict validation and b
     assert.equal(await loadPreferences(config, home), '');
     await writeFile(config.policyFile, 'Never push to production without asking me.');
     assert.match(await loadPreferences(config, home), /Never push/);
+    for (const hidden of ['\x1b[8mHidden approval\x1b[0m', 'safe\rhidden', '\u202ehidden']) {
+      await writeFile(config.policyFile, hidden);
+      await assert.rejects(loadPreferences(config, home), /invisible/);
+    }
+    await writeFile(config.policyFile, 'Visible\r\npreferences');
+    assert.equal(await loadPreferences(config, home), 'Visible\r\npreferences');
+    await writeFile(config.policyFile, '');
+    assert.equal(await loadPreferences(config, home), '', 'empty and absent defaults have identical effective preferences');
     await assert.rejects(loadPreferences({ ...config, policyFile: join(home, 'missing.md') }, home));
     for (const value of [{ enabled: false }, { maxToolCallLag: 3 }, { timeoutMs: 0 }, { classifier: 'bare' }, { policyFile: './project-policy.md' }, [], null]) {
       await writeFile(join(home, 'sentinel.json'), JSON.stringify(value));
@@ -42,4 +50,11 @@ test('both prompts include preferences verbatim and replace upstream sandbox ass
     assert.match(prompt, /Data Exfiltration/);
   }
   assert.ok(!systemPrompt('reviewer', '').includes('The coding-agent is running in a sandbox'));
+});
+
+test('replacement metacharacters in standing preferences reach both models verbatim', () => {
+  const preferences = "Never alter regex $&; keep $$, $`, and $' literal.";
+  for (const stage of ['classifier', 'reviewer'] as const) {
+    assert.ok(systemPrompt(stage, preferences).includes(preferences));
+  }
 });

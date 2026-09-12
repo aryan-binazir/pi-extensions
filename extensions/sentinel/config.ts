@@ -20,14 +20,14 @@ export async function readBounded(path: string, maxBytes: number, optional = fal
   try {
     const info = await file.stat();
     if (!info.isFile() || info.size > maxBytes) throw new Error(`Sentinel file must be a regular file of at most ${maxBytes} bytes: ${path}`);
-    const buffer = Buffer.alloc(maxBytes + 1);
+    const buffer = Buffer.alloc(Math.min(info.size, maxBytes) + 1);
     let count = 0;
     while (count < buffer.length) {
       const { bytesRead } = await file.read(buffer, count, buffer.length - count, null);
       if (!bytesRead) break;
       count += bytesRead;
     }
-    if (count > maxBytes) throw new Error(`Sentinel file exceeds limit: ${path}`);
+    if (count > Math.min(info.size, maxBytes)) throw new Error(`Sentinel file grew during read or exceeds limit: ${path}`);
     return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, count));
   } finally { await file.close(); }
 }
@@ -62,5 +62,7 @@ export async function loadConfig(agentDir: string): Promise<SentinelConfig> {
 
 export async function loadPreferences(config: SentinelConfig, agentDir: string): Promise<string> {
   // Only the default absent file means no preferences; an explicitly selected missing file is an error.
-  return readBounded(config.policyFile, 32768, config.policyFile === resolve(agentDir, 'sentinel-policy.md'));
+  const text = await readBounded(config.policyFile, 32768, config.policyFile === resolve(agentDir, 'sentinel-policy.md'));
+  if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\r(?!\n)|\p{Bidi_Control}/u.test(text)) throw new Error('Sentinel preferences contain invisible terminal or bidirectional controls; use plain visible text');
+  return text;
 }

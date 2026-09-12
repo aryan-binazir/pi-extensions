@@ -15,7 +15,7 @@ test('stock Pi active permissions support default and preset children and workfl
     process.env.PATH = `${cwd}:${oldPath ?? ''}`;
     const agentDir = join(cwd, 'agent');
     process.env.PI_CODING_AGENT_DIR = agentDir;
-    const settingsManager = SettingsManager.inMemory({packages: [{ source: resolve(import.meta.dirname, '..'), extensions: ['extensions/*/index.ts', '!extensions/sentinel/index.ts'] }]});
+    const settingsManager = SettingsManager.inMemory({packages: [resolve(import.meta.dirname, '..')]});
     const resourceLoader = new DefaultResourceLoader({cwd, agentDir, settingsManager, noSkills: true, noContextFiles: true, noThemes: true, noPromptTemplates: true});
     await resourceLoader.reload();
     const modelRuntime = await ModelRuntime.create({authPath: join(agentDir, 'auth.json'), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false});
@@ -23,7 +23,7 @@ test('stock Pi active permissions support default and preset children and workfl
     await session.bindExtensions({});
     const runner = session.extensionRunner!;
     assert.ok(!session.getActiveToolNames().includes('grep'));
-    // Independently selected bundled tools still work when Sentinel is not enabled.
+    // Sentinel is loaded, but a new chat defaults to auto off.
     assert.notEqual((await runner.emitToolCall({type: 'tool_call', toolName: 'read', toolCallId: 'init', input: {path: join(cwd, 'pi')}}))?.block, true);
     const ctx = {...runner.createContext()};
     const execute = async (name: string, params: any) => await session!.getToolDefinition(name)!.execute(name, params, undefined, undefined, ctx) as any;

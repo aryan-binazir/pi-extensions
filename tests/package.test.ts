@@ -62,12 +62,12 @@ test('Pi package discovers exactly fourteen entrypoints and independently loads 
 });
 
 
-test('bundled tools work without a global classifier in a real headless session', async () => {
+test('bundled tools work with Sentinel loaded but auto off in a real headless session', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-managed-tools-'));
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
     const agentDir = join(temp, 'agent');
-    const settingsManager = SettingsManager.inMemory({packages: [{ source: root, extensions: ['extensions/*/index.ts', '!extensions/sentinel/index.ts'] }]});
+    const settingsManager = SettingsManager.inMemory({packages: [root]});
     const resourceLoader = new DefaultResourceLoader({cwd: temp, agentDir, settingsManager, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true});
     await resourceLoader.reload();
     const modelRuntime = await ModelRuntime.create({authPath: join(agentDir, 'auth.json'), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false});

@@ -1,7 +1,7 @@
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { getActiveCwd } from '../worktree/routing.ts';
@@ -10,6 +10,8 @@ import { digest, loadConfig, loadPreferences, readBounded, type SentinelConfig }
 import { collectEvidence } from './evidence.ts';
 import { SentinelEngine, type Verdict } from './engine.ts';
 import { classify, review, type ModelRequest } from './transport.ts';
+import { captureUserInput, classifyInstructions, sanitizeQuestionnaire } from './provenance.ts';
+import { controlAction } from './controls.ts';
 
 const MODE = 'sentinel:mode';
 const MAX_ASYNC_ACTION = 40000;
@@ -18,7 +20,10 @@ const inheritedPath = () => process.env.PI_SENTINEL_PARENT;
 
 export default function sentinel(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
-  let instructions = '', steering = '';
+  let instructions = '', untrustedInstructions = '', steering = '';
+  let bufferedInputs: unknown[] = [];
+  let bufferedInputOmission = false;
+  let publishedDigest = '';
   let config: SentinelConfig | undefined;
   let agentDir = getAgentDir();
   let inherited: InheritedSentinel | undefined;
@@ -39,15 +44,18 @@ export default function sentinel(pi: ExtensionAPI): void {
     return value;
   };
   const cwd = (ctx: ExtensionContext) => getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId());
-  const snapshot = (ctx: ExtensionContext) => collectEvidence(ctx, instructions, inherited?.authorization);
+  const snapshot = (ctx: ExtensionContext) => collectEvidence(ctx, instructions, inherited?.authorization, untrustedInstructions);
   const publish = () => {
     if (!context || !tempDirectory) return;
     if (!config || failure || !reviewedPolicy) throw new Error(failure ?? 'Sentinel configuration unavailable');
     const authorization = snapshot(context).authorization;
     const serialized = JSON.stringify({ version: 1, config, agentDir, policyDigest: reviewedPolicy, authorization } satisfies InheritedSentinel);
     if (Buffer.byteLength(serialized) > 1100000) throw new Error('Sentinel parent authorization exceeds child budget');
+    const nextDigest = digest(serialized);
+    if (nextDigest === publishedDigest && existsSync(join(tempDirectory, 'parent.json'))) return;
     writeFileSync(join(tempDirectory, 'parent.next'), serialized, { mode: 0o600 });
     renameSync(join(tempDirectory, 'parent.next'), join(tempDirectory, 'parent.json'));
+    publishedDigest = nextDigest;
   };
   const publishLifecycle = () => {
     try { publish(); }
@@ -66,7 +74,7 @@ export default function sentinel(pi: ExtensionAPI): void {
         if (!enabled || !config || failure) throw new Error(failure ?? 'Sentinel not ready');
         tempDirectory ??= mkdtempSync(join(tmpdir(), 'pi-sentinel-'));
         publish();
-        return { env: { PI_SENTINEL_PARENT: join(tempDirectory, 'parent.json') }, extensions: [fileURLToPath(import.meta.url)] };
+        return { env: { PI_SENTINEL_PARENT: join(tempDirectory, 'parent.json') }, extensions: [realpathSync(fileURLToPath(import.meta.url))] };
       },
     });
   };
@@ -74,6 +82,7 @@ export default function sentinel(pi: ExtensionAPI): void {
     context = ctx;
     const version = ++generation;
     engine?.reset(); engine = undefined;
+    incompleteReasons = [];
     failure = enabled ? 'Sentinel is initializing' : undefined;
     attachBridge(ctx);
     if (!enabled) { if (ctx.hasUI) ctx.ui.setStatus('sentinel', 'Sentinel: auto off'); return; }
@@ -83,7 +92,7 @@ export default function sentinel(pi: ExtensionAPI): void {
       const options = await loadConfig(directory);
       if (parent && digest(options) !== digest(parent.config)) throw new Error('Parent Sentinel configuration changed; restart child');
       const preferences = await loadPreferences(options, directory);
-      if (expected && expected !== digest({ config: options, preferences })) throw new Error('Sentinel files changed after confirmation; review again');
+      if (!parent && (!expected || expected !== digest({ config: options, preferences }))) throw new Error('Sentinel policy confirmation required or files changed; use /auto on to review again');
       const policyDigest = parent?.policyDigest ?? digest(preferences);
       if (policyDigest !== digest(preferences)) throw new Error('Parent has not approved current Sentinel policy');
       if (version !== generation) return;
@@ -94,7 +103,9 @@ export default function sentinel(pi: ExtensionAPI): void {
         review: (input, signal) => review(ctx, options.reviewer, input as ModelRequest, signal),
       });
       failure = undefined;
+      if (tempDirectory) mkdirSync(tempDirectory, { recursive: true, mode: 0o700 });
       if (ctx.hasUI) ctx.ui.setStatus('sentinel', 'Sentinel: auto on');
+      return true;
     } catch (error) {
       if (version !== generation) return;
       failure = error instanceof Error ? error.message : String(error);
@@ -102,55 +113,57 @@ export default function sentinel(pi: ExtensionAPI): void {
       publishLifecycle();
     }
   };
-  const restoredMode = (ctx: ExtensionContext) => {
-    if (inheritedPath()) return true;
-    let on = false;
+  const restoredMode = (ctx: ExtensionContext): { enabled: boolean; approval?: string } => {
+    if (inheritedPath()) return { enabled: true };
+    let mode: { enabled: boolean; approval?: string } = { enabled: false };
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === 'custom' && entry.customType === MODE) {
-        const data = entry.data as { version?: number; enabled?: unknown } | undefined;
-        on = data?.version === 1 && data.enabled === true;
+        const data = entry.data as { version?: number; enabled?: unknown; approval?: unknown } | undefined;
+        mode = { enabled: [1, 2].includes(data?.version ?? 0) && data?.enabled === true,
+          approval: data?.version === 2 && typeof data.approval === 'string' ? data.approval : undefined };
       }
     }
-    return on;
+    return mode;
   };
-  pi.on('session_start', async (_event, ctx) => { enabled = restoredMode(ctx); await initialize(ctx); });
-  pi.on('session_tree', async (_event, ctx) => {
-    context = ctx;
-    try {
-      const next = restoredMode(ctx);
-      if (enabled !== next) {
-        enabled = next;
-        // Navigation cannot silently approve files changed since the last confirmation.
-        if (enabled) {
-          if (!config || !reviewedPolicy) throw new Error('Confirm Sentinel policy with /auto on');
-          const preferences = await loadPreferences(config, agentDir);
-          if (digest(preferences) !== reviewedPolicy) throw new Error('Sentinel policy changed; run /sentinel reload');
-          await initialize(ctx, digest({ config, preferences }));
-        } else await initialize(ctx);
-      } else engine?.reset();
-    } catch (error) {
-      engine?.reset(); failure = String(error); attachBridge(ctx);
-    }
+  const restore = async (ctx: ExtensionContext) => {
+    bufferedInputs = []; bufferedInputOmission = false;
+    const mode = restoredMode(ctx); enabled = mode.enabled;
+    await initialize(ctx, mode.approval);
     publishLifecycle();
+  };
+  pi.on('session_start', (_event, ctx) => restore(ctx));
+  pi.on('session_tree', (_event, ctx) => restore(ctx));
+  pi.on('session_compact', () => { engine?.reset(); incompleteReasons = []; });
+  pi.on('input', (event) => {
+    engine?.reset();
+    const captured = captureUserInput(event);
+    if (!captured || inheritedPath()) return;
+    if (enabled || tempDirectory) { pi.appendEntry('sentinel:user-input', { version: 1, input: captured }); publishLifecycle(); }
+    else {
+      bufferedInputs.push(captured);
+      while (bufferedInputs.length > 1 && JSON.stringify(bufferedInputs).length > 128000) { bufferedInputs.shift(); bufferedInputOmission = true; }
+    }
   });
-  pi.on('session_compact', () => engine?.reset());
-  pi.on('input', () => engine?.reset());
-  pi.on('before_agent_start', (event, ctx) => {
+  pi.on('before_agent_start', async (event, ctx) => {
     context = ctx;
+    const version = generation;
     const options = event.systemPromptOptions;
-    const next = JSON.stringify({ customPrompt: options?.customPrompt, appendSystemPrompt: options?.appendSystemPrompt, contextFiles: options?.contextFiles ?? [] });
-    const nextSteering = digest({ prompt: event.systemPrompt, options });
-    if (next !== instructions || nextSteering !== steering) engine?.reset();
-    instructions = next; steering = nextSteering;
+    const provenance = await classifyInstructions(options, ctx.isProjectTrusted?.() === true, agentDir);
+    if (version !== generation) return;
+    const nextSteering = digest({ prompt: event.systemPrompt, options, provenance });
+    if (nextSteering !== steering) engine?.reset();
+    instructions = provenance.trusted; untrustedInstructions = provenance.untrusted; steering = nextSteering;
     publishLifecycle();
   });
   pi.on('tool_result', (event) => {
-    if (event.toolName !== 'questionnaire' || event.isError) return;
+    if ((!enabled && !tempDirectory) || event.toolName !== 'questionnaire' || event.isError) return;
     const source = pi.getAllTools().find(tool => tool.name === 'questionnaire')?.sourceInfo.path;
-    if (!source || resolve(source) !== fileURLToPath(new URL('../questionnaire/index.ts', import.meta.url))) return;
-    const result = event.details as { cancelled?: boolean; answers?: unknown[] } | undefined;
-    if (result?.cancelled !== false || !Array.isArray(result.answers)) return;
-    pi.appendEntry('sentinel:user-answer', { assistant_authored_questions: event.input, verified_answers: result.answers });
+    try {
+      if (!source || realpathSync(source) !== realpathSync(fileURLToPath(new URL('../questionnaire/index.ts', import.meta.url)))) return;
+    } catch { return; }
+    const answer = sanitizeQuestionnaire(event.input, event.details);
+    if (!answer) return;
+    pi.appendEntry('sentinel:user-answer', { version: 2, ...answer });
     engine?.reset(); publishLifecycle();
   });
 
@@ -163,7 +176,7 @@ export default function sentinel(pi: ExtensionAPI): void {
       const currentConfig = await loadConfig(agentDir);
       if (digest(currentConfig) !== digest(config)) { engine.reset(); throw new Error('Sentinel settings changed; run /sentinel reload'); }
       inherited = await readParent();
-      if (inherited && digest(inherited.config) !== digest(config)) throw new Error('Parent Sentinel configuration changed; restart child');
+      if (inherited && (inherited.agentDir !== agentDir || digest(inherited.config) !== digest(config))) throw new Error('Parent Sentinel configuration changed; restart child');
       if (inherited && inherited.policyDigest !== reviewedPolicy) { engine.reset(); reviewedPolicy = inherited.policyDigest; }
       const preferences = await loadPreferences(config, agentDir);
       if (digest(preferences) !== reviewedPolicy) { engine.reset(); throw new Error('Sentinel policy changed; run /sentinel reload to confirm the new policy'); }
@@ -174,22 +187,24 @@ export default function sentinel(pi: ExtensionAPI): void {
       incompleteReasons = [...evidence.incompleteReasons, ...(size > MAX_ASYNC_ACTION ? ['async_action_budget'] : [])];
       const identity = digest({ session: ctx.sessionManager.getSessionId(), cwd: action.cwd, authorization: evidence.identity, steering, preferences, config });
       const input: ModelRequest = { identity, action, evidence: evidence.text, images: evidence.images, cwd: action.cwd, systemPrompt: preferences, complete: evidence.complete && size <= MAX_ASYNC_ACTION, asyncEligible: size <= MAX_ASYNC_ACTION };
-      // Direct relative paths and custom policy filenames cannot ride a cached score.
-      const paths = [config.policyFile, resolve(agentDir, 'sentinel.json')];
-      const values = (value: unknown): string[] => typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(values) : value && typeof value === 'object' ? Object.values(value).flatMap(values) : [];
-      if (values(action.arguments).some(value => paths.includes(resolve(action.cwd, value)) || paths.some(path => value.includes(path)) || value.includes('sentinel-policy.md') || value.includes('sentinel.json'))) engine.reset();
+      const controls = controlAction(event.toolName, action.arguments, action.cwd, agentDir, config.policyFile, inheritedPath(), ctx.sessionManager.getSessionFile?.());
+      if (controls === 'deny') throw new Error('Sentinel control files cannot be changed by guarded write/edit tools; use /auto off for explicit maintenance');
+      if (controls === 'review') engine.reset();
       publish();
       if (ctx.hasUI) ctx.ui.setStatus('sentinel', `Sentinel: checking ${event.toolName}`);
       const verdict = await engine.decide(input, ctx.signal);
       ctx.signal?.throwIfAborted();
       if (!enabled || version !== generation) throw new Error('Sentinel session changed during review');
       const latestParent = await readParent();
-      const latestEvidence = collectEvidence(ctx, instructions, latestParent?.authorization);
-      if (latestEvidence.identity !== evidence.identity || (latestParent && latestParent.policyDigest !== reviewedPolicy) || cwd(ctx) !== action.cwd || digest(await loadPreferences(config, agentDir)) !== reviewedPolicy || digest(await loadConfig(agentDir)) !== digest(config)) {
+      const latestEvidence = collectEvidence(ctx, instructions, latestParent?.authorization, untrustedInstructions);
+      const parentChanged = latestParent && (latestParent.agentDir !== agentDir || latestParent.policyDigest !== reviewedPolicy || digest(latestParent.config) !== digest(config));
+      const authorityChanged = latestEvidence.identity !== evidence.identity || cwd(ctx) !== action.cwd;
+      const filesChanged = digest(await loadPreferences(config, agentDir)) !== reviewedPolicy || digest(await loadConfig(agentDir)) !== digest(config);
+      if (parentChanged || authorityChanged || filesChanged) {
         engine.reset(); throw new Error('Sentinel authorization, policy, settings, or worktree changed during review; retry');
       }
       record(verdict, event.toolName, ctx);
-      if (!verdict.allow) return { block: true, reason: `Sentinel: ${verdict.assessment?.rationale ?? verdict.reason}. Do not bypass this denial; obtain specific user authorization or use a safer action.` };
+      if (!verdict.allow) return { block: true, reason: `Sentinel: ${(verdict.assessment?.rationale ?? verdict.reason).slice(0, 2000)}. Do not bypass this denial; obtain specific user authorization or use a safer action.` };
     } catch (error) {
       engine?.reset();
       const reason = error instanceof Error ? error.message : String(error);
@@ -209,9 +224,9 @@ export default function sentinel(pi: ExtensionAPI): void {
     }
     if (!ctx.isIdle() || !ctx.hasUI || inheritedPath()) { ctx.ui.notify('Sentinel mode/policy changes require an idle interactive parent session', 'warning'); return; }
     if (action === 'off') {
-      enabled = false; ++generation; engine?.reset(); engine = undefined; failure = undefined;
+      enabled = false; ++generation; engine?.reset(); engine = undefined; failure = undefined; incompleteReasons = [];
       unregister?.(); unregister = undefined;
-      pi.appendEntry(MODE, { version: 1, enabled: false });
+      pi.appendEntry(MODE, { version: 2, enabled: false });
       ctx.ui.setStatus('sentinel', 'Sentinel: auto off');
       ctx.ui.notify('Auto review is off. Already-running guarded children remain guarded until they finish.', 'info'); return;
     }
@@ -220,11 +235,15 @@ export default function sentinel(pi: ExtensionAPI): void {
       const preferences = await loadPreferences(next, agentDir);
       const shown = `Settings:\n${JSON.stringify(next, null, 2)}\n\nStanding preferences:\n${preferences || '(none)'}`;
       const submitted = await ctx.ui.editor('Review Sentinel settings and policy; submit unchanged to confirm', shown);
-      if (submitted !== shown || !await ctx.ui.confirm('Enable auto review with this policy?', 'These preferences will authorize or restrict actions in this session and its children.')) return;
+      if (submitted !== shown) { ctx.ui.notify('Sentinel unchanged: submit the displayed text without edits to approve it.', 'info'); return; }
+      if (!await ctx.ui.confirm('Enable auto review with this policy?', 'These preferences will authorize or restrict actions in this session and its children.')) return;
       const expected = digest({ config: next, preferences });
       enabled = true;
-      await initialize(ctx, expected);
-      pi.appendEntry(MODE, { version: 1, enabled: true });
+      if (!await initialize(ctx, expected)) return;
+      if (bufferedInputOmission) pi.appendEntry('sentinel:user-input', { version: 1, input: { text: '<sentinel_truncated reason="inputs_before_enable" />', complete: false } });
+      for (const input of bufferedInputs) pi.appendEntry('sentinel:user-input', { version: 1, input });
+      bufferedInputs = []; bufferedInputOmission = false;
+      pi.appendEntry(MODE, { version: 2, enabled: true, approval: expected });
       publishLifecycle();
     } catch (error) { ctx.ui.notify(String(error), 'error'); }
   };
@@ -232,6 +251,7 @@ export default function sentinel(pi: ExtensionAPI): void {
   pi.registerCommand('auto', { description: 'Session auto review (new chats default off): /auto [on|off|status]', handler: command });
   pi.on('session_shutdown', async () => {
     ++generation; engine?.reset(); engine = undefined; failure = 'Sentinel session stopped';
+    incompleteReasons = []; bufferedInputs = []; context = undefined;
     unregister?.(); unregister = undefined;
     if (tempDirectory) await rm(tempDirectory, { recursive: true, force: true });
     tempDirectory = undefined;

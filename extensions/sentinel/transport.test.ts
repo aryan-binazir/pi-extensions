@@ -55,7 +55,10 @@ test('malformed inspection arguments produce an error result rather than executi
 test('reviewer accepts fenced JSON but rejects malformed objects; truncated and aborted responses never approve', async () => {
   const response = (text: string, stopReason = 'stop') => ({ role: 'assistant', stopReason, content: [{ type: 'text', text }] });
   assert.deepEqual(await review(context([response('```json\n{"outcome":"allow"}\n```')]), 'test/reviewer', input, new AbortController().signal), { outcome: 'allow' });
-  await assert.rejects(review(context([response('not json')]), 'test/reviewer', input, new AbortController().signal));
+  for (const text of ['not json', 'For example: {"outcome":"allow"}. That is not my decision.']) {
+    await assert.rejects(review(context([response(text)]), 'test/reviewer', input, new AbortController().signal));
+  }
+  await assert.rejects(review(context([]), 'missing-provider', input, new AbortController().signal), /provider\/model/);
   for (const stop of ['length', 'aborted']) await assert.rejects(sample(context([response('{"outcome":"allow"}', stop)]), 'test/reviewer', 'reviewer', input, new AbortController().signal));
 });
 
@@ -68,4 +71,21 @@ test('transport failure gets one bounded retry, invalid classifications are not 
   const invalid: any[] = [];
   await assert.rejects(classify(context([{ deltas: ['bad'] }], invalid), 'test/luna', input, new AbortController().signal));
   assert.equal(invalid.length, 1);
+});
+
+test('blocking inspection enforces round, call-count and aggregate-output budgets', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'sentinel-budgets-'));
+  const calls = (count: number, path = 'missing') => ({ role: 'assistant', stopReason: 'toolUse', content: Array.from({ length: count }, (_, id) => ({ type: 'toolCall', id: String(id), name: 'read', arguments: { path } })) });
+  try {
+    const rounds: any[] = [];
+    await assert.rejects(sample(context(Array.from({ length: 5 }, () => calls(1)), rounds), 'test/reviewer', 'reviewer', { ...input, cwd: home }, new AbortController().signal), /round budget/);
+    assert.equal(rounds.length, 5);
+    await assert.rejects(sample(context([calls(9)]), 'test/reviewer', 'reviewer', { ...input, cwd: home }, new AbortController().signal), /inspection budget/);
+    await writeFile(join(home, 'large'), 'x'.repeat(45000));
+    const captured: any[] = [];
+    await sample(context([calls(2, 'large'), { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: '{"outcome":"deny"}' }] }], captured), 'test/reviewer', 'reviewer', { ...input, cwd: home }, new AbortController().signal);
+    const results = captured[1].messages.filter((message: any) => message.role === 'toolResult');
+    assert.equal(results[0].isError, false); assert.equal(results[1].isError, true);
+    assert.ok(results.reduce((size: number, result: any) => size + result.content[0].text.length, 0) <= 64000);
+  } finally { await rm(home, { recursive: true, force: true }); }
 });

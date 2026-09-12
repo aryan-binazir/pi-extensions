@@ -16,7 +16,9 @@ make model requests.
 Changes require an idle interactive parent session. Mode is recorded in the current
 session branch, restored on resume, and defaults off when there is no saved entry.
 Children inheriting an enabled guard cannot turn it off. Session navigation resets
-scores; navigating into an enabled branch cannot silently approve a changed policy.
+scores. The confirmed settings/preferences fingerprint is persisted with enabled
+mode, so resume, extension reload, and branch navigation cannot silently approve
+changed files. Older enabled entries without that fingerprint require confirmation.
 
 ## Your preferences file
 
@@ -40,7 +42,9 @@ relevant conversation/tool evidence are sent to the configured review providers.
 While auto review is enabled, file changes immediately prevent further approvals
 until `/sentinel reload` confirms the new contents. An agent edit cannot silently
 become trusted authorization. No repository-local config overrides this user file.
-On resuming an enabled session, user-owned global settings are loaded afresh.
+Resume rereads global settings and checks the saved confirmation. Guarded direct
+writes to policy, session/approval records, provider settings and guard code are
+blocked. Use `/auto off` for explicit maintenance, then `/auto on` to confirm.
 
 Optional **`~/.pi/agent/sentinel.json`** settings (all fields optional):
 
@@ -56,18 +60,22 @@ Optional **`~/.pi/agent/sentinel.json`** settings (all fields optional):
 An optional `policyFile` selects an absolute path; omitting it derives the default
 from Pi's actual agent directory. Lag is 0–2 and timeout is 100–300000 milliseconds.
 Unknown keys, invalid JSON, symlinks, non-regular files, invalid UTF-8 and read
-failures block enabled review. Config is limited to 8 KiB; preferences to 32 KiB.
+failures block enabled review. Invisible terminal/bidirectional controls in preferences
+are rejected so they cannot conceal policy text during confirmation. Config is
+limited to 8 KiB; preferences to 32 KiB.
 Missing default files mean defaults/no extra preferences; an explicitly selected
 missing policy file is an error.
 
 Pi supplies provider authentication, OAuth refresh, headers, environment and base
 URL. Luna must be present in the model catalog. The blocking model can be addressed
-through the provider even when hidden from the model picker. Credentials are never
+through the provider even when hidden from the model picker, using that provider's
+Luna transport metadata without changing the requested model ID. Register an explicit
+model definition if its endpoint/capabilities differ. Provider credentials are never
 copied into Sentinel settings, child snapshots, or decision logs.
 
 ## How review works
 
-1. Each proposed LLM tool call starts an asynchronous trajectory classification.
+1. Each eligible LLM tool call starts an asynchronous trajectory classification.
    Luna predicts current and upcoming risk and emits `high` or `low`.
 2. A previous `low` score can release a call only with unchanged user authority,
    steering instructions, policy, session and worktree, within two tool calls.
@@ -83,8 +91,8 @@ cannot overwrite newer scores. The first nonempty output delta decides; malforme
 or split labels require blocking review. Requests use SSE and abort after the first
 classification instead of retaining background sockets. Transport failures get one
 bounded retry within the same decision timeout; malformed decisions do not. There
-is no circuit breaker or silent model substitution. Reviewer JSON may have a prose
-or code-fence wrapper, but the extracted object must validate.
+is no circuit breaker or silent model substitution. Reviewer JSON must be a bare
+object or a complete code-fenced object; narrative/example JSON is not an approval.
 
 Per attempt, blocking review has five model rounds, eight read-only inspections,
 and 64K characters of inspection output. Actions over 40K characters skip the fast
@@ -93,24 +101,38 @@ action limit is 256K characters. No truncated action is approved as if complete.
 
 ## Evidence and delegated work
 
-Original user messages survive compaction as authority. Summaries, assistant text,
-tool outputs, skill/plugin descriptions and delegation briefs remain untrusted
-execution evidence. Host-loaded instructions have a separate budget from user
-messages. Only verified questionnaire **answers** carry user input; the model's
-questions remain explicitly untrusted, not blanket authorization.
+Original interactive/RPC input is captured **before** skill/template expansion and
+retained as separate session metadata when auto is enabled. Before first enablement,
+that capture is bounded in-memory only. Older/unobserved user-role messages are not
+proof of user origin; restate the task if its original input is unavailable. Expanded
+skills/templates, extension custom messages, summaries, tool output and delegation
+briefs are untrusted evidence. New custom-message steering invalidates cached scores.
+
+Canonical global user instructions, or context files in an explicitly trusted project,
+have a separate authority budget. Other repository instructions and unsourced prompt
+overrides stay untrusted. No context file can manufacture a direct user's approval.
+Questionnaire authority contains only the displayed selected **label** or custom user
+text, with a numeric question index—not hidden option values or textual IDs. Questions
+and option metadata remain untrusted, including legacy unsanitized answer entries.
 
 Budgets: 128K characters each for user authority and host instructions; the newest
-20 non-user entries, 16K characters per entry and 64K total; four images/4 MiB of
-encoded data, preferring recent screenshots. Truncation prevents cached approvals
-and is surfaced in status. Child snapshots omit image payloads and explicitly mark
+20 execution/expanded entries, 65,536 characters per entry and 196,608 total; four
+images/4 MiB of encoded data. User-provided visual authority gets slots before recent
+tool screenshots. Truncation prevents cached approvals and is surfaced in status.
+Incomplete evidence goes directly to blocking review without paying for an unusable
+classifier request. An oversized original-user history remains incomplete; start a
+new session with concise scope rather than silently discarding earlier restrictions. Child snapshots omit image payloads and explicitly mark
 visual user authority as incomplete rather than claiming to have transmitted it.
 
 When Sentinel is enabled, the bundled direct-subagent and workflow launch paths
-inject the guard even with normal extension discovery disabled. A private live
+inject the guard **last**, even with normal extension discovery disabled. A private live
 snapshot carries root user authority and confirmed policy identity. A child brief
 is not independent user approval. Children reread root authority before each call;
 confirmed policy updates propagate. Model/settings changes require restarting
-existing children. Parent shutdown removes the snapshot after child shutdown.
+existing children. If files change while the parent is off, guarded children block;
+the parent can confirm with `/sentinel reload`, then turn off again. Normal parent
+shutdown removes the snapshot after child shutdown. SIGKILL can leave a private
+snapshot in the OS temporary directory; never remove another live parent's snapshot.
 
 ## Boundaries
 

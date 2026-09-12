@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import effort from "./index.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 
 function host(bus = createEventBus()) {
@@ -70,7 +71,7 @@ function host(bus = createEventBus()) {
     changes,
     notices,
     key: (s: string) => component.handleInput(s),
-    render: () => component.render(80).join("\n"),
+    render: (width = 80) => component.render(width).join("\n"),
   };
 }
 test("slider traverses only actual supported thinking levels", async () => {
@@ -83,6 +84,25 @@ test("slider traverses only actual supported thinking levels", async () => {
   await result;
   assert.deepEqual(h.changes, ["max"]);
 });
+test("slider has a padded full border and fits narrow terminals", async () => {
+  const h = host();
+  h.ctx.model.id = "模型".repeat(60);
+  const result = h.commands.effort.handler("", h.ctx);
+  for (const width of [5, 20, 40, 80]) {
+    const lines = h.render(width).split("\n");
+    assert.equal(lines[0], `╭${"─".repeat(width - 2)}╮`);
+    assert.equal(lines.at(-1), `╰${"─".repeat(width - 2)}╯`);
+    for (const line of lines) assert.equal(visibleWidth(line), width);
+    for (const line of lines.slice(1, -1)) assert.match(line, /^│ .* │$/);
+  }
+  for (const width of [1, 2, 4])
+    for (const line of h.render(width).split("\n"))
+      assert.ok(visibleWidth(line) <= width);
+  h.key("\u001b");
+  await result;
+  h.hooks.session_shutdown();
+});
+
 test("new-session handoff applies only on replacement runtime and leaves defaults alone", async () => {
   const bus = createEventBus();
   const old = host(bus);

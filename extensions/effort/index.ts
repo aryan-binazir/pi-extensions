@@ -10,6 +10,7 @@ import type {
 import {
   matchesKey,
   stripTerminalSequences,
+  truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
@@ -143,24 +144,36 @@ export default function effort(pi: ExtensionAPI) {
                   tui.requestRender();
                 },
                 render(width: number) {
-                  return [
+                  const innerWidth = Math.max(1, width - 4);
+                  const lines = [
                     `Effort — ${model.id}`,
+                    "",
                     levels
                       .map((value, i) =>
                         i === selected ? `[● ${value}]` : `○ ${value}`,
                       )
                       .join(" ─ "),
+                    "",
                     "←→ adjust • Enter applies • Esc cancels",
                   ].flatMap((s) =>
                     wrapTextWithAnsi(
                       stripTerminalSequences(s),
-                      Math.max(1, width),
+                      innerWidth,
                     ),
                   );
+                  if (width < 5)
+                    return lines.map((line) => truncateToWidth(line, width, ""));
+                  return [
+                    `╭${"─".repeat(width - 2)}╮`,
+                    ...lines.map((line) =>
+                      `│ ${truncateToWidth(line, innerWidth, "", true)} │`,
+                    ),
+                    `╰${"─".repeat(width - 2)}╯`,
+                  ];
                 },
               };
             },
-          { overlay: true },
+            { overlay: true, overlayOptions: { width: 80 } },
           );
         } finally {
           closeSlider = undefined;

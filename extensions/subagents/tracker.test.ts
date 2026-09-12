@@ -44,6 +44,21 @@ test('single request, minute cadence, deadline visible and late response suppres
   t.mock.timers.tick(1); await tick(); assert.equal(f.calls.length, 2); f.tracker.stop(); release();
 });
 
+test('invalidating one cancelled child suppresses stale reports without accelerating the cadence', async t => {
+  let release!: () => void;
+  const f = fixture(t, async function* () {await new Promise<void>(r => {release = r;}); yield {type: 'text_delta', delta: 'stale'}; yield {type: 'done', reason: 'stop'};});
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  f.tasks.push({...f.tasks[0], id: 'remaining'});
+  f.tasks[0].status = 'cancelled';
+  f.tracker.invalidate();
+  assert.equal(f.calls[0][2].signal.aborted, true);
+  release(); await tick(); assert.deepEqual(f.reports, []);
+  t.mock.timers.tick(59999); await tick(); assert.equal(f.calls.length, 1);
+  t.mock.timers.tick(1); await tick(); assert.equal(f.calls.length, 2);
+  assert.equal(JSON.parse(f.calls[1][1].messages[0].content).running[0].id, 'remaining');
+  f.tracker.stop(); release();
+});
+
 test('stop/no work prevents late publication and subsequent work restarts', async t => {
   let release!: () => void;
   const f = fixture(t, async function* () {await new Promise<void>(r => {release = r;}); yield {type: 'text_delta', delta: 'late'}; yield {type: 'done', reason: 'stop'};});

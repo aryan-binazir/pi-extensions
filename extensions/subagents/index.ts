@@ -69,7 +69,15 @@ export default function subagents(pi: ExtensionAPI): void {
   const trackedSpawn = async (task: TaskSpec, signal?: AbortSignal, owner: 'parent' | 'workflow' = 'parent') => {
     const handle = await registry.spawn(task, signal, owner);
     if (!shuttingDown && !cancellingAll) tracker.update();
-    void handle.done.then(() => { if (!shuttingDown && !cancellingAll) tracker.update(); });
+    const invalidate = () => { if (!shuttingDown && !cancellingAll) tracker.invalidate(); };
+    signal?.addEventListener('abort', invalidate, {once: true});
+    if (signal?.aborted) invalidate();
+    void handle.done.then(task => {
+      signal?.removeEventListener('abort', invalidate);
+      if (!shuttingDown && !cancellingAll) {
+        if (task.status === 'cancelled') tracker.invalidate(); else tracker.update();
+      }
+    });
     pi.events.emit('pi-interactive:background-activity', { id: handle.id, active: true });
     void handle.done.then(() => pi.events.emit('pi-interactive:background-activity', { id: handle.id, active: false }));
     return handle;
@@ -113,6 +121,7 @@ export default function subagents(pi: ExtensionAPI): void {
       }
     }
     const cancelled = registry.cancel(id);
+    if (cancelled) tracker.invalidate();
     await registry.wait(id);
     return {cancelled};
   };
@@ -192,6 +201,7 @@ export default function subagents(pi: ExtensionAPI): void {
           workflowRuns.delete(run);
         }
       } finally {
+        controller.abort();
         workflows.delete(controller);
         signal?.removeEventListener('abort', abort);
       }

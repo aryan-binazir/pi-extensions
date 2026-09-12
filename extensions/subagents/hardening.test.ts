@@ -3,6 +3,38 @@ import { tmpdir } from 'node:os';
 import test from 'node:test';
 import { SubagentRegistry } from './registry.ts';
 
+test('a long-running task remains retained when it finishes after many shorter tasks', async () => {
+  const registry = new SubagentRegistry({invocation: spec => {
+    if (spec.task === 'long') return {command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)']};
+    throw new Error('Synthetic short task');
+  }});
+  try {
+    const first = await registry.spawn({task: 'long', cwd: tmpdir(), preset: 'reader'});
+    for (let i = 0; i < 51; i++) await (await registry.spawn({task: `short ${i}`, cwd: tmpdir(), preset: 'reader'})).done;
+    registry.cancel(first.id);
+    await first.done;
+    assert.equal(registry.get(first.id)?.status, 'cancelled');
+    assert.equal(registry.list().at(-1)?.id, first.id);
+  } finally { await registry.shutdown(); }
+});
+
+test('cancel-all winning an admission microtask race prevents the launch', async () => {
+  for (let depth = 0; depth < 8; depth++) {
+    let cancelled = false, lateLaunches = 0;
+    let cancellation = Promise.resolve();
+    const registry = new SubagentRegistry({authorize: async () => {
+      let chain = Promise.resolve();
+      for (let i = 0; i < depth; i++) chain = chain.then(() => undefined);
+      cancellation = chain.then(async () => { cancelled = true; await registry.cancelAll(); });
+    }, invocation: () => { if (cancelled) lateLaunches++; throw new Error('Synthetic launch boundary'); }});
+    try {
+      await registry.spawn({task: 'admission race', cwd: tmpdir()}).then(handle => handle.done, () => undefined);
+      await cancellation;
+      assert.equal(lateLaunches, 0, `launch after cancellation at microtask depth ${depth}`);
+    } finally { await registry.shutdown(); }
+  }
+});
+
 test('queued work cannot launch with tools revoked by its owner while it waited', async () => {
   let allowed = ['read', 'write'];
   const launched: string[] = [];

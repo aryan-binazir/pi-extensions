@@ -29,6 +29,12 @@ export class SubagentTracker {
     }, Math.max(0, this.nextAt - Date.now()));
     this.timer.unref();
   }
+  invalidate(): void {
+    const nextAt = this.nextAt;
+    this.stop();
+    this.nextAt = nextAt;
+    this.update();
+  }
   stop(): void {
     this.generation++;
     this.nextAt = 0;

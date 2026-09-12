@@ -64,6 +64,17 @@ test('cancel all stops current children and leaves the orchestrator usable', asy
   assert.equal((await settle(next.details.id)).status, 'succeeded');
 }));
 
+test('a workflow deadline prevents a late editor submission from opening confirmation', async () => fixture(async ({execute, ctx}: any) => {
+  let release!: (source: string) => void;
+  let confirmations = 0;
+  ctx.ui.editor = () => new Promise<string>(resolve => { release = resolve; });
+  ctx.ui.confirm = async () => { confirmations++; return true; };
+  await assert.rejects(execute('workflow', {source: 'return 1;', timeout: 50}), /aborted/);
+  release('return 1;');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(confirmations, 0);
+}));
+
 test('shutdown settles an open workflow editor and ignores its late submission', async () => fixture(async ({execute, ctx, hooks}: any) => {
   let release!: (value: string) => void, entered!: () => void;
   let confirmations = 0;
@@ -206,9 +217,10 @@ test('shutdown aborts a pending tracker without delaying children and late repor
     while (requests.length < count && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(requests.length, count);
   };
-  await execute('subagent', {task: 'hold', preset: 'reader'}); await waitForRequest(1);
-  const second = await execute('subagent', {task: 'hold', preset: 'reader'});
-  await execute('subagent_cancel', {id: second.details.id});
+  const first = await execute('subagent', {task: 'hold', preset: 'reader'}); await waitForRequest(1);
+  await execute('subagent', {task: 'hold', preset: 'reader'});
+  await execute('subagent_cancel', {id: first.details.id});
+  assert.equal(requests[0].signal.aborted, true, 'individual cancellation invalidates the shared pending snapshot');
   await hooks.get('session_shutdown')();
   assert.equal(requests[0].signal.aborted, true);
   await hooks.get('session_start')({}, ctx);

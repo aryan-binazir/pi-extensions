@@ -66,8 +66,9 @@ explicit tool requests outside those permissions are rejected. It returns a task
 is pushed into the parent conversation. `subagent_status` inspects the registry;
 `subagent_cancel` or `/subagents cancel ID` cancels a task. Same-directory writers
 queue behind one another. Timeouts, cancellation and session shutdown terminate
-process groups, including ordinary descendants. A descendant that deliberately
-creates a new session can escape portable process-group cleanup.
+process groups, including descendants in those groups. Separate groups/sessions,
+including stock Pi's detached bash jobs, depend on Pi's own graceful cleanup;
+if Pi is wedged or killed first, those jobs can escape portable group cleanup.
 
 The default deadline is one hour, including approval and queue time. Children
 inherit the selected parent model and thinking level unless explicitly overridden.

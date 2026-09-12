@@ -119,6 +119,7 @@ export class SubagentRegistry {
       validated = await abortable(validateTask(spec, this.options.allowedTools?.()), admissionSignal);
       admissionSignal.throwIfAborted();
       await abortable(this.options.authorize?.(validated), admissionSignal);
+      admissionSignal.throwIfAborted();
       if (Date.now() >= deadlineAt) throw new Error('Task admission deadline exceeded');
     } finally { clearTimeout(timer); }
     signal?.throwIfAborted();
@@ -324,6 +325,9 @@ export class SubagentRegistry {
   private finish(entry: Entry) {
     if (entry.finished) return;
     entry.finished = true;
+    // Keep outstanding insertion order but put terminal records in completion order.
+    this.entries.delete(entry.result.id);
+    this.entries.set(entry.result.id, entry);
     entry.detachSignal?.();
     clearTimeout(entry.timer); clearTimeout(entry.killTimer);
     // Queued cancellation does not hold a process slot.

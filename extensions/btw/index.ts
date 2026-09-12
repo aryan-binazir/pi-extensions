@@ -3,13 +3,16 @@ import type { Message } from "@earendil-works/pi-ai";
 import {
   buildSessionContext,
   convertToLlm,
+  getMarkdownTheme,
   serializeConversation,
   sessionEntryToContextMessages,
   type ExtensionAPI,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+  Box,
   Editor,
+  Markdown,
   matchesKey,
   stripTerminalSequences,
   wrapTextWithAnsi,
@@ -261,15 +264,28 @@ export default function btw(pi: ExtensionAPI) {
               const framed = width >= 3 && totalHeight >= 3;
               const w = Math.max(1, width - (framed ? 2 : 0));
               const innerHeight = totalHeight - (framed ? 2 : 0);
-              const display = [
-                ...turns.map((turn) => `You: ${turn.question}\n\nBTW: ${turn.answer || "(No answer)"}`),
-                ...(busy ? [`You: ${currentQuestion}\n\nBTW: ${answer || "…"}`] : []),
-                ...pending.map((question) => `You (queued): ${question}`),
-              ].join("\n\n") || "Ask a side question below.";
-              const lines = wrapTextWithAnsi(
-                stripTerminalSequences(display).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""),
-                w,
-              );
+              const clean = (text: string) => stripTerminalSequences(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+              const padding = w >= 3 ? 1 : 0;
+              const markdownTheme = getMarkdownTheme();
+              const userLines = (question: string) => {
+                const box = new Box(padding, 1, (text) => theme.bg("userMessageBg", text));
+                box.addChild(new Markdown(clean(question), 0, 0, markdownTheme, {
+                  color: (text) => theme.fg("userMessageText", text),
+                }, { preserveOrderedListMarkers: true, preserveBackslashEscapes: true }));
+                return box.render(w);
+              };
+              const turnLines = (question: string, reply: string) => [
+                ...userLines(question),
+                "",
+                ...new Markdown(clean(reply), padding, 0, markdownTheme).render(w),
+                "",
+              ];
+              const lines = [
+                ...turns.flatMap((turn) => turnLines(turn.question, turn.answer || "(No answer)")),
+                ...(busy ? turnLines(currentQuestion, answer || "…") : []),
+                ...pending.flatMap((question) => userLines(`(queued)\n${question}`)),
+              ];
+              if (!lines.length) lines.push(...wrapTextWithAnsi("Ask a side question below.", w));
               const footer = [
                 ...wrapTextWithAnsi(stripTerminalSequences(status).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""), w),
                 ...editor.render(w),

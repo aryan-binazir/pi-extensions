@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import { createAgentSession, ModelRuntime, SessionManager, DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
 
 const root = resolve(import.meta.dirname, '..');
-const intended = ['questionnaire', 'memory', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'mcp-client', 'web-search', 'computer-use', 'fast-mode', 'auto-caffeinate', 'auto-mode'];
+const intended = ['questionnaire', 'memory', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'mcp-client', 'web-search', 'computer-use', 'fast-mode', 'auto-caffeinate'];
 
-test('Pi package discovers exactly fifteen entrypoints and independently loads each', async () => {
+test('Pi package discovers exactly fourteen entrypoints and independently loads each', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-package-test-'));
   try {
     const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -35,7 +35,6 @@ test('Pi package discovers exactly fifteen entrypoints and independently loads e
         'prompt-stash': {tools: [], commands: [], shortcuts: ['ctrl+shift+s']},
         subagents: {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []},
         worktree: {tools: ['bash'], commands: ['worktree'], shortcuts: []},
-        'auto-mode': {tools: [], commands: ['auto'], shortcuts: []},
         'mcp-client': {tools: ['mcp'], commands: ['mcp-auth', 'mcp-connect'], shortcuts: []},
         'web-search': {tools: ['web_search'], commands: [], shortcuts: []},
         'computer-use': {tools: ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []},
@@ -63,7 +62,7 @@ test('Pi package discovers exactly fifteen entrypoints and independently loads e
 });
 
 
-test('bundled tools declare their own managed effects to auto mode in a real headless session', async () => {
+test('bundled tools work without a global classifier in a real headless session', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-managed-tools-'));
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
@@ -88,7 +87,7 @@ test('bundled tools declare their own managed effects to auto mode in a real hea
       await tool.execute(`managed-${toolName}`, input, undefined, undefined, runner.createContext());
     }
     const unknown = await runner.emitToolCall({type: 'tool_call', toolName: 'untrusted_remote_tool', toolCallId: 'unknown', input: {}});
-    assert.equal(unknown?.block, true);
+    assert.notEqual(unknown?.block, true, 'no global auto-mode tool gate is installed');
     assert.deepEqual(errors, []);
     await runner.emit({type: 'session_shutdown', reason: 'quit'});
   } finally {session?.dispose(); await rm(temp, {recursive: true, force: true});}

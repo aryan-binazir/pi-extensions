@@ -1,4 +1,3 @@
-import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { StringEnum } from '@earendil-works/pi-ai';
@@ -25,9 +24,6 @@ function normalize(value: unknown): Todo[] {
 
 export default function todo(pi: ExtensionAPI): void {
   // Only trusted local code declares its own bounded storage/UI effects.
-  pi.events?.on('auto-mode:request-declarations', () => {
-    pi.events.emit('auto-mode:declare', { version: 1, source: 'local', extension: fileURLToPath(import.meta.url), tool: 'todo_write', effect: 'managed' });
-  });
   let state: Snapshot = { version: 1, todos: [], staleTurns: 0 };
   const active = () => state.todos.some(item => item.status !== 'completed');
   const paint = (ctx: ExtensionContext) => {

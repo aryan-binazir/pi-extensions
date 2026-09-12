@@ -1,4 +1,3 @@
-import { fileURLToPath } from 'node:url';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -110,9 +109,6 @@ async function ensureIgnored(dir: string): Promise<void> {
 
 export default function memory(pi: ExtensionAPI): void {
   // Only trusted local code declares its own bounded storage/UI effects.
-  pi.events?.on('auto-mode:request-declarations', () => {
-    pi.events.emit('auto-mode:declare', { version: 1, source: 'local', extension: fileURLToPath(import.meta.url), tool: 'memory', effect: 'managed' });
-  });
   // Pi serializes normal tool scheduling; this queue also protects direct SDK
   // callers that invoke registered callbacks concurrently. Rejections never
   // poison the queue, and cancellation is checked when an operation reaches it.

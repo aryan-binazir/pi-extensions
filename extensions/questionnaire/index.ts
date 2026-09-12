@@ -1,4 +1,3 @@
-import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   Editor,
@@ -42,9 +41,6 @@ interface Result {
 /** Independent questionnaire; waiting notifications are paired by toolCallId. */
 export default function questionnaire(pi: ExtensionAPI) {
   // Only trusted local code declares its own bounded storage/UI effects.
-  pi.events?.on('auto-mode:request-declarations', () => {
-    pi.events.emit('auto-mode:declare', { version: 1, source: 'local', extension: fileURLToPath(import.meta.url), tool: 'questionnaire', effect: 'managed' });
-  });
   const active = new Set<() => void>();
   let inFlight = false;
   pi.on("session_shutdown", () => {

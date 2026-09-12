@@ -6,7 +6,7 @@ Pi has no built-in MCP client. The extension must support stdio, Streamable HTTP
 
 Use the maintained official `@modelcontextprotocol/sdk` client for transport framing, request IDs, capability negotiation, cancellation, progress and OAuth. `McpConnection` owns connection lifetime and bounded configuration; the Pi entry point owns discovery, consent, tool registration and session cleanup. `SessionOAuth` supplies the SDK's session credential interface and a state-checked loopback callback. No tokens persist beyond the session.
 
-Merge complete server entries in global, trusted-project, explicit order. Preserve original tool schemas. Namespace tools by both exact server and tool names. Remote tool annotations remain untrusted metadata; every registered call still traverses Pi's auto-mode handler. A project-derived server is unusable after project trust is revoked. Session changes invalidate previously registered callbacks.
+Merge complete server entries in global, trusted-project, explicit order. Preserve original tool schemas. Namespace tools by both exact server and tool names. Remote tool annotations remain untrusted metadata; server consent is enforced by the MCP extension. A project-derived server is unusable after project trust is revoked. Session changes invalidate previously registered callbacks.
 
 Resources and prompts return bounded untrusted data through one bridge tool. Neither sampling nor nested agents are enabled. Legacy SSE is explicit, which avoids retrying a failed authentication or mutation against another transport. Configuration or OAuth grants do not imply a remote operation was undone when its request is cancelled.
 

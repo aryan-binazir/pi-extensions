@@ -1,6 +1,6 @@
 # Pi interactive tools
 
-Fifteen independently selectable extensions for Pi 0.85.1. Install from this
+Fourteen independently selectable extensions for Pi 0.85.1. Install from this
 private Git repository using your existing GitHub SSH access:
 
 ```sh
@@ -26,7 +26,6 @@ A single extension can also be loaded with
 | Prompt stash | `Ctrl+Shift+S` | Stash, restore or swap one draft slot; a footer indicator shows occupancy. |
 | Subagents | `subagent`, TypeScript workflows | Isolated task contexts, bounded background execution and approved workflow replay. |
 | Worktree | `/worktree` | Create or reuse a checkout and route the current session's shell and relative file tools. |
-| Auto mode | `/auto on\|off\|status\|audit` | Pre-execution policy, exact approvals and inherited child limits. |
 | MCP client | MCP tools, resources and prompts | Connect configured stdio, Streamable HTTP or SSE servers with explicit trust and consent. See [MCP setup](extensions/mcp-client/README.md). |
 | Web search | `web_search` | Bounded DuckDuckGo HTML search returning links and snippets, with explicit failure results. [Limits](docs/adr/006-search-fast-power.md). |
 | Computer use | Desktop tools | Pi directs screenshots and input through native Linux or macOS adapters. See [desktop setup](extensions/computer-use/README.md). |
@@ -100,7 +99,7 @@ file effects still exist. Confirm replay only after checking that those effects
 remain valid. Declining aborts without starting children. Failed stages run again,
 and unfinished capability calls prevent a successful workflow result.
 
-## Worktrees and auto mode
+## Worktrees
 
 `/worktree feature` creates or reuses `amb/feature` at
 `~/repos/.worktrees/<repo>/feature`. Use `--branch exact/name` to preserve an
@@ -120,20 +119,9 @@ before editing.
 requires a merged GitHub PR whose head still matches the checkout. These
 commands preserve branch refs.
 
-Auto mode starts on. `/auto on|off|status|audit` controls it and shows recent
-actions, approvals and provenance. Canonical workspace file operations use
-model-free checks. Recursive directory grep requires approval because Pi searches
-hidden files; grep of one verified safe file remains automatic. Uncertain calls
-use a bounded, tool-free classifier and may
-require an exact-action confirmation. Shell commands beyond literal `pwd` are classified. An eligible permitted action
-runs on `safe`, requests approval on `ask`, and is blocked on `unsafe`. Classifier errors,
-approval errors and required approval without an interactive UI block execution.
-
-Delegated children inherit a narrower workspace and tool list, user directives
-and a mandatory guard they cannot disable. Trusted installed local extensions
-can register versioned tool declarations; remote read-only hints do not grant
-trust. These checks cover tool calls. They do not sandbox arbitrary extension
-JavaScript or turn separate agent contexts into an OS sandbox.
+Delegated children are launched with a validated workspace and builtin tool list.
+There is no global tool classifier or mandatory child guard. These launch-time
+checks do not sandbox child tools or trusted extension JavaScript.
 
 ## Development
 
@@ -153,8 +141,6 @@ The repository's `bin/pi` is a copy of the existing mise launcher. This package
 does not change host launchers, shell aliases, global defaults or authentication.
 
 Workflow replay is deliberately opt-in. Declining replay stops that invocation. To rerun every stage, change the source (for example, add a revision comment), review it again, and approve the resulting fresh journal. Each synchronous worker evaluation is limited to 100 ms independently of the overall workflow timeout. A journal write failure stops subsequent journal writes in that invocation; rerun after correcting storage rather than retrying unjournaled effects.
-
-Bundled memory, todo and questionnaire tools declare their own managed storage/UI effects to auto mode through versioned local declarations. This preserves their original behavior without trusting unknown tools by name. Managed declarations trust the installed extension to bound its internal effects; inherited child tool limits still apply.
 
 External integrations never require a nested research or desktop-planning agent.
 Desktop actions require a usable native desktop service and its OS permissions.

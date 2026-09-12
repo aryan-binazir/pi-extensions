@@ -190,7 +190,7 @@ export class SubagentRegistry {
 }
 
 export function piInvocation(spec: ValidTask, extra?: {env: Record<string, string>; extensions: string[]}) {
-  const args = ['--mode', 'json', '-p', '--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--tools', spec.tools.join(','), '--system-prompt', 'You are a delegated agent. Your only task context is the explicit brief below. Follow inherited tool policy. Do not assume parent conversation context.'];
+  const args = ['--mode', 'json', '-p', '--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--tools', spec.tools.join(','), '--system-prompt', 'You are a delegated agent. Your only task context is the explicit brief below. Use only the configured tools and assigned workspace. Do not assume parent conversation context.'];
   if (spec.model) args.push('--model', spec.model);
   for (const extension of [...new Set([...(extra?.extensions ?? []), ...spec.extensions])]) args.push('-e', extension);
   args.push('--', spec.task);

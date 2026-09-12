@@ -1,7 +1,7 @@
 import { join, resolve } from 'node:path';
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { assertChildTask, childPolicy, checkAction } from '../auto-mode/policy.ts';
+import { assertChildTask, delegationScope, assertWorkflowRead } from './scope.ts';
 import { getActiveCwd } from '../worktree/routing.ts';
 import { piInvocation, SubagentRegistry, type TaskSpec } from './registry.ts';
 import { runWorkflow } from './workflow.ts';
@@ -20,9 +20,9 @@ export default function subagents(pi: ExtensionAPI): void {
   const workflowRuns = new Set<Promise<unknown>>();
   const parent = () => ({ cwd: getActiveCwd(context?.cwd ?? process.cwd(), context?.sessionManager.getSessionId()), tools: pi.getActiveTools() });
   const createRegistry = () => new SubagentRegistry({
-    allowedTools: () => childPolicy(context?.cwd ?? process.cwd(), undefined, context?.sessionManager.getSessionId(), parent()).tools,
-    authorize: async task => { await assertChildTask(task, { parent: parent(), approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request) : undefined }, context?.sessionManager.getSessionId()); },
-    invocation: task => piInvocation(task, childPolicy(task.cwd, task.tools, context?.sessionManager.getSessionId(), parent())),
+    allowedTools: () => delegationScope(parent()).tools,
+    authorize: async task => { await assertChildTask(task, { parent: parent(), approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request) : undefined }); },
+    invocation: task => piInvocation(task),
     onUpdate: task => {
       if (context?.hasUI) context.ui.setWidget(`subagent:${task.id}`, [`${task.id.slice(0, 8)} · ${task.status} · ${task.usage.input} in / ${task.usage.output} out`, task.output.slice(-2000)]);
     },
@@ -55,7 +55,7 @@ export default function subagents(pi: ExtensionAPI): void {
   pi.on('session_shutdown', stopAll);
   // A before-switch handler can cancel the switch; committed switches emit shutdown.
   pi.registerTool({
-    name: 'subagent', label: 'Subagent', description: 'Start a background Pi agent with only an explicit task brief, bounded tools, and inherited policy. Returns task ID immediately; completion is pushed into this conversation. Context separation is not an OS sandbox. Same-directory writers serialize. Explicit child extensions may contribute hooks and commands; their custom tools are excluded by the built-in tool allowlist.', parameters: taskSchema,
+    name: 'subagent', label: 'Subagent', description: 'Start a background Pi agent with only an explicit task brief, a validated workspace, and bounded tools. Returns task ID immediately; completion is pushed into this conversation. Context separation is not an OS sandbox. Same-directory writers serialize. Explicit child extensions may contribute hooks and commands; their custom tools are excluded by the built-in tool allowlist.', parameters: taskSchema,
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
       context = ctx;
@@ -73,7 +73,7 @@ export default function subagents(pi: ExtensionAPI): void {
     async execute(_id, params) { return result({ cancelled: registry.cancel(params.id) }); },
   });
   pi.registerTool({
-    name: 'workflow', label: 'TypeScript workflow', description: 'Compile and run an explicitly user-approved TypeScript async function body. api exposes spawn(task, stableStageLabel), parallel(array of async functions), retry(attempts, async function), checkpoint(key, async function), bounded readFile(path,maxBytes). Successful stages replay only with identical approved source, cwd, and inherited policy. Requires interactive source review.',
+    name: 'workflow', label: 'TypeScript workflow', description: 'Compile and run an explicitly user-approved TypeScript async function body. api exposes spawn(task, stableStageLabel), parallel(array of async functions), retry(attempts, async function), checkpoint(key, async function), bounded readFile(path,maxBytes). Successful stages replay only with identical approved source, cwd, and tool scope. Requires interactive source review.',
     parameters: Type.Object({ source: Type.String({ minLength: 1, maxLength: 64000 }), timeout: Type.Optional(Type.Integer({ minimum: 10, maximum: 3600000 })) }),
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
@@ -86,19 +86,15 @@ export default function subagents(pi: ExtensionAPI): void {
       try {
         const run = runWorkflow({
           source: params.source, cwd, timeout: params.timeout, signal: controller.signal,
-          journalDirectory: join(getAgentDir(), 'workflow-journals'), policyIdentity: childPolicy(cwd, undefined, ctx.sessionManager.getSessionId(), parent()).replayIdentity,
-          allowedTools: () => childPolicy(cwd, undefined, ctx.sessionManager.getSessionId(), parent()).tools,
+          journalDirectory: join(getAgentDir(), 'workflow-journals'), policyIdentity: delegationScope(parent()).replayIdentity,
+          allowedTools: () => delegationScope(parent()).tools,
           approve: ctx.hasUI ? async source => {
             const reviewed = await ctx.ui.editor('Review workflow TypeScript; submit unchanged source to continue', source);
             return reviewed === source && await ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.');
           } : undefined,
-          validateTask: async task => { await assertChildTask(task, { parent: parent(), approve: ctx.hasUI ? request => ctx.ui.confirm('Approve workflow child extensions', request) : undefined }, ctx.sessionManager.getSessionId()); },
+          validateTask: async task => { await assertChildTask(task, { parent: parent(), approve: ctx.hasUI ? request => ctx.ui.confirm('Approve workflow child extensions', request) : undefined }); },
           approveReplay: ctx.hasUI ? stages => ctx.ui.confirm('Replay previously successful stages?', `These stages will NOT run again: ${stages.join(', ')}. Approve only if their outputs and side effects remain valid in the current workspace.`) : async () => false,
-          authorizeRead: async path => {
-            if (!childPolicy(cwd, undefined, ctx.sessionManager.getSessionId(), parent()).tools.includes('read')) throw new Error('Read is outside parent permissions');
-            const decision = await checkAction({ tool: 'read', input: { path }, cwd, provenance: 'workflow readFile' }, {}, ctx.sessionManager.getSessionId());
-            if (!decision.allow) throw new Error(decision.reason);
-          },
+          authorizeRead: path => assertWorkflowRead(parent(), path),
           spawn: async (task, taskSignal) => {
             taskSignal.throwIfAborted();
             const handle = await trackedSpawn(task);

@@ -5,9 +5,15 @@ import { join } from 'node:path';
 import test from 'node:test';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import subagents from './index.ts';
-import { AutoPolicy, setActivePolicy } from '../auto-mode/policy.ts';
 
-test('workflow registration blocks missing UI and protects sensitive reads through inherited policy',async()=>{
+function assertChildTools(child: {args: string[]}, tools: string[]) {
+ assert.ok(child.args.includes('--tools'));
+ assert.equal(child.args[child.args.indexOf('--tools') + 1], tools.join(','));
+ assert.ok(child.args.includes('--no-extensions'));
+ assert.ok(!child.args.includes('-e'), 'no mandatory child extension');
+}
+
+test('workflow registration requires exact source approval and protects sensitive reads',async()=>{
  const cwd=await mkdtemp(join(tmpdir(),'workflow-extension-'));
  const previousAgentDir=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent-home');
  const tools=new Map<string,any>();const events=new Map<string,any>();
@@ -17,15 +23,17 @@ test('workflow registration blocks missing UI and protects sensitive reads throu
   await assert.rejects(tools.get('workflow').execute('id',{source:'return 1;'},undefined,undefined,ctx),/approval/);
   ctx.hasUI=true;
   await writeFile(join(cwd,'.env'),'SYNTHETIC_SECRET');
-  setActivePolicy(new AutoPolicy(cwd),'workflow-extension-test');
-  await assert.rejects(tools.get('workflow').execute('id',{source:'return await api.readFile(".env");'},undefined,undefined,ctx),/Approval required/);
+  ctx.ui.editor = async () => 'return 2;';
+  await assert.rejects(tools.get('workflow').execute('id',{source:'return 1;'},undefined,undefined,ctx),/approv/i);
+  ctx.ui.editor = async (_title:string,source:string) => source;
+  await assert.rejects(tools.get('workflow').execute('id',{source:'return await api.readFile(".env");'},undefined,undefined,ctx),/sensitive/);
  } finally {
   if(previousAgentDir===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=previousAgentDir;
-  await events.get('session_shutdown')();setActivePolicy(undefined,'workflow-extension-test');await rm(cwd,{recursive:true,force:true});
+  await events.get('session_shutdown')();await rm(cwd,{recursive:true,force:true});
  }
 });
 
-test('registered background tool launches guarded Pi and pushes completion to its parent',async()=>{
+test('registered background tool launches tool-limited Pi and pushes completion to its parent',async()=>{
  const {chmod}=await import('node:fs/promises');
  const cwd=await mkdtemp(join(tmpdir(),'subagent-extension-'));
  const previousPath=process.env.PATH,previousAgentDir=process.env.PI_CODING_AGENT_DIR;
@@ -35,10 +43,9 @@ test('registered background tool launches guarded Pi and pushes completion to it
  const notification=new Promise<{message:any;options:any}>(resolve=>{notify=resolve;});
  const ctx={cwd,hasUI:false,mode:'print',sessionManager:{getSessionId:()=>sessionId}};
  try {
-  await writeFile(join(cwd,'pi'),`#!${process.execPath}\nconst policy=JSON.parse(process.env.PI_AGENT_POLICY);const output=JSON.stringify({args:process.argv.slice(2),policy});process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:output}],usage:{input:3,output:4}}})+'\\n');`);
+  await writeFile(join(cwd,'pi'),`#!${process.execPath}\nconst output=JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()});process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:output}],usage:{input:3,output:4}}})+'\\n');`);
   await chmod(join(cwd,'pi'),0o700);
   process.env.PATH=`${cwd}:${previousPath??''}`;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent-home');
-  setActivePolicy(new AutoPolicy(cwd),sessionId);
   subagents({events:{emit(){}},getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler),sendMessage:(message:any,options:any)=>notify({message,options})} as unknown as ExtensionAPI);
   await events.get('session_start')({},ctx);
   const response=await tools.get('subagent').execute('call',{task:'Read synthetic checkout',preset:'reader'},undefined,undefined,ctx);
@@ -51,14 +58,12 @@ test('registered background tool launches guarded Pi and pushes completion to it
   assert.equal(task.status,'succeeded');assert.equal(task.id,response.details.id);
   assert.deepEqual(task.usage,{input:3,output:4});
   const child=JSON.parse(task.output);
-  assert.equal(child.policy.inherited,true);assert.equal(child.policy.root,await realpath(cwd));
-  assert.deepEqual(child.policy.tools,['read','grep','find','ls']);
+  assert.equal(child.cwd,await realpath(cwd));
+  assertChildTools(child,['read','grep','find','ls']);
   assert.ok(child.args.includes('--no-session'));assert.ok(child.args.includes('--no-extensions'));
-  const extension=child.args[child.args.indexOf('-e')+1];
-  assert.match(extension,/auto-mode\/index\.ts$/);
   assert.equal(child.args.at(-1),'Read synthetic checkout');
  } finally {
-  await events.get('session_shutdown')?.();setActivePolicy(undefined,sessionId);
+  await events.get('session_shutdown')?.();
   if(previousPath===undefined)delete process.env.PATH;else process.env.PATH=previousPath;
   if(previousAgentDir===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=previousAgentDir;
   await rm(cwd,{recursive:true,force:true});
@@ -88,8 +93,6 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
     await writeFile(join(cwd, 'trusted.ts'), 'export default () => {};');
     process.env.PATH = `${cwd}:${previousPath ?? ''}`;
     process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent-home');
-    const policy = new AutoPolicy(cwd);
-    setActivePolicy(policy, sessionId);
     subagents({events: {emit() {}}, getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => { completions++; }} as unknown as ExtensionAPI);
     await events.get('session_start')({}, ctx);
     const source = `return await api.spawn({task:'read',preset:'reader',extensions:[${JSON.stringify(join(cwd, 'trusted.ts'))}]},'read');`;
@@ -97,7 +100,6 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
     await execute();
     assert.equal(completions, 1);
     assert.equal(approvals.filter(title => title.includes('child extensions')).length, 1);
-    policy.directive('Retry the exact same approved workflow after the failed turn');
     allowExtensions = false;
     await assert.rejects(execute(), /Child extension loading was not approved/);
     assert.equal(completions, 1, 'rejected replay must not launch a child');
@@ -107,7 +109,6 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
     assert.equal(approvals.filter(title => title.includes('child extensions')).length, 3);
   } finally {
     await events.get('session_shutdown')?.();
-    setActivePolicy(undefined, sessionId);
     if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     await rm(cwd, {recursive: true, force: true});
@@ -125,7 +126,6 @@ test('cancelled switches keep the registry usable; committed shutdown reaps chil
     await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:String(process.pid)}}));setInterval(()=>{},1000);`);
     await chmod(join(cwd, 'pi'), 0o700);
     process.env.PATH = `${cwd}:${previousPath ?? ''}`;
-    setActivePolicy(new AutoPolicy(cwd), sessionId);
     subagents({events: {emit() {}}, getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
     await events.get('session_start')({}, ctx);
     const launch = () => tools.get('subagent').execute('call', {task: 'wait', preset: 'reader'}, undefined, undefined, ctx);
@@ -148,7 +148,6 @@ test('cancelled switches keep the registry usable; committed shutdown reaps chil
     for (const pid of pids) assert.throws(() => process.kill(pid, 0), {code: 'ESRCH'});
   } finally {
     await events.get('session_shutdown')?.();
-    setActivePolicy(undefined, sessionId);
     if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
     await rm(cwd, {recursive: true, force: true});
   }
@@ -166,7 +165,7 @@ test('standalone registered subagents and workflows inherit active builtins and 
   subagents({events: {emit() {}}, getActiveTools: () => active, registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
   const direct = (params: any) => tools.get('subagent').execute('call', params, undefined, undefined, ctx);
   const workflow = (source: string) => tools.get('workflow').execute('call', {source}, undefined, undefined, ctx);
-  const directPolicy = async (preset?: string) => {
+  const directChild = async (preset?: string) => {
     const response = await direct({task: 'valid direct child', preset});
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
@@ -178,7 +177,7 @@ test('standalone registered subagents and workflows inherit active builtins and 
     throw new Error('Direct child did not complete');
   };
   try {
-    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:process.env.PI_AGENT_POLICY}]}}));`);
+    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()})}]}}));`);
     await chmod(join(cwd, 'pi'), 0o700);
     await writeFile(join(cwd, 'input'), 'safe');
     process.env.PATH = `${cwd}:${previousPath ?? ''}`;
@@ -192,16 +191,16 @@ test('standalone registered subagents and workflows inherit active builtins and 
     await assert.rejects(workflow(`return await api.spawn({task:'escape',cwd:${JSON.stringify(tmpdir())}},'escape');`), /escapes workflow cwd/);
     for (const preset of [undefined, 'reader', 'writer']) {
       const response = await workflow(`return await api.spawn(${JSON.stringify({task: 'valid', preset})},'valid');`);
-      const policy = JSON.parse(response.details.output);
-      assert.deepEqual(policy.tools, ['read']);
-      assert.deepEqual((await directPolicy(preset)).tools, ['read']);
-      assert.equal(policy.root, await realpath(cwd));
+      const child = JSON.parse(response.details.output);
+      assertChildTools(child, ['read']);
+      assertChildTools(await directChild(preset), ['read']);
+      assert.equal(child.cwd, await realpath(cwd));
     }
     active = ['subagent', 'workflow'];
     for (const preset of [undefined, 'reader', 'writer']) {
       const response = await workflow(`return await api.spawn(${JSON.stringify({task: 'reason only', preset})},'reason');`);
-      assert.deepEqual(JSON.parse(response.details.output).tools, []);
-      assert.deepEqual((await directPolicy(preset)).tools, []);
+      assertChildTools(JSON.parse(response.details.output), []);
+      assertChildTools(await directChild(preset), []);
     }
     await assert.rejects(workflow('return await api.readFile("input");'), /outside parent permissions/);
   } finally {

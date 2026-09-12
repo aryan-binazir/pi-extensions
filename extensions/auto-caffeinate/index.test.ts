@@ -20,6 +20,9 @@ test('work requires AC, background survives settled, battery and shutdown releas
 test('Linux power distinguishes AC, battery and missing information',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'pi-power-'));
  try{
+  assert.equal(await readPower('linux',dir),'ac');
+  assert.equal(await readPower('linux',join(dir,'missing')),'unknown');
+  await mkdir(join(dir,'BAT0'));await writeFile(join(dir,'BAT0/type'),'Battery');
   assert.equal(await readPower('linux',dir),'unknown');
   await mkdir(join(dir,'AC'));await writeFile(join(dir,'AC/type'),'Mains');await writeFile(join(dir,'AC/online'),'1');
   await mkdir(join(dir,'AA-broken'));await writeFile(join(dir,'AA-broken/type'),'Mains');

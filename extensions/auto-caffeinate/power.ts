@@ -10,7 +10,10 @@ export async function readPower(platform=process.platform,root='/sys/class/power
    return /Now drawing from 'AC Power'/.test(stdout)?'ac':/Now drawing from 'Battery Power'/.test(stdout)?'battery':'unknown';
   }
   if(platform!=='linux')return 'unknown';
-  const entries=await readdir(root);let offline=false;
+  const entries=await readdir(root);
+  // Fixed-power desktops commonly expose no power-supply devices.
+  if(entries.length===0)return 'ac';
+  let offline=false;
   for(const entry of entries){
    try {
    const type=(await readFile(join(root,entry,'type'),'utf8')).trim();

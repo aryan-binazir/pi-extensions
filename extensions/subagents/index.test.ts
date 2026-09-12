@@ -41,9 +41,9 @@ test('registered background tool launches tool-limited Pi and pushes completion 
  const tools=new Map<string,any>();const events=new Map<string,any>();
  let notify!:(value:{message:any;options:any})=>void;
  const notification=new Promise<{message:any;options:any}>(resolve=>{notify=resolve;});
- const ctx={cwd,hasUI:false,mode:'print',sessionManager:{getSessionId:()=>sessionId}};
+ const ctx={cwd,model:{provider:'test',id:'fixture'},thinkingLevel:'off',hasUI:false,mode:'print',sessionManager:{getSessionId:()=>sessionId}};
  try {
-  await writeFile(join(cwd,'pi'),`#!${process.execPath}\nconst output=JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()});process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:output}],usage:{input:3,output:4}}})+'\\n');`);
+  await writeFile(join(cwd,'pi'),`#!${process.execPath}\nconst output=JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()});process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:output}],usage:{input:3,output:4}}})+'\\n');`);
   await chmod(join(cwd,'pi'),0o700);
   process.env.PATH=`${cwd}:${previousPath??''}`;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent-home');
   subagents({events:{emit(){}},getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler),sendMessage:(message:any,options:any)=>notify({message,options})} as unknown as ExtensionAPI);
@@ -80,7 +80,7 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
   let allowExtensions = true;
   let completions = 0;
   const ctx = {
-    cwd, hasUI: true, mode: 'rpc', sessionManager: {getSessionId: () => sessionId},
+    cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', hasUI: true, mode: 'rpc', sessionManager: {getSessionId: () => sessionId},
     ui: {
       editor: async (_title: string, source: string) => source,
       confirm: async (title: string) => { approvals.push(title); return title.includes('child extensions') ? allowExtensions : true; },
@@ -88,7 +88,7 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
     },
   };
   try {
-    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}));`);
+    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}));`);
     await chmod(join(cwd, 'pi'), 0o700);
     await writeFile(join(cwd, 'trusted.ts'), 'export default () => {};');
     process.env.PATH = `${cwd}:${previousPath ?? ''}`;
@@ -98,14 +98,16 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
     const source = `return await api.spawn({task:'read',preset:'reader',extensions:[${JSON.stringify(join(cwd, 'trusted.ts'))}]},'read');`;
     const execute = () => tools.get('workflow').execute('call', {source}, undefined, undefined, ctx);
     await execute();
-    assert.equal(completions, 1);
+    assert.equal(completions, 0, 'workflow owns its child result');
+    assert.equal((await tools.get('subagent_status').execute('status', {})).details.length, 1);
     assert.equal(approvals.filter(title => title.includes('child extensions')).length, 1);
     allowExtensions = false;
     await assert.rejects(execute(), /Child extension loading was not approved/);
-    assert.equal(completions, 1, 'rejected replay must not launch a child');
+    assert.equal((await tools.get('subagent_status').execute('status', {})).details.length, 1, 'rejected replay must not launch a child');
     allowExtensions = true;
     await execute();
-    assert.equal(completions, 1, 'approved replay must reuse the cached child');
+    assert.equal((await tools.get('subagent_status').execute('status', {})).details.length, 1, 'approved replay must reuse the cached child');
+    assert.equal(completions, 0);
     assert.equal(approvals.filter(title => title.includes('child extensions')).length, 3);
   } finally {
     await events.get('session_shutdown')?.();
@@ -121,7 +123,7 @@ test('cancelled switches keep the registry usable; committed shutdown reaps chil
   const previousPath = process.env.PATH;
   const sessionId = 'subagent-switch-test';
   const tools = new Map<string, any>(), events = new Map<string, any>();
-  const ctx = {cwd, hasUI: false, mode: 'print', sessionManager: {getSessionId: () => sessionId}};
+  const ctx = {cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', hasUI: false, mode: 'print', sessionManager: {getSessionId: () => sessionId}};
   try {
     await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:String(process.pid)}}));setInterval(()=>{},1000);`);
     await chmod(join(cwd, 'pi'), 0o700);
@@ -159,7 +161,7 @@ test('standalone registered subagents and workflows inherit active builtins and 
   const previousPath = process.env.PATH, previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const tools = new Map<string, any>(), events = new Map<string, any>();
   let active = ['read', 'subagent', 'workflow'];
-  const ctx = {cwd, hasUI: true, sessionManager: {getSessionId: () => 'standalone-only'}, ui: {
+  const ctx = {cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', hasUI: true, sessionManager: {getSessionId: () => 'standalone-only'}, ui: {
     editor: async (_title: string, source: string) => source, confirm: async () => true, setWidget: () => {},
   }};
   subagents({events: {emit() {}}, getActiveTools: () => active, registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
@@ -169,7 +171,7 @@ test('standalone registered subagents and workflows inherit active builtins and 
     const response = await direct({task: 'valid direct child', preset});
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
-      const task = (await tools.get('subagent_status').execute()).details.find((task: any) => task.id === response.details.id);
+      const task = (await tools.get('subagent_status').execute('status', {id: response.details.id})).details;
       if (task.status === 'succeeded') return JSON.parse(task.output);
       assert.ok(['queued', 'running'].includes(task.status), JSON.stringify(task));
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -177,7 +179,7 @@ test('standalone registered subagents and workflows inherit active builtins and 
     throw new Error('Direct child did not complete');
   };
   try {
-    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()})}]}}));`);
+    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()})}]}}));`);
     await chmod(join(cwd, 'pi'), 0o700);
     await writeFile(join(cwd, 'input'), 'safe');
     process.env.PATH = `${cwd}:${previousPath ?? ''}`;

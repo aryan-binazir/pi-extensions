@@ -10,7 +10,7 @@ test('stock Pi active permissions support default and preset children and workfl
   const oldPath = process.env.PATH, oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
-    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:JSON.stringify({tools:process.argv[process.argv.indexOf('--tools')+1].split(',')})}]}}));`);
+    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify({tools:process.argv[process.argv.indexOf('--tools')+1].split(',')})}]}}));`);
     await chmod(join(cwd, 'pi'), 0o700);
     process.env.PATH = `${cwd}:${oldPath ?? ''}`;
     const agentDir = join(cwd, 'agent');
@@ -26,6 +26,7 @@ test('stock Pi active permissions support default and preset children and workfl
     // Sentinel is loaded, but a new chat defaults to auto off.
     assert.notEqual((await runner.emitToolCall({type: 'tool_call', toolName: 'read', toolCallId: 'init', input: {path: join(cwd, 'pi')}}))?.block, true);
     const ctx = {...runner.createContext()};
+    Object.assign(ctx, {model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off'});
     const execute = async (name: string, params: any) => await session!.getToolDefinition(name)!.execute(name, params, undefined, undefined, ctx) as any;
     for (const preset of [undefined, 'reader', 'writer']) {
       const result = await execute('subagent', {task: 'Synthetic child', ...(preset ? {preset} : {})});

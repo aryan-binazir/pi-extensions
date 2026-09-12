@@ -66,8 +66,31 @@ explicit tool requests outside those permissions are rejected. It returns a task
 is pushed into the parent conversation. `subagent_status` inspects the registry;
 `subagent_cancel` or `/subagents cancel ID` cancels a task. Same-directory writers
 queue behind one another. Timeouts, cancellation and session shutdown terminate
-process groups, including ordinary descendants. A descendant that deliberately
-creates a new session can escape portable process-group cleanup.
+process groups, including descendants in those groups. Separate groups/sessions,
+including stock Pi's detached bash jobs, depend on Pi's own graceful cleanup;
+if Pi is wedged or killed first, those jobs can escape portable group cleanup.
+
+The default deadline is one hour, including approval and queue time. Children
+inherit the selected parent model and thinking level unless explicitly overridden.
+Fast aliases use the base model without the priority-tier extension. Aborting the
+parent turn also stops its children.
+A Node supervisor watches an inherited owner pipe and cleans up on owner loss;
+this is supervision, not machine-wide subscription control. Four consecutive
+identical failed tool calls stop a child as `stalled`; productive work and successful
+polling are not turn-limited. No new token or spending quotas are imposed.
+Use `subagent_cancel` with `id: "all"`, or `/subagents cancel all`, to stop current
+children and workflows without disabling future delegation.
+
+Direct completions and individual cancellations are compact and batched. A batch
+containing only cancellations does not trigger a model turn. Cancel-all returns a
+count and suppresses individual notifications. Workflow stages return only to
+their awaiting workflow. Status is paginated
+(`offset`, `limit`, or `id` with `outputOffset`); the registry retains 50 completed
+results alongside outstanding work. Oversized JSON records are skipped and flagged,
+not treated as a reason to kill an otherwise healthy child. Incomplete terminal
+results cannot count as success. Workflow retry does not automatically relaunch
+stalled, cancelled, expired, timed-out, or incomplete children. Journal persistence
+failure returns control for reconciliation rather than repeating unjournaled effects.
 
 Workflows require a separate Node executable on `PATH` (22.19+ in the 22.x series, or 24+), including when Pi itself runs on Bun. Its version and permission enforcement are probed before execution; missing or unsupported Node fails explicitly.
 
@@ -170,3 +193,17 @@ Linux accessibility is reported unavailable when no supported service exists.
 The Linux/macOS CI matrix checks portable behavior; it does not prove a live Mac
 desktop session or priority-service entitlement. Unknown power state leaves idle
 sleep settings untouched. No live provider call is needed for the fixture tests.
+
+Registered subagents share one report-only `openai-codex/gpt-5.6-luna` tracker
+with medium reasoning per owning session, covering direct and workflow children.
+It starts asynchronously with work, then requests at most once per minute with a
+30-second deadline. Snapshots contain at most four running children, queued
+counts and four recent completed children, with clipped briefs/output and usage;
+no parent history is sent. Reports are capped at 2,000 characters and delivered
+as bounded JSON observations marked as untrusted model-generated data, not
+instructions or authority, on the next turn without waking the parent.
+`subagent_status` also exposes tracker
+status/errors while preserving task details. Missing model/auth never selects a
+fallback. The tracker has no tools or execution authority; deterministic task
+supervision remains independent. Idle, cancel-all and shutdown abort tracking;
+tracker errors survive going idle. Later delegation starts tracking again.

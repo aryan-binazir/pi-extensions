@@ -10,7 +10,7 @@ test('isolated processes stream text and usage and push completion without polli
   const updates: string[] = [];
   const notifications: string[] = [];
   const registry = new SubagentRegistry({
-    invocation: () => ({command: process.execPath, args: ['-e', `console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'hello'}}));console.log(JSON.stringify({type:'message_end',message:{role:'assistant',usage:{input:2,output:3},content:[{type:'text',text:'hello'}]}}))`]}),
+    invocation: () => ({command: process.execPath, args: ['-e', `console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'hello'}}));console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',usage:{input:2,output:3},content:[{type:'text',text:'hello'}]}}))`]}),
     onUpdate: task => updates.push(task.output), onComplete: task => notifications.push(task.status),
   });
   try {
@@ -42,7 +42,7 @@ test('failure, timeout, cancellation and session shutdown settle real subprocess
 test('writers using a directory symlink serialize while unrelated readers can run', async () => {
   const cwd = await mkdtemp(join(tmpdir(),'writers-'));
   await symlink(cwd,join(cwd,'alias'));
-  const registry = new SubagentRegistry({concurrency:2,invocation:()=>({command:process.execPath,args:['-e','setTimeout(()=>{},150)']})});
+  const registry = new SubagentRegistry({concurrency:2,invocation:()=>({command:process.execPath,args:['-e',`setTimeout(()=>console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}})),150)`]})});
   try {
     const first = await registry.spawn({task:'first',cwd});
     const second = await registry.spawn({task:'second',cwd:join(cwd,'alias')});
@@ -54,7 +54,7 @@ test('writers using a directory symlink serialize while unrelated readers can ru
 });
 
 test('notification errors settle tasks and do not strand queued writers', async () => {
- const registry=new SubagentRegistry({concurrency:1,invocation:()=>({command:process.execPath,args:['-e','process.exit(0)']}),onComplete:()=>{throw new Error('UI gone');}});
+ const registry=new SubagentRegistry({concurrency:1,invocation:()=>({command:process.execPath,args:['-e',`console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}}))`]}),onComplete:()=>{throw new Error('UI gone');}});
  try {
   const first=await registry.spawn({task:'one',cwd:tmpdir()});
   const second=await registry.spawn({task:'two',cwd:tmpdir()});
@@ -101,7 +101,7 @@ test('split UTF-8 stdout and stderr retain non-ASCII text', async () => {
     const split=record.indexOf(Buffer.from('é'))+1;
     process.stdout.write(record.subarray(0,split));
     process.stderr.write(Buffer.from([0xf0,0x9f]));
-    setTimeout(()=>{process.stdout.write(record.subarray(split));process.stderr.write(Buffer.from([0x9a,0x80]));},50);
+    setTimeout(()=>{process.stdout.write(record.subarray(split));process.stderr.write(Buffer.from([0x9a,0x80]));console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'café 🚀'}]}}));},50);
   `;
   const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', script]})});
   try {
@@ -132,7 +132,7 @@ test('explicit tools must respect parent permissions without an authorize callba
     allowedTools: () => allowed,
     invocation: spec => {
       launched.push(spec.tools);
-      return {command: process.execPath, args: ['-e', 'process.exit(0)']};
+      return {command: process.execPath, args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}}));`]};
     },
   });
   try {
@@ -158,7 +158,7 @@ for (const missingGroup of [false, true]) {
     });
     const registry = new SubagentRegistry({invocation: () => ({
       command: process.execPath,
-      args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:String(process.pid)}]}}));`],
+      args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:String(process.pid)}]}}));`],
     })});
     try {
       const result = await (await registry.spawn({task: 'exit normally', cwd: tmpdir()})).done;

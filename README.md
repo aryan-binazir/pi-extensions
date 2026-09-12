@@ -105,6 +105,15 @@ and unfinished capability calls prevent a successful workflow result.
 explicit branch and `--base ref` to choose a starting ref. `/worktree list`
 shows checkouts; `/worktree original` restores the original directory.
 Active Herdr sessions use Herdr's worktree APIs; other environments use Git.
+If an existing checkout's directory is missing or is no longer a directory,
+opening it fails with its path instead of switching the session there. Restore
+the directory to reuse it. For a deleted Git-managed checkout, first use
+`/worktree original` if the session still targets the missing path, move aside
+any file replacing the directory, then run
+`git worktree remove --force /absolute/path` from the original repository and
+retry. For Herdr-managed checkouts, restore the directory or resolve the missing
+checkout in Herdr before retrying. The extension does not automatically discard
+Git or Herdr state.
 
 The conversation stays in the same session. Built-in bash, user shell commands
 and relative file-tool paths use the active checkout. Absolute paths keep their
@@ -114,6 +123,7 @@ per-turn instructions state this boundary. Read the new checkout's instructions
 before editing.
 
 `/worktree remove /absolute/path` requires confirmation and skips dirty trees.
+Supply exactly one nonempty path argument; quote paths containing spaces.
 `--force` explicitly allows dirty removal. `/worktree cleanup` additionally
 requires a merged GitHub PR whose head still matches the checkout. These
 commands preserve branch refs.

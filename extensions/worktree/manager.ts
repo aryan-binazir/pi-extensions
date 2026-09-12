@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, realpath } from 'node:fs/promises';
+import { mkdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -45,6 +45,12 @@ export class Worktrees {
     const herdr = await this.herdrState();
     const reused = existing.find(item => item.branch === branch);
     if (reused) {
+      let directory = false;
+      try { directory = (await stat(reused.path)).isDirectory(); }
+      catch (error) {
+        if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+      }
+      if (!directory) throw new Error(`Worktree directory is unavailable: ${reused.path}. Restore it or remove its stale Git worktree entry before retrying.`);
       if (herdr !== undefined) await this.run('herdr', ['worktree', 'open', '--cwd', this.cwd, '--path', reused.path, '--no-focus']);
       return reused;
     }

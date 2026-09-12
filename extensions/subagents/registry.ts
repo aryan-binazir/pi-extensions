@@ -350,10 +350,11 @@ export function piInvocation(spec: ValidTask, extra?: {env: Record<string, strin
   // The inherited guard runs last, after any user-approved argument-transforming hooks.
   for (const extension of [...new Set([...spec.extensions.filter(path => !extra?.extensions.includes(path)), ...(extra?.extensions ?? [])])]) args.push('-e', extension);
   args.push('--', spec.task);
+  const env: NodeJS.ProcessEnv = {...process.env, ...extra?.env, PI_SUBAGENT_TIMEOUT_MS: String(spec.timeout)};
   return {
     command: 'node',
     supervised: true,
     args: [fileURLToPath(new URL('./process-supervisor.mjs', import.meta.url)), 'pi', ...args],
-    env: {...process.env, ...extra?.env, PI_SUBAGENT_TIMEOUT_MS: String(spec.timeout)},
+    env,
   };
 }

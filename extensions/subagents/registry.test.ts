@@ -132,7 +132,7 @@ test('explicit tools must respect parent permissions without an authorize callba
     allowedTools: () => allowed,
     invocation: spec => {
       launched.push(spec.tools);
-      return {command: process.execPath, args: ['-e', 'process.exit(0)']};
+      return {command: process.execPath, args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}}));`]};
     },
   });
   try {
@@ -158,7 +158,7 @@ for (const missingGroup of [false, true]) {
     });
     const registry = new SubagentRegistry({invocation: () => ({
       command: process.execPath,
-      args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:String(process.pid)}]}}));`],
+      args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:String(process.pid)}]}}));`],
     })});
     try {
       const result = await (await registry.spawn({task: 'exit normally', cwd: tmpdir()})).done;

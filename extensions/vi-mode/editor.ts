@@ -27,6 +27,7 @@ type Snapshot = {
 };
 export class ViEditor extends CustomEditor {
   private mode: "insert" | "normal" | "visual" | "line" = "insert";
+  private previousHardwareCursor: boolean;
   private count = "";
   private anchor = 0;
   private register = '"';
@@ -104,6 +105,8 @@ export class ViEditor extends CustomEditor {
   constructor(...args: ConstructorParameters<typeof CustomEditor>) {
     super(...args);
     installEditorHandoff(this);
+    this.previousHardwareCursor = this.tui.getShowHardwareCursor();
+    this.tui.setShowHardwareCursor(true);
     this.cursorShape();
   }
   override setText(text: string): void {
@@ -382,6 +385,7 @@ export class ViEditor extends CustomEditor {
   dispose(): void {
     this.paste = undefined;
     this.pasteOpening = "";
+    this.tui.setShowHardwareCursor(this.previousHardwareCursor);
     this.tui.terminal.write("\x1b[0 q");
   }
   handleInput(data: string): void {
@@ -709,16 +713,30 @@ export class ViEditor extends CustomEditor {
     this.tui.requestRender();
   }
   protected renderBottomBorder(width: number, hidden: number): string {
-    const label = ` ${this.mode.toUpperCase()} ${this.count}${this.op}${this.prefix} `;
-    return truncateToWidth(
-      label + super.renderBottomBorder(width, hidden),
+    const pending = `${this.count}${this.op}${this.prefix}`;
+    const label = truncateToWidth(
+      ` ${this.mode.toUpperCase()}${pending ? ` ${pending}` : ""} `,
       width,
       "",
     );
+    return super.renderBottomBorder(Math.max(0, width - visibleWidth(label)), hidden) + label;
   }
   render(width: number): string[] {
-    if (this.mode !== "visual" && this.mode !== "line")
-      return renderProjected(this, () => super.render(width));
+    if (this.mode !== "visual" && this.mode !== "line") {
+      const lines = renderProjected(this, () => super.render(width));
+      if (this.mode !== "insert" || !this.focused) return lines;
+      // Keep the hardware cursor marker, but remove the base editor's fake
+      // reverse-video cursor so the terminal's insert-mode beam is visible.
+      return lines.map((line) => {
+        const start = line.indexOf(CURSOR_MARKER + "\x1b[7m");
+        if (start < 0) return line;
+        const contentStart = start + CURSOR_MARKER.length + "\x1b[7m".length;
+        const end = line.indexOf("\x1b[0m", contentStart);
+        if (end < 0) return line;
+        return line.slice(0, start) + CURSOR_MARKER +
+          line.slice(contentStart, end) + line.slice(end + "\x1b[0m".length);
+      });
+    }
     const [rawStart, rawEnd] = this.range();
     const projection = projectDisplay(this.getText());
     const a = projection.offsets[rawStart],

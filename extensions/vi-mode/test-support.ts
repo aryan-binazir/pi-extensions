@@ -28,8 +28,14 @@ export function editor<T extends CustomEditor = ViEditor>(
       noMatch: (s: string) => s,
     },
   };
+  let showHardwareCursor = false;
   return new EditorClass(
-    { terminal, requestRender() {} } as unknown as TUI,
+    {
+      terminal,
+      requestRender() {},
+      getShowHardwareCursor: () => showHardwareCursor,
+      setShowHardwareCursor: (show: boolean) => { showHardwareCursor = show; },
+    } as unknown as TUI,
     theme,
     new KeybindingsManager(),
   );

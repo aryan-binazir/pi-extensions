@@ -6,6 +6,39 @@ import type { ViEditor } from "./editor.ts";
 function keys(e: ViEditor, input: string) {
   for (const k of input) e.handleInput(k);
 }
+test("mode label stays at the bottom right across widths and modes", () => {
+  const e = editor();
+  for (const [key, mode] of [["", "INSERT"], ["\x1b", "NORMAL"], ["v", "VISUAL"]]) {
+    if (key) e.handleInput(key);
+    for (const width of [8, 20, 80]) {
+      const border = e.render(width).at(-1)!;
+      assert.equal(visibleWidth(border), width);
+      assert.ok(border.endsWith(` ${mode} `));
+    }
+  }
+});
+
+test("insert uses a hardware beam without a fake block; normal restores a block", () => {
+  const e = editor();
+  const tui = (e as unknown as { tui: import("@earendil-works/pi-tui").TUI }).tui;
+  const writes: string[] = [];
+  tui.terminal.write = (data) => { writes.push(data); };
+  assert.equal(tui.getShowHardwareCursor(), true);
+  e.focused = true;
+  e.setText("hello");
+  assert.ok(e.render(40).join("").includes(CURSOR_MARKER));
+  assert.ok(!e.render(40).join("").includes("\x1b[7m"));
+  e.handleInput("\x1b");
+  assert.equal(writes.at(-1), "\x1b[2 q");
+  assert.ok(e.render(40).join("").includes(CURSOR_MARKER + "\x1b[7m"));
+  e.handleInput("i");
+  assert.equal(writes.at(-1), "\x1b[6 q");
+  assert.ok(!e.render(40).join("").includes("\x1b[7m"));
+  e.dispose();
+  assert.equal(tui.getShowHardwareCursor(), false);
+  assert.equal(writes.at(-1), "\x1b[0 q");
+});
+
 test("normal counted operator deletes two words and undo/redo restores changes", () => {
   const e = editor();
   e.setText("one two three");

@@ -1,8 +1,11 @@
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { PowerKeeper } from './power.ts';
 export default function autoCaffeinate(pi:ExtensionAPI):void {
- const keeper=new PowerKeeper();
- pi.on('session_start',()=>keeper.start());
+ let ctx:ExtensionContext|undefined;
+ const keeper=new PowerKeeper({onChange:awake=>{
+  if(ctx?.hasUI)ctx.ui.setStatus('auto-caffeinate',awake?'☕ Awake':undefined);
+ }});
+ pi.on('session_start',(_event,context)=>{ctx=context;keeper.start();});
  pi.on('agent_start',()=>keeper.setAgent(true));
  pi.on('agent_settled',()=>keeper.setAgent(false));
  const unsubscribe=pi.events.on('pi-interactive:background-activity',(value:unknown)=>{

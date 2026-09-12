@@ -40,13 +40,15 @@ export function startInhibitor(platform:NodeJS.Platform=process.platform,launch=
   if(timer)clearTimeout(timer);
  }};
 }
-interface KeeperOptions {power?:()=>Promise<Power>;start?:()=>Inhibitor|undefined;now?:()=>number;lingerMs?:number;checkMs?:number;powerCacheMs?:number}
+interface KeeperOptions {power?:()=>Promise<Power>;start?:()=>Inhibitor|undefined;now?:()=>number;lingerMs?:number;checkMs?:number;powerCacheMs?:number;onChange?:(awake:boolean)=>void}
 export class PowerKeeper {
  private agent=false;private tasks=new Set<string>();private until=0;private stopped=false;private inhibitor?:Inhibitor;
  private cachedPower:Power='unknown';private checkedAt=-Infinity;private retryAt=0;
  private timer?:ReturnType<typeof setInterval>;private queue:Promise<void>=Promise.resolve();
+ private awake=false;
+ private publish(){const awake=!!this.inhibitor?.alive();if(awake!==this.awake){this.awake=awake;this.options.onChange(awake);}}
  private readonly options:Required<KeeperOptions>;
- constructor(options:KeeperOptions={}){this.options={power:readPower,start:startInhibitor,now:Date.now,lingerMs:5000,checkMs:2000,powerCacheMs:1000,...options};}
+ constructor(options:KeeperOptions={}){this.options={power:readPower,start:startInhibitor,now:Date.now,lingerMs:5000,checkMs:2000,powerCacheMs:1000,onChange:()=>{},...options};}
  private active(){return this.agent||this.tasks.size>0;}
  start(){if(!this.timer&&!this.stopped){this.timer=setInterval(()=>{void this.check(false);},this.options.checkMs);this.timer.unref();}}
  async setAgent(active:boolean){if(this.stopped)return;const before=this.active();this.agent=active;if(before&&!this.active())this.until=this.options.now()+this.options.lingerMs;await this.check(false);}
@@ -61,8 +63,8 @@ export class PowerKeeper {
    if(!needed||power!=='ac'){await this.release();return;}
    if(this.inhibitor&&!this.inhibitor.alive()){this.inhibitor=undefined;this.retryAt=this.options.now()+30000;}
    if(!this.inhibitor&&this.options.now()>=this.retryAt){try{this.inhibitor=this.options.start();}catch{/* Unsupported/missing OS service: no-op. */}if(!this.inhibitor)this.retryAt=this.options.now()+30000;}
-  }).catch(async()=>{await this.release();});return this.queue;
+  }).catch(async()=>{await this.release();}).finally(()=>this.publish());return this.queue;
  }
- private async release(){const current=this.inhibitor;this.inhibitor=undefined;await current?.stop();}
+ private async release(){const current=this.inhibitor;this.inhibitor=undefined;try{await current?.stop();}finally{this.publish();}}
  async shutdown(){this.stopped=true;if(this.timer)clearInterval(this.timer);await this.queue;await this.release();this.tasks.clear();}
 }

@@ -28,6 +28,28 @@ test('Linux power distinguishes AC, battery and missing information',async()=>{
   await writeFile(join(dir,'AC/online'),'garbage');assert.equal(await readPower('linux',dir),'unknown');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('awake status tracks inhibition, linger, power loss, child exit and shutdown',async()=>{
+ let now=0,alive=true;let power:'ac'|'battery'='ac';const states:boolean[]=[];
+ const keeper=new PowerKeeper({now:()=>now,power:async()=>power,lingerMs:20,
+  start:()=>{alive=true;return {alive:()=>alive,stop:async()=>{alive=false;}};},
+  onChange:awake=>states.push(awake)});
+ await keeper.setAgent(true);await keeper.check();assert.deepEqual(states,[true]);
+ await keeper.setAgent(false);now=10;await keeper.check();assert.deepEqual(states,[true]);
+ now=30;await keeper.check();assert.deepEqual(states,[true,false]);
+ await keeper.background('task',true);assert.deepEqual(states,[true,false,true]);
+ power='battery';await keeper.check();assert.equal(states.at(-1),false);
+ power='ac';await keeper.check();assert.equal(states.at(-1),true);
+ alive=false;await keeper.check();assert.equal(states.at(-1),false);
+ now+=30000;await keeper.check();assert.equal(states.at(-1),true);
+ await keeper.shutdown();assert.equal(states.at(-1),false);
+});
+
+test('missing inhibitor never publishes awake',async()=>{
+ const states:boolean[]=[];
+ const keeper=new PowerKeeper({power:async()=> 'ac',start:()=>undefined,onChange:awake=>states.push(awake)});
+ await keeper.setAgent(true);await keeper.shutdown();assert.deepEqual(states,[]);
+});
+
 test('unsupported systems never spawn an inhibitor',()=>assert.equal(startInhibitor('win32'),undefined));
 
 import { spawn } from 'node:child_process';

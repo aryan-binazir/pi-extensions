@@ -77,6 +77,8 @@ test("BTW fills its overlay from opening through the first answer and resize", a
   const result = h.commands.btw.handler("", h.ctx);
   assert.equal(h.lines().length, 36);
   assert.match(h.lines()[0], /^┌─+┐$/);
+  assert.match(h.render(), /Side conversation · disposable/);
+  assert.doesNotMatch(h.render(), /\bBTW\b/);
   assert.match(h.lines().at(-1)!, /^└─+┘$/);
   assert.ok(h.lines().every((line) => visibleWidth(line) === 80));
   h.key("First question");h.key("\r");
@@ -155,7 +157,7 @@ test("BTW shows the full side transcript and queues followups without losing a d
   h.key("\u001b");await result;
 });
 
-test("side chat uses normal user backgrounds and unlabeled assistant replies while streaming and completed", async () => {
+test("side chat uses normal user backgrounds and Agent labels while streaming and completed", async () => {
   const h = host();
   let finish!: () => void;
   const waiting = new Promise<void>((resolve) => { finish = resolve; });
@@ -180,7 +182,10 @@ test("side chat uses normal user backgrounds and unlabeled assistant replies whi
       const reply = lines.find((line) => stripTerminalSequences(line).includes("Assistant reply"));
       assert.ok(reply);
       assert.ok(!reply.includes("\x1b[48;5;236m"));
-      assert.doesNotMatch(stripTerminalSequences(lines.join("\n")), /You:|BTW:|Assistant:|\*\*/);
+      const label = lines.find((line) => stripTerminalSequences(line).includes("Agent:"));
+      assert.ok(label, "assistant reply is labeled Agent:");
+      assert.ok(!label.includes("\x1b[48;5;236m"));
+      assert.doesNotMatch(stripTerminalSequences(lines.join("\n")), /You:|\bBTW\b|Assistant:|\*\*/);
     }
   };
   await tick();

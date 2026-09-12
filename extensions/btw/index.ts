@@ -33,7 +33,7 @@ export default function btw(pi: ExtensionAPI) {
   const handler = async (args: string, ctx: ExtensionCommandContext) => {
     if (ctx.mode !== "tui" || !ctx.model) {
       ctx.ui.notify(
-        "BTW requires an interactive terminal and selected model",
+        "Side conversation requires an interactive terminal and selected model",
         "error",
       );
       return;
@@ -277,6 +277,7 @@ export default function btw(pi: ExtensionAPI) {
               const turnLines = (question: string, reply: string) => [
                 ...userLines(question),
                 "",
+                ...new Markdown("Agent:", padding, 0, markdownTheme).render(w),
                 ...new Markdown(clean(reply), padding, 0, markdownTheme).render(w),
                 "",
               ];
@@ -291,7 +292,7 @@ export default function btw(pi: ExtensionAPI) {
                 ...editor.render(w),
               ].slice(-(Math.max(1, innerHeight - 2)));
               const header = wrapTextWithAnsi(
-                "BTW · disposable · Esc closes and discards · PgUp/PgDn scroll",
+                "Side conversation · disposable · Esc closes and discards · PgUp/PgDn scroll",
                 w,
               ).slice(0, Math.max(0, innerHeight - footer.length - 1));
               const height = Math.max(0, innerHeight - header.length - footer.length);

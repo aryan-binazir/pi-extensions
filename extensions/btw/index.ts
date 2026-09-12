@@ -99,7 +99,7 @@ export default function btw(pi: ExtensionAPI) {
           let status = "";
           let scroll = 0;
           let controller: AbortController | undefined;
-          const turns: { question: string; answer: string }[] = [];
+          const turns: { question: string; answer: string; error?: string }[] = [];
           const editor = new Editor(tui, {
             borderColor: (s) => theme.fg("accent", s),
             selectList: {
@@ -152,6 +152,7 @@ export default function btw(pi: ExtensionAPI) {
             controller = new AbortController();
             const signal = controller.signal;
             const question = raw;
+            let failure: string | undefined;
             try {
               const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
               if (closed) return;
@@ -168,10 +169,11 @@ export default function btw(pi: ExtensionAPI) {
               ];
               // All prior side turns are also text: no model-generated tool calls
               // can enter a followup request as executable provider messages.
-              if (turns.length)
+              const history = turns.filter((turn) => !turn.error);
+              if (history.length)
                 messages.push({
                   role: "user",
-                  content: `Earlier side conversation:\n${turns.map((t) => `User: ${t.question}\nAssistant: ${t.answer}`).join("\n\n").slice(-MAX_HISTORY)}`,
+                  content: `Earlier side conversation:\n${history.map((t) => `User: ${t.question}\nAssistant: ${t.answer}`).join("\n\n").slice(-MAX_HISTORY)}`,
                   timestamp: Date.now(),
                 });
               messages.push({
@@ -199,6 +201,7 @@ export default function btw(pi: ExtensionAPI) {
                 },
               );
               status = "Answering…";
+              tui.requestRender();
               for await (const event of stream) {
                 if (closed) break;
                 if (event.type === "text_delta") {
@@ -226,11 +229,11 @@ export default function btw(pi: ExtensionAPI) {
               }
             } catch (error) {
               if (!closed)
-                status = `Side request failed: ${error instanceof Error ? error.message.slice(0, 2000) : "Unknown provider error"}`;
+                status = failure = `Side request failed: ${error instanceof Error ? error.message.slice(0, 2000) : "Unknown provider error"}`;
             } finally {
               busy = false;
               if (!closed) {
-                turns.push({ question, answer });
+                turns.push({ question, answer, error: failure });
                 currentQuestion = "";
                 answer = "";
                 const next = pending.shift();
@@ -282,7 +285,12 @@ export default function btw(pi: ExtensionAPI) {
                 "",
               ];
               const lines = [
-                ...turns.flatMap((turn) => turnLines(turn.question, turn.answer || "(No answer)")),
+                ...turns.flatMap((turn) => turnLines(
+                  turn.question,
+                  turn.error
+                    ? [turn.answer, turn.error].filter(Boolean).join("\n\n")
+                    : turn.answer || "(No answer)",
+                )),
                 ...(busy ? turnLines(currentQuestion, answer || "…") : []),
                 ...pending.flatMap((question) => userLines(`(queued)\n${question}`)),
               ];

@@ -1,5 +1,9 @@
 # Search, fast models and work-scoped power inhibition
 
+## Status
+
+The DuckDuckGo web-search extension was removed after repeated live searches returned HTTP 202. The search design and verification below are historical; fast mode and auto-caffeinate remain active.
+
 ## Decision
 
 Each extension owns its Pi adapter and one implementation module. No shared integration framework is introduced.

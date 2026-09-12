@@ -129,11 +129,16 @@ test('active Herdr uses create/open and resolves an opaque workspace for removal
     process.env.PATH = `${bin}:${previousPath}`;
     const trees = new Worktrees(repo, { home, herdr: true });
     const checkout = await trees.open('task'); await trees.open('task');
+    await rm(checkout.path, { recursive: true });
+    await assert.rejects(trees.open('task'), /Worktree directory is unavailable/);
+    git('worktree', 'remove', '--force', checkout.path);
+    git('worktree', 'add', checkout.path, checkout.branch);
     assert.equal((await trees.remove(checkout.path, { confirm: async () => true })).removed, true);
     const { readFile } = await import('node:fs/promises');
     const calls = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line)).filter(args => args[1] !== 'list');
     assert.deepEqual(calls[0], ['worktree', 'create', '--cwd', repo, '--branch', 'amb/task', '--base', 'main', '--path', checkout.path, '--no-focus']);
     assert.deepEqual(calls[1], ['worktree', 'open', '--cwd', repo, '--path', checkout.path, '--no-focus']);
+    assert.equal(calls.length, 3);
     assert.deepEqual(calls.at(-1), ['worktree', 'remove', '--workspace', 'w-opaque']);
   } finally { process.env.PATH = previousPath; await rm(home, { recursive: true, force: true }); }
 });

@@ -124,3 +124,70 @@ test('notification failures preserve the original child error', async () => {
     assert.match(result.notificationError!, /UI gone/);
   } finally { await registry.shutdown(); }
 });
+
+test('explicit tools must respect parent permissions without an authorize callback', async () => {
+  const launched: string[][] = [];
+  let allowed = ['read'];
+  const registry = new SubagentRegistry({
+    allowedTools: () => allowed,
+    invocation: spec => {
+      launched.push(spec.tools);
+      return {command: process.execPath, args: ['-e', 'process.exit(0)']};
+    },
+  });
+  try {
+    await assert.rejects(registry.spawn({task: 'escalate', cwd: tmpdir(), tools: ['bash']}), /exceed parent permissions/);
+    assert.deepEqual(launched, []);
+    for (const selection of [{tools: ['read']}, {}, {preset: 'reader' as const}, {preset: 'writer' as const}]) {
+      assert.equal((await (await registry.spawn({task: 'read', cwd: tmpdir(), ...selection})).done).status, 'succeeded');
+    }
+    assert.deepEqual(launched, [['read'], ['read'], ['read'], ['read']]);
+    allowed = [];
+    await assert.rejects(registry.spawn({task: 'escalate', cwd: tmpdir(), tools: ['read']}), /exceed parent permissions/);
+    assert.equal(launched.length, 4);
+    assert.equal((await (await registry.spawn({task: 'reason', cwd: tmpdir()})).done).status, 'succeeded');
+    assert.deepEqual(launched.at(-1), []);
+  } finally { await registry.shutdown(); }
+});
+
+for (const missingGroup of [false, true]) {
+  test(`child exit attempts group cleanup only once, including close (ESRCH: ${missingGroup})`, async t => {
+    const kill = t.mock.method(process, 'kill', () => {
+      if (missingGroup) throw Object.assign(new Error('No such process'), {code: 'ESRCH'});
+      return true;
+    });
+    const registry = new SubagentRegistry({invocation: () => ({
+      command: process.execPath,
+      args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:String(process.pid)}]}}));`],
+    })});
+    try {
+      const result = await (await registry.spawn({task: 'exit normally', cwd: tmpdir()})).done;
+      assert.equal(result.status, 'succeeded');
+      const pid = Number(result.output);
+      assert.ok(pid > 0);
+      assert.deepEqual(kill.mock.calls.map(call => call.arguments), [[-pid, 'SIGKILL']]);
+    } finally { await registry.shutdown(); }
+  });
+}
+
+test('cancellation escalation does not signal the process group again at exit or close', async t => {
+  const kill = t.mock.method(process, 'kill');
+  let ready!: (pid: number) => void;
+  const started = new Promise<number>(resolve => { ready = resolve; });
+  const registry = new SubagentRegistry({
+    invocation: () => ({command: process.execPath, args: ['-e', `
+      process.on('SIGTERM',()=>{});
+      console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:String(process.pid)}}));
+      setInterval(()=>{},1000);
+    `]}),
+    onUpdate: task => { if (task.output) ready(Number(task.output)); },
+  });
+  try {
+    const task = await registry.spawn({task: 'ignore graceful cancellation', cwd: tmpdir(), timeout: 5000});
+    const pid = await Promise.race([started, task.done.then(() => { throw new Error('Child exited before readiness'); })]);
+    assert.ok(pid > 0);
+    assert.equal(registry.cancel(task.id), true);
+    assert.equal((await task.done).status, 'cancelled');
+    assert.deepEqual(kill.mock.calls.map(call => call.arguments), [[-pid, 'SIGTERM'], [-pid, 'SIGKILL']]);
+  } finally { await registry.shutdown(); }
+});

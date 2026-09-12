@@ -20,7 +20,7 @@ test('work requires AC, background survives settled, battery and shutdown releas
 test('Linux power distinguishes AC, battery and missing information',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'pi-power-'));
  try{
-  assert.equal(await readPower('linux',dir),'unknown');
+  assert.equal(await readPower('linux',dir),'ac');
   assert.equal(await readPower('linux',join(dir,'missing')),'unknown');
   await mkdir(join(dir,'BAT0'));await writeFile(join(dir,'BAT0/type'),'Battery');
   assert.equal(await readPower('linux',dir),'unknown');
@@ -96,12 +96,12 @@ test('missing inhibitor backs off instead of retrying each watchdog tick',async(
  finally {await keeper.shutdown();}
 });
 
-test('empty Linux power-supply directory never starts an inhibitor',async()=>{
+test('empty Linux power-supply directory is treated as fixed AC power',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'pi-power-empty-'));let starts=0;
  const keeper=new PowerKeeper({power:()=>readPower('linux',dir),start:()=>{starts++;return {alive:()=>true,stop:async()=>{}};}});
  try{
   await keeper.setAgent(true);await keeper.background('task',true);await keeper.check();
-  assert.equal(starts,0);
+  assert.equal(starts,1);
  }finally{await keeper.shutdown();await rm(dir,{recursive:true,force:true});}
 });
 

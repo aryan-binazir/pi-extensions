@@ -11,6 +11,9 @@ export async function readPower(platform=process.platform,root='/sys/class/power
   }
   if(platform!=='linux')return 'unknown';
   const entries=await readdir(root);
+  // Fixed-power desktops commonly expose no power-supply devices at all; a
+  // missing or unreadable directory stays unknown via the caller's catch.
+  if(entries.length===0)return 'ac';
   let offline=false;
   for(const entry of entries){
    try {

@@ -253,7 +253,7 @@ export default function btw(pi: ExtensionAPI) {
               const totalHeight = Math.max(1, Math.floor((tui.terminal?.rows ?? 30) * 0.9));
               const footer = [
                 ...wrapTextWithAnsi(stripTerminalSequences(status).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""), w),
-                ...(busy ? [] : editor.render(w)),
+                ...editor.render(w),
               ].slice(-(Math.max(1, totalHeight - 2)));
               const header = wrapTextWithAnsi(
                 "BTW · disposable · Esc closes and discards · PgUp/PgDn scroll",

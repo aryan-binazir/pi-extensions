@@ -77,6 +77,32 @@ test("BTW fills its overlay from opening through the first answer and resize", a
   h.key("\u001b");await result;
 });
 
+test("BTW keeps the input area in place while connecting and streaming", async () => {
+  const h = host();
+  let finish!: () => void;
+  const waiting = new Promise<void>((resolve) => { finish = resolve; });
+  h.ctx.modelRegistry.getProvider = () => ({
+    streamSimple: () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "text_delta", delta: "Partial answer" };
+        await waiting;
+      },
+    }),
+  });
+  const result = h.commands.btw.handler("", h.ctx);
+  const inputArea = h.lines().slice(-3);
+  h.key("Question");h.key("\r");
+  assert.match(h.render(), /Connecting/);
+  assert.deepEqual(h.lines().slice(-3), inputArea);
+  await tick();
+  assert.match(h.render(), /Partial answer/);
+  assert.match(h.render(), /Answering/);
+  assert.deepEqual(h.lines().slice(-3), inputArea);
+  finish();await tick();
+  assert.deepEqual(h.lines().slice(-3), inputArea);
+  h.key("\u001b");await result;
+});
+
 test("BTW streams a tool-free side answer with current system snapshot and followups", async () => {
   const h = host();
   const result = h.commands.btw.handler("What about this?", h.ctx);

@@ -14,7 +14,7 @@ async function fixture(run: (host: any) => Promise<void>) {
     await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nif(process.argv.at(-1)==='large')console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'界'.repeat(50000)}]}}));else if(process.argv.at(-1)==='batch'){console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'ready'}}));const timer=setInterval(()=>{if(require('node:fs').existsSync('release')){clearInterval(timer);console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}));}},5);}else if(process.argv.at(-1)==='hold')setInterval(()=>{},1000);else if(process.argv.at(-1)==='loop'){for(let i=0;i<4;i++)console.log(JSON.stringify({type:'tool_execution_end',toolName:'bash',args:{command:'missing'},isError:true}));setInterval(()=>{},1000);}else console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify(process.argv.slice(2))}]}}));`);
     await chmod(join(cwd, 'pi'), 0o700);
     process.env.PATH = `${cwd}:${oldPath ?? ''}`; process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent');
-    subagents({events: {emit() {}}, getActiveTools: () => ['read','write','edit','bash'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand() {}, on: (name: string, hook: any) => hooks.set(name, hook), sendMessage: (message: any, options: any) => notifications.push({task: JSON.parse(message.content), options})} as any);
+    subagents({events: {emit() {}}, getActiveTools: () => ['read','write','edit','bash'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand() {}, on: (name: string, hook: any) => hooks.set(name, hook), sendMessage: (message: any, options: any) => notifications.push({type: message.customType, task: message.customType === 'subagent-tracker' ? message.content : JSON.parse(message.content), options})} as any);
     await hooks.get('session_start')({}, ctx);
     const execute = (name: string, args: any = {}, signal?: AbortSignal) => tools.get(name).execute(name, args, signal, undefined, ctx);
     const settle = async (id: string) => {
@@ -133,4 +133,68 @@ test('registered delegation remains attached to its owning abort signal after re
   const task = await execute('subagent', {task: 'hold', preset: 'reader'}, controller.signal);
   controller.abort();
   assert.equal((await settle(task.details.id)).status, 'cancelled');
+}));
+
+
+test('registered direct and workflow children share native monitoring without recursive delegation or paid wakeups', async () => fixture(async ({execute, ctx, notifications}: any) => {
+  const calls: any[] = [];
+  ctx.modelRegistry = {
+    find: (provider: string, id: string) => { assert.equal(provider, 'openai-codex'); assert.equal(id, 'gpt-5.6-luna'); return {provider, id, maxTokens: 128000}; },
+    getApiKeyAndHeaders: async () => ({ok: true, apiKey: 'fake'}),
+    getProvider: () => ({streamSimple: (...args: any[]) => {calls.push(args); return (async function* () {yield {type: 'text_delta', delta: 'Observed children'}; yield {type: 'done', reason: 'stop'};})();}}),
+  };
+  // Start the workflow child first so the shared initial snapshot includes it.
+  const workflow = execute('workflow', {source: "return await api.spawn({task:'hold',preset:'reader'},'tracking');"}).catch(() => undefined);
+  const end = Date.now() + 4000;
+  while (!calls.length && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(calls.length, 1); assert.match(calls[0][1].messages[0].content, /workflow/);
+  await execute('subagent', {task: 'hold', preset: 'reader'});
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(calls.length, 1);
+  assert.equal((await execute('subagent_status')).details.length, 2);
+  const reports = notifications.filter((notice: any) => notice.type === 'subagent-tracker');
+  assert.equal(reports.length, 1); assert.deepEqual(reports[0].options, {triggerTurn: false, deliverAs: 'nextTurn'});
+  await execute('subagent_cancel', {id: 'all'}); await workflow;
+  await execute('subagent', {task: 'hold', preset: 'reader'});
+  const restartedBy = Date.now() + 2000;
+  while (calls.length < 2 && Date.now() < restartedBy) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(calls.length, 2); assert.match(calls[1][1].messages[0].content, /parent/);
+  assert.equal((await execute('subagent_status')).details.length, 3);
+}));
+
+test('missing model registry surfaces tracker failure in status while children remain usable', async () => fixture(async ({execute}: any) => {
+  const child = await execute('subagent', {task: 'hold', preset: 'reader'});
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const status = await execute('subagent_status', {id: child.details.id});
+  assert.match(status.tracker, /Luna tracker error:.*unavailable/);
+  assert.equal(status.details.id, child.details.id);
+  assert.match(status.content[1].text, /unavailable/);
+}));
+
+test('shutdown aborts a pending tracker without delaying children and late reports cannot enter a new session', async () => fixture(async ({execute, ctx, hooks, notifications}: any) => {
+  const requests: any[] = [];
+  ctx.modelRegistry = {
+    find: () => ({provider: 'openai-codex', id: 'gpt-5.6-luna'}),
+    getApiKeyAndHeaders: async () => ({ok: true, apiKey: 'fake'}),
+    getProvider: () => ({streamSimple: (_model: any, _context: any, options: any) => (async function* () {
+      await new Promise<void>(resolve => requests.push({resolve, signal: options.signal}));
+      yield {type: 'text_delta', delta: 'late report'}; yield {type: 'done', reason: 'stop'};
+    })()}),
+  };
+  const waitForRequest = async (count: number) => {
+    const end = Date.now() + 2000;
+    while (requests.length < count && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(requests.length, count);
+  };
+  await execute('subagent', {task: 'hold', preset: 'reader'}); await waitForRequest(1);
+  const second = await execute('subagent', {task: 'hold', preset: 'reader'});
+  await execute('subagent_cancel', {id: second.details.id});
+  await hooks.get('session_shutdown')();
+  assert.equal(requests[0].signal.aborted, true);
+  await hooks.get('session_start')({}, ctx);
+  await execute('subagent', {task: 'hold', preset: 'reader'}); await waitForRequest(2);
+  requests[0].resolve(); await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(notifications.filter((notice: any) => notice.type === 'subagent-tracker').length, 0);
+  await execute('subagent_cancel', {id: 'all'});
+  assert.equal(requests[1].signal.aborted, true); requests[1].resolve();
 }));

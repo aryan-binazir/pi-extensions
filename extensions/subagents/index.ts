@@ -8,6 +8,7 @@ import { piInvocation, SubagentRegistry, type TaskSpec } from './registry.ts';
 import { runWorkflow } from './workflow.ts';
 import { clipJson, taskView } from './presentation.ts';
 import { abortable } from './cancellation.ts';
+import { SubagentTracker } from './tracker.ts';
 
 const taskSchema = Type.Object({
   task: Type.String({ minLength: 1, maxLength: 32000 }), cwd: Type.Optional(Type.String()),
@@ -19,6 +20,7 @@ const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: J
 export default function subagents(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let shuttingDown = false;
+  let cancellingAll = false;
   const workflows = new Set<AbortController>();
   const workflowRuns = new Set<Promise<unknown>>();
   let notices: ReturnType<typeof taskView>[] = [];
@@ -58,8 +60,13 @@ export default function subagents(pi: ExtensionAPI): void {
     },
   });
   let registry = createRegistry();
+  const tracker = new SubagentTracker(() => context, () => registry.list(), report => {
+    pi.sendMessage({customType: 'subagent-tracker', content: report, display: true}, {triggerTurn: false, deliverAs: 'nextTurn'});
+  });
   const trackedSpawn = async (task: TaskSpec, signal?: AbortSignal, owner: 'parent' | 'workflow' = 'parent') => {
     const handle = await registry.spawn(task, signal, owner);
+    if (!shuttingDown && !cancellingAll) tracker.update();
+    void handle.done.then(() => { if (!shuttingDown && !cancellingAll) tracker.update(); });
     pi.events.emit('pi-interactive:background-activity', { id: handle.id, active: true });
     void handle.done.then(() => pi.events.emit('pi-interactive:background-activity', { id: handle.id, active: false }));
     return handle;
@@ -79,6 +86,7 @@ export default function subagents(pi: ExtensionAPI): void {
   });
   const stopAll = async () => {
     shuttingDown = true;
+    tracker.stop();
     clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0;
     for (const controller of workflows) controller.abort();
     await registry.shutdown();
@@ -87,12 +95,19 @@ export default function subagents(pi: ExtensionAPI): void {
   pi.on('session_shutdown', stopAll);
   const cancelTasks = async (id: string) => {
     if (id === 'all') {
+      cancellingAll = true;
+      tracker.stop();
       clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0;
       const runs = [...workflowRuns];
       for (const controller of workflows) controller.abort();
-      const count = await registry.cancelAll();
-      await Promise.allSettled(runs);
-      return {cancelled: count > 0, count};
+      try {
+        const count = await registry.cancelAll();
+        await Promise.allSettled(runs);
+        return {cancelled: count > 0, count};
+      } finally {
+        cancellingAll = false;
+        if (!shuttingDown) tracker.update();
+      }
     }
     const cancelled = registry.cancel(id);
     await registry.wait(id);
@@ -117,9 +132,11 @@ export default function subagents(pi: ExtensionAPI): void {
       if (params.id) {
         const task = registry.get(params.id);
         if (!task) throw new Error('Unknown or no longer retained subagent id');
-        return result(taskView(task, 8192, params.outputOffset ?? 0));
+        const value = result(taskView(task, 8192, params.outputOffset ?? 0));
+        return {...value, tracker: tracker.status, content: [...value.content, {type: 'text' as const, text: tracker.status}]};
       }
-      return result(registry.list(params.offset ?? 0, params.limit ?? 10).map(task => taskView(task)));
+      const value = result(registry.list(params.offset ?? 0, params.limit ?? 10).map(task => taskView(task)));
+      return {...value, tracker: tracker.status, content: [...value.content, {type: 'text' as const, text: tracker.status}]};
     },
   });
   pi.registerTool({

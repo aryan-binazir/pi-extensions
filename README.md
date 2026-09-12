@@ -188,3 +188,15 @@ Linux accessibility is reported unavailable when no supported service exists.
 The Linux/macOS CI matrix checks portable behavior; it does not prove a live Mac
 desktop session or priority-service entitlement. Unknown power state leaves idle
 sleep settings untouched. No live provider call is needed for the fixture tests.
+
+Registered subagents share one report-only `openai-codex/gpt-5.6-luna` tracker
+with medium reasoning per owning session, covering direct and workflow children.
+It starts asynchronously with work, then requests at most once per minute with a
+30-second deadline. Snapshots contain at most four running children, queued
+counts and four recent completed children, with clipped briefs/output and usage;
+no parent history is sent. Reports are capped at 2,000 characters and delivered
+on the next turn without waking the parent. `subagent_status` also exposes tracker
+status/errors while preserving task details. Missing model/auth never selects a
+fallback. The tracker has no tools or execution authority; deterministic task
+supervision remains independent. Idle, cancel-all and shutdown abort tracking;
+later delegation starts it again.

@@ -632,3 +632,129 @@ test("confirming a slash completion submits the completed command", async () => 
   assert.equal(e.isShowingAutocomplete(), true);
   e.handleInput("\r"); assert.equal(sent, "/btw");
 });
+
+for (const [command, before, after, expanded] of [
+  ["ggp", "a\nb", "a\nMARKER\nb", "a\nPAYLOAD\nb"],
+  ["GP", "a\nb", "a\nMARKER\nb", "a\nPAYLOAD\nb"],
+  ["Gp", "a\nb", "a\nb\nMARKER", "a\nb\nPAYLOAD"],
+  ["ggP", "a\nb", "MARKER\na\nb", "PAYLOAD\na\nb"],
+]) test(`linewise collapsed put keeps its boundary: ${command}`, () => {
+  const e = editor(), payload = "payload\n".repeat(30);
+  e.handleInput(`\x1b[200~${payload}\x1b[201~`);
+  keys(e, '\x1b0yy');
+  e.setText(before);
+  keys(e, command);
+  assert.equal(e.getText().replace(/\[paste #[^\]]+\]/g, "MARKER"), after);
+  assert.equal(e.getExpandedText(), expanded.replace("PAYLOAD", payload.slice(0, -1)));
+  const putText = e.getText(), putExpanded = e.getExpandedText();
+  keys(e, "u"); assert.equal(e.getText(), before);
+  keys(e, "\x12"); assert.equal(e.getText(), putText);
+  assert.equal(e.getExpandedText(), putExpanded);
+  keys(e, command === "Gp" ? "Gdd" : "dd");
+  assert.equal(e.getExpandedText(), before);
+});
+
+test("linewise P separates two collapsed payloads", () => {
+  const e = editor(), payload = "payload\n".repeat(30);
+  e.handleInput(`\x1b[200~${payload}\x1b[201~`);
+  keys(e, '\x1b0yyP');
+  assert.match(e.getText(), /^\[paste #[^\]]+\]\n\[paste #[^\]]+\]$/);
+  assert.equal(e.getExpandedText(), payload + payload);
+  keys(e, "dd"); assert.equal(e.getExpandedText(), payload);
+});
+
+for (const [command, after, expanded] of [
+  ["ggVp", "MARKER\nb", "PAYLOAD\nb"],
+  ["gglvp", "a\nMARKER\nz\nb", "a\nPAYLOAD\nz\nb"],
+]) test(`visual collapsed put keeps its boundaries: ${command}`, () => {
+  const e = editor(), payload = "payload\n".repeat(30), before = "axz\nb";
+  e.handleInput(`\x1b[200~${payload}\x1b[201~`);
+  keys(e, '\x1b0yy'); e.setText(before);
+  keys(e, command);
+  assert.equal(e.getText().replace(/\[paste #[^\]]+\]/g, "MARKER"), after);
+  assert.equal(e.getExpandedText(), expanded.replace("PAYLOAD", payload.slice(0, -1)));
+  const visible = e.getText(), full = e.getExpandedText();
+  keys(e, "u"); assert.equal(e.getText(), before);
+  keys(e, "\x12"); assert.equal(e.getText(), visible);
+  assert.equal(e.getExpandedText(), full);
+});
+
+for (const visual of ["v", "V"]) {
+  for (const redo of [false, true]) test(`history returns ${visual} to normal on ${redo ? "redo" : "undo"}`, () => {
+    const e = editor(); e.setText("abc\ndef"); keys(e, "\x1b0x");
+    if (redo) keys(e, "u");
+    keys(e, "gg" + visual + "G" + (redo ? "\x12" : "u"));
+    const restored = redo ? "abc\nef" : "abc\ndef";
+    assert.equal(e.getText(), restored);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+    keys(e, "d"); assert.equal(e.getText(), restored, "d waits for a motion");
+    keys(e, "d"); assert.equal(e.getText(), "abc");
+  });
+  for (const history of ["u", "\x12"]) test(`empty history cancels ${visual} selection for ${JSON.stringify(history)}`, () => {
+    const e = editor(); e.setText("abc"); keys(e, "\x1b0" + visual + "l" + history);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+    keys(e, "d"); assert.equal(e.getText(), "abc");
+  });
+}
+
+test("undo cancels pending operators and counts", () => {
+  for (const pending of ["2d", "di", "g"]) {
+    const e = editor(); e.setText("one two three"); keys(e, "\x1b0x" + pending + "u");
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+    keys(e, "w"); assert.equal(e.getText(), "one two three");
+    assert.deepEqual(e.getCursor(), { line: 0, col: 4 });
+  }
+});
+
+for (const change of ["C", "cc"]) {
+  for (const before of ["", "a\n", "a\n\nb"]) test(`${change} inserts on an empty line in ${JSON.stringify(before)}`, () => {
+    const e = editor(); e.setText(before); keys(e, "\x1b" + (before === "a\n\nb" ? "2G" : "G"));
+    const cursor = e.getCursor();
+    keys(e, change);
+    assert.ok(e.render(40).at(-1)!.endsWith(" INSERT "));
+    assert.deepEqual(e.getCursor(), cursor);
+    keys(e, "X\x1b");
+    assert.equal(e.getText(), before === "a\n\nb" ? "a\nX\nb" : before + "X");
+    keys(e, "u"); assert.equal(e.getText(), before);
+    keys(e, "\x12"); assert.ok(e.getText().includes("X"));
+  });
+  test(`empty ${change} preserves registers and adds no undo entry`, () => {
+    const e = editor(); e.setText("a\nx"); keys(e, "\x1bGxggyyG" + change + "\x1b");
+    keys(e, "u"); assert.equal(e.getText(), "a\nx");
+    keys(e, "p"); assert.equal(e.getText(), "a\nx\na");
+  });
+}
+
+for (const [position, motion] of [["G", "j"], ["gg", "k"]]) {
+  for (const op of ["d", "c", "y"]) test(`failed ${op}${motion} preserves draft, cursor and register`, () => {
+    const e = editor(); e.setText("a\nb\nc"); keys(e, "\x1b2Gyy" + position);
+    const cursor = e.getCursor(); keys(e, op + motion);
+    assert.equal(e.getText(), "a\nb\nc");
+    assert.deepEqual(e.getCursor(), cursor);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+    keys(e, "p");
+    assert.equal(e.getText(), position === "G" ? "a\nb\nc\nb" : "a\nb\nb\nc");
+  });
+}
+
+test("failed vertical deletion adds no history and compares lines rather than columns", () => {
+  const e = editor(); e.setText("aaaa\nbbb"); keys(e, "\x1bgg$j");
+  e.handleInput("\x1b[D");
+  const cursor = e.getCursor(); keys(e, "dj");
+  assert.equal(e.getText(), "aaaa\nbbb");
+  assert.deepEqual(e.getCursor(), cursor);
+  keys(e, "xdj"); assert.equal(e.getText(), "aaaa\nbb");
+  keys(e, "u"); assert.equal(e.getText(), "aaaa\nbbb");
+});
+
+test("vertical operator rejection preserves valid line and counted motions", () => {
+  for (const [command, expected] of [["GdG", "a\nb"], ["ggdgg", "b\nc"], ["gg99dj", ""], ["G99dk", ""]]) {
+    const e = editor(); e.setText("a\nb\nc"); keys(e, "\x1b" + command);
+    assert.equal(e.getText(), expected);
+  }
+  for (const command of ["dj", "dk", "cj", "ck", "cl"]) {
+    const e = editor(); e.setText("x"); keys(e, "\x1b" + command);
+    assert.equal(e.getText(), "x");
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+  }
+});

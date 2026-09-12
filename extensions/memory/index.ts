@@ -76,12 +76,13 @@ async function safeTarget(path: string): Promise<void> {
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error('Memory target must be a regular file, never a symlink');
   } catch (error) { if (!missing(error)) throw error; }
 }
-async function write(path: string, content: string): Promise<void> {
+async function write(path: string, content: string, signal?: AbortSignal): Promise<void> {
   await safeTarget(path);
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     const handle = await open(temporary, 'wx', 0o600);
     try { await handle.writeFile(content, 'utf8'); } finally { await handle.close(); }
+    signal?.throwIfAborted();
     await rename(temporary, path);
   } finally { await unlink(temporary).catch(error => { if (!missing(error)) throw error; }); }
 }
@@ -92,15 +93,10 @@ async function ensureIgnored(dir: string): Promise<void> {
   try { content = await read(path, '.gitignore'); }
   catch (error) {
     if (!missing(error)) throw error;
-    let handle;
-    try { handle = await open(path, 'wx', 0o600); }
-    catch (createError) {
-      if ((createError as NodeJS.ErrnoException).code === 'EEXIST') return ensureIgnored(dir);
-      throw createError;
-    }
-    try { await handle.writeFile('*\n', 'utf8'); } finally { await handle.close(); }
+    await write(path, '*\n');
     return;
   }
+  if (!content.trim()) { await write(path, '*\n'); return; }
   // A final wildcard excludes every child regardless of any preceding rules.
   // Preserve user rules byte-for-byte; refuse ambiguous/negated configurations.
   const rules = content.split(/\r?\n/).filter(line => line.trim() !== '' && !line.startsWith('#'));
@@ -142,7 +138,7 @@ export default function memory(pi: ExtensionAPI): void {
           validate(content, name);
           signal?.throwIfAborted();
           if (params.scope === 'project') await ensureIgnored(dir);
-          await write(path, content);
+          await write(path, content, signal);
         }
         signal?.throwIfAborted();
         return { content: [{ type: 'text' as const, text: params.action === 'read' ? content! : `${params.action}: ${params.scope}/${name}` }], details: { action: params.action, scope: params.scope, name, ...(params.action === 'read' ? { content } : {}) } };

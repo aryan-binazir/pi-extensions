@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -18,20 +20,6 @@ function runtime(cwd: string) {
   const ctx = { cwd, hasUI: false, isProjectTrusted: () => true } as ExtensionContext;
   return { call: (params: object, signal?: AbortSignal) => tool.execute('test', params, signal, undefined, ctx), before: (systemPrompt = 'BASE') => hooks.get('before_agent_start')!({ systemPrompt }, ctx), ctx };
 }
-
-test('memory writes and reads explicit topics; only small index enters current project context', async () => {
-  const project = join(base, 'project'); await mkdir(project);
-  const app = runtime(project);
-  await app.call({ action: 'write', scope: 'project', name: 'architecture', content: 'TOPIC DETAILS' });
-  await app.call({ action: 'write', scope: 'project', name: 'MEMORY.md', content: '- architecture: design decisions' });
-  const topic = await app.call({ action: 'read', scope: 'project', name: 'architecture' });
-  assert.match(JSON.stringify(topic), /TOPIC DETAILS/);
-  const prompt = (await app.before()).systemPrompt;
-  assert.match(prompt, /architecture: design decisions/);
-  assert.doesNotMatch(prompt, /TOPIC DETAILS/);
-  const second = join(base, 'second'); await mkdir(second); app.ctx.cwd = second;
-  assert.equal((await app.before()).systemPrompt, 'BASE');
-});
 
 test('memory global CRUD, exact updates, limits, cancellation and secret rejection', async () => {
   const app = runtime(base);
@@ -64,15 +52,37 @@ test('project fallback, Git exclusion and symlink rejection protect external fil
 });
 
 
-test('memory rejects linked files and aborted writes without leaking or persisting their contents', async () => {
+test('memory rejects linked files and mid-write aborts without persisting contents or leaking temp files', async (t) => {
   const { link, writeFile } = await import('node:fs/promises');
   const project = join(base, 'hardlink'); await mkdir(join(project, '.agents', 'memory'), { recursive: true });
   const outside = join(base, 'private'); await writeFile(outside, 'private unrecognized content');
   await link(outside, join(project, '.agents', 'memory', 'linked.md'));
   const app = runtime(project);
   await assert.rejects(app.call({ action: 'read', scope: 'project', name: 'linked' }), /linked|regular/);
-  const controller = new AbortController(); controller.abort();
-  await assert.rejects(app.call({ action: 'write', scope: 'project', name: 'cancelled', content: 'value' }, controller.signal), /abort/i);
+  const controller = new AbortController();
+  const dir = join(project, '.agents', 'memory');
+  const originalOpen = fs.open;
+  let temporaryWritten = false;
+  const mockedOpen = t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    if (String(args[0]).startsWith(join(dir, 'cancelled.md.')) && String(args[0]).endsWith('.tmp')) {
+      const originalWriteFile = handle.writeFile.bind(handle);
+      t.mock.method(handle, 'writeFile', async (...writeArgs: Parameters<typeof handle.writeFile>) => {
+        await originalWriteFile(...writeArgs);
+        assert.equal(await fs.readFile(args[0], 'utf8'), 'value');
+        temporaryWritten = true;
+        controller.abort();
+      });
+    }
+    return handle;
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(app.call({ action: 'write', scope: 'project', name: 'cancelled', content: 'value' }, controller.signal), /abort/i);
+  } finally { mockedOpen.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(temporaryWritten, true);
+  assert.equal(controller.signal.aborted, true);
+  assert.deepEqual((await fs.readdir(dir)).sort(), ['.gitignore', 'linked.md']);
   await assert.rejects(app.call({ action: 'read', scope: 'project', name: 'cancelled' }), /ENOENT/);
 });
 
@@ -91,6 +101,47 @@ test('memory uses the configured agent directory and gates project scope on curr
   assert.match((await app.before()).systemPrompt, /UNTRUSTED_PROJECT_INDEX/);
 });
 
+test('interrupted ignore creation never publishes an empty file and can be retried', async (t) => {
+  const project = join(base, 'ignore-interrupted'); const dir = join(project, '.agents', 'memory'); await mkdir(dir, { recursive: true });
+  const path = join(dir, '.gitignore'); const app = runtime(project);
+  const originalOpen = fs.open;
+  let published: string | undefined;
+  const mockedOpen = t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    if (String(args[0]).startsWith(path)) {
+      t.mock.method(handle, 'writeFile', async () => {
+        published = await fs.readFile(path, 'utf8').catch(error => { if (error.code !== 'ENOENT') throw error; return undefined; });
+        throw new Error('interrupted ignore write');
+      });
+    }
+    return handle;
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(app.call({ action: 'write', scope: 'project', name: 'topic', content: 'note' }), /interrupted ignore write/);
+  } finally { mockedOpen.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(published, undefined);
+  assert.deepEqual(await fs.readdir(dir), []);
+  await assert.rejects(app.call({ action: 'read', scope: 'project', name: 'topic' }), /ENOENT/);
+  await app.call({ action: 'write', scope: 'project', name: 'topic', content: 'retry succeeds' });
+  assert.equal(await fs.readFile(path, 'utf8'), '*\n');
+  assert.match(JSON.stringify(await app.call({ action: 'read', scope: 'project', name: 'topic' })), /retry succeeds/);
+});
+
+test('project writes repair empty and whitespace-only ignore files', async () => {
+  const { writeFile, readFile } = await import('node:fs/promises');
+  const project = join(base, 'ignore-repair'); const dir = join(project, '.agents', 'memory'); await mkdir(dir, { recursive: true });
+  const app = runtime(project);
+  for (const blank of ['', ' \t\r\n']) {
+    await writeFile(join(dir, '.gitignore'), blank);
+    const content = `repaired ${JSON.stringify(blank)}`;
+    await app.call({ action: 'write', scope: 'project', name: 'topic', content });
+    assert.equal(await readFile(join(dir, '.gitignore'), 'utf8'), '*\n');
+    const result = await app.call({ action: 'read', scope: 'project', name: 'topic' });
+    assert.deepEqual(result.content, [{ type: 'text', text: content }]);
+  }
+});
+
 test('memory preserves existing ignore rules and refuses writes when complete exclusion is not proven', async () => {
   const { writeFile, readFile } = await import('node:fs/promises');
   const project = join(base, 'ignore-preserved'); const dir = join(project, '.agents', 'memory'); await mkdir(dir, { recursive: true });
@@ -102,6 +153,9 @@ test('memory preserves existing ignore rules and refuses writes when complete ex
   await assert.rejects(app.call({ action: 'write', scope: 'project', name: 'topic', content: 'must not be saved' }), /ignore/i);
   assert.equal(await readFile(path, 'utf8'), unsafe);
   assert.match(JSON.stringify(await app.call({ action: 'read', scope: 'project', name: 'topic' })), /safe note/);
+  const comments = ' \n# User-owned comment\n'; await writeFile(path, comments);
+  await assert.rejects(app.call({ action: 'write', scope: 'project', name: 'topic', content: 'must not be saved' }), /ignore/i);
+  assert.equal(await readFile(path, 'utf8'), comments);
 });
 
 test('topic names cannot alias the index on case-insensitive filesystems', async () => {
@@ -111,6 +165,23 @@ test('topic names cannot alias the index on case-insensitive filesystems', async
     await assert.rejects(app.call({ action: 'write', scope: 'global', name, content: 'x'.repeat(8192) }), /reserved|slug/i);
   }
   assert.match(JSON.stringify(await app.call({ action: 'read', scope: 'global', name: 'MEMORY.md' })), /Index stays intact/);
+});
+
+test('memory writes and reads explicit topics; only small index enters current project context', async () => {
+  const project = join(base, 'project'); await mkdir(project);
+  const app = runtime(project);
+  await app.call({ action: 'write', scope: 'global', name: 'MEMORY.md', content: 'GLOBAL_INDEX_MARKER' });
+  await app.call({ action: 'write', scope: 'project', name: 'architecture', content: 'TOPIC DETAILS' });
+  await app.call({ action: 'write', scope: 'project', name: 'MEMORY.md', content: '- architecture: design decisions' });
+  const topic = await app.call({ action: 'read', scope: 'project', name: 'architecture' });
+  assert.match(JSON.stringify(topic), /TOPIC DETAILS/);
+  const prompt = (await app.before()).systemPrompt;
+  assert.match(prompt, /architecture: design decisions/);
+  assert.doesNotMatch(prompt, /TOPIC DETAILS/);
+  const second = join(base, 'second'); await mkdir(second); app.ctx.cwd = second;
+  const isolated = (await app.before()).systemPrompt;
+  assert.match(isolated, /GLOBAL_INDEX_MARKER/);
+  assert.doesNotMatch(isolated, /architecture: design decisions|TOPIC DETAILS/);
 });
 
 test('overlapping registered memory calls retain both edits and respect delete ordering', async () => {

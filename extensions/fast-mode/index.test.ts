@@ -143,7 +143,10 @@ test('config-declared direct models retain usable fast aliases',async()=>{
    payload=JSON.parse(String(init?.body));
    return new Response('data: '+JSON.stringify({type:'response.completed',response:{status:'completed',usage:{input_tokens:0,output_tokens:0}}})+'\n\n',{headers:{'content-type':'text/event-stream'}});
   };
-  const output=await registry.getRegisteredNativeProvider('openai')!.streamSimple(ctx.model,{messages:[]},{apiKey:'fixture-key',reasoning:'low',fetch,maxRetries:0}).result();
+  const alias=registry.find('openai','gpt-custom~fast');
+  assert.ok(alias,'Custom alias survives refresh');
+  assert.ok(registry.find('openai','gpt-custom'),'Configured base remains available');
+  const output=await registry.getProvider('openai')!.streamSimple(alias,{messages:[]},{apiKey:'fixture-key',reasoning:'low',fetch,maxRetries:0}).result();
   assert.equal(output.stopReason,'stop',output.errorMessage);
   assert.equal(payload.model,'gpt-custom');
   assert.equal(payload.service_tier,'priority');

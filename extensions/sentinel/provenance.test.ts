@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -78,7 +78,8 @@ test('question IDs only match declared order, cannot enter authority or alias mu
 });
 
 test('classifies canonical global files separately from project and unsourced prompts', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'sentinel-provenance-'));
+  // macOS temp paths traverse /var -> /private/var; this case needs a canonical root.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sentinel-provenance-')));
   try {
     const agentDir = join(root, 'agent');
     await mkdir(agentDir);

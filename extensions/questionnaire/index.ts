@@ -225,10 +225,12 @@ export default function questionnaire(pi: ExtensionAPI) {
               render(width: number) {
                 const w = Math.max(1, width - 2);
                 const rows = tui.terminal?.rows ?? 24;
-                const height = Math.max(3, rows - 5);
+                // Leave room for Pi's dock/footer and avoid dominating fullscreen widgets.
+                const height = Math.max(3, Math.min(18, rows - 5));
                 const showHeader = height >= 4;
-                const decorated = height >= 10;
-                const budget = height - 1 - (showHeader ? 1 : 0) - (decorated ? 4 : 0);
+                // Add decoration one row at a time so resizing never shrinks the body budget.
+                const decorationRows = Math.min(4, Math.max(0, height - 9));
+                const budget = height - 1 - (showHeader ? 1 : 0) - decorationRows;
                 const clean = (text: string) => stripTerminalSequences(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
                 const q = params.questions[tab];
                 const tabs = params.questions.map((item, i) => {
@@ -243,21 +245,17 @@ export default function questionnaire(pi: ExtensionAPI) {
                   const position = `${tab + 1}/${params.questions.length + 1}`;
                   const suffix = q ? " · Submit" : "";
                   const label = q ? `${answers.has(q.id) ? "✓ " : ""}${clean(q.label || q.id)}` : "Submit";
-                  const active = truncateToWidth(label, Math.max(1, w - position.length - suffix.length - 5), "…");
-                  header = `${position} ${theme.fg("accent", `[ ${active} ]`)}${suffix}`;
+                  const labelWidth = w - position.length - suffix.length - 5;
+                  const activeLabel = truncateToWidth(label, Math.max(1, labelWidth), "…");
+                  header = labelWidth < 2
+                    ? theme.fg("accent", `${position} Submit`)
+                    : `${position} ${theme.fg("accent", `[ ${activeLabel} ]`)}${suffix}`;
                 }
                 const promptPrefix = !showHeader && params.questions.length > 1
-                  ? (q ? `${tab + 1}/${params.questions.length + 1} · Submit | ` : "[ Submit ] ") : "";
+                  ? (q ? `${tab + 1}/${params.questions.length + 1} ${w >= 28 ? "Submit" : "S"} | ` : "[ Submit ] ") : "";
                 const prompt = promptPrefix + (q ? clean(q.prompt) : "Review your answers");
                 const editorRows = editing ? editor.render(Math.max(10, w)) : [];
                 const wrappedPrompt = wrapTextWithAnsi(prompt, w);
-                const promptLimit = Math.max(1, budget - Math.min(editing ? editorRows.length : 3, budget - 1));
-                const promptRows = wrappedPrompt.slice(0, promptLimit);
-                if (wrappedPrompt.length > promptRows.length) {
-                  const indicator = w >= 32 ? " … [prompt truncated]" : "…";
-                  const last = promptRows.length - 1;
-                  promptRows[last] = `${truncateToWidth(promptRows[last], Math.max(0, w - indicator.length), "")}${indicator}`;
-                }
                 const content: string[] = [];
                 let focusRow = 0;
                 if (q && !editing) {
@@ -281,6 +279,13 @@ export default function questionnaire(pi: ExtensionAPI) {
                     ? "Enter to submit all answers" : "Answer every question before submitting"));
                   focusRow = content.length - 1;
                 }
+                const promptLimit = Math.max(1, budget - Math.min(editing ? editorRows.length : Math.min(content.length, Math.ceil(budget / 2)), budget - 1));
+                const promptRows = wrappedPrompt.slice(0, promptLimit);
+                if (wrappedPrompt.length > promptRows.length) {
+                  const indicator = w >= 32 ? " … [prompt truncated]" : "…";
+                  const last = promptRows.length - 1;
+                  promptRows[last] = `${truncateToWidth(promptRows[last], Math.max(0, w - indicator.length), "")}${indicator}`;
+                }
                 // Keep the question and controls stationary while long options scroll.
                 const available = Math.max(1, budget - promptRows.length);
                 const start = Math.max(0, Math.min(focusRow, content.length - available));
@@ -298,14 +303,14 @@ export default function questionnaire(pi: ExtensionAPI) {
                   : `Esc cancel · ↑↓ choose · Enter select${params.questions.length > 1 ? " · Tab next" : ""}`;
                 const rule = theme.fg("borderMuted", "─".repeat(Math.max(0, width)));
                 return [
-                  ...(decorated ? [rule] : []),
+                  ...(decorationRows >= 1 ? [rule] : []),
                   ...(showHeader ? [` ${header}`] : []),
-                  ...(decorated ? [""] : []),
+                  ...(decorationRows >= 3 ? [""] : []),
                   ...promptRows.map((line) => ` ${line}`),
-                  ...(decorated ? [""] : []),
+                  ...(decorationRows >= 4 ? [""] : []),
                   ...body.map((line) => ` ${line}`),
                   ` ${theme.fg("dim", hint)}`,
-                  ...(decorated ? [rule] : []),
+                  ...(decorationRows >= 2 ? [rule] : []),
                 ].map((line) => truncateToWidth(line, width));
               },
             };

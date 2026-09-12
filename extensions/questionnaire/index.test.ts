@@ -373,14 +373,17 @@ test("six-row terminals retain prompt, selection, editor and cancellation contro
       assert.match(rows.join("\n"), /Choose small/);
       assert.match(stripTerminalSequences(rows.join("\n")), expected);
     };
-    check(/Esc cancel/);
-    check(/❯ 1. Yes/);
+    const initial = h.render(80).join("\n");
+    assert.match(initial, /1\/3.*Submit.*Choose small/);
+    assert.match(initial, /Esc cancel/);
+    assert.match(initial, /❯ 1. Yes/);
     h.key("\x1b[B");
     h.key("\r");
     h.key("Draft answer");
     check(/Draft answer/);
     check(/Ctrl\+C cancel/);
     h.key("\x1b[200~\nsecond\nthird\nfourth\nfifth\nsixth\x1b[201~");
+    check(/sixth/);
     for (let i = 0; i < 5; i++) h.key("\x1b[A");
     check(/Draft answer/);
     assert.ok(h.render(80).some((line: string) => line.includes("\x1b[7m")), "The editor cursor must remain visible");
@@ -413,8 +416,8 @@ test("long prompts use spare terminal rows and disclose remaining text", async (
     assert.ok(rows.length <= 24);
     h.terminal.rows = 48;
     const expanded = h.render(80).join("\n");
-    assert.match(expanded, /Prompt line 30/);
-    assert.doesNotMatch(expanded, /prompt truncated/);
+    assert.match(expanded, /Prompt line 4/);
+    assert.match(expanded, /prompt truncated/);
     h.terminal.rows = 6;
     const compact = h.render(80);
     assert.ok(compact.length <= 3);
@@ -424,6 +427,47 @@ test("long prompts use spare terminal rows and disclose remaining text", async (
     const narrow = stripTerminalSequences(h.render(20).join("\n"));
     assert.match(narrow, /Prompt line 1.*…/);
     assert.match(narrow, /Esc cancel/);
+  } finally {
+    h.key("\x1b");
+    await running;
+  }
+});
+
+
+test("decoration never reduces visible choices as the terminal grows", async () => {
+  const h = host();
+  const running = h.run([{ ...question("balance"), allowOther: false,
+    options: Array.from({ length: 20 }, (_, i) => ({ value: String(i), label: `Option-${i}` })),
+  }]);
+  try {
+    let previous = 0;
+    for (let height = 6; height <= 30; height++) {
+      h.terminal.rows = height;
+      const rows = h.render(80);
+      const count = rows.filter((line: string) => line.includes("Option-")).length;
+      assert.ok(count >= previous, `Growing to ${height} rows hid choices`);
+      previous = count;
+      assert.ok(rows.length <= Math.max(3, Math.min(18, height - 5)));
+      assert.match(rows.join("\n"), /Esc cancel/);
+    }
+  } finally {
+    h.key("\x1b");
+    await running;
+  }
+});
+
+test("long prompts share space with choices within the fullscreen height cap", async () => {
+  const h = host();
+  h.terminal.rows = 40;
+  const running = h.run([{ ...question("balance"), prompt: "Prompt text ".repeat(330), allowOther: false,
+    options: Array.from({ length: 20 }, (_, i) => ({ value: String(i), label: `Option-${i}` })),
+  }]);
+  try {
+    const rows = h.render(80);
+    assert.ok(rows.length <= 18);
+    assert.match(rows.join("\n"), /Option-5/);
+    assert.match(rows.join("\n"), /prompt truncated/);
+    assert.match(rows.join("\n"), /Esc cancel/);
   } finally {
     h.key("\x1b");
     await running;

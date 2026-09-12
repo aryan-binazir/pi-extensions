@@ -7,6 +7,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
   const hooks: Record<string, any> = {};
   const requests: any[] = [];
   let component: any;
+  const terminal = { rows: 40, columns: 80 };
   const ctx: any = {
     mode: "tui",
     model: { id: "fake", provider: "fake", maxTokens: 8192 },
@@ -31,7 +32,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
         assert.equal(options.overlay, true);
         return new Promise((resolve) => {
           component = factory(
-            { requestRender() {}, terminal: { rows: 40, columns: 80 } },
+            { requestRender() {}, terminal },
             { fg: (_: string, value: string) => value },
             {},
             resolve,
@@ -53,11 +54,29 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
     commands,
     hooks,
     requests,
+    terminal,
+    lines: (width = 80): string[] => component.render(width),
     key: (s: string) => component.handleInput(s),
     render: () => component.render(80).join("\n"),
   };
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+test("BTW fills its overlay from opening through the first answer and resize", async () => {
+  const h = host();
+  const result = h.commands.btw.handler("", h.ctx);
+  assert.equal(h.lines().length, 36);
+  h.key("First question");h.key("\r");
+  assert.equal(h.lines().length, 36);
+  await tick();
+  assert.equal(h.lines().length, 36);
+  assert.match(h.render(), /Side answer/);
+  for (const rows of [60, 20, 5, 1]) {
+    h.terminal.rows = rows;
+    assert.equal(h.lines(20).length, Math.max(1, Math.floor(rows * 0.9)));
+  }
+  h.key("\u001b");await result;
+});
+
 test("BTW streams a tool-free side answer with current system snapshot and followups", async () => {
   const h = host();
   const result = h.commands.btw.handler("What about this?", h.ctx);

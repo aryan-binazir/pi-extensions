@@ -250,20 +250,24 @@ export default function btw(pi: ExtensionAPI) {
                 stripTerminalSequences(display).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""),
                 w,
               );
-              const height = Math.max(
-                3,
-                Math.min(20, (tui.terminal?.rows ?? 30) - 10),
-              );
-              scroll = Math.min(scroll, Math.max(0, lines.length - height));
-              const end = Math.max(height, lines.length - scroll);
-              return [
-                ...wrapTextWithAnsi(
-                  "BTW · disposable · Esc closes and discards · PgUp/PgDn scroll",
-                  w,
-                ),
-                ...lines.slice(Math.max(0, end - height), end),
+              const totalHeight = Math.max(1, Math.floor((tui.terminal?.rows ?? 30) * 0.9));
+              const footer = [
                 ...wrapTextWithAnsi(stripTerminalSequences(status).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""), w),
                 ...(busy ? [] : editor.render(w)),
+              ].slice(-(Math.max(1, totalHeight - 2)));
+              const header = wrapTextWithAnsi(
+                "BTW · disposable · Esc closes and discards · PgUp/PgDn scroll",
+                w,
+              ).slice(0, Math.max(0, totalHeight - footer.length - 1));
+              const height = Math.max(0, totalHeight - header.length - footer.length);
+              scroll = Math.min(scroll, Math.max(0, lines.length - height));
+              const end = Math.max(height, lines.length - scroll);
+              const visible = lines.slice(Math.max(0, end - height), end);
+              return [
+                ...header,
+                ...visible,
+                ...Array<string>(height - visible.length).fill(""),
+                ...footer,
               ];
             },
           };

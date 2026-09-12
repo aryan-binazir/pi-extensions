@@ -1,10 +1,10 @@
 # Pi interactive tools
 
-Ten independently selectable extensions for Pi 0.85.1. Install from this
+Fifteen independently selectable extensions for Pi 0.85.1. Install from this
 private Git repository using your existing GitHub SSH access:
 
 ```sh
-pi install git:git@github.com:aryan-binazir/pi-extension@amb/agent-workflows
+pi install git:git@github.com:aryan-binazir/pi-extension@amb/external-integrations
 ```
 
 After this branch lands, use the desired release or main ref. Installation uses
@@ -27,6 +27,11 @@ A single extension can also be loaded with
 | Subagents | `subagent`, TypeScript workflows | Isolated task contexts, bounded background execution and approved workflow replay. |
 | Worktree | `/worktree` | Create or reuse a checkout and route the current session's shell and relative file tools. |
 | Auto mode | `/auto on\|off\|status\|audit` | Pre-execution policy, exact approvals and inherited child limits. |
+| MCP client | MCP tools, resources and prompts | Connect configured stdio, Streamable HTTP or SSE servers with explicit trust and consent. See [MCP setup](extensions/mcp-client/README.md). |
+| Web search | `web_search` | Bounded DuckDuckGo HTML search returning links and snippets, with explicit failure results. [Limits](docs/adr/006-search-fast-power.md). |
+| Computer use | Desktop tools | Pi directs screenshots and input through native Linux or macOS adapters. See [desktop setup](extensions/computer-use/README.md). |
+| Fast mode | `/fast` | Toggle supported base/fast model entries while retaining provider authentication and reasoning. [Provider support](docs/adr/006-search-fast-power.md). |
+| Auto-caffeinate | Agent lifecycle | Temporarily inhibit idle sleep during work on confirmed AC power, including background tasks. |
 
 ## Memory and sessions
 
@@ -146,8 +151,14 @@ Architecture decisions and the precise editor compatibility boundary are in
 
 The repository's `bin/pi` is a copy of the existing mise launcher. This package
 does not change host launchers, shell aliases, global defaults or authentication.
-External integrations belong to a later PR.
 
 Workflow replay is deliberately opt-in. Declining replay stops that invocation. To rerun every stage, change the source (for example, add a revision comment), review it again, and approve the resulting fresh journal. Each synchronous worker evaluation is limited to 100 ms independently of the overall workflow timeout. A journal write failure stops subsequent journal writes in that invocation; rerun after correcting storage rather than retrying unjournaled effects.
 
 Bundled memory, todo and questionnaire tools declare their own managed storage/UI effects to auto mode through versioned local declarations. This preserves their original behavior without trusting unknown tools by name. Managed declarations trust the installed extension to bound its internal effects; inherited child tool limits still apply.
+
+External integrations never require a nested research or desktop-planning agent.
+Desktop actions require a usable native desktop service and its OS permissions.
+Linux accessibility is reported unavailable when no supported service exists.
+The Linux/macOS CI matrix checks portable behavior; it does not prove a live Mac
+desktop session or priority-service entitlement. Unknown power state leaves idle
+sleep settings untouched. No live provider call is needed for the fixture tests.

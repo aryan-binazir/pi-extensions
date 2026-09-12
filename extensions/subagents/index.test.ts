@@ -11,7 +11,7 @@ test('workflow registration blocks missing UI and protects sensitive reads throu
  const cwd=await mkdtemp(join(tmpdir(),'workflow-extension-'));
  const previousAgentDir=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent-home');
  const tools=new Map<string,any>();const events=new Map<string,any>();
- subagents({getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler)} as unknown as ExtensionAPI);
+ subagents({events:{emit(){}},getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler)} as unknown as ExtensionAPI);
  const ctx={cwd,hasUI:false,mode:'tui',sessionManager:{getSessionId:()=> 'workflow-extension-test'},ui:{editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
  try {
   await assert.rejects(tools.get('workflow').execute('id',{source:'return 1;'},undefined,undefined,ctx),/approval/);
@@ -39,7 +39,7 @@ test('registered background tool launches guarded Pi and pushes completion to it
   await chmod(join(cwd,'pi'),0o700);
   process.env.PATH=`${cwd}:${previousPath??''}`;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent-home');
   setActivePolicy(new AutoPolicy(cwd),sessionId);
-  subagents({getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler),sendMessage:(message:any,options:any)=>notify({message,options})} as unknown as ExtensionAPI);
+  subagents({events:{emit(){}},getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler),sendMessage:(message:any,options:any)=>notify({message,options})} as unknown as ExtensionAPI);
   await events.get('session_start')({},ctx);
   const response=await tools.get('subagent').execute('call',{task:'Read synthetic checkout',preset:'reader'},undefined,undefined,ctx);
   const deadline=setTimeout(()=>notify({message:{content:'{}'},options:{timeout:true}}),5000);
@@ -90,7 +90,7 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
     process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent-home');
     const policy = new AutoPolicy(cwd);
     setActivePolicy(policy, sessionId);
-    subagents({getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => { completions++; }} as unknown as ExtensionAPI);
+    subagents({events: {emit() {}}, getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => { completions++; }} as unknown as ExtensionAPI);
     await events.get('session_start')({}, ctx);
     const source = `return await api.spawn({task:'read',preset:'reader',extensions:[${JSON.stringify(join(cwd, 'trusted.ts'))}]},'read');`;
     const execute = () => tools.get('workflow').execute('call', {source}, undefined, undefined, ctx);
@@ -126,7 +126,7 @@ test('cancelled switches keep the registry usable; committed shutdown reaps chil
     await chmod(join(cwd, 'pi'), 0o700);
     process.env.PATH = `${cwd}:${previousPath ?? ''}`;
     setActivePolicy(new AutoPolicy(cwd), sessionId);
-    subagents({getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
+    subagents({events: {emit() {}}, getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
     await events.get('session_start')({}, ctx);
     const launch = () => tools.get('subagent').execute('call', {task: 'wait', preset: 'reader'}, undefined, undefined, ctx);
     await launch();
@@ -163,7 +163,7 @@ test('standalone registered subagents and workflows inherit active builtins and 
   const ctx = {cwd, hasUI: true, sessionManager: {getSessionId: () => 'standalone-only'}, ui: {
     editor: async (_title: string, source: string) => source, confirm: async () => true, setWidget: () => {},
   }};
-  subagents({getActiveTools: () => active, registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
+  subagents({events: {emit() {}}, getActiveTools: () => active, registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
   const direct = (params: any) => tools.get('subagent').execute('call', params, undefined, undefined, ctx);
   const workflow = (source: string) => tools.get('workflow').execute('call', {source}, undefined, undefined, ctx);
   const directPolicy = async (preset?: string) => {

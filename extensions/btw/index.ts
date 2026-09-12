@@ -91,6 +91,8 @@ export default function btw(pi: ExtensionAPI) {
           let closed = false;
           let busy = false;
           let answer = "";
+          let currentQuestion = "";
+          const pending: string[] = [];
           let status = "";
           let scroll = 0;
           let controller: AbortController | undefined;
@@ -110,6 +112,8 @@ export default function btw(pi: ExtensionAPI) {
             closed = true;
             controller?.abort();
             turns.length = 0;
+            pending.length = 0;
+            currentQuestion = "";
             answer = "";
             snapshot = "";
             systemPrompt = "";
@@ -118,7 +122,7 @@ export default function btw(pi: ExtensionAPI) {
           };
           open.add(close);
           const ask = async (raw: string) => {
-            if (closed || busy || !raw.trim()) return;
+            if (closed || !raw.trim()) return;
             if (raw.length > MAX_QUESTION) {
               status = `Question exceeds ${MAX_QUESTION} characters`;
               // Pi's Editor clears before onSubmit; put rejected input back.
@@ -126,11 +130,22 @@ export default function btw(pi: ExtensionAPI) {
               tui.requestRender();
               return;
             }
+            if (busy) {
+              if (pending.reduce((n, question) => n + question.length, 0) + raw.length > MAX_HISTORY) {
+                status = "Queued messages are full; wait for an answer";
+                editor.setText(raw);
+              } else {
+                pending.push(raw);
+                scroll = 0;
+              }
+              tui.requestRender();
+              return;
+            }
             busy = true;
+            currentQuestion = raw;
             answer = "";
             status = "Connecting…";
             scroll = 0;
-            editor.setText("");
             controller = new AbortController();
             const signal = controller.signal;
             const question = raw;
@@ -153,7 +168,7 @@ export default function btw(pi: ExtensionAPI) {
               if (turns.length)
                 messages.push({
                   role: "user",
-                  content: `Earlier side conversation:\n${turns.map((t) => `User: ${t.question}\nAssistant: ${t.answer}`).join("\n\n")}`,
+                  content: `Earlier side conversation:\n${turns.map((t) => `User: ${t.question}\nAssistant: ${t.answer}`).join("\n\n").slice(-MAX_HISTORY)}`,
                   timestamp: Date.now(),
                 });
               messages.push({
@@ -201,15 +216,6 @@ export default function btw(pi: ExtensionAPI) {
                   status = "Provider requested a tool; no tool was run";
               }
               if (!closed) {
-                turns.push({ question, answer });
-                while (
-                  turns.length > 1 &&
-                  turns.reduce(
-                    (n, t) => n + t.question.length + t.answer.length,
-                    0,
-                  ) > MAX_HISTORY
-                )
-                  turns.shift();
                 if (status === "Answering…")
                   status = answer
                     ? ""
@@ -220,7 +226,14 @@ export default function btw(pi: ExtensionAPI) {
                 status = `Side request failed: ${error instanceof Error ? error.message.slice(0, 2000) : "Unknown provider error"}`;
             } finally {
               busy = false;
-              if (!closed) tui.requestRender();
+              if (!closed) {
+                turns.push({ question, answer });
+                currentQuestion = "";
+                answer = "";
+                const next = pending.shift();
+                if (next !== undefined) void ask(next);
+                tui.requestRender();
+              }
             }
           };
           editor.onSubmit = (value) => {
@@ -240,7 +253,7 @@ export default function btw(pi: ExtensionAPI) {
               if (matchesKey(data, "pageUp")) scroll += 12;
               else if (matchesKey(data, "pageDown"))
                 scroll = Math.max(0, scroll - 12);
-              else if (!busy) editor.handleInput(data);
+              else editor.handleInput(data);
               tui.requestRender();
             },
             render(width: number) {
@@ -248,8 +261,11 @@ export default function btw(pi: ExtensionAPI) {
               const framed = width >= 3 && totalHeight >= 3;
               const w = Math.max(1, width - (framed ? 2 : 0));
               const innerHeight = totalHeight - (framed ? 2 : 0);
-              const display =
-                answer || turns.at(-1)?.answer || "Ask a side question below.";
+              const display = [
+                ...turns.map((turn) => `You: ${turn.question}\n\nBTW: ${turn.answer || "(No answer)"}`),
+                ...(busy ? [`You: ${currentQuestion}\n\nBTW: ${answer || "…"}`] : []),
+                ...pending.map((question) => `You (queued): ${question}`),
+              ].join("\n\n") || "Ask a side question below.";
               const lines = wrapTextWithAnsi(
                 stripTerminalSequences(display).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""),
                 w,

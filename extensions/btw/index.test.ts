@@ -109,6 +109,53 @@ test("BTW keeps the input area in place while connecting and streaming", async (
   h.key("\u001b");await result;
 });
 
+test("BTW shows the full side transcript and queues followups without losing a draft", async () => {
+  const h = host();
+  let finish!: () => void;
+  const waiting = new Promise<void>((resolve) => { finish = resolve; });
+  const requests: any[] = [];
+  h.ctx.modelRegistry.getProvider = () => ({
+    streamSimple: (_model: any, context: any) => {
+      const index = requests.push(context);
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: "text_delta", delta: index === 1 ? "First answer" : "Second answer" };
+          if (index === 1) await waiting;
+        },
+      };
+    },
+  });
+  const result = h.commands.btw.handler("First question", h.ctx);
+  assert.match(h.render(), /You: First question/);
+  await tick();
+  h.key("Second question");
+  assert.match(h.render(), /Second question/);
+  h.key("\r");
+  assert.match(h.render(), /You \(queued\): Second question/);
+  assert.equal(requests.length, 1);
+  h.key("Unsent draft");
+  finish();await tick();await tick();
+  assert.equal(requests.length, 2);
+  assert.match(JSON.stringify(requests[1].messages), /First question/);
+  assert.match(JSON.stringify(requests[1].messages), /First answer/);
+  const transcript = h.render();
+  for (const text of ["You: First question", "BTW: First answer", "You: Second question", "BTW: Second answer", "Unsent draft"])
+    assert.ok(transcript.includes(text), text);
+  assert.doesNotMatch(transcript, /queued/);
+  h.key("\u001b");await result;
+});
+
+test("closing BTW discards queued messages", async () => {
+  const h = host();
+  let authenticate!: (value: any) => void;
+  h.ctx.modelRegistry.getApiKeyAndHeaders = () => new Promise((resolve) => { authenticate = resolve; });
+  const result = h.commands.btw.handler("First", h.ctx);
+  h.key("Queued");h.key("\r");
+  h.key("\u001b");await result;
+  authenticate({ ok: true, apiKey: "synthetic-key" });await tick();
+  assert.equal(h.requests.length, 0);
+});
+
 test("BTW streams a tool-free side answer with current system snapshot and followups", async () => {
   const h = host();
   const result = h.commands.btw.handler("What about this?", h.ctx);

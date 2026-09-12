@@ -1,10 +1,16 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { Provider as ModelProvider } from '@earendil-works/pi-ai';
+import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { FAST_SUFFIX, withFastModels } from './provider.ts';
 export default function fastMode(pi:ExtensionAPI):void {
  const install=(ctx:ExtensionContext)=>{
   for(const id of ['openai','openai-codex']) {
-   const provider=ctx.modelRegistry.getProvider(id);
-   if(provider) {const wrapped=withFastModels(provider);if(wrapped!==provider)pi.registerProvider(wrapped);}
+   const view=ctx.modelRegistry.getProvider(id);
+   // Pi 0.85.1 private runtime.builtins preserves the pi.dev catalog; public factories are the fallback.
+   const provider=ctx.modelRegistry.getRegisteredNativeProvider(id)
+    ?? (ctx.modelRegistry as unknown as {runtime?:{builtins?:Map<string,ModelProvider>}}).runtime?.builtins?.get(id)
+    ?? builtinProviders().find(provider=>provider.id===id);
+   if(provider && view) {const wrapped=withFastModels(provider,view);if(wrapped!==provider)pi.registerProvider(wrapped);}
   }
  };
  pi.on('session_start',async(event,ctx)=>{
@@ -30,7 +36,7 @@ export default function fastMode(pi:ExtensionAPI):void {
    const enabled=args.trim()?args.trim()==='on':!active;
    const id=(active?current.id.slice(0,-FAST_SUFFIX.length):current.id)+(enabled?FAST_SUFFIX:'');
    const next=ctx.modelRegistry.find(current.provider,id);
-   if(!next || (!active && next===current && enabled)){ctx.ui.notify('Fast mode is unavailable for this provider path','error');return;}
+   if(!next){ctx.ui.notify('Fast mode is unavailable for this provider path','error');return;}
    const effort=pi.getThinkingLevel();
    if(!(await pi.setModel(next))){ctx.ui.notify('Model authentication unavailable','error');return;}
    pi.setThinkingLevel(effort);

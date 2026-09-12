@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
-import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
+import { getSupportedThinkingLevels, type ThinkingLevel } from '@earendil-works/pi-ai';
 import { withFastModels } from './provider.ts';
 
 test('fast aliases preserve auth and pricing metadata and send priority through real provider',async()=>{
@@ -17,11 +17,12 @@ test('fast aliases preserve auth and pricing metadata and send priority through 
    payload=JSON.parse(String(init?.body));headers=new Headers(init?.headers);
    return new Response('data: '+JSON.stringify({type:'response.completed',response:{status:'completed',service_tier:'priority',usage:{input_tokens:1000,output_tokens:100,input_tokens_details:{cached_tokens:0}}}})+'\n\n',{headers:{'content-type':'text/event-stream'}});
   };
-  const output=await provider.streamSimple(alias,{messages:[]},{apiKey:'fixture-key',reasoning:reasoning==='off'?undefined:reasoning,fetch,maxRetries:0}).result();
+  // Pi's runtime handles 'off', but its simple-options type excludes it.
+  const output=await provider.streamSimple(alias,{messages:[]},{apiKey:'fixture-key',reasoning:reasoning as ThinkingLevel,fetch,maxRetries:0}).result();
   assert.equal(output.stopReason,'stop',output.errorMessage);
   assert.equal(payload.model,base.id);assert.equal(payload.service_tier,'priority');
   assert.equal(headers!.get('authorization'),'Bearer fixture-key');
-  if(reasoning!=='off') assert.equal(payload.reasoning.effort,base.thinkingLevelMap?.[reasoning]??reasoning);
+  assert.equal(payload.reasoning.effort,reasoning==='off'?'none':base.thinkingLevelMap?.[reasoning]??reasoning);
   assert.equal(output.usage.cost.input,base.cost.input*0.001*2.5);
  }
  assert.equal(withFastModels(provider),provider,'reload must not wrap twice');
@@ -31,7 +32,7 @@ import fastMode from './index.ts';
 test('toggle and resume keep reasoning; other provider paths remain untouched',async()=>{
  const original=openaiProvider();const models=original.getModels();const base=models.find(m=>m.id==='gpt-5.5')!;
  let provider:any=original;let selected:any=base;let effort='high';let command:any;let resume:any;let registrations=0;
- const ctx:any={model:base,modelRegistry:{getProvider:(id:string)=>id==='openai'?provider:undefined,find:(id:string,name:string)=>id==='openai'?provider.getModels().find((m:any)=>m.id===name):undefined},sessionManager:{getBranch:()=>[{type:'model_change',provider:'openai',modelId:'gpt-5.5~fast'}]},ui:{notify(){}}};
+ const ctx:any={model:base,modelRegistry:{getRegisteredNativeProvider:(id:string)=>id==='openai'&&registrations?provider:undefined,getProvider:(id:string)=>id==='openai'?provider:undefined,find:(id:string,name:string)=>id==='openai'?provider.getModels().find((m:any)=>m.id===name):undefined},sessionManager:{getBranch:()=>[{type:'model_change',provider:'openai',modelId:'gpt-5.5~fast'}]},ui:{notify(){}}};
  fastMode({registerProvider:(p:any)=>{registrations++;provider=p;},on:(name:string,fn:any)=>{if(name==='session_start')resume=fn;},registerCommand:(_name:string,entry:any)=>{command=entry;},getThinkingLevel:()=>effort,setThinkingLevel:(value:string)=>{effort=value;},setModel:async(value:any)=>{selected=value;ctx.model=value;effort='low';return true;}} as any);
  await command.handler('',ctx);assert.equal(selected.id,'gpt-5.5~fast');assert.equal(effort,'high');
  await command.handler('',ctx);assert.equal(selected.id,'gpt-5.5');assert.equal(effort,'high');
@@ -56,10 +57,10 @@ test('Codex fast sends priority using existing subscription auth and reasoning',
 import { mkdtemp,writeFile,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { InMemoryCredentialStore,InMemoryModelsStore } from '@earendil-works/pi-ai';
 
-test('repeated fast installation preserves unique models through real models.json composition',async()=>{
+test('fast installation preserves unique models and reflects models.json refreshes',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'pi-fast-overlay-'));
  try {
   const modelsPath=join(dir,'models.json');
@@ -67,9 +68,10 @@ test('repeated fast installation preserves unique models through real models.jso
   const runtime=await ModelRuntime.create({modelsPath,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
   let command:any;let startup:any;let registrations=0;
   const base=runtime.getModel('openai','gpt-5.5')!;assert.equal(base.name,'Custom model name');
-  const ctx:any={model:base,modelRegistry:{getProvider:(id:string)=>runtime.getProvider(id),find:(id:string,name:string)=>runtime.getModel(id,name)},ui:{notify(){}}};
+  const ctx:any={model:base,modelRegistry:new ModelRegistry(runtime),ui:{notify(){}}};
   fastMode({registerProvider:(provider:any)=>{registrations++;runtime.registerNativeProvider(provider);},on:(_name:string,handler:any)=>{startup=handler;},registerCommand:(_name:string,entry:any)=>{command=entry;},getThinkingLevel:()=> 'low',setThinkingLevel:()=>{},setModel:async(model:any)=>{ctx.model=model;return true;}} as any);
   await startup({reason:'new'},ctx);
+  assert.equal(typeof ctx.modelRegistry.getRegisteredNativeProvider('openai')!.refreshModels,'function','Native wrapper must preserve the runtime catalog refresh chain');
   const installed=registrations;
   const count=runtime.getModels('openai').length;
   for(let i=0;i<5;i++){
@@ -80,5 +82,44 @@ test('repeated fast installation preserves unique models through real models.jso
    assert.equal(ctx.model.id,i%2===0?'gpt-5.5~fast':'gpt-5.5');
   }
   assert.equal(registrations,installed,'Composed providers must not accumulate wrapper layers');
+  // Settle registration's asynchronous refresh before changing the config file.
+  await ctx.modelRegistry.refresh({allowNetwork:false});
+  await writeFile(modelsPath,JSON.stringify({providers:{}}));
+  await ctx.modelRegistry.refresh({allowNetwork:false});
+  assert.equal(ctx.modelRegistry.find('openai','gpt-5.5')!.name,'GPT-5.5','Removing an override must restore the builtin value');
+  await writeFile(modelsPath,JSON.stringify({providers:{openai:{modelOverrides:{'gpt-5.5':{name:'Updated model name'}}}}}));
+  await ctx.modelRegistry.refresh({allowNetwork:false});
+  assert.equal(ctx.modelRegistry.find('openai','gpt-5.5')!.name,'Updated model name');
+  await command.handler('on',ctx);
+  const refreshed=runtime.getModels('openai');
+  assert.equal(ctx.model.id,'gpt-5.5~fast');
+  assert.equal(refreshed.length,count);
+  assert.equal(new Set(refreshed.map(m=>m.id)).size,refreshed.length);
+  assert.equal(registrations,installed,'Refresh must not cause duplicate installation');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+for(const [name,config] of [
+ ['provider proxy',{baseUrl:'https://proxy.example/v1'}],
+ ['per-model proxy',{models:[{id:'gpt-5.5',baseUrl:'https://proxy.example/v1'}]}],
+] as const) {
+ test(`fast installation respects ${name} eligibility`,async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'pi-fast-proxy-'));
+  try {
+   const modelsPath=join(dir,'models.json');
+   await writeFile(modelsPath,JSON.stringify({providers:{openai:config}}));
+   const runtime=await ModelRuntime.create({modelsPath,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
+   let startup:any;
+   fastMode({registerProvider:(provider:any)=>runtime.registerNativeProvider(provider),on:(_name:string,handler:any)=>{startup=handler;},registerCommand:()=>{}} as any);
+   const registry=new ModelRegistry(runtime);
+   await startup({reason:'new'},{modelRegistry:registry});
+   await registry.refresh({allowNetwork:false});
+   const aliases=runtime.getModels('openai').filter(model=>model.id.endsWith('~fast'));
+   if(name==='provider proxy')assert.equal(aliases.length,0);
+   else {
+    assert.ok(aliases.length>0,'Other direct models remain eligible');
+    assert.ok(!aliases.some(model=>model.id==='gpt-5.5~fast'));
+   }
+  }finally{await rm(dir,{recursive:true,force:true});}
+ });
+}

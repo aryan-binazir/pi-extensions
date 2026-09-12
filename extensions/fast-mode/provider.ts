@@ -14,13 +14,14 @@ function supported(model:Model<Api>):boolean {
    (model.provider==='openai-codex' && model.api==='openai-codex-responses' && origin==='https://chatgpt.com');
  } catch {return false;}
 }
-export function withFastModels(original:Provider):Provider {
+export function withFastModels(original:Provider,view:Provider=original):Provider {
  if(!buildBaseOptions)return original;
  const baseOptions=buildBaseOptions;
  // Pi models.json overlays recompose provider objects and discard symbols,
  // but retain the fast aliases. Treat those as the installed adapter too.
  if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED] || original.getModels().some(model=>model.id.endsWith(FAST_SUFFIX))) return original;
- const aliases=(models:readonly Model<Api>[])=>models.flatMap(model=>supported(model)&&!model.id.endsWith(FAST_SUFFIX)?[model,{...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}]:[model]);
+ const eligible=new Set(view.getModels().filter(supported).map(model=>model.id));
+ const aliases=(models:readonly Model<Api>[])=>models.flatMap(model=>eligible.has(model.id)&&supported(model)&&!model.id.endsWith(FAST_SUFFIX)?[model,{...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}]:[model]);
  const resolve=(model:Model<Api>)=>{
   if(!model.id.endsWith(FAST_SUFFIX))return {model,fast:false};
   const base=original.getModels().find(m=>m.id===model.id.slice(0,-FAST_SUFFIX.length));

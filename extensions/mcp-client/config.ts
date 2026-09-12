@@ -95,6 +95,7 @@ function serverConfig(value: unknown): ServerConfig {
 export function validateConfig(value: unknown): McpConfig {
   const root = record(value);
   const keys = Object.keys(root);
+  if (keys.length === 0) return { servers: {} };
   if (keys.length !== 1 || !['servers', 'mcp_servers'].includes(keys[0])) fail('MCP config requires exactly one supported servers object');
   const entries = Object.entries(record(root[keys[0]]));
   if (entries.length > 32) fail('MCP server limit is 32');

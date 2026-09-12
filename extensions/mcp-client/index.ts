@@ -2,10 +2,17 @@ import { open } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
+import { stripTerminalSequences } from '@earendil-works/pi-tui';
+import { McpConfigError } from './config.ts';
 import { Type } from 'typebox';
 import { boundedResult, McpConnection, mergeConfig, toolName, validateConfig, type McpConfig } from './client.ts';
 
-async function readConfig(path: string, optional = false): Promise<McpConfig> {
+export function displayLabel(value: string, limit = 80): string {
+  // Strip escape sequences before control bytes; bound work and visible length.
+  return stripTerminalSequences(value.slice(0, 4096)).replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, limit);
+}
+
+async function readConfig(path: string, optional = false, source = 'Explicit'): Promise<McpConfig> {
   try {
     const file = await open(path, 'r');
     try {
@@ -17,17 +24,18 @@ async function readConfig(path: string, optional = false): Promise<McpConfig> {
         if (!result.bytesRead) break;
         bytes += result.bytesRead;
       }
-      if (bytes > 1048576) throw new Error('MCP configuration exceeds 1 MiB');
+      if (bytes > 1048576) throw new McpConfigError('MCP configuration exceeds 1 MiB');
       return validateConfig(JSON.parse(buffer.subarray(0, bytes).toString('utf8')));
     } finally { await file.close(); }
   } catch (error) {
     if (optional && (error as NodeJS.ErrnoException).code === 'ENOENT') return { servers: {} };
-    throw new Error('MCP configuration is missing or invalid');
+    if (error instanceof McpConfigError) throw new Error(`${source} MCP configuration: ${error.message}`);
+    throw new Error(`${source} MCP configuration is missing or invalid JSON`);
   }
 }
 
-function schemaAllowed(schema: unknown): boolean {
-  if (Buffer.byteLength(JSON.stringify(schema)) > 32768) return false;
+export function schemaAllowed(schema: unknown): boolean {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return false;
   const check = (value: unknown, depth: number): boolean => {
     if (depth > 32) return false;
     if (!value || typeof value !== 'object') return true;
@@ -36,7 +44,7 @@ function schemaAllowed(schema: unknown): boolean {
       return check(nested, depth + 1);
     });
   };
-  return check(schema, 0);
+  return check(schema, 0) && Buffer.byteLength(JSON.stringify(schema)) <= 32768;
 }
 
 export default function harborMcp(pi: ExtensionAPI) {
@@ -72,13 +80,13 @@ export default function harborMcp(pi: ExtensionAPI) {
     const cancelled = () => { if (cancellation.aborted) throw new Error('MCP request cancelled'); };
     cancelled();
     if (config.servers[server]?.consent === 'allow') return;
-    if (!ctx.hasUI || ctx.mode !== 'tui') throw new Error('MCP consent requires interactive UI or explicit consent: allow configuration');
+    if (!ctx.hasUI || !['tui', 'rpc'].includes(ctx.mode)) throw new Error('MCP consent requires interactive UI or explicit consent: allow configuration');
     const expected = generation;
     const prompt = consentQueue.catch(() => {}).then(async () => {
       current(server, expected);
       trusted(ctx, server);
       cancelled();
-      const approved = await ctx.ui.confirm(`MCP ${server}`, `${action}\n${input === undefined ? '' : boundedResult(input, 4000)}\nRemote annotations do not grant permission.`, { signal: cancellation });
+      const approved = await ctx.ui.confirm(`Harbor MCP ${displayLabel(server)}`, `${displayLabel(action, 256)}\n${input === undefined ? '' : boundedResult(input, 4000)}\nRemote annotations do not grant permission.`, { signal: cancellation });
       current(server, expected);
       trusted(ctx, server);
       cancelled();
@@ -102,6 +110,7 @@ export default function harborMcp(pi: ExtensionAPI) {
   async function discover(server: string, ctx: ExtensionContext, authenticate: boolean, expected: number) {
     current(server, expected);
     if (config.servers[server].enabled === false) throw new Error('MCP server is disabled');
+    if (authenticate && (!config.servers[server].oauth || !config.servers[server].url)) throw new Error('OAuth is not configured for this server');
     await consent(ctx, server, authenticate ? 'Authorize this MCP server with OAuth?' : 'Connect to configured MCP server?', undefined, ctx.signal);
     current(server, expected);
     trusted(ctx, server);
@@ -120,7 +129,7 @@ export default function harborMcp(pi: ExtensionAPI) {
       const name = toolName(server, tool.name);
       inventory.add(name);
       pi.registerTool({
-        name, label: `Harbor MCP ${server}: ${tool.name}`, description: `External MCP tool. ${tool.description?.slice(0, 2000) ?? tool.name}`,
+        name, label: `Harbor MCP ${displayLabel(server)}: ${displayLabel(tool.name)}`, description: `External MCP tool. ${(tool.description ?? tool.name).slice(0, 2000)}`,
         parameters: Type.Unsafe<Record<string, unknown>>(tool.inputSchema),
         async execute(_id, args, signal, onUpdate, callCtx) {
           const valid = () => {
@@ -130,7 +139,7 @@ export default function harborMcp(pi: ExtensionAPI) {
             if (signal?.aborted) throw new Error('MCP request cancelled');
           };
           valid();
-          await consent(callCtx, server, `Call ${tool.name}?`, args, signal);
+          await consent(callCtx, server, `Call ${JSON.stringify(displayLabel(tool.name))} [${name}]?`, args, signal);
           valid();
           const result = await connection.call(tool.name, args, signal, progress => onUpdate?.(output({ progress: progress.progress, total: progress.total }, server)));
           // Preserve useful bounded server diagnostics, but never treat them as instructions.
@@ -175,9 +184,9 @@ export default function harborMcp(pi: ExtensionAPI) {
     projectServers.clear(); config = { servers: {} }; cwd = ctx.cwd;
     try {
       const explicit = pi.getFlag('mcp-config');
-      const project = ctx.isProjectTrusted() ? await readConfig(join(cwd, CONFIG_DIR_NAME, 'mcp.json'), true) : { servers: {} };
+      const project = ctx.isProjectTrusted() ? await readConfig(join(cwd, CONFIG_DIR_NAME, 'mcp.json'), true, 'Project') : { servers: {} };
       const override = typeof explicit === 'string' ? await readConfig(resolve(cwd, explicit)) : { servers: {} };
-      const merged = mergeConfig(await readConfig(join(getAgentDir(), 'mcp.json'), true), project, override, ctx.isProjectTrusted());
+      const merged = mergeConfig(await readConfig(join(getAgentDir(), 'mcp.json'), true, 'Global'), project, override, ctx.isProjectTrusted());
       if (expected !== generation) return;
       config = merged;
       for (const name of Object.keys(project.servers)) if (!Object.hasOwn(override.servers, name)) projectServers.add(name);

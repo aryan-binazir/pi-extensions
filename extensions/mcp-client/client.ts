@@ -17,18 +17,23 @@ export function toolName(server: string, name: string) {
   return `mcp_${server.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 16)}_${name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 20)}_${hash}`;
 }
 
+class McpPublicError extends Error {
+  constructor(readonly kind: 'cancelled' | 'timeout' | 'auth_required' | 'denied' | 'failure', message: string) { super(message); }
+}
 export function publicError(error: unknown): Error {
-  if (error instanceof McpLimitError || error instanceof McpConfigError) return error;
+  if (error instanceof McpPublicError || error instanceof McpLimitError || error instanceof McpConfigError) return error;
   const e = error as { name?: string; code?: number; status?: number };
-  if (e?.name === 'AbortError') return new Error('MCP request cancelled');
-  if (e?.code === -32001 || e?.name === 'TimeoutError') return new Error('MCP request timed out');
-  if (error instanceof UnauthorizedError || e?.name === 'UnauthorizedError' || e?.code === 401 || e?.status === 401) return new Error('MCP authentication required; use /mcp-auth SERVER');
-  if (e?.code === 403 || e?.status === 403) return new Error('MCP authorization denied (403)');
-  return new Error('MCP request failed; server unavailable, invalid response, or protocol error');
+  if (e?.name === 'AbortError') return new McpPublicError('cancelled', 'MCP request cancelled');
+  if (e?.code === -32001 || e?.name === 'TimeoutError') return new McpPublicError('timeout', 'MCP request timed out');
+  if (error instanceof UnauthorizedError || e?.name === 'UnauthorizedError' || e?.code === 401 || e?.status === 401) return new McpPublicError('auth_required', 'MCP authentication required; use /mcp-auth SERVER');
+  if (e?.code === 403 || e?.status === 403) return new McpPublicError('denied', 'MCP authorization denied (403)');
+  return new McpPublicError('failure', 'MCP request failed; server unavailable, invalid response, or protocol error');
 }
 
 export function boundedResult(value: unknown, maxBytes = 65536): string {
-  const text = JSON.stringify(value) ?? 'null';
+  let text: string;
+  try { text = JSON.stringify(value) ?? 'null'; }
+  catch { return '[MCP output omitted: value is too deeply nested or not JSON serializable]'; }
   if (Buffer.byteLength(text) <= maxBytes) return text;
   return Buffer.from(text).subarray(0, maxBytes - 64).toString('utf8') + '\n[MCP output truncated]';
 }
@@ -90,6 +95,11 @@ export class McpConnection {
 
   async connect(): Promise<Tool[]> {
     if (this.lifetime.signal.aborted) throw new Error('MCP connection closed');
+    return this.authenticating ?? this.connectCurrent();
+  }
+
+  private async connectCurrent(): Promise<Tool[]> {
+    if (this.lifetime.signal.aborted) throw new Error('MCP connection closed');
     if (this.config.enabled === false) throw new Error('MCP server is disabled');
     if (this.connecting) return this.connecting;
     this.connecting = this.establish();
@@ -106,13 +116,21 @@ export class McpConnection {
       return tools;
     } catch (error) {
       const safe = publicError(error);
-      if (!this.lifetime.signal.aborted) this.currentStatus = { state: safe.message.includes('authentication required') ? 'auth_required' : 'failed', toolCount: 0, error: safe.message };
+      if (!this.lifetime.signal.aborted) this.currentStatus = { state: safe instanceof McpPublicError && safe.kind === 'auth_required' ? 'auth_required' : 'failed', toolCount: 0, error: safe.message };
       throw safe;
     }
   }
 
   private async open(signal: AbortSignal): Promise<Tool[]> {
-    if (this.client) return this.listTools(this.client, signal, startupTimeout(this.config));
+    if (this.client) {
+      const client = this.client;
+      try { return await this.listTools(client, signal, startupTimeout(this.config)); }
+      catch (error) {
+        await client.close().catch(() => {});
+        if (this.client === client) this.client = undefined;
+        throw error;
+      }
+    }
     const client = new Client({ name: 'harbor-mcp', version: '0.2.0' }, { capabilities: {} });
     const config = this.config;
     client.onclose = () => {
@@ -176,7 +194,7 @@ export class McpConnection {
     this.lifetime.signal.addEventListener('abort', abort, { once: true });
     try {
       this.lifetime.signal.throwIfAborted();
-      try { return await this.connect(); } catch { if (!this.oauth.authorizationStarted) throw new Error('MCP OAuth discovery failed'); }
+      try { return await this.connectCurrent(); } catch (error) { if (!this.oauth.authorizationStarted) throw error; }
       const code = await this.oauth.code;
       const transport = this.transport;
       if (!(transport instanceof StreamableHTTPClientTransport || transport instanceof SSEClientTransport)) throw new Error('MCP OAuth transport unavailable');
@@ -187,7 +205,7 @@ export class McpConnection {
         try { await transport.finishAuth(code); signal.throwIfAborted(); }
         finally { this.authRequestSignal = undefined; signal.removeEventListener('abort', onAbort); }
       });
-      return await this.connect();
+      return await this.connectCurrent();
     } catch (error) { throw publicError(error); }
     finally { this.lifetime.signal.removeEventListener('abort', abort); await this.oauth.close(); }
   }

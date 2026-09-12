@@ -42,7 +42,8 @@ Third-party attribution and licenses are in [`../licenses`](../licenses).
   the configured eligible tools. Session replacement, shutdown and project
   directory/trust changes cannot reuse old authority.
 - Bounds: 32 servers, 32 pages and 256 items per catalog, 64 KiB cursors, 2 MiB
-  responses/events/frames, 32 KiB schemas, depth 32 and local schema refs only.
+  responses/events/frames, 32 KiB schemas, JSON-entry depth 32 and reference
+  values limited to `#`/`#/...` (not named anchors). No URI resolver is installed.
   Duplicate tool names fail discovery rather than registering ambiguous schemas.
   Catalog failures never return partial success. An empty cursor is followed;
   only an absent cursor completes pagination. Missing capabilities return `[]`.
@@ -51,7 +52,7 @@ Third-party attribution and licenses are in [`../licenses`](../licenses).
   phase-specific fields take precedence. Progress cannot extend deadlines.
   Configurable timeout bounds are 10–120000ms.
 - Never replay failed tool mutations. A new explicit action may reconnect after
-  a response-size reset; transport exits otherwise require explicit reconnect.
+  an HTTP/SSE response-size reset; transport exits otherwise require explicit reconnect.
   Cancellation sends MCP cancellation but cannot undo remote side effects.
 - Stdio processes run with the user's OS permissions. Harbor is not a sandbox;
   verification containers are test infrastructure, not a runtime security
@@ -67,7 +68,9 @@ capability-aware catalogs, sanitized status, consent serialization, trust/sessio
 changes during prompts, late startup completion, stale schemas, output limits,
 header-origin isolation and synthetic OAuth PKCE.
 
-A throwaway harness exercises the actual transports and extension registration
-boundary inside an ephemeral Node container with synthetic credentials and no
-external network. This does not prove live provider authentication, graphical
+During verification, a throwaway harness exercised the actual transports and
+extension registration boundary inside an ephemeral Node container with synthetic
+credentials and no external network. That scratch harness is intentionally not
+shipped. The maintained, reproducible integration coverage lives in
+`extensions/mcp-client/*.test.ts` and runs with `npm run check`. This does not prove live provider authentication, graphical
 browser login, a real model conversation, or macOS behavior.

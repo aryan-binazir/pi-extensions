@@ -15,7 +15,7 @@ for(const kind of ['http','sse'] as const)test(`${kind} reports 401/403 without 
   await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
   const url=`http://127.0.0.1:${(server.address() as {port:number}).port}/mcp`;
   try{
-    for(const code of [401,403]){status=code;const c=new McpConnection('auth',{url,transport:kind});try{await assert.rejects(c.connect(),error=>{assert.match(String(error),code===401?/auth/i:/403|failed/);assert.doesNotMatch(String(error),/SECRET/);return true;});}finally{await c.close();}}
+    for(const code of [401,403]){status=code;const c=new McpConnection('auth',{url,transport:kind});try{await assert.rejects(c.connect(),error=>{assert.match(String(error),code===401?/auth/i:/403|failed/);assert.doesNotMatch(String(error),/SECRET/);return true;});assert.equal(c.status.state,code===401?'auth_required':'failed');}finally{await c.close();}}
   }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
 
@@ -50,7 +50,8 @@ for(const separateAuth of [false,true])for(const kind of ['http','sse'] as const
   const c=new McpConnection('oauth',{headers:{'X-Api-Key':'fixture-origin-secret'},url:`${origin}/mcp`,transport:kind,oauth:{clientId:'fixture-client'}});
   const browserCalls:Promise<unknown>[]=[];
   try{
-    const tools=await c.authenticate(url=>{browserCalls.push(fetch(url));});
+    const [tools, concurrentTools]=await Promise.all([c.authenticate(url=>{browserCalls.push(fetch(url));}), c.connect()]);
+    assert.deepEqual(concurrentTools.map(t=>t.name),tools.map(t=>t.name));
     await Promise.all(browserCalls);
     assert.equal(tools[0].name,'echo');assert.equal(tokenCalls,1);
     assert.match(JSON.stringify(await c.call('echo',{text:'authenticated'})),/authenticated/);

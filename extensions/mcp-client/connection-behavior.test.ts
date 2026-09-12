@@ -94,6 +94,48 @@ test('successful discovery cannot overwrite a concurrent closed status', async (
   } finally { mock.mock.restore(); await c.close(); }
 });
 
+test('failed refresh closes the unusable catalog session and explicit reconnect recovers', async () => {
+  let duplicate = false;
+  const fixture = await catalogServer(async () => ({ tools: duplicate ? [echo, echo] : [echo] }));
+  const c = new McpConnection('refresh', { url: fixture.url });
+  try {
+    await c.connect(); duplicate = true;
+    await assert.rejects(c.connect(), /duplicate/);
+    assert.equal(c.status.state, 'failed');
+    await assert.rejects(c.call('echo', {}), /disconnected/);
+    duplicate = false;
+    assert.equal((await c.connect()).length, 1);
+    assert.equal(c.status.state, 'ready');
+  } finally { await c.close(); await fixture.close(); }
+});
+
+test('deny wins over allow at discovery and dispatch; empty allowlist exposes nothing', async () => {
+  const fixture = await startFixture('http');
+  try {
+    for (const filters of [{ allowTools: ['echo'], denyTools: ['echo'] }, { allowTools: [] }]) {
+      const c = new McpConnection('filters', { ...fixture.config, ...filters });
+      try {
+        assert.deepEqual(await c.connect(), []);
+        await assert.rejects(c.call('echo', { text: 'denied' }), /excluded/);
+      } finally { await c.close(); }
+    }
+  } finally { await fixture.close(); }
+});
+
+test('stdio frame overflow disconnects without replay and requires explicit reconnect', async () => {
+  const fixture = await startFixture('stdio');
+  const c = new McpConnection('frame', { ...fixture.config, timeoutMs: 3000 });
+  try {
+    await c.connect();
+    const pid = Number(((await c.call('echo', { text: 'process-id' })).content as { text: string }[])[0].text);
+    await assert.rejects(c.call('echo', { text: 'x'.repeat(2 * 1024 * 1024 + 1) }), /failed|disconnected/);
+    await assert.rejects(c.call('echo', { text: 'not retried' }), /disconnected/);
+    await c.connect();
+    const replacement = Number(((await c.call('echo', { text: 'process-id' })).content as { text: string }[])[0].text);
+    assert.notEqual(replacement, pid);
+  } finally { await c.close(); await fixture.close(); }
+});
+
 test('startup has a single budget across handshake/discovery and reports failed status', async () => {
   let pages = 0;
   const fixture = await catalogServer(async () => {

@@ -34,6 +34,82 @@ async function harness(servers: Record<string, ServerConfig>, project = false) {
 
 const schema = { type: 'object' as const, properties: { text: { type: 'string' } } };
 
+test('consent and tool labels cannot be hidden or overflowed by server tool names', async () => {
+  const raw = 'lookup\n\nFAKE REASSURANCE\x1b[8mconceal' + 'x'.repeat(100000);
+  const mock = test.mock.method(McpConnection.prototype, 'connect', async () => [{ name: raw, inputSchema: schema }]);
+  const h = await harness({ s: { url: 'http://127.0.0.1:1' } });
+  try {
+    await h.start();
+    const tool = h.tools.get(toolName('s', raw));
+    assert.ok(tool.label.length < 180);
+    assert.ok(tool.description.length < 2020);
+    assert.doesNotMatch(tool.label, /[\x00-\x1f\x7f-\x9f]/);
+    let displayed = '';
+    h.ctx.ui.confirm = async (_title, message) => { displayed = message; return false; };
+    await assert.rejects(tool.execute('malicious', { text: 'REAL_ARGUMENTS' }, undefined, undefined, h.ctx), /declined/);
+    assert.ok(displayed.split('\n')[0].length <= 256);
+    assert.doesNotMatch(displayed, /[\x00-\x09\x0b-\x1f\x7f-\x9f]/);
+    assert.match(displayed, /\n\{"text":"REAL_ARGUMENTS"\}\nRemote annotations do not grant permission\./);
+    assert.ok(displayed.includes(tool.name));
+  } finally { mock.mock.restore(); await h.close(); }
+});
+
+test('deep schemas are skipped without dropping later valid tools', async () => {
+  let deep: any = { type: 'object' };
+  for (let i = 0; i < 10000; i++) deep = { type: 'object', properties: { child: deep } };
+  const mock = test.mock.method(McpConnection.prototype, 'connect', async () => [{ name: 'deep', inputSchema: deep }, { name: 'valid', inputSchema: schema }]);
+  const h = await harness({ s: { url: 'http://127.0.0.1:1', consent: 'allow' } });
+  try {
+    await h.start();
+    assert.equal(h.active().includes(toolName('s', 'deep')), false);
+    assert.equal(h.active().includes(toolName('s', 'valid')), true);
+    assert.equal((await h.status())[0].registeredTools, 1);
+  } finally { mock.mock.restore(); await h.close(); }
+});
+
+test('non-OAuth auth command leaves a healthy inventory untouched', async () => {
+  const fixture = await startFixture('http');
+  const h = await harness({ fixture: { ...fixture.config, consent: 'allow' } });
+  try {
+    await h.start();
+    const name = toolName('fixture', 'echo'), old = h.tools.get(name);
+    await h.commands.get('mcp-auth').handler('fixture', h.ctx);
+    assert.match(h.notifications.at(-1)!, /OAuth is not configured/);
+    assert.ok(h.active().includes(name));
+    assert.match((await old.execute('still-valid', { text: 'still-valid' }, undefined, undefined, h.ctx)).content[0].text, /still-valid/);
+  } finally { await h.close(); await fixture.close(); }
+});
+
+test('config errors identify their source and preserve safe validation reasons', async () => {
+  const h = await harness({});
+  try {
+    const file = join(h.ctx.cwd, 'mcp.json');
+    await writeFile(file, JSON.stringify({ servers: { bad: { command: 'synthetic', required: true } } }));
+    await h.start();
+    assert.match(h.notifications.at(-1)!, /Explicit MCP configuration: Unsupported MCP server field/);
+    assert.doesNotMatch(h.notifications.at(-1)!, /synthetic/);
+    await writeFile(file, ' '.repeat(1048577));
+    await h.start();
+    assert.match(h.notifications.at(-1)!, /Explicit MCP configuration:.*exceeds 1 MiB/);
+  } finally { await h.close(); }
+});
+
+test('RPC dialog consent works without silently granting headless authority', async () => {
+  const fixture = await startFixture('http');
+  const h = await harness({ fixture: fixture.config });
+  h.ctx.mode = 'rpc';
+  let prompts = 0;
+  h.ctx.ui.confirm = async () => { prompts++; return true; };
+  try {
+    await h.start();
+    const tool = h.tools.get(toolName('fixture', 'echo'));
+    assert.match((await tool.execute('rpc', { text: 'rpc' }, undefined, undefined, h.ctx)).content[0].text, /rpc/);
+    assert.equal(prompts, 2);
+    h.ctx.hasUI = false;
+    await assert.rejects(tool.execute('headless', { text: 'no' }, undefined, undefined, h.ctx), /consent/);
+  } finally { await h.close(); await fixture.close(); }
+});
+
 test('refresh retires removed/schema-rejected tools and invalidates saved callbacks', async () => {
   const fixture = await startFixture('http');
   const h = await harness({ fixture: { ...fixture.config, consent: 'allow' } });

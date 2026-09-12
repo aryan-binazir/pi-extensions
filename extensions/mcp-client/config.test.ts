@@ -19,7 +19,8 @@ test('all aliases normalize and conflict even when equal', () => {
   }
 });
 test('strict roots, records, unsupported policies and OAuth shapes', () => {
-  for (const root of [null, [], {}, { servers: {}, mcp_servers: {} }, { servers: {}, extra: 1 }, { servers: [] }, Object.create({ servers: {} })]) assert.throws(() => validateConfig(root));
+  assert.deepEqual(validateConfig({}), { servers: {} });
+  for (const root of [null, [], { servers: {}, mcp_servers: {} }, { servers: {}, extra: 1 }, { servers: [] }, Object.create({ servers: {} })]) assert.throws(() => validateConfig(root));
   for (const server of [null, [], new Date(), Object.create({ command: 'run' }), { command: 'run', required: false }, { command: 'run', auth: 'oauth' }, { command: 'run', unknown: 'secret' }]) assert.throws(() => validate(server));
   for (const oauth of [null, [], false, 'yes', { client_id: 'x' }, { clientId: 2 }, { scope: false }]) assert.throws(() => validate({ url: 'https://example.com', oauth }));
   assert.deepEqual(validate({ url: 'https://example.com', oauth: {} }).oauth, {});

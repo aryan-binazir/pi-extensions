@@ -67,13 +67,14 @@ OAuth discovery/token origin. Stdio stderr is discarded.
 
 ### Alternative JSON field names
 
-Use either `servers` or `mcp_servers` as the root, not both. Individual entries
+An empty `{}` config means no servers. Otherwise use either `servers` or
+`mcp_servers` as the root, not both. Individual entries
 accept the following aliases, but never an alias together with its camelCase field:
 
 | Alternative field | Harbor field |
 | --- | --- |
-| `startup_timeout_sec` | `startupTimeoutMs` (seconds converted to integer milliseconds) |
-| `tool_timeout_sec` | `toolTimeoutMs` (seconds converted to integer milliseconds) |
+| `startup_timeout_sec` | `startupTimeoutMs` (seconds must yield an integer number of milliseconds) |
+| `tool_timeout_sec` | `toolTimeoutMs` (seconds must yield an integer number of milliseconds) |
 | `enabled_tools` | `allowTools` |
 | `disabled_tools` | `denyTools` |
 | `env_vars` | `envVars` (string names only) |
@@ -81,7 +82,8 @@ accept the following aliases, but never an alias together with its camelCase fie
 | `env_http_headers` | `envHeaders` |
 | `bearer_token_env_var` | `bearerTokenEnvVar` |
 
-`command`, `args`, `env`, `url`, `cwd` and `enabled` use the same spelling.
+Other supported fields are `command`, `args`, `env`, `url`, `cwd`, `enabled`,
+`transport`, `consent`, `timeoutMs`, `maxOutputBytes` and `oauth`.
 Only JSON is supported. Unknown fields (including `required`, auth policies,
 environment-source objects and header helpers) are errors, not silently ignored.
 OAuth accepts `clientId` and `scope`. No external agent's config or credentials
@@ -91,7 +93,8 @@ Disabled entries must still be valid.
 ## Commands and tools
 
 - `/mcp`: server state and eligible/registered tool counts, without credentials.
-- `/mcp-connect SERVER`: connect or explicitly refresh the tool inventory.
+- `/mcp-connect SERVER`: connect or explicitly refresh the tool inventory using
+  the current configuration snapshot. Config file edits require `/reload`.
 - `/mcp-auth SERVER`: interactive OAuth authorization for this session.
 - `mcp` tool `action: "servers"`: configured names (backward-compatible).
 - `action: "status"`: per-server state and counts.
@@ -107,8 +110,9 @@ States are `disabled`, `disconnected`, `connecting`, `ready`, `failed`,
 
 Each connection and action asks for consent by default. Turn cancellation dismisses
 active consent dialogs and skips queued prompts without dispatching their actions.
-Headless sessions fail
-closed unless `consent: "allow"` explicitly authorizes that configured server.
+TUI and RPC clients with dialog support can approve prompts. Print/JSON sessions
+and clients without dialogs fail closed unless `consent: "allow"` explicitly
+authorizes that configured server.
 Use `allowTools` to narrow tool authority; `denyTools` always wins. Lists match
 exact raw names, not generated Pi names or glob patterns. Empty allow-list means
 no tools. Filters apply to discovery and calls. Resource/prompt access remains
@@ -117,10 +121,14 @@ actions. Sampling and elicitation are not enabled.
 
 Pi tool names preserve the existing sanitized server/tool name plus exact-name
 hash. Valid input JSON Schemas are preserved, including nested constraints and
-references. Oversized/deep/external-reference schemas are excluded with a warning;
+references. Consent labels are single-line, control-free and bounded; tool names
+also show their stable Pi identifier so truncated labels are distinguishable.
+Oversized/deep/external-reference schemas are excluded with a warning;
 provider-specific schema limitations may require further filtering. Duplicate raw
 tool names fail discovery. Refresh invalidates old callbacks and deactivates
-removed tools, then reactivates the configured eligible tools. Automatic
+removed tools, then reactivates the configured eligible tools. Failed catalog
+refresh closes the connection; reconnect explicitly to recover. An auth command
+on a non-OAuth server does not retire its healthy inventory. Automatic
 server-notification refresh is not supported. Reconnect after a server changes its
 inventory. Late startup completion cannot register tools in a replacement session.
 
@@ -142,7 +150,10 @@ Resource templates are metadata only; callers construct an explicit URI for
 - 64 KiB output default; `maxOutputBytes` allows 256–1048576 bytes. Truncation is
   explicit and full content is not hidden in tool details.
 - 2 MiB HTTP JSON response, SSE event, or stdio frame before SDK parsing.
-- 32 KiB schema, depth 32, local schema references only. String lists max 256 items.
+- 32 KiB schema, JSON-entry depth 32 (each `properties` object adds a level).
+  Supported reference values are `#` and `#/...`, not named anchors. `$id` and
+  `$schema` metadata are preserved; Harbor itself performs no URI resolution.
+  String lists max 256 items. Unserializable/deep output is explicitly omitted.
 
 Request cancellation uses the SDK's per-request MCP cancellation notification;
 it does not imply a mutation was rolled back. Actions are never automatically

@@ -32,7 +32,7 @@ import fastMode from './index.ts';
 test('toggle and resume keep reasoning; other provider paths remain untouched',async()=>{
  const original=openaiProvider();const models=original.getModels();const base=models.find(m=>m.id==='gpt-5.5')!;
  let provider:any=original;let selected:any=base;let effort='high';let command:any;let resume:any;let registrations=0;
- const ctx:any={model:base,modelRegistry:{getRegisteredNativeProvider:(id:string)=>id==='openai'&&registrations?provider:undefined,getProvider:(id:string)=>id==='openai'?provider:undefined,find:(id:string,name:string)=>id==='openai'?provider.getModels().find((m:any)=>m.id===name):undefined},sessionManager:{getBranch:()=>[{type:'model_change',provider:'openai',modelId:'gpt-5.5~fast'}]},ui:{notify(){}}};
+ const ctx:any={model:base,modelRegistry:{getRegisteredProviderConfig:()=>undefined,getRegisteredNativeProvider:(id:string)=>id==='openai'&&registrations?provider:undefined,getProvider:(id:string)=>id==='openai'?provider:undefined,find:(id:string,name:string)=>id==='openai'?provider.getModels().find((m:any)=>m.id===name):undefined},sessionManager:{getBranch:()=>[{type:'model_change',provider:'openai',modelId:'gpt-5.5~fast'}]},ui:{notify(){}}};
  fastMode({registerProvider:(p:any)=>{registrations++;provider=p;},on:(name:string,fn:any)=>{if(name==='session_start')resume=fn;},registerCommand:(_name:string,entry:any)=>{command=entry;},getThinkingLevel:()=>effort,setThinkingLevel:(value:string)=>{effort=value;},setModel:async(value:any)=>{selected=value;ctx.model=value;effort='low';return true;}} as any);
  await command.handler('',ctx);assert.equal(selected.id,'gpt-5.5~fast');assert.equal(effort,'high');
  await command.handler('',ctx);assert.equal(selected.id,'gpt-5.5');assert.equal(effort,'high');
@@ -153,4 +153,20 @@ test('config-declared direct models retain usable fast aliases',async()=>{
   const models=runtime.getModels('openai');
   assert.equal(new Set(models.map(model=>model.id)).size,models.length);
  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('fast installation preserves another extension legacy provider registration',async()=>{
+ const runtime=await ModelRuntime.create({modelsPath:null,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
+ const registry=new ModelRegistry(runtime);
+ const config={baseUrl:'https://proxy.example/v1',apiKey:'fixture-proxy-key'};
+ registry.registerProvider('openai',config);
+ await registry.refresh({allowNetwork:false});
+ let startup:any;
+ fastMode({registerProvider:(provider:any)=>registry.registerProvider(provider),on:(_name:string,handler:any)=>{startup=handler;},registerCommand:()=>{}} as any);
+ await startup({reason:'new'},{modelRegistry:registry});
+ await registry.refresh({allowNetwork:false});
+ assert.deepEqual(registry.getRegisteredProviderConfig('openai'),config);
+ assert.equal(registry.getRegisteredNativeProvider('openai'),undefined);
+ assert.equal(registry.find('openai','gpt-5.5')!.baseUrl,config.baseUrl);
+ assert.ok(!runtime.getModels('openai').some(model=>model.id.endsWith('~fast')));
 });

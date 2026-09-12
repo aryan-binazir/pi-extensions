@@ -5,6 +5,8 @@ import { FAST_SUFFIX, withFastModels } from './provider.ts';
 export default function fastMode(pi:ExtensionAPI):void {
  const install=(ctx:ExtensionContext)=>{
   for(const id of ['openai','openai-codex']) {
+   // Native registration replaces legacy config, including another extension's endpoint and auth.
+   if(ctx.modelRegistry.getRegisteredProviderConfig(id))continue;
    const view=ctx.modelRegistry.getProvider(id);
    // Pi 0.85.1 private runtime.builtins preserves the pi.dev catalog; public factories are the fallback.
    const provider=ctx.modelRegistry.getRegisteredNativeProvider(id)

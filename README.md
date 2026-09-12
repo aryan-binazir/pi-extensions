@@ -69,6 +69,24 @@ queue behind one another. Timeouts, cancellation and session shutdown terminate
 process groups, including ordinary descendants. A descendant that deliberately
 creates a new session can escape portable process-group cleanup.
 
+The default deadline is one hour, including approval and queue time. Children
+inherit the selected parent model and thinking level unless explicitly overridden.
+A Node supervisor watches an inherited owner pipe and cleans up on owner loss;
+this is supervision, not machine-wide subscription control. Four consecutive
+identical failed tool calls stop a child as `stalled`; productive work and successful
+polling are not turn-limited. No new token or spending quotas are imposed.
+Use `subagent_cancel` with `id: "all"`, or `/subagents cancel all`, to stop current
+children and workflows without disabling future delegation.
+
+Direct completions are compact and batched; cancellation does not trigger a model
+turn. Workflow stages return only to their awaiting workflow. Status is paginated
+(`offset`, `limit`, or `id` with `outputOffset`); the registry retains 50 completed
+results alongside outstanding work. Oversized JSON records are skipped and flagged,
+not treated as a reason to kill an otherwise healthy child. Incomplete terminal
+results cannot count as success. Workflow retry does not automatically relaunch
+stalled, cancelled, expired, timed-out, or incomplete children. Journal persistence
+failure returns control for reconciliation rather than repeating unjournaled effects.
+
 Workflows require a separate Node executable on `PATH` (22.19+ in the 22.x series, or 24+), including when Pi itself runs on Bun. Its version and permission enforcement are probed before execution; missing or unsupported Node fails explicitly.
 
 The `workflow` tool accepts a TypeScript async function body. The user reviews

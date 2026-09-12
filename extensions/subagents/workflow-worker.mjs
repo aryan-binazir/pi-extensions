@@ -43,7 +43,7 @@ process.on('message', message => {
       },
       retry: async (attempts, task) => {
         if (!Number.isInteger(attempts) || attempts < 1 || attempts > 5) throw new Error('retry attempts must be 1–5');
-        for (let i=0;i<attempts;i++) {try{return await task(i);}catch(error){if(i+1===attempts)throw error;}}
+        for (let i=0;i<attempts;i++) {try{return await task(i);}catch(error){if(error?.retryable === false || i+1===attempts)throw error;}}
       },
       checkpoint: async (key, task) => {
         if (typeof key !== 'string' || !/^[a-zA-Z0-9_.-]{1,80}$/.test(key)) throw new Error('Invalid checkpoint key');
@@ -62,7 +62,7 @@ process.on('message', message => {
     );
    `);
   } else if (message.type === 'response') {
-   evaluate(`{ const response = JSON.parse(${JSON.stringify(JSON.stringify(message))}); const pending = __pending.get(response.id); if(pending) {__pending.delete(response.id); if(response.ok) pending.resolve(response.value); else pending.reject(new Error(response.error));} }`);
+   evaluate(`{ const response = JSON.parse(${JSON.stringify(JSON.stringify(message))}); const pending = __pending.get(response.id); if(pending) {__pending.delete(response.id); if(response.ok) pending.resolve(response.value); else pending.reject(Object.assign(new Error(response.error), {retryable: response.retryable !== false}));} }`);
   }
   pump();
  } catch(error) { process.send?.({type:'done',ok:false,error:String(error?.message ?? error)},()=>process.exit(1)); }

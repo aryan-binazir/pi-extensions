@@ -20,7 +20,7 @@ test('work requires AC, background survives settled, battery and shutdown releas
 test('Linux power distinguishes AC, battery and missing information',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'pi-power-'));
  try{
-  assert.equal(await readPower('linux',dir),'ac');
+  assert.equal(await readPower('linux',dir),'unknown');
   assert.equal(await readPower('linux',join(dir,'missing')),'unknown');
   await mkdir(join(dir,'BAT0'));await writeFile(join(dir,'BAT0/type'),'Battery');
   assert.equal(await readPower('linux',dir),'unknown');
@@ -94,4 +94,37 @@ test('missing inhibitor backs off instead of retrying each watchdog tick',async(
  const keeper=new PowerKeeper({now:()=>now,power:async()=> 'ac',start:()=>{starts++;return undefined;}});
  try {await keeper.setAgent(true);for(now=2000;now<30000;now+=2000)await keeper.check();assert.equal(starts,1);await keeper.check();assert.equal(starts,2);}
  finally {await keeper.shutdown();}
+});
+
+test('empty Linux power-supply directory never starts an inhibitor',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-power-empty-'));let starts=0;
+ const keeper=new PowerKeeper({power:()=>readPower('linux',dir),start:()=>{starts++;return {alive:()=>true,stop:async()=>{}};}});
+ try{
+  await keeper.setAgent(true);await keeper.background('task',true);await keeper.check();
+  assert.equal(starts,0);
+ }finally{await keeper.shutdown();await rm(dir,{recursive:true,force:true});}
+});
+
+test('throwing status callbacks never reject checks or skip the next power read',async()=>{
+ let reads=0,stops=0;let power:'ac'|'battery'='ac';const states:boolean[]=[];
+ const keeper=new PowerKeeper({power:async()=>{reads++;return power;},
+  start:()=>({alive:()=>true,stop:async()=>{stops++;}}),
+  onChange:awake=>{states.push(awake);throw new Error('stale UI context');}});
+ try{
+  await assert.doesNotReject(keeper.background('task',true));assert.equal(reads,1);
+  power='battery';await assert.doesNotReject(keeper.check());assert.equal(reads,2);assert.equal(stops,1);
+  power='ac';await assert.doesNotReject(keeper.check());assert.equal(reads,3);
+  await assert.doesNotReject(keeper.shutdown());assert.equal(stops,2);
+  assert.deepEqual(states,[true,false,true,false]);
+ }finally{await keeper.shutdown();}
+});
+
+test('fire-and-forget background activity tolerates a throwing status callback',async()=>{
+ const keeper=new PowerKeeper({power:async()=> 'ac',
+  start:()=>({alive:()=>true,stop:async()=>{}}),onChange:()=>{throw new Error('stale UI context');}});
+ try{
+  void keeper.background('task',true);
+  // Let unhandled rejections reach node:test, matching the event-bus caller.
+  await new Promise<void>(resolve=>setImmediate(resolve));
+ }finally{await keeper.shutdown();}
 });

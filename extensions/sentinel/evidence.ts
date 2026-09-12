@@ -72,13 +72,14 @@ export function collectEvidence(ctx: ExtensionContext, instructions: string, inh
   // User-supplied visual authority gets slots before tool screenshots, newest first.
   for (const value of userImageSources.reverse()) content(value, true);
   if ([...authorizedImages].some(hash => !imageHashes.includes(hash))) reasons.add('authorization_image_unavailable');
-  let historySize = 0;
+  let historySize = 0, historyTrimmedByBytes = false;
   const recent: RecordEntry[] = [];
   for (const record of records.slice(-20).reverse()) {
     const raw = JSON.stringify(content(record.content));
     const rendered = bounded(raw, MAX_ENTRY);
+    // Byte and count limits both trim the oldest part of the execution window.
+    if (historySize + rendered.length > MAX_HISTORY) { historyTrimmedByBytes = true; break; }
     if (rendered !== raw) reasons.add('execution_entry_budget');
-    if (historySize + rendered.length > MAX_HISTORY) { reasons.add('execution_history_budget'); break; }
     historySize += rendered.length; recent.unshift({ role: record.role, content: rendered });
   }
   if (!inherited && !rawUsers.length && userImageSources.length) reasons.add('user_input_provenance_unavailable');
@@ -102,7 +103,7 @@ export function collectEvidence(ctx: ExtensionContext, instructions: string, inh
     trusted_user_messages: inherited ? undefined : JSON.stringify(authorization.users),
     untrusted_instructions: bounded(untrustedInstructions, MAX_INSTRUCTIONS),
     evidence: recent, image_order: imageHashes,
-    history_window: 'Last 20 non-user/expanded entries; older execution evidence may be omitted.',
+    history_window: { max_entries: 20, max_characters: MAX_HISTORY, trimmed_by_bytes: historyTrimmedByBytes, older_entries_omitted: recent.length < records.length },
     complete, incomplete_reasons: [...reasons],
   });
   return { text, images, complete, incompleteReasons: [...reasons], authorization, identity: digest({ authorization, complete, externalSteering, untrustedInstructions }) };

@@ -130,9 +130,7 @@ export class SentinelEngine {
       .then((value) => {
         if (generation !== this.generation || task.controller.signal.aborted) return;
         if (value !== 'low' && value !== 'high') throw new Error('invalid_score');
-        if (!input.complete) {
-          this.latestFailed = Math.max(this.latestFailed, index);
-        } else if (!this.score || index > this.score.index) {
+        if (!this.score || index > this.score.index) {
           // Score and authorization identity are published as one value.
           this.score = { index, identity: input.identity, risk: value === 'low' ? 0 : 1 };
         }

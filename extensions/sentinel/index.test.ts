@@ -264,6 +264,18 @@ test('custom-message steering invalidates the low cache and incomplete evidence 
   } finally { await h.close(); }
 });
 
+test('four ordinary max-size results keep the adaptive path usable after byte-window trimming', async () => {
+  const h = await harness();
+  try {
+    for (let index = 0; index < 4; index++) {
+      await h.call(); await new Promise(resolve => setImmediate(resolve));
+      h.branch.push({ type: 'message', message: { role: 'toolResult', content: 'x'.repeat(50000) } });
+    }
+    await h.call();
+    assert.equal(h.records.at(-1).source, 'cached');
+  } finally { await h.close(); }
+});
+
 test('configured lag zero prevents reuse and the configured timeout bounds reviewer requests', async () => {
   const h = await harness();
   try {
@@ -289,5 +301,14 @@ test('noninteractive and non-idle mode changes are refused; failed enablement do
     h.ctx.ui.confirm = async () => { await writeFile(join(h.home, 'sentinel-policy.md'), 'UNSEEN'); return true; };
     await h.commands.get('auto').handler('on', h.ctx);
     assert.equal(h.branch.some(entry => entry.customType === 'sentinel:mode'), false);
+    let status: any;
+    h.ctx.ui.notify = (text: string) => { status = JSON.parse(text); };
+    await h.commands.get('auto').handler('status', h.ctx);
+    assert.equal(status.enabled, true);
+    assert.match(status.state, /confirmation required/);
+    assert.equal(status.persistedMode, 'off');
+    await h.handlers.get('session_start')({}, h.ctx);
+    await h.commands.get('auto').handler('status', h.ctx);
+    assert.equal(status.enabled, false); assert.equal(status.persistedMode, 'off');
   } finally { await h.close(); }
 });

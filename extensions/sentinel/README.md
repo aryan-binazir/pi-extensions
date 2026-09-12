@@ -19,6 +19,8 @@ Children inheriting an enabled guard cannot turn it off. Session navigation rese
 scores. The confirmed settings/preferences fingerprint is persisted with enabled
 mode, so resume, extension reload, and branch navigation cannot silently approve
 changed files. Older enabled entries without that fingerprint require confirmation.
+A failed enable attempt blocks the current session but saves no approval; status shows
+both current and persisted modes. Resume restores the last successful mode, possibly off.
 
 ## Your preferences file
 
@@ -42,9 +44,11 @@ relevant conversation/tool evidence are sent to the configured review providers.
 While auto review is enabled, file changes immediately prevent further approvals
 until `/sentinel reload` confirms the new contents. An agent edit cannot silently
 become trusted authorization. No repository-local config overrides this user file.
-Resume rereads global settings and checks the saved confirmation. Guarded direct
-writes to policy, session/approval records, provider settings and guard code are
-blocked. Use `/auto off` for explicit maintenance, then `/auto on` to confirm.
+Resume rereads global settings and checks the saved confirmation. Recognized built-in
+`write`/`edit` calls targeting policy, session/approval records, provider settings or
+guard code are blocked. Opaque commands have a bounded control-path scan; uncertainty
+or scan exhaustion forces fresh review. File-write payloads are not executable commands.
+Use `/auto off` for explicit maintenance, then `/auto on` to confirm.
 
 Optional **`~/.pi/agent/sentinel.json`** settings (all fields optional):
 
@@ -118,10 +122,13 @@ and option metadata remain untrusted, including legacy unsanitized answer entrie
 Budgets: 128K characters each for user authority and host instructions; the newest
 20 execution/expanded entries, 65,536 characters per entry and 196,608 total; four
 images/4 MiB of encoded data. User-provided visual authority gets slots before recent
-tool screenshots. Truncation prevents cached approvals and is surfaced in status.
-Incomplete evidence goes directly to blocking review without paying for an unusable
-classifier request. An oversized original-user history remains incomplete; start a
-new session with concise scope rather than silently discarding earlier restrictions. Child snapshots omit image payloads and explicitly mark
+tool screenshots. Count and aggregate byte limits both trim the oldest execution
+history; this rolling-window trimming is explicit in the evidence and does not disable
+reuse. Truncation within an included entry or user authority prevents cached approvals
+and is surfaced in status. Incomplete evidence goes directly to blocking review without
+paying for an unusable classifier request. An oversized original-user history—or a
+single paste beyond the 128K capture limit—remains incomplete; start a new session with
+concise scope rather than silently discarding earlier restrictions. Child snapshots omit image payloads and explicitly mark
 visual user authority as incomplete rather than claiming to have transmitted it.
 
 When Sentinel is enabled, the bundled direct-subagent and workflow launch paths

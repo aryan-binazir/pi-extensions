@@ -220,7 +220,11 @@ export default function sentinel(pi: ExtensionAPI): void {
     const action = args.trim();
     if (!['', 'status', 'on', 'off', 'reload'].includes(action)) { ctx.ui.notify('Usage: /auto [on|off|status] or /sentinel [reload]', 'warning'); return; }
     if (action === '' || action === 'status') {
-      ctx.ui.notify(JSON.stringify({ enabled, state: enabled ? failure ?? 'active' : 'off', config, incompleteReasons, ...engine?.status() }, null, 2), enabled && failure ? 'error' : 'info'); return;
+      ctx.ui.notify(JSON.stringify({
+        enabled, state: enabled ? failure ?? 'active' : 'off',
+        persistedMode: inheritedPath() ? 'inherited' : restoredMode(ctx).enabled ? 'on' : 'off',
+        config, incompleteReasons, ...engine?.status(),
+      }, null, 2), enabled && failure ? 'error' : 'info'); return;
     }
     if (!ctx.isIdle() || !ctx.hasUI || inheritedPath()) { ctx.ui.notify('Sentinel mode/policy changes require an idle interactive parent session', 'warning'); return; }
     if (action === 'off') {

@@ -58,6 +58,21 @@ test('real truncation prevents caching, ordinary builtin-sized output does not',
   assert.equal(collectEvidence(ctx([message('toolResult', 'x'.repeat(70000))]), '').complete, false);
 });
 
+test('aggregate history bytes trim the oldest execution window without disabling reuse', () => {
+  for (const [count, size] of [[4, 50000], [20, 10000]]) {
+    const entries = Array.from({ length: count }, (_, index) => message('toolResult', `${index}:` + 'x'.repeat(size)));
+    const result = collectEvidence(ctx(entries), '');
+    const parsed = JSON.parse(result.text);
+    assert.equal(result.complete, true);
+    assert.deepEqual(result.incompleteReasons, []);
+    assert.equal(parsed.history_window.trimmed_by_bytes, true);
+    assert.equal(parsed.history_window.older_entries_omitted, true);
+    assert.equal(parsed.evidence.length, count - 1);
+    assert.ok(parsed.evidence[0].content.includes('1:'));
+    assert.ok(parsed.evidence.reduce((size: number, record: { content: string }) => size + record.content.length, 0) <= 196608);
+  }
+});
+
 test('only sanitized answer fields are authority; legacy answers and hidden values stay out', () => {
   const entry = { type: 'custom', customType: 'sentinel:user-answer', data: { version: 2,
     verified_answers: [{ question_index: 0, label: 'No', value: 'HIDDEN APPROVAL', id: 'HIDDEN ID' }],

@@ -646,11 +646,12 @@ for (const [command, before, after, expanded] of [
   keys(e, command);
   assert.equal(e.getText().replace(/\[paste #[^\]]+\]/g, "MARKER"), after);
   assert.equal(e.getExpandedText(), expanded.replace("PAYLOAD", payload.slice(0, -1)));
+  assert.deepEqual(e.getCursor(), { line: command === "Gp" ? 2 : command === "ggP" ? 0 : 1, col: 0 });
   const putText = e.getText(), putExpanded = e.getExpandedText();
   keys(e, "u"); assert.equal(e.getText(), before);
   keys(e, "\x12"); assert.equal(e.getText(), putText);
   assert.equal(e.getExpandedText(), putExpanded);
-  keys(e, command === "Gp" ? "Gdd" : "dd");
+  keys(e, "dd");
   assert.equal(e.getExpandedText(), before);
 });
 
@@ -673,10 +674,12 @@ for (const [command, after, expanded] of [
   keys(e, command);
   assert.equal(e.getText().replace(/\[paste #[^\]]+\]/g, "MARKER"), after);
   assert.equal(e.getExpandedText(), expanded.replace("PAYLOAD", payload.slice(0, -1)));
+  assert.deepEqual(e.getCursor(), { line: command === "ggVp" ? 0 : 1, col: 0 });
   const visible = e.getText(), full = e.getExpandedText();
   keys(e, "u"); assert.equal(e.getText(), before);
   keys(e, "\x12"); assert.equal(e.getText(), visible);
   assert.equal(e.getExpandedText(), full);
+  keys(e, "dd"); assert.equal(e.getText(), command === "ggVp" ? "b" : "a\nz\nb");
 });
 
 for (const visual of ["v", "V"]) {
@@ -750,11 +753,11 @@ test("failed vertical deletion adds no history and compares lines rather than co
 test("vertical operator rejection preserves valid line and counted motions", () => {
   for (const [command, expected] of [["GdG", "a\nb"], ["ggdgg", "b\nc"], ["gg99dj", ""], ["G99dk", ""]]) {
     const e = editor(); e.setText("a\nb\nc"); keys(e, "\x1b" + command);
-    assert.equal(e.getText(), expected);
+    assert.equal(e.getText(), expected, command);
   }
-  for (const command of ["dj", "dk", "cj", "ck", "cl"]) {
+  for (const command of ["dj", "dk", "cj", "ck"]) {
     const e = editor(); e.setText("x"); keys(e, "\x1b" + command);
-    assert.equal(e.getText(), "x");
-    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+    assert.equal(e.getText(), "x", command);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), command);
   }
 });

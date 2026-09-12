@@ -678,7 +678,7 @@ export class ViEditor extends CustomEditor {
           this.checkpoint();
           this.registers.set('"', { text: expandPastes(this, t.slice(a, b)), line: this.mode === "line" });
           this.writeText(t.slice(0, a) + before + collapsePaste(this, value) + after + t.slice(b));
-          this.move(a);
+          this.move(a + before.length);
           this.mode = "normal";
           this.anchor = 0;
           this.visualScroll = 0;
@@ -703,7 +703,7 @@ export class ViEditor extends CustomEditor {
           value = value.replace(/\n$/, "");
         }
         this.writeText(t.slice(0, p) + before + collapsePaste(this, value) + after + t.slice(p));
-        this.move(p);
+        this.move(p + before.length);
       }
       return;
     }

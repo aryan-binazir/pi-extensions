@@ -134,29 +134,30 @@ test("the registered shifted shortcut leaves legacy Ctrl+S untouched and stashes
   }
 });
 
-test("stash preserves literal paste terminators and their suffix", async () => {
-  let handler!: (ctx: ExtensionContext) => unknown;
-  stash({
-    on() {},
-    registerShortcut: (_key: string, s: { handler: typeof handler }) => {
-      handler = s.handler;
-    },
-  } as unknown as ExtensionAPI);
-  const e = editor(CustomEditor);
-  const payload = "draft\x1b[201~suffix";
-  e.setText(payload);
-  assert.equal(e.getExpandedText(), payload);
-  const ctx = {
-    hasUI: true,
-    ui: {
-      getEditorText: () => e.getExpandedText(),
-      setEditorText: (text: string) => e.setText(text),
-      pasteToEditor: (text: string) => e.handleInput(`\x1b[200~${text}\x1b[201~`),
-      setStatus() {},
-    },
-  } as unknown as ExtensionContext;
-  await handler(ctx);
-  assert.equal(e.getExpandedText(), "");
-  await handler(ctx);
-  assert.equal(e.getExpandedText(), payload);
-});
+for (const payload of ["draft\x1b[201~suffix", "draft\x1b[200~\x01\x07suffix"]) {
+  test(`stash preserves literal control bytes in ${JSON.stringify(payload)}`, async () => {
+    let handler!: (ctx: ExtensionContext) => unknown;
+    stash({
+      on() {},
+      registerShortcut: (_key: string, s: { handler: typeof handler }) => {
+        handler = s.handler;
+      },
+    } as unknown as ExtensionAPI);
+    const e = editor(CustomEditor);
+    e.insertTextAtCursor(payload);
+    assert.equal(e.getExpandedText(), payload);
+    const ctx = {
+      hasUI: true,
+      ui: {
+        getEditorText: () => e.getExpandedText(),
+        setEditorText: (text: string) => e.setText(text),
+        pasteToEditor: (text: string) => e.handleInput(`\x1b[200~${text}\x1b[201~`),
+        setStatus() {},
+      },
+    } as unknown as ExtensionContext;
+    await handler(ctx);
+    assert.equal(e.getExpandedText(), "");
+    await handler(ctx);
+    assert.equal(e.getExpandedText(), payload);
+  });
+}

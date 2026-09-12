@@ -13,8 +13,11 @@ const msg = (id: number, op: number, body: Buffer) => Buffer.concat([ints(id, ((
 test('real Unix wire transport discovers output, binds pointer to it, clicks and scrolls', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-wayland-')); const socket = join(dir, 'wayland-test');
   let removeGlobal: number | undefined;
+  let onDisconnect!: () => void;
+  const disconnected = new Promise<void>(resolve => { onDisconnect = resolve; });
   const requests: { id: number; op: number; body: Buffer }[] = [];
   const server = createServer(s => {
+    s.once('close', onDisconnect);
     let buffer = Buffer.alloc(0);
     s.on('data', data => {
       buffer = Buffer.concat([buffer, data]);
@@ -67,9 +70,10 @@ test('real Unix wire transport discovers output, binds pointer to it, clicks and
       await assert.rejects(pointer.click('HEADLESS-1', .25, .5, 'left', new AbortController().signal), /Wayland registry changed/);
       await assert.rejects(pointer.outputs(new AbortController().signal), /Wayland registry changed/);
     });
-    await t.test('closed connections never return cached outputs', async () => {
-      pointer.close();
-      await assert.rejects(pointer.outputs(new AbortController().signal), /Wayland connection closed/);
+    await t.test('disconnected connections retain the original output-removal error', async () => {
+      await disconnected;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await assert.rejects(pointer.outputs(new AbortController().signal), /Wayland registry changed/);
     });
   } finally { pointer.close(); await new Promise<void>(r => server.close(() => r())); await rm(dir, { recursive: true }); }
 });

@@ -99,6 +99,9 @@ test("slider has a padded full border and fits narrow terminals", async (t) => {
 test("new-session handoff applies only on replacement runtime and leaves defaults alone", async (t) => {
   const defaults = { model: "saved-model", level: "high" };
   const old = host(t, defaults);
+  const unrelated = host(t, defaults);
+  unrelated.ctx.sessionManager.getSessionFile = () => "/synthetic/unrelated";
+  unrelated.ctx.modelRegistry.find = () => ({ ...unrelated.ctx.model, id: "test" });
   let fresh: ReturnType<typeof host>;
   old.ctx.newSession = async ({ withSession }: any) => {
     old.hooks.session_shutdown();
@@ -111,6 +114,8 @@ test("new-session handoff applies only on replacement runtime and leaves default
   old.ctx.modelRegistry.find = () => ({ ...old.ctx.model, id: "test" });
   await old.commands.effort.handler("new max test/test", old.ctx);
   assert.deepEqual(old.changes, []);
+  assert.equal(unrelated.ctx.model.id, "saved-model");
+  assert.equal(unrelated.pi.getThinkingLevel(), "high");
   assert.deepEqual(fresh!.changes, ["test", "max"]);
   // Unrelated new/resumed sessions have no pending global handoff.
   fresh!.hooks.session_shutdown();
@@ -201,6 +206,8 @@ test("a slow new-session model handoff reports success after it applies", async 
 test("an unacknowledged replacement session times out without applying effort", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const old = host(t);
+  const unrelated = host(t, { model: "saved-model", level: "high" });
+  unrelated.ctx.sessionManager.getSessionFile = () => "/synthetic/unrelated";
   const notices: string[] = [];
   old.ctx.newSession = async ({ withSession }: any) => {
     old.hooks.session_shutdown();
@@ -212,11 +219,15 @@ test("an unacknowledged replacement session times out without applying effort", 
   };
   const result = old.commands.effort.handler("new max", old.ctx);
   t.mock.timers.tick(5000);
-  await result;
+  await Promise.resolve();
   assert.deepEqual(notices, [
     "Effort extension did not acknowledge the new session",
   ]);
+  await result;
   assert.deepEqual(old.changes, []);
+  assert.deepEqual(unrelated.changes, []);
+  assert.equal(unrelated.ctx.model.id, "saved-model");
+  assert.equal(unrelated.pi.getThinkingLevel(), "high");
   const later = host(t);
   later.ctx.sessionManager.getSessionFile = () => "/synthetic/missing";
   await Promise.resolve();

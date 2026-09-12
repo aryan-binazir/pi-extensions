@@ -24,7 +24,7 @@ export class WaylandPointer {
   private readonly pointers = new Map<string, number>();
   private readonly waiting = new Map<number, { resolve(): void; reject(error: Error): void }>();
   constructor(private readonly path: string) {}
-  private fail(error: Error) { this.error = error; this.socket?.destroy(); for (const waiter of this.waiting.values()) waiter.reject(error); this.waiting.clear(); }
+  private fail(error: Error) { this.error ??= error; this.socket?.destroy(); for (const waiter of this.waiting.values()) waiter.reject(error); this.waiting.clear(); }
   close() { this.fail(new Error('Wayland connection closed')); }
   private send(id: number, opcode: number, body = Buffer.alloc(0)) {
     if (this.error) throw this.error;

@@ -24,7 +24,6 @@
       "./extensions/subagents/index.ts",
       "./extensions/worktree/index.ts",
       "./extensions/mcp-client/index.ts",
-      "./extensions/web-search/index.ts",
       "./extensions/computer-use/index.ts",
       "./extensions/fast-mode/index.ts",
       "./extensions/auto-caffeinate/index.ts",
@@ -58,8 +57,6 @@
   "dependencies": {
     "typescript": "~5.9.3",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "htmlparser2": "^12.0.0",
-    "ipaddr.js": "^2.5.0",
     "zod": "^4.6.2",
     "@earendil-works/pi-ai": "0.85.1"
   }

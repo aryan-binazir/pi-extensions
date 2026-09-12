@@ -157,6 +157,7 @@ export function installEditorHandoff(editor?: Editor): void {
   const prototype = InteractiveMode.prototype as unknown as {
     [handoffInstalled]?: boolean;
     setCustomEditorComponent: (factory: unknown) => void;
+    showExtensionCustom: (factory: unknown, options?: { overlay?: boolean }) => Promise<unknown>;
   };
   if (prototype[handoffInstalled]) return;
   const original = prototype.setCustomEditorComponent;
@@ -186,6 +187,24 @@ export function installEditorHandoff(editor?: Editor): void {
     writePastes(this.editor, payloads);
     placeCursor(this.editor, this.editor.getText().length);
     if (viEditor in this.editor) this.editor.onChange?.(text);
+  };
+  // Inline custom UI also restores getText() via setText(), clearing paste data.
+  const showCustom = prototype.showExtensionCustom;
+  prototype.showExtensionCustom = async function (this: { editor: Editor }, factory, options) {
+    const source = this.editor;
+    if (options?.overlay || !(viEditor in source))
+      return showCustom.call(this, factory, options);
+    const text = source.getText();
+    const payloads = readPastes(source);
+    try {
+      return await showCustom.call(this, factory, options);
+    } finally {
+      // Do not resurrect a draft after a session/editor replacement.
+      if (this.editor === source && source.getText() === text) {
+        writePastes(source, payloads);
+        source.onChange?.(text);
+      }
+    }
   };
   Object.defineProperty(prototype, handoffInstalled, { value: true });
 }

@@ -25,7 +25,16 @@ function host() {
   app.statusContainer = new Container();
   app.disposeActiveSelector = () => {};
   let overlay: any;
-  app.ui = {terminal: {rows: 30, columns: 100, write() {}}, requestRender() {}, setFocus() {}, showOverlay(c: any) {overlay = c; return {};}, hideOverlay() {overlay = undefined;}};
+  let showHardwareCursor = false;
+  app.ui = {
+    terminal: {rows: 30, columns: 100, write() {}},
+    requestRender() {},
+    getShowHardwareCursor: () => showHardwareCursor,
+    setShowHardwareCursor: (show: boolean) => { showHardwareCursor = show; },
+    setFocus() {},
+    showOverlay(c: any) {overlay = c; return {};},
+    hideOverlay() {overlay = undefined;},
+  };
   const hooks = new Map<string, any[]>(), shortcuts = new Map(), commands = new Map(), tools = new Map();
   const api: any = {events: createEventBus(), on(name: string, fn: any) {hooks.set(name, [...hooks.get(name) ?? [], fn]);}, registerShortcut(n: string, s: any) {shortcuts.set(n, s);}, registerCommand(n: string, c: any) {commands.set(n, c);}, registerTool(t: any) {tools.set(t.name, t);}, getThinkingLevel() {return 'off';}};
   const ctx: any = {mode: 'tui', hasUI: true, model: {id: 'synthetic', provider: 'openai', reasoning: false}, ui: {getEditorText: () => app.editor.getExpandedText(), setEditorText: (s: string) => app.editor.setText(s), setEditorComponent: (f: any) => app.setCustomEditorComponent(f), setStatus() {}, notify() {}, custom: (f: any, options: any) => app.showExtensionCustom(f, options)}};
@@ -51,6 +60,28 @@ for (const dialog of ['questionnaire', 'effort']) check(`real ${dialog} callback
   await new Promise(r => setTimeout(r, 0)); h.closeDialog(); await pending;
   assert.equal(h.app.editor.getExpandedText(), payload); assert.equal(h.app.editor.getText(), visible);
   h.emit('session_shutdown');
+});
+check('inline custom UI factory failure preserves pasted draft', async () => {
+  const h = host(); paste(h.app.editor); const visible = h.app.editor.getText();
+  try {
+    await assert.rejects(h.app.showExtensionCustom(() => { throw new Error('synthetic failure'); }), /synthetic failure/);
+    assert.equal(h.app.editor.getText(), visible);
+    assert.equal(h.app.editor.getExpandedText(), payload);
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
+check('inline custom UI synchronous completion preserves pasted draft', async () => {
+  const h = host(); paste(h.app.editor);
+  try {
+    await h.app.showExtensionCustom((_tui: any, _theme: any, _keys: any, done: any) => {
+      done(undefined);
+      return new Container();
+    });
+    assert.equal(h.app.editor.getExpandedText(), payload);
+  } finally {
+    h.emit('session_shutdown');
+  }
 });
 check('real extension event wiring preserves typed and mixed drafts through stash', async () => {
   const h = host();

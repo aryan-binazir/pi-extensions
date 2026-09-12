@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import btw from "./index.ts";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+
+initTheme("dark");
 
 function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
   const commands: Record<string, any> = {};
@@ -35,7 +38,13 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
         return new Promise((resolve) => {
           component = factory(
             { requestRender() {}, terminal },
-            { fg: (_: string, value: string) => value },
+            {
+              fg: (_: string, value: string) => value,
+              bg: (color: string, value: string) => {
+                assert.equal(color, "userMessageBg");
+                return `\x1b[48;5;236m${value}\x1b[49m`;
+              },
+            },
             {},
             resolve,
           );
@@ -68,6 +77,8 @@ test("BTW fills its overlay from opening through the first answer and resize", a
   const result = h.commands.btw.handler("", h.ctx);
   assert.equal(h.lines().length, 36);
   assert.match(h.lines()[0], /^┌─+┐$/);
+  assert.match(h.render(), /Side conversation · disposable/);
+  assert.doesNotMatch(h.render(), /\bBTW\b/);
   assert.match(h.lines().at(-1)!, /^└─+┘$/);
   assert.ok(h.lines().every((line) => visibleWidth(line) === 80));
   h.key("First question");h.key("\r");
@@ -126,12 +137,13 @@ test("BTW shows the full side transcript and queues followups without losing a d
     },
   });
   const result = h.commands.btw.handler("First question", h.ctx);
-  assert.match(h.render(), /You: First question/);
+  assert.match(h.render(), /First question/);
   await tick();
   h.key("Second question");
   assert.match(h.render(), /Second question/);
   h.key("\r");
-  assert.match(h.render(), /You \(queued\): Second question/);
+  assert.match(h.render(), /\(queued\)/);
+  assert.ok(h.lines().find((line) => line.includes("Second question"))?.includes("\x1b[48;5;236m"));
   assert.equal(requests.length, 1);
   h.key("Unsent draft");
   finish();await tick();await tick();
@@ -139,9 +151,47 @@ test("BTW shows the full side transcript and queues followups without losing a d
   assert.match(JSON.stringify(requests[1].messages), /First question/);
   assert.match(JSON.stringify(requests[1].messages), /First answer/);
   const transcript = h.render();
-  for (const text of ["You: First question", "BTW: First answer", "You: Second question", "BTW: Second answer", "Unsent draft"])
+  for (const text of ["First question", "First answer", "Second question", "Second answer", "Unsent draft"])
     assert.ok(transcript.includes(text), text);
   assert.doesNotMatch(transcript, /queued/);
+  h.key("\u001b");await result;
+});
+
+test("side chat uses normal user backgrounds and Agent labels while streaming and completed", async () => {
+  const h = host();
+  let finish!: () => void;
+  const waiting = new Promise<void>((resolve) => { finish = resolve; });
+  h.ctx.modelRegistry.getProvider = () => ({
+    streamSimple: () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "text_delta", delta: "**Assistant reply**" };
+        await waiting;
+      },
+    }),
+  });
+  const result = h.commands.side.handler("User question\nSecond line", h.ctx);
+  const check = () => {
+    for (const width of [80, 24]) {
+      const lines = h.lines(width);
+      assert.ok(lines.every((line) => visibleWidth(line) === width));
+      for (const text of ["User question", "Second line"]) {
+        const line = lines.find((line) => line.includes(text));
+        assert.ok(line?.includes("\x1b[48;5;236m"), text);
+        assert.match(line!, /\x1b\[49m│$/);
+      }
+      const reply = lines.find((line) => stripTerminalSequences(line).includes("Assistant reply"));
+      assert.ok(reply);
+      assert.ok(!reply.includes("\x1b[48;5;236m"));
+      const label = lines.find((line) => stripTerminalSequences(line).includes("Agent:"));
+      assert.ok(label, "assistant reply is labeled Agent:");
+      assert.ok(!label.includes("\x1b[48;5;236m"));
+      assert.doesNotMatch(stripTerminalSequences(lines.join("\n")), /You:|\bBTW\b|Assistant:|\*\*/);
+    }
+  };
+  await tick();
+  check();
+  finish();await tick();
+  check();
   h.key("\u001b");await result;
 });
 

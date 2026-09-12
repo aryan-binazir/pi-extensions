@@ -47,7 +47,7 @@ export class PowerKeeper {
  private cachedPower:Power='unknown';private checkedAt=-Infinity;private retryAt=0;
  private timer?:ReturnType<typeof setInterval>;private queue:Promise<void>=Promise.resolve();
  private awake=false;
- private publish(){const awake=!!this.inhibitor?.alive();if(awake!==this.awake){this.awake=awake;try{this.options.onChange(awake);}catch{/* A stale status consumer must not interrupt power checks or cleanup. */}}}
+ private publish(){const awake=!!this.inhibitor?.alive();if(awake!==this.awake){this.awake=awake;try{this.options.onChange(awake);}catch{/* A synchronous status callback failure must not interrupt power checks or cleanup. */}}}
  private readonly options:Required<KeeperOptions>;
  constructor(options:KeeperOptions={}){this.options={power:readPower,start:startInhibitor,now:Date.now,lingerMs:5000,checkMs:2000,powerCacheMs:1000,onChange:()=>{},...options};}
  private active(){return this.agent||this.tasks.size>0;}

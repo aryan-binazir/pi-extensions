@@ -26,6 +26,8 @@ for (const transport of ['stdio','http','sse'] as const) {
       const result=await connection.call('echo',{text:'hello'},undefined,p=>progress.push(p.progress));
       assert.equal((result.content as {text:string}[])[0].text,'hello');
       assert.deepEqual(progress,[1]);
+      assert.equal(connection.status.state,'ready');
+      assert.deepEqual((await connection.resourceTemplates()).map(t=>t.name),['item','second']);
       assert.equal((await connection.resources())[0].uri,'fixture://hello');
       assert.equal(((await connection.read('fixture://hello')).contents[0] as {text:string}).text,'resource text');
       assert.equal((await connection.prompts())[0].name,'greeting');
@@ -49,9 +51,9 @@ test('call deadlines cancel server work, filters reject hidden tools, and stdio 
   try{
     await c.connect();
     await assert.rejects(c.call('hidden',{}),/excluded/);
-    config.timeoutMs=30;
+    c.config.toolTimeoutMs=30;
     await assert.rejects(c.call('echo',{text:'timeout',delay:1000}),/timed out/);
-    config.timeoutMs=1000;
+    c.config.toolTimeoutMs=1000;
     assert.equal(((await c.call('echo',{text:'cancellation-count'})).content as {text:string}[])[0].text,'1');
     const pid=Number(((await c.call('echo',{text:'process-id'})).content as {text:string}[])[0].text);
     assert.ok(pid>0);await c.close();assert.throws(()=>process.kill(pid,0),(error:any)=>error.code==='ESRCH');

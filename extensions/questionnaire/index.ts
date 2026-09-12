@@ -224,7 +224,13 @@ export default function questionnaire(pi: ExtensionAPI) {
               },
               render(width: number) {
                 const w = Math.max(1, width - 2);
-                const height = Math.max(1, Math.min(18, (tui.terminal?.rows ?? 24) - 4));
+                const rows = tui.terminal?.rows ?? 24;
+                // Leave room for Pi's dock/footer and avoid dominating fullscreen widgets.
+                const height = Math.max(3, Math.min(18, rows - 5));
+                const showHeader = height >= 4;
+                // Add decoration one row at a time so resizing never shrinks the body budget.
+                const decorationRows = Math.min(4, Math.max(0, height - 9));
+                const budget = height - 1 - (showHeader ? 1 : 0) - decorationRows;
                 const clean = (text: string) => stripTerminalSequences(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
                 const q = params.questions[tab];
                 const tabs = params.questions.map((item, i) => {
@@ -232,11 +238,24 @@ export default function questionnaire(pi: ExtensionAPI) {
                   return theme.fg(tab === i ? "accent" : "muted", tab === i ? `[ ${label} ]` : label);
                 });
                 tabs.push(theme.fg(q ? "muted" : "accent", q ? "Submit" : "[ Submit ]"));
-                const header = params.questions.length > 1
+                let header = params.questions.length > 1
                   ? tabs.join("   ")
                   : theme.fg("accent", "Question");
-                const prompt = q ? clean(q.prompt) : "Review your answers";
-                const promptRows = wrapTextWithAnsi(prompt, w).slice(0, 3);
+                if (params.questions.length > 1 && truncateToWidth(header, w) !== header) {
+                  const position = `${tab + 1}/${params.questions.length + 1}`;
+                  const suffix = q ? " · Submit" : "";
+                  const label = q ? `${answers.has(q.id) ? "✓ " : ""}${clean(q.label || q.id)}` : "Submit";
+                  const labelWidth = w - position.length - suffix.length - 5;
+                  const activeLabel = truncateToWidth(label, Math.max(1, labelWidth), "…");
+                  header = labelWidth < 2
+                    ? theme.fg("accent", `${position} Submit`)
+                    : `${position} ${theme.fg("accent", `[ ${activeLabel} ]`)}${suffix}`;
+                }
+                const promptPrefix = !showHeader && params.questions.length > 1
+                  ? (q ? `${tab + 1}/${params.questions.length + 1} ${w >= 28 ? "Submit" : "S"} | ` : "[ Submit ] ") : "";
+                const prompt = promptPrefix + (q ? clean(q.prompt) : "Review your answers");
+                const editorRows = editing ? editor.render(Math.max(10, w)) : [];
+                const wrappedPrompt = wrapTextWithAnsi(prompt, w);
                 const content: string[] = [];
                 let focusRow = 0;
                 if (q && !editing) {
@@ -260,26 +279,39 @@ export default function questionnaire(pi: ExtensionAPI) {
                     ? "Enter to submit all answers" : "Answer every question before submitting"));
                   focusRow = content.length - 1;
                 }
+                const promptLimit = Math.max(1, budget - Math.min(editing ? editorRows.length : Math.min(content.length, Math.ceil(budget / 2)), budget - 1));
+                const promptRows = wrappedPrompt.slice(0, promptLimit);
+                if (wrappedPrompt.length > promptRows.length) {
+                  const indicator = w - promptPrefix.length >= 32 ? " … [prompt truncated]" : "…";
+                  const last = promptRows.length - 1;
+                  promptRows[last] = `${truncateToWidth(promptRows[last], Math.max(0, w - indicator.length), "")}${indicator}`;
+                }
                 // Keep the question and controls stationary while long options scroll.
-                const available = Math.max(1, height - promptRows.length - 6);
+                const available = Math.max(1, budget - promptRows.length);
                 const start = Math.max(0, Math.min(focusRow, content.length - available));
-                const body = editing
-                  ? editor.render(Math.max(10, w)).slice(-available)
-                  : content.slice(start, start + available);
+                let body = content.slice(start, start + available);
+                if (editing) {
+                  const editorBody = editorRows.length > available ? editorRows.slice(1, -1) : editorRows;
+                  // Pi renders the active cursor in reverse video. Keep its row
+                  // visible even when the editor itself exceeds our body budget.
+                  const cursorRow = Math.max(0, editorBody.findIndex((line) => line.includes("\x1b[7m")));
+                  const editorStart = Math.max(0, Math.min(cursorRow, editorBody.length - available));
+                  body = editorBody.slice(editorStart, editorStart + available);
+                }
                 const hint = editing
-                  ? "Enter save · Esc back · Ctrl+C cancel"
-                  : `↑↓ choose · Enter select${params.questions.length > 1 ? " · Tab next" : ""} · Esc cancel`;
+                  ? "Ctrl+C cancel · Esc back · Enter save"
+                  : `Esc cancel · ↑↓ choose · Enter select${params.questions.length > 1 ? " · Tab next" : ""}`;
                 const rule = theme.fg("borderMuted", "─".repeat(Math.max(0, width)));
                 return [
-                  rule,
-                  ` ${header}`,
-                  "",
+                  ...(decorationRows >= 1 ? [rule] : []),
+                  ...(showHeader ? [` ${header}`] : []),
+                  ...(decorationRows >= 3 ? [""] : []),
                   ...promptRows.map((line) => ` ${line}`),
-                  "",
+                  ...(decorationRows >= 4 ? [""] : []),
                   ...body.map((line) => ` ${line}`),
                   ` ${theme.fg("dim", hint)}`,
-                  rule,
-                ].slice(0, height).map((line) => truncateToWidth(line, width));
+                  ...(decorationRows >= 2 ? [rule] : []),
+                ].map((line) => truncateToWidth(line, width));
               },
             };
           },

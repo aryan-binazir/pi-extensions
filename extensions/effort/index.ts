@@ -1,5 +1,6 @@
 import type { EventEmitter } from "node:events";
 import {
+  clampThinkingLevel,
   getSupportedThinkingLevels,
   type ModelThinkingLevel,
 } from "@earendil-works/pi-ai";
@@ -20,6 +21,7 @@ interface Handoff {
   model: string;
   level: ModelThinkingLevel;
   sessionFile: string | undefined;
+  acknowledge: () => void;
   complete: (error?: string) => void;
 }
 
@@ -36,6 +38,7 @@ export default function effort(pi: ExtensionAPI) {
       current.sessionManager.getSessionFile() !== request.sessionFile
     )
       return;
+    request.acknowledge();
     const ctx = current;
     void (async () => {
       const model = ctx.modelRegistry.find(request.provider, request.model);
@@ -113,7 +116,9 @@ export default function effort(pi: ExtensionAPI) {
         try {
           level = await ctx.ui.custom<ModelThinkingLevel | undefined>(
             (tui, _theme, _keys, done) => {
-              let selected = Math.max(0, levels.indexOf(pi.getThinkingLevel()));
+              let selected = levels.indexOf(
+                clampThinkingLevel(model, pi.getThinkingLevel()),
+              );
               closeSlider = () => done(undefined);
               return {
                 invalidate() {},
@@ -203,6 +208,8 @@ export default function effort(pi: ExtensionAPI) {
               model: modelId,
               level: selectedLevel,
               sessionFile: replacement.sessionManager.getSessionFile(),
+              // The deadline covers receipt, not the asynchronous model change.
+              acknowledge: () => clearTimeout(timer),
               complete: (message?: string) => {
                 clearTimeout(timer);
                 resolve(message);

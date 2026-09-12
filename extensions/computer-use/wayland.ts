@@ -55,7 +55,11 @@ export class WaylandPointer {
           if (this.globals.length > 1000) throw new Error('Wayland registry limit');
         } else if (object === 2 && opcode === 1) {
           // Hotplug invalidates the coordinate map. Never silently choose another output.
-          this.fail(new Error('Wayland registry changed; inspect the desktop again'));
+          const name = body.readUInt32LE(0), index = this.globals.findIndex(global => global.name === name);
+          const removed = index < 0 ? undefined : this.globals.splice(index, 1)[0];
+          if (removed?.iface === 'wl_output') {
+            this.fail(new Error('Wayland registry changed; inspect the desktop again'));
+          }
         } else if (this.outputIds.has(object) && opcode === 4) this.outputIds.set(object, readString(body, 0).value);
       }
     } catch (error) { this.fail(error instanceof Error ? error : new Error('Invalid Wayland event')); }
@@ -87,7 +91,12 @@ export class WaylandPointer {
     try { this.ready ??= this.initialize(); await this.ready; signal.throwIfAborted(); return await operation(); }
     finally { signal.removeEventListener('abort', abort); }
   }
-  outputs(signal: AbortSignal) { return this.withSignal(signal, async () => [...this.outputIds.values()].filter(Boolean)); }
+  outputs(signal: AbortSignal) {
+    return this.withSignal(signal, async () => {
+      if (this.error) throw this.error;
+      return [...this.outputIds.values()].filter(Boolean);
+    });
+  }
   private async pointer(output: string) {
     const existing = this.pointers.get(output); if (existing) return existing;
     if (!this.manager || this.managerVersion < 2) throw new Error('Compositor lacks virtual-pointer v2; pointer control unavailable');

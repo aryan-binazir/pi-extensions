@@ -7,6 +7,14 @@ pi install git:git@github.com:aryan-binazir/pi-extensions@main
 pi config
 ```
 
+Before enabling Harbor, disable or uninstall any other MCP client extension to
+avoid overlapping tools and commands. If you followed the previous setup guide,
+remove its separately installed adapter first:
+
+```sh
+pi remove npm:pi-mcp-adapter
+```
+
 Enable `extensions/mcp-client/index.ts`, then restart Pi or run `/reload`. For a
 development checkout use `pi install /absolute/path/to/pi-extensions` instead;
 do not install both copies. If you previously excluded this extension in package

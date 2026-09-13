@@ -28,32 +28,18 @@ test("reference acceptance: large pasted payload stays collapsed and survives at
 });
 
 test("collapsed payload survives the actual stash shortcut and editor replacement", async () => {
-  const { default: stash } = await import("../extensions/prompt-stash/index.ts");
-  type API = import("@earendil-works/pi-coding-agent").ExtensionAPI;
-  type Context = import("@earendil-works/pi-coding-agent").ExtensionContext;
-  let handler!: (ctx: Context) => unknown;
-  stash({
-    on() {},
-    registerShortcut(key: string, options: { handler: typeof handler }) {
-      assert.equal(key, "ctrl+s");
-      handler = options.handler;
-    },
-  } as unknown as API);
-  let e = editor();
-  const ctx = {
-    hasUI: true,
-    ui: {
-      getEditorText: () => e.getExpandedText(),
-      setEditorText: (text: string) => e.setText(text),
-      setStatus() {},
-    },
-  } as unknown as Context;
+  const { stashHost } = await import("../extensions/prompt-stash/test-support.ts");
+  const { ViEditor } = await import("../extensions/vi-mode/editor.ts");
+  const h = stashHost(ViEditor);
+  let e = h.e;
   const payload = "\tSynthetic\r\n😀\n".repeat(100);
   e.handleInput(`\x1b[200~${payload}\x1b[201~`);
-  await handler(ctx);
+  e.handleInput("\x13");
   assert.equal(e.getExpandedText(), "");
-  e = editor();
-  await handler(ctx);
+  // Reinstantiate the installed composing factory, as Pi does on replacement.
+  h.ctx.ui.setEditorComponent(h.ctx.ui.getEditorComponent());
+  e = h.e;
+  e.handleInput("\x13");
   assert.equal(e.getExpandedText(), payload);
   assert.match(e.getText(), /^\[paste #/);
   e.handleInput("\x1b");
@@ -62,4 +48,5 @@ test("collapsed payload survives the actual stash shortcut and editor replacemen
   assert.equal(e.getExpandedText(), "");
   e.handleInput("u");
   assert.equal(e.getExpandedText(), payload);
+  h.emit("session_shutdown");
 });

@@ -32,7 +32,7 @@ test('Pi package discovers exactly fourteen entrypoints and independently loads 
         effort: {tools: [], commands: ['effort'], shortcuts: []},
         btw: {tools: [], commands: ['btw', 'side'], shortcuts: []},
         'vi-mode': {tools: [], commands: [], shortcuts: []},
-        'prompt-stash': {tools: [], commands: [], shortcuts: ['ctrl+s']},
+        'prompt-stash': {tools: [], commands: [], shortcuts: []},
         subagents: {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []},
         worktree: {tools: ['bash'], commands: ['worktree'], shortcuts: []},
         'mcp-client': {tools: ['mcp'], commands: ['mcp', 'mcp-auth', 'mcp-connect', 'mcp-forget'], shortcuts: []},

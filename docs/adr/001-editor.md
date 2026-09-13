@@ -10,10 +10,24 @@ Public APIs provide text reads, expanded paste reads, input, insertion and edito
 
 Bracketed paste is buffered across input chunks and applied as a single undoable operation. Vi commands never interpret its contents. Character motions use grapheme boundaries, with each valid paste marker treated as one atomic unit. Pastes and public draft replacements exceeding 10 lines or 1000 characters use stock Pi marker formatting and its rendering registry. The adapter preserves safe raw whitespace instead of applying stock paste normalization. Undo snapshots retain the visible draft, cursor and copied payload registry; register yanks save expanded payloads and puts allocate fresh markers. Internal writes retain the registry, while public replacement clears it and creates a new collapsed draft. Insert-mode backspace removes a whole marker without stock registry renumbering. Expansion makes one replacement pass so marker-shaped text inside payloads stays literal. Visual mode renders highlighted character or logical-line selections. For rendering only, tabs project to four spaces, CR and other C0 controls to visible control symbols, and C1 controls to escaped hex text. Offset mapping puts the cursor and selection on the projected text. The adapter restores raw state in `finally`, including when rendering throws. This preserves safe payload bytes without sending pasted terminal control sequences or relying on terminal tab widths. Terminal cursor shape uses DECSCUSR, with a mode label as the fallback for terminals that ignore it. Linux PTY checks exercise the installed TUI, while cursor appearance in a real terminal emulator and macOS desktop behavior remain manual checks.
 
-Prompt stash registers its own shortcut and footer status without replacing the editor. Pi 0.85.1's `getEditorText()` calls `getExpandedText()` internally, so a collapsed paste is saved as its actual payload. The slot is in memory only and clears on session start/shutdown, including reload, resume and fork. A nonempty draft swaps with the saved slot; an empty draft restores and empties the slot. No shared events or persistent settings are needed.
+Prompt stash handles Ctrl+S in the main editor's input method, not through
+`registerShortcut` or a global terminal hook. Pi's model/thinking save and
+session-selector Ctrl+S bindings therefore remain untouched and produce no
+registration warning. Both legacy and Kitty Ctrl+S work; distinct Kitty
+Ctrl+Shift+S passes through. No keybindings configuration is required.
 
-
-Ctrl+Shift+S requires a terminal that reports the shifted control chord, such as Kitty keyboard protocol. A legacy terminal sends Ctrl+S for both physical chords, which this extension deliberately does not claim. Tests verify the registered shortcut against Pi's decoder with the protocol both enabled and disabled; legacy Ctrl+S never stashes. The stash stores the editor's expanded text; restoring it through ViEditor.setText collapses a large draft again. Stock Pi has already normalized tabs and line endings during paste before stash reads them; vi mode preserves the original bytes, and its stash round-trip does too.
+The wrapper captures the existing factory with `getEditorComponent` and installs
+through `setEditorComponent` during `resources_discover`, after all extensions'
+`session_start` handlers. This composes with vi in either load order. It decorates
+the actual editor so identity, focus, callbacks and paste integration remain
+intact. Vi disposes its previous instance whenever its factory is reinvoked.
+Repeated discovery does not stack wrappers. Shutdown disables old input handlers
+and restores the previous factory only if stash still owns it. Other extensions
+that replace the editor later must compose with the current factory themselves.
+Expanded stock paste text is recovered if Pi's factory transfer loses its marker
+registry; vi's existing handoff retains the richer visible draft and registry.
+The slot is memory-only and clears on session start/shutdown, including reload,
+resume and fork. Nonempty drafts swap; empty drafts restore and empty the slot.
 
 
 Review corrections sanitize text at draft ingestion, including bracketed paste, programmatic insertion and replacement. C0 controls other than tab/newline/carriage return, DEL and C1 controls are removed before any editor getter can expose them to streaming follow-ups, compaction queues, external editors or the transcript. Ordinary tabs, carriage returns and newlines remain byte-preserved in the draft and stash; normal submission additionally removes carriage returns. Unsafe terminal control bytes are never retained in the stash. Replacing a draft cancels visual selection and resets its anchor and viewport, preserving insert or normal mode.

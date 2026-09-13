@@ -11,12 +11,15 @@ import viMode from '../extensions/vi-mode/index.ts';
 import stash from '../extensions/prompt-stash/index.ts';
 import questionnaire from '../extensions/questionnaire/index.ts';
 import effort from '../extensions/effort/index.ts';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import { ThinkingSelectorComponent } from '../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/thinking-selector.js';
 initTheme('dark', false);
 const keys = (e: any, value: string) => { for (const key of value) e.handleInput(key); };
 const payload = 'SYNTHETIC_PAYLOAD 😀\t\r\n'.repeat(100);
 const paste = (e: any) => e.handleInput('\x1b[200~' + payload + '\x1b[201~');
 const check = test;
-function host() {
+function host(stashFirst = false) {
   const app: any = Object.create(InteractiveMode.prototype);
   app.defaultEditor = editor(CustomEditor);
   app.editor = app.defaultEditor;
@@ -37,9 +40,10 @@ function host() {
   };
   const hooks = new Map<string, any[]>(), shortcuts = new Map(), commands = new Map(), tools = new Map();
   const api: any = {events: createEventBus(), on(name: string, fn: any) {hooks.set(name, [...hooks.get(name) ?? [], fn]);}, registerShortcut(n: string, s: any) {shortcuts.set(n, s);}, registerCommand(n: string, c: any) {commands.set(n, c);}, registerTool(t: any) {tools.set(t.name, t);}, getThinkingLevel() {return 'off';}};
-  const ctx: any = {mode: 'tui', hasUI: true, model: {id: 'synthetic', provider: 'openai', reasoning: false}, ui: {getEditorText: () => app.editor.getExpandedText(), setEditorText: (s: string) => app.editor.setText(s), setEditorComponent: (f: any) => app.setCustomEditorComponent(f), setStatus() {}, notify() {}, custom: (f: any, options: any) => app.showExtensionCustom(f, options)}};
+  const ctx: any = {mode: 'tui', hasUI: true, model: {id: 'synthetic', provider: 'openai', reasoning: false}, ui: {getEditorText: () => app.editor.getExpandedText(), setEditorText: (s: string) => app.editor.setText(s), getEditorComponent: () => app.editorComponentFactory, setEditorComponent: (f: any) => app.setCustomEditorComponent(f), setStatus() {}, notify() {}, custom: (f: any, options: any) => app.showExtensionCustom(f, options)}};
   const emit = (n: string) => {for (const fn of hooks.get(n) ?? []) fn({}, ctx);};
-  viMode(api); stash(api); emit('session_start');
+  if (stashFirst) { stash(api); viMode(api); } else { viMode(api); stash(api); }
+  emit('session_start'); emit('resources_discover');
   return {app, api, ctx, emit, shortcuts, commands, tools, closeDialog() {const c = overlay ?? app.editorContainer.children[0]; assert.ok(c?.handleInput, 'real dialog component mounted'); c.handleInput('\x1b');}};
 }
 check('real InteractiveMode editor swap preserves visible marker and raw payload', () => {
@@ -88,7 +92,7 @@ check('real extension event wiring preserves typed and mixed drafts through stas
   const typed = 'editable prose '.repeat(90);
   for (const ch of typed) h.app.editor.handleInput(ch);
   assert.equal(h.app.editor.getText(), typed);
-  const toggle = () => h.shortcuts.get('ctrl+s').handler(h.ctx);
+  const toggle = () => h.app.editor.handleInput('\x13');
   await toggle(); await toggle(); assert.equal(h.app.editor.getText(), typed);
   paste(h.app.editor); keys(h.app.editor, ' suffix');
   const visible = h.app.editor.getText(), expanded = h.app.editor.getExpandedText();
@@ -108,8 +112,48 @@ check('stash restoration notifies Pi of the restored draft', async () => {
   const h = host(); let changed = '';
   h.app.editor.onChange = (text: string) => { changed = text; };
   keys(h.app.editor, '!echo synthetic');
-  const toggle = () => h.shortcuts.get('ctrl+s').handler(h.ctx);
+  const toggle = () => h.app.editor.handleInput('\x13');
   await toggle(); assert.equal(changed, '');
   await toggle(); assert.equal(changed, '!echo synthetic');
+  h.emit('session_shutdown');
+});
+
+for (const stashFirst of [false, true]) check(`stash composes with vi in load order ${stashFirst ? 'stash first' : 'vi first'}`, () => {
+  const h = host(stashFirst);
+  assert.equal(h.shortcuts.size, 0);
+  paste(h.app.editor);
+  const visible = h.app.editor.getText();
+  h.app.editor.handleInput('\x1b'); // normal mode
+  h.app.editor.handleInput('\x13'); assert.equal(h.app.editor.getText(), '');
+  h.app.editor.handleInput('\x13'); assert.equal(h.app.editor.getText(), visible);
+  assert.equal(h.app.editor.getExpandedText(), payload);
+  h.app.editor.handleInput('0'); h.app.editor.handleInput('x');
+  assert.equal(h.app.editor.getText(), '');
+  h.app.editor.handleInput('u'); assert.equal(h.app.editor.getExpandedText(), payload);
+  h.emit('session_shutdown'); h.emit('session_start'); h.emit('resources_discover');
+  h.app.editor.setText('new draft'); h.app.editor.handleInput('\x13');
+  assert.equal(h.app.editor.getText(), '');
+  h.emit('session_shutdown');
+});
+
+check('focused Pi thinking selector keeps Ctrl+S save; main editor alone stashes', async () => {
+  const h = host();
+  // Use Pi's own TUI module even when npm keeps a nested copy.
+  const requirePi = createRequire(import.meta.resolve('@earendil-works/pi-coding-agent'));
+  const { getKeybindings, setKeybindings } = await import(pathToFileURL(requirePi.resolve('@earendil-works/pi-tui')).href);
+  const previousKeys = getKeybindings();
+  setKeybindings(new KeybindingsManager());
+  h.app.editor.setText('draft behind selector');
+  let saved = '';
+  const pending = h.app.showExtensionCustom((_tui: any, _theme: any, _kb: any, done: any) =>
+    new ThinkingSelectorComponent('medium', ['low', 'medium', 'high'], done, () => done(undefined), level => { saved = level; done(level); }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  h.app.editorContainer.children[0].handleInput('\x13');
+  await pending;
+  setKeybindings(previousKeys);
+  assert.equal(saved, 'medium');
+  assert.equal(h.app.editor.getText(), 'draft behind selector');
+  h.app.editor.handleInput('\x13'); assert.equal(h.app.editor.getText(), '');
+  h.app.editor.handleInput('\x13'); assert.equal(h.app.editor.getText(), 'draft behind selector');
   h.emit('session_shutdown');
 });

@@ -22,10 +22,12 @@ export default function viMode(pi: ExtensionAPI): void {
     if (ctx.hasUI) {
       unsubscribe?.();
       unsubscribe = pi.events?.on("pi-interactive:stash-capture", capture);
-      active?.dispose();
       ctx.ui.setEditorComponent(
-        (tui, theme, keybindings) =>
-          (active = new ViEditor(tui, theme, keybindings)),
+        (tui, theme, keybindings) => {
+          // A composing extension can invoke this factory again after startup.
+          active?.dispose();
+          return (active = new ViEditor(tui, theme, keybindings));
+        },
       );
     }
   });

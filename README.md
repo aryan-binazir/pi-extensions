@@ -9,18 +9,9 @@ pi install git:git@github.com:aryan-binazir/pi-extensions@main
 
 Installation uses Pi's package manager and does not require a build. Run `/reload` in an existing
 Pi session, then use `pi config` to select extensions. The manifest lists only each feature's `index.ts`; helper and test
-files are never entrypoints. Prompt stash uses `Ctrl+S`. Move Pi's save actions to
-`Ctrl+Shift+S` in `~/.pi/agent/keybindings.json`, then run `/reload`:
-
-```json
-{
-  "app.models.save": "ctrl+shift+s",
-  "app.thinking.save": "ctrl+shift+s"
-}
-```
-
-The extension does not change core bindings or write this configuration itself.
-`Ctrl+Shift+S` requires an enhanced keyboard protocol such as Kitty; legacy terminals cannot distinguish it from `Ctrl+S`.
+files are never entrypoints. Prompt stash uses `Ctrl+S` only while the main prompt
+editor has focus. Pi's model/thinking save and session-selector bindings remain
+unchanged, with no shortcut conflict warning or keybindings configuration needed.
 
 A single extension can also be loaded with
 `pi -e ./extensions/todo/index.ts` from a checkout after `npm ci`.

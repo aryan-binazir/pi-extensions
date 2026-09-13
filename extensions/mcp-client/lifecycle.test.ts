@@ -7,8 +7,9 @@ import { join } from 'node:path';
 import mcp from './index.ts';
 import { McpConnection, toolName, type ServerConfig } from './client.ts';
 import { startFixture } from './fixture.ts';
+import type { createOAuthStore } from './credential-store.ts';
 
-async function harness(servers: Record<string, ServerConfig>, project = false) {
+async function harness(servers: Record<string, ServerConfig>, project = false, oauthStore: typeof createOAuthStore = () => undefined) {
   const cwd = await mkdtemp(join(tmpdir(), 'pi-mcp-lifecycle-'));
   const path = join(cwd, project ? '.pi/mcp.json' : 'mcp.json');
   if (project) await mkdir(join(cwd, '.pi'));
@@ -23,7 +24,7 @@ async function harness(servers: Record<string, ServerConfig>, project = false) {
     registerCommand: (name: string, cmd: any) => commands.set(name, cmd),
     registerFlag: () => {}, getFlag: () => project ? undefined : path,
     getActiveTools: () => [...active], setActiveTools: (names: string[]) => { active = names; },
-  } as any);
+  } as any, { agentDir: join(cwd, 'agent'), oauthStore });
   return {
     ctx, tools, commands, notifications, active: () => active,
     start: () => handlers.get('session_start')({}, ctx),
@@ -34,6 +35,58 @@ async function harness(servers: Record<string, ServerConfig>, project = false) {
 }
 
 const schema = { type: 'object' as const, properties: { text: { type: 'string' } } };
+
+test('connection consent survives restart, not config changes; calls still prompt and forgetting revokes it', async () => {
+  const mocked = test.mock.method(McpConnection.prototype, 'connect', async () => [{ name: 'echo', inputSchema: schema }]);
+  const calls = test.mock.method(McpConnection.prototype, 'call', async () => ({ content: [] }));
+  const h = await harness({ remembered: { url: 'http://127.0.0.1:1' } });
+  let prompts = 0;
+  h.ctx.ui.confirm = async (_title, message) => { prompts++; assert.match(message, /Remember this connection approval|Call/); return true; };
+  try {
+    await h.start(); assert.equal(prompts, 1);
+    await h.start(); assert.equal(prompts, 1);
+    await h.tools.get(toolName('remembered', 'echo')).execute('call', {}, undefined, undefined, h.ctx);
+    assert.equal(prompts, 2);
+    await h.commands.get('mcp-forget').handler('remembered', h.ctx);
+    assert.match(h.notifications.at(-1)!, /forgotten; disconnected/);
+    assert.ok(!h.active().includes(toolName('remembered', 'echo')));
+    await h.start(); assert.equal(prompts, 3);
+    await writeFile(join(h.ctx.cwd, 'mcp.json'), JSON.stringify({ servers: { remembered: { url: 'http://127.0.0.1:2' } } }));
+    await h.start(); assert.equal(prompts, 4);
+  } finally { mocked.mock.restore(); calls.mock.restore(); await h.close(); }
+});
+
+test('forget deletes the configured OAuth store and requires new connection approval', async () => {
+  const mocked = test.mock.method(McpConnection.prototype, 'connect', async () => []);
+  let deletes = 0, prompts = 0;
+  const h = await harness({ s: { url: 'http://127.0.0.1:1', oauth: {} } }, false, () => ({ load: async () => undefined, save: async () => {}, delete: async () => { deletes++; } }));
+  h.ctx.ui.confirm = async () => { prompts++; return true; };
+  try {
+    await h.start(); assert.equal(prompts, 1);
+    assert.equal((await h.status())[0].oauthStorage, 'macOS Keychain');
+    await h.commands.get('mcp-forget').handler('s', h.ctx);
+    assert.equal(deletes, 1);
+    await h.commands.get('mcp-connect').handler('s', h.ctx);
+    assert.equal(prompts, 2);
+  } finally { mocked.mock.restore(); await h.close(); }
+});
+
+test('declined connection approval is not remembered and headless startup fails closed', async () => {
+  const mocked = test.mock.method(McpConnection.prototype, 'connect', async () => []);
+  const h = await harness({ s: { url: 'http://127.0.0.1:1' } });
+  let prompts = 0;
+  h.ctx.ui.confirm = async () => { prompts++; return false; };
+  try {
+    await h.start(); await h.start(); assert.equal(prompts, 2); assert.equal(mocked.mock.callCount(), 0);
+    h.ctx.hasUI = false;
+    await h.start(); assert.match(h.notifications.at(-1)!, /requires interactive UI/);
+    assert.equal(mocked.mock.callCount(), 0);
+    h.ctx.hasUI = true; h.ctx.ui.confirm = async () => true;
+    await h.start(); assert.equal(mocked.mock.callCount(), 1);
+    h.ctx.hasUI = false;
+    await h.start(); assert.equal(mocked.mock.callCount(), 2);
+  } finally { mocked.mock.restore(); await h.close(); }
+});
 
 test('consent and tool labels cannot be hidden or overflowed by server tool names', async () => {
   const raw = 'lookup\n\nFAKE REASSURANCE\x1b[8mconceal' + 'x'.repeat(100000);

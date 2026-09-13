@@ -9,7 +9,18 @@ pi install git:git@github.com:aryan-binazir/pi-extensions@main
 
 Installation uses Pi's package manager and does not require a build. Run `/reload` in an existing
 Pi session, then use `pi config` to select extensions. The manifest lists only each feature's `index.ts`; helper and test
-files are never entrypoints. `Ctrl+Shift+S` requires a terminal supporting an enhanced keyboard protocol such as Kitty; legacy terminals cannot distinguish it from `Ctrl+S`. The extension does not remap `Ctrl+S`.
+files are never entrypoints. Prompt stash uses `Ctrl+S`. Move Pi's save actions to
+`Ctrl+Shift+S` in `~/.pi/agent/keybindings.json`, then run `/reload`:
+
+```json
+{
+  "app.models.save": "ctrl+shift+s",
+  "app.thinking.save": "ctrl+shift+s"
+}
+```
+
+The extension does not change core bindings or write this configuration itself.
+`Ctrl+Shift+S` requires an enhanced keyboard protocol such as Kitty; legacy terminals cannot distinguish it from `Ctrl+S`.
 
 A single extension can also be loaded with
 `pi -e ./extensions/todo/index.ts` from a checkout after `npm ci`.
@@ -22,7 +33,7 @@ A single extension can also be loaded with
 | Effort | `/effort`, `/effort LEVEL` | Slider over the current model's supported thinking levels. |
 | BTW | `/btw`, `/side` | Private side conversation from a snapshot of the current context, streamed with the current provider and no tools. |
 | Vi mode | Editor keyboard input | Insert, normal and visual modes with motions, operators, registers and undo/redo. |
-| Prompt stash | `Ctrl+Shift+S` | Stash, restore or swap one draft slot; a footer indicator shows occupancy. |
+| Prompt stash | `Ctrl+S` | Stash, restore or swap one draft slot; a footer indicator shows occupancy. |
 | Subagents | `subagent`, TypeScript workflows | Isolated task contexts, bounded background execution and approved workflow replay. |
 | Worktree | `/worktree` | Create or reuse a checkout and route the current session's shell and relative file tools. |
 | Harbor MCP | MCP tools, resources, templates and prompts; `/mcp` status | TypeScript client with bounded discovery, per-server deadlines and explicit consent. [Setup and limits](extensions/mcp-client/README.md). |

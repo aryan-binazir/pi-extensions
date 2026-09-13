@@ -88,7 +88,7 @@ check('real extension event wiring preserves typed and mixed drafts through stas
   const typed = 'editable prose '.repeat(90);
   for (const ch of typed) h.app.editor.handleInput(ch);
   assert.equal(h.app.editor.getText(), typed);
-  const toggle = () => h.shortcuts.get('ctrl+shift+s').handler(h.ctx);
+  const toggle = () => h.shortcuts.get('ctrl+s').handler(h.ctx);
   await toggle(); await toggle(); assert.equal(h.app.editor.getText(), typed);
   paste(h.app.editor); keys(h.app.editor, ' suffix');
   const visible = h.app.editor.getText(), expanded = h.app.editor.getExpandedText();
@@ -108,7 +108,7 @@ check('stash restoration notifies Pi of the restored draft', async () => {
   const h = host(); let changed = '';
   h.app.editor.onChange = (text: string) => { changed = text; };
   keys(h.app.editor, '!echo synthetic');
-  const toggle = () => h.shortcuts.get('ctrl+shift+s').handler(h.ctx);
+  const toggle = () => h.shortcuts.get('ctrl+s').handler(h.ctx);
   await toggle(); assert.equal(changed, '');
   await toggle(); assert.equal(changed, '!echo synthetic');
   h.emit('session_shutdown');

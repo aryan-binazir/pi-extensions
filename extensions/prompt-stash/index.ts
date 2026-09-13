@@ -10,7 +10,7 @@ export default function promptStash(pi: ExtensionAPI): void {
     slot = undefined;
     ctx.ui.setStatus("prompt-stash", undefined);
   });
-  pi.registerShortcut("ctrl+shift+s", {
+  pi.registerShortcut("ctrl+s", {
     description: "Stash, restore, or swap the current prompt",
     handler: async (ctx) => {
       if (!ctx.hasUI) return;

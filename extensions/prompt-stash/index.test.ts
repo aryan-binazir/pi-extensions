@@ -91,8 +91,8 @@ test("independent stash restores default editor collapsed paste markers", async 
   assert.equal(e.getExpandedText(), payload);
 });
 
-test("the registered shifted shortcut leaves legacy Ctrl+S untouched and stashes raw pasted bytes", async () => {
-  let chord: KeyId = "ctrl+shift+s";
+test("the registered Ctrl+S shortcut supports legacy and Kitty input and stashes raw pasted bytes", async () => {
+  let chord: KeyId = "ctrl+s";
   let handler!: (ctx: ExtensionContext) => unknown;
   stash({
     on() {},
@@ -118,13 +118,15 @@ test("the registered shifted shortcut leaves legacy Ctrl+S untouched and stashes
       setKittyProtocolActive(kitty);
       assert.equal(
         matchesKey("\x13", chord),
-        false,
-        "legacy Ctrl+S is never the stash shortcut",
+        true,
+        "legacy Ctrl+S invokes stash",
       );
       assert.equal(e.getExpandedText(), payload);
     }
     setKittyProtocolActive(true);
-    assert.equal(matchesKey("\x1b[115;6u", chord), true);
+    assert.equal(chord, "ctrl+s");
+    assert.equal(matchesKey("\x1b[115;5u", chord), true);
+    assert.equal(matchesKey("\x1b[115;6u", chord), false);
     await handler(ctx);
     assert.equal(e.getExpandedText(), "");
     await handler(ctx);

@@ -35,7 +35,7 @@ test("collapsed payload survives the actual stash shortcut and editor replacemen
   stash({
     on() {},
     registerShortcut(key: string, options: { handler: typeof handler }) {
-      assert.equal(key, "ctrl+shift+s");
+      assert.equal(key, "ctrl+s");
       handler = options.handler;
     },
   } as unknown as API);

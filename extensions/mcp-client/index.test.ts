@@ -14,7 +14,7 @@ test('Pi registers schema-preserving tools, enforces call consent and never prom
   const handlers=new Map<string,any>(),tools=new Map<string,any>(),commands=new Map<string,any>();
   let approved=true;const emissions:string[]=[];
   const pi={on:(n:string,f:any)=>handlers.set(n,f),registerTool:(t:any)=>tools.set(t.name,t),registerCommand:(n:string,c:any)=>commands.set(n,c),registerFlag:()=>{},getFlag:()=>path,getActiveTools:()=>[...tools.keys()],setActiveTools:()=>{},events:{emit:(n:string)=>emissions.push(n)}};
-  mcp(pi as any);
+  mcp(pi as any, { agentDir: join(dir, 'agent'), oauthStore: () => undefined });
   const ctx={cwd:dir,hasUI:true,mode:'tui',isProjectTrusted:()=>false,ui:{confirm:async()=>approved,notify:()=>{}}};
   try{
     await handlers.get('session_start')({},ctx);
@@ -40,7 +40,7 @@ test('session replacement invalidates old registered callbacks and project trust
   const pi={on:(n:string,f:any)=>handlers.set(n,f),registerTool:(t:any)=>tools.set(t.name,t),registerCommand:()=>{},registerFlag:()=>{},getFlag:()=>undefined,getActiveTools:()=>[...tools.keys()],setActiveTools:()=>{}};
   let trust=true;
   const ctx={cwd:dir,hasUI:false,mode:'json',isProjectTrusted:()=>trust,ui:{notify:()=>{}}};
-  mcp(pi as any);
+  mcp(pi as any, { agentDir: join(dir, 'agent'), oauthStore: () => undefined });
   try{
     await handlers.get('session_start')({},ctx);
     const old=[...tools.values()].find(t=>t.name.startsWith('mcp_project_'));assert.ok(old);
@@ -66,7 +66,7 @@ test('remote schemas cannot inject external references or oversized provider par
   {name:'recursive',inputSchema:{type:'object',properties:{child:{$ref:'#'}}}},
  ]);
  try{
-  mcp({on:(n:string,h:any)=>handlers.set(n,h),registerTool:(t:any)=>tools.set(t.name,t),registerCommand(){},registerFlag(){},getFlag:()=>path,getActiveTools:()=>[...tools.keys()],setActiveTools:()=>{}} as any);
+  mcp({on:(n:string,h:any)=>handlers.set(n,h),registerTool:(t:any)=>tools.set(t.name,t),registerCommand(){},registerFlag(){},getFlag:()=>path,getActiveTools:()=>[...tools.keys()],setActiveTools:()=>{}} as any, { agentDir: join(dir, 'agent'), oauthStore: () => undefined });
   await handlers.get('session_start')({}, {cwd:dir,hasUI:false,isProjectTrusted:()=>false,ui:{notify:(message:string)=>warnings.push(message)}});
   assert.equal([...tools.keys()].filter(name=>name.startsWith('mcp_fixture_')).length,2);
   assert.ok([...tools.keys()].some(name=>name.startsWith('mcp_fixture_valid_')));

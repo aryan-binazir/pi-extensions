@@ -8,6 +8,7 @@ import {SSEServerTransport} from '@modelcontextprotocol/sdk/server/sse.js';
 import {configure} from './fixture-server.mjs';
 import {McpConnection, boundedResult, validateConfig} from './client.ts';
 import {SessionOAuth} from './oauth.ts';
+import type { OAuthState, OAuthStore } from './credential-store.ts';
 
 for(const kind of ['http','sse'] as const)test(`${kind} reports 401/403 without echoing server secrets`,async()=>{
   let status=401;
@@ -20,9 +21,11 @@ for(const kind of ['http','sse'] as const)test(`${kind} reports 401/403 without 
 });
 
 for(const separateAuth of [false,true])for(const kind of ['http','sse'] as const)test(`${kind} OAuth separateAuth=${separateAuth} completes PKCE without leaking configured headers`,async()=>{
-  let origin='';let authOrigin='';let challenge='';let tokenCalls=0;
+  let origin='';let authOrigin='';let challenge='';let tokenCalls=0;let refreshCalls=0;let currentAccess='fixture-secret';let currentRefresh='fixture-refresh';let rejectRefresh=false;
+  let saved:OAuthState|undefined;let lease:Promise<unknown>=Promise.resolve();
+  const store:OAuthStore={load:async()=>structuredClone(saved),save:async value=>{saved=structuredClone(value);},delete:async()=>{saved=undefined;},withLock:async<T>(fn:()=>Promise<T>)=>{const next=lease.catch(()=>{}).then(fn);lease=next;return next;}};
   const headerObservations:{origin:string;key:string|undefined}[]=[];
-  const sessions:Server[]=[];let sse:SSEServerTransport|undefined;
+  const sessions:Server[]=[];const sseSessions=new Map<string,SSEServerTransport>();
   const handler:RequestListener=async(req,res)=>{
     const requestOrigin=`http://${req.headers.host}`;
     const url=new URL(req.url!,requestOrigin);
@@ -36,18 +39,26 @@ for(const separateAuth of [false,true])for(const kind of ['http','sse'] as const
     }
     if(url.pathname==='/token'){
       let body='';for await(const chunk of req)body+=chunk;
-      const form=new URLSearchParams(body);assert.equal(form.get('code'),'fixture-code');assert.equal(createHash('sha256').update(form.get('code_verifier')!).digest('base64url'),challenge);assert.equal(form.get('resource'),`${origin}/mcp`);tokenCalls++;return json({access_token:'fixture-secret',token_type:'Bearer',expires_in:3600,scope:'read'});
+      const form=new URLSearchParams(body);
+      if(form.get('grant_type')==='refresh_token'){
+        refreshCalls++;
+        if(rejectRefresh)return json({error:'invalid_grant'},400);
+        assert.equal(form.get('refresh_token'),currentRefresh);
+        currentAccess=`fixture-refreshed-${refreshCalls}`;currentRefresh=`fixture-refresh-${refreshCalls}`;
+        return json({access_token:currentAccess,refresh_token:currentRefresh,token_type:'Bearer',expires_in:3600});
+      }
+      assert.equal(form.get('code'),'fixture-code');assert.equal(createHash('sha256').update(form.get('code_verifier')!).digest('base64url'),challenge);assert.equal(form.get('resource'),`${origin}/mcp`);tokenCalls++;return json({access_token:'fixture-secret',refresh_token:'fixture-refresh',token_type:'Bearer',expires_in:3600,scope:'read'});
     }
-    if(req.headers.authorization!=='Bearer fixture-secret'){res.writeHead(401,{'www-authenticate':`Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource"`});res.end();return;}
-    if(kind==='sse' && req.method==='GET') {sse=new SSEServerTransport('/messages',res);const server=configure(new Server({name:'fixture',version:'1'},{capabilities:{tools:{},resources:{},prompts:{}}}));sessions.push(server);await server.connect(sse);return;}
-    if(kind==='sse'){await sse!.handlePostMessage(req,res);return;}
+    if(req.headers.authorization!==`Bearer ${currentAccess}`){res.writeHead(401,{'www-authenticate':`Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource"`});res.end();return;}
+    if(kind==='sse' && req.method==='GET') {const sse=new SSEServerTransport('/messages',res);sseSessions.set(sse.sessionId,sse);const server=configure(new Server({name:'fixture',version:'1'},{capabilities:{tools:{},resources:{},prompts:{}}}));sessions.push(server);await server.connect(sse);return;}
+    if(kind==='sse'){await sseSessions.get(url.searchParams.get('sessionId')!)!.handlePostMessage(req,res);return;}
     const server=configure(new Server({name:'fixture',version:'1'},{capabilities:{tools:{},resources:{},prompts:{}}}));sessions.push(server);const t=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});await server.connect(t);await t.handleRequest(req,res);
   };
   const http=createServer(handler);const authHttp=separateAuth?createServer(handler):undefined;
   if(authHttp)await new Promise<void>(resolve=>authHttp.listen(0,'127.0.0.1',resolve));
   await new Promise<void>(resolve=>http.listen(0,'127.0.0.1',resolve));origin=`http://127.0.0.1:${(http.address() as {port:number}).port}`;
   authOrigin=authHttp?`http://127.0.0.1:${(authHttp.address() as {port:number}).port}`:origin;
-  const c=new McpConnection('oauth',{headers:{'X-Api-Key':'fixture-origin-secret'},url:`${origin}/mcp`,transport:kind,oauth:{clientId:'fixture-client'}});
+  const c=new McpConnection('oauth',{headers:{'X-Api-Key':'fixture-origin-secret'},url:`${origin}/mcp`,transport:kind,oauth:{clientId:'fixture-client'}},process.cwd(),store);
   const browserCalls:Promise<unknown>[]=[];
   try{
     const [tools, concurrentTools]=await Promise.all([c.authenticate(url=>{browserCalls.push(fetch(url));}), c.connect()]);
@@ -55,6 +66,44 @@ for(const separateAuth of [false,true])for(const kind of ['http','sse'] as const
     await Promise.all(browserCalls);
     assert.equal(tools[0].name,'echo');assert.equal(tokenCalls,1);
     assert.match(JSON.stringify(await c.call('echo',{text:'authenticated'})),/authenticated/);
+    const peer=new McpConnection('oauth',c.config,process.cwd(),store);
+    try {
+      await peer.connect();currentAccess='expired-for-parallel-calls';
+      await Promise.all([c.call('echo',{text:'one'}),c.call('echo',{text:'two'}),peer.call('echo',{text:'peer'})]);
+      assert.equal(refreshCalls,1,'parallel calls and stale sessions refresh only once under the identity lease');
+    }finally{await peer.close();}
+    await c.close();
+    assert.equal(saved?.tokens?.refresh_token,'fixture-refresh-1','shutdown preserves durable refresh credentials');
+    currentAccess='expired';
+    const resumed=new McpConnection('oauth',c.config,process.cwd(),store);
+    try {
+      assert.equal((await resumed.connect())[0].name,'echo');
+      assert.equal(refreshCalls,2);assert.equal(browserCalls.length,1);
+      assert.equal(saved?.tokens?.refresh_token,'fixture-refresh-2');
+      assert.match(JSON.stringify(await resumed.call('echo',{text:'resumed'})),/resumed/);
+    } finally {await resumed.close();}
+    const again=new McpConnection('oauth',c.config,process.cwd(),store);
+    try {await again.connect();assert.equal(refreshCalls,2);}finally{await again.close();}
+    const beforeDecline=structuredClone(saved);
+    const abandoned=new McpConnection('oauth',c.config,process.cwd(),store);
+    const declines:Promise<unknown>[]=[];
+    try {
+      await assert.rejects(abandoned.authenticate(url=>{
+        const authorization=new URL(url);const callback=new URL(authorization.searchParams.get('redirect_uri')!);
+        callback.searchParams.set('state',authorization.searchParams.get('state')!);callback.searchParams.set('error','access_denied');
+        declines.push(fetch(callback));
+      }));
+      await Promise.all(declines);assert.deepEqual(saved,beforeDecline,'abandoned login preserves saved sign-in');
+      await abandoned.connect();
+    }finally{await abandoned.close();}
+    currentAccess='revoked';rejectRefresh=true;
+    const revoked=new McpConnection('oauth',c.config,process.cwd(),store);
+    try {
+      await assert.rejects(revoked.connect(),/\/mcp-auth oauth/);
+      assert.equal(revoked.status.state,'auth_required');
+      assert.equal(browserCalls.length,1,'failed refresh must not silently open a browser');
+      assert.equal(saved?.tokens,undefined);
+    }finally{await revoked.close();}
     assert.ok(headerObservations.some(o=>o.origin===authOrigin));
     for(const observed of headerObservations)assert.equal(observed.key,observed.origin===origin?'fixture-origin-secret':undefined,`configured header scope at ${observed.origin}`);
   }finally{await c.close();await Promise.all(sessions.map(s=>s.close()));http.closeAllConnections();await new Promise<void>(resolve=>http.close(()=>resolve()));if(authHttp){authHttp.closeAllConnections();await new Promise<void>(resolve=>authHttp.close(()=>resolve()));}}

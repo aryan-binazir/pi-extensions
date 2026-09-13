@@ -30,10 +30,24 @@ Third-party attribution and licenses are in [`../licenses`](../licenses).
   commands, plugin imports, persistent catalog cache, `required`/exec-exit policy,
   sampling or elicitation. Resource templates are not automatically expanded.
   Tool-inventory changes require explicit `/mcp-connect SERVER` refresh.
-- OAuth credentials stay session-only. The SDK owns PKCE, discovery and token
-  refresh. Durable credential storage and configurable callback ports are outside
-  the current scope. No browser opens automatically.
-- Consent/trust checks remain mandatory by default, including after awaits.
+- OAuth credentials persist in macOS Keychain through a bundled native Security
+  framework helper; other platforms retain session-only OAuth. The SDK owns PKCE,
+  discovery and token refresh. Compiler/Keychain failures fail closed, never to
+  plaintext storage. No browser opens automatically. Callback ports remain
+  ephemeral; persisted registration/redirect metadata supports passive refresh,
+  while a new interactive login obtains a fresh dynamic registration.
+- Initial connection approval is remembered in private non-secret, hashed records.
+  Both approval and Keychain identity bind the full normalized config, effective
+  environment/headers, and config authority. Global HTTP identity is reusable
+  across projects; stdio additionally binds cwd. Config/source changes require new
+  approval. Tool/resource consent and project trust remain mandatory by default,
+  including after awaits. `/mcp-forget` disconnects and removes saved state for the
+  current identity without revoking provider tokens. Cross-process identity leases
+  serialize OAuth operations, reload state before requests, and coordinate forget
+  with refresh so stale sessions cannot overwrite rotated tokens or recreate a
+  forgotten identity. Interactive login stages changes until success, and normal
+  shutdown drains accepted writes. Keychain access has a separate bounded wait
+  outside the network handshake deadline.
   Four startup workers share one serialized interactive consent queue. Disabled
   servers are validated but never connected or prompted. A failure does not stop
   healthy servers. Status excludes configuration, environment values and headers.

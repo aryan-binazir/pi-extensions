@@ -4,6 +4,8 @@ import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionContext 
 import { StringEnum } from '@earendil-works/pi-ai';
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
 import { McpConfigError } from './config.ts';
+import { ConsentStore, serverIdentity } from './consent-store.ts';
+import { createOAuthStore, type OAuthStore } from './credential-store.ts';
 import { Type } from 'typebox';
 import { boundedResult, McpConnection, mergeConfig, toolName, validateConfig, type McpConfig } from './client.ts';
 
@@ -47,7 +49,13 @@ export function schemaAllowed(schema: unknown): boolean {
   return check(schema, 0) && Buffer.byteLength(JSON.stringify(schema)) <= 32768;
 }
 
-export default function harborMcp(pi: ExtensionAPI) {
+export default function harborMcp(pi: ExtensionAPI, storage?: { agentDir?: string; oauthStore?: typeof createOAuthStore }) {
+  const agentDir = storage?.agentDir ?? getAgentDir();
+  const consentStore = new ConsentStore(agentDir);
+  const oauthStoreFactory = storage?.oauthStore ?? createOAuthStore;
+  const identities = new Map<string, string>();
+  const scopes = new Map<string, string>();
+  const stores = new Map<string, OAuthStore | undefined>();
   const connections = new Map<string, McpConnection>();
   const inventories = new Map<string, Set<string>>();
   const operations = new Map<string, Promise<number>>();
@@ -74,23 +82,44 @@ export default function harborMcp(pi: ExtensionAPI) {
 
   pi.registerFlag('mcp-config', { description: 'Explicit MCP configuration JSON, merged after global and trusted project config', type: 'string' });
 
-  async function consent(ctx: ExtensionContext, server: string, action: string, input?: unknown, signal?: AbortSignal) {
+  function identity(server: string): string {
+    let key = identities.get(server);
+    if (!key) { key = serverIdentity(server, config.servers[server], scopes.get(server)!, cwd); identities.set(server, key); }
+    return key;
+  }
+
+  function oauthStore(server: string): OAuthStore | undefined {
+    if (!stores.has(server)) stores.set(server, config.servers[server].oauth ? oauthStoreFactory(agentDir, identity(server)) : undefined);
+    return stores.get(server);
+  }
+
+  async function consent(ctx: ExtensionContext, server: string, action: string, input?: unknown, signal?: AbortSignal, rememberConnection = false) {
     trusted(ctx, server);
     const cancellation = AbortSignal.any([sessionAbort.signal, ...(signal ? [signal] : [])]);
     const cancelled = () => { if (cancellation.aborted) throw new Error('MCP request cancelled'); };
     cancelled();
     if (config.servers[server]?.consent === 'allow') return;
-    if (!ctx.hasUI || !['tui', 'rpc'].includes(ctx.mode)) throw new Error('MCP consent requires interactive UI or explicit consent: allow configuration');
     const expected = generation;
     const prompt = consentQueue.catch(() => {}).then(async () => {
       current(server, expected);
       trusted(ctx, server);
       cancelled();
-      const approved = await ctx.ui.confirm(`Harbor MCP ${displayLabel(server)}`, `${displayLabel(action, 256)}\n${input === undefined ? '' : boundedResult(input, 4000)}\nRemote annotations do not grant permission.`, { signal: cancellation });
+      if (rememberConnection && await consentStore.approved(identity(server))) {
+        current(server, expected); trusted(ctx, server); cancelled(); return;
+      }
+      if (!ctx.hasUI || !['tui', 'rpc'].includes(ctx.mode)) throw new Error('MCP consent requires interactive UI or explicit consent: allow configuration');
+      const message = rememberConnection
+        ? `${displayLabel(action, 256)}\nRemember this connection approval for the current server configuration. Tool and resource actions still require permission. Use /mcp-forget to revoke saved approval and sign-in.`
+        : `${displayLabel(action, 256)}\n${input === undefined ? '' : boundedResult(input, 4000)}\nRemote annotations do not grant permission.`;
+      const approved = await ctx.ui.confirm(`Harbor MCP ${displayLabel(server)}`, message, { signal: cancellation });
       current(server, expected);
       trusted(ctx, server);
       cancelled();
       if (!approved) throw new Error('MCP action declined');
+      if (rememberConnection) {
+        await consentStore.remember(identity(server));
+        current(server, expected); trusted(ctx, server); cancelled();
+      }
     });
     consentQueue = prompt;
     // A queued caller stops waiting immediately; its queue entry later skips
@@ -111,11 +140,11 @@ export default function harborMcp(pi: ExtensionAPI) {
     current(server, expected);
     if (config.servers[server].enabled === false) throw new Error('MCP server is disabled');
     if (authenticate && (!config.servers[server].oauth || !config.servers[server].url)) throw new Error('OAuth is not configured for this server');
-    await consent(ctx, server, authenticate ? 'Authorize this MCP server with OAuth?' : 'Connect to configured MCP server?', undefined, ctx.signal);
+    await consent(ctx, server, authenticate ? 'Authorize this MCP server with OAuth?' : 'Connect to this MCP server and remember approval?', undefined, ctx.signal, true);
     current(server, expected);
     trusted(ctx, server);
     let connection = connections.get(server);
-    if (!connection) { connection = new McpConnection(server, config.servers[server], cwd); connections.set(server, connection); }
+    if (!connection) { connection = new McpConnection(server, config.servers[server], cwd, oauthStore(server)); connections.set(server, connection); }
     // A failed refresh cannot leave obsolete schemas callable. Pi does not offer
     // unregisterTool, so deactivate retired names and also guard saved callbacks.
     retire(server);
@@ -165,6 +194,7 @@ export default function harborMcp(pi: ExtensionAPI) {
     server,
     ...(connections.get(server)?.status ?? { state: entry.enabled === false ? 'disabled' : 'disconnected', toolCount: 0 }),
     registeredTools: inventories.get(server)?.size ?? 0,
+    ...(entry.oauth ? { oauthStorage: !stores.has(server) ? 'not-initialized' : stores.get(server) ? 'macOS Keychain' : 'session-only' } : {}),
   }));
 
   async function shutdown() {
@@ -181,15 +211,20 @@ export default function harborMcp(pi: ExtensionAPI) {
     sessionAbort = new AbortController();
     consentQueue = Promise.resolve();
     const expected = generation;
-    projectServers.clear(); config = { servers: {} }; cwd = ctx.cwd;
+    projectServers.clear(); identities.clear(); scopes.clear(); stores.clear(); config = { servers: {} }; cwd = ctx.cwd;
     try {
       const explicit = pi.getFlag('mcp-config');
       const project = ctx.isProjectTrusted() ? await readConfig(join(cwd, CONFIG_DIR_NAME, 'mcp.json'), true, 'Project') : { servers: {} };
       const override = typeof explicit === 'string' ? await readConfig(resolve(cwd, explicit)) : { servers: {} };
-      const merged = mergeConfig(await readConfig(join(getAgentDir(), 'mcp.json'), true, 'Global'), project, override, ctx.isProjectTrusted());
+      const merged = mergeConfig(await readConfig(join(agentDir, 'mcp.json'), true, 'Global'), project, override, ctx.isProjectTrusted());
       if (expected !== generation) return;
       config = merged;
-      for (const name of Object.keys(project.servers)) if (!Object.hasOwn(override.servers, name)) projectServers.add(name);
+      for (const name of Object.keys(config.servers)) {
+        const explicitServer = Object.hasOwn(override.servers, name);
+        const projectServer = !explicitServer && Object.hasOwn(project.servers, name);
+        if (projectServer) projectServers.add(name);
+        scopes.set(name, explicitServer ? `explicit:${resolve(cwd, explicit as string)}` : projectServer ? `project:${resolve(cwd)}` : `global:${resolve(agentDir)}`);
+      }
       // Independent failures do not prevent other servers from starting. Bound
       // concurrency to four; consent() serializes interactive prompts separately.
       const servers = Object.keys(config.servers).filter(name => config.servers[name].enabled !== false);
@@ -206,11 +241,40 @@ export default function harborMcp(pi: ExtensionAPI) {
 
   pi.registerCommand('mcp', { description: 'Show MCP server connection status (no credentials)', handler: async (_args, ctx) => { ctx.ui.notify(boundedResult(statuses()), 'info'); } });
   for (const [command, auth] of [['mcp-connect', false], ['mcp-auth', true]] as const) pi.registerCommand(command, {
-    description: auth ? 'Authorize an MCP server using session-only OAuth' : 'Connect or refresh configured MCP tools',
+    description: auth ? 'Authorize an MCP server (saved in macOS Keychain when available)' : 'Connect or refresh configured MCP tools',
     getArgumentCompletions: prefix => Object.keys(config.servers).filter(name => name.startsWith(prefix)).map(name => ({ value: name, label: name })),
     handler: async (args, ctx) => {
       try { const count = await connect(args.trim(), ctx, auth); ctx.ui.notify(`MCP registered ${count} tools`, 'info'); }
       catch (error) { ctx.ui.notify((error as Error).message, 'error'); }
+    },
+  });
+  pi.registerCommand('mcp-forget', {
+    description: 'Forget this server configuration\'s saved connection approval and OAuth sign-in, then disconnect',
+    getArgumentCompletions: prefix => Object.keys(config.servers).filter(name => name.startsWith(prefix)).map(name => ({ value: name, label: name })),
+    handler: async (args, ctx) => {
+      const server = args.trim();
+      try {
+        if (!Object.hasOwn(config.servers, server)) throw new Error('Usage: /mcp-forget followed by a configured server name');
+        trusted(ctx, server);
+        const expected = generation;
+        // Serialize with login/refresh so an in-flight save cannot recreate deleted credentials.
+        const operation = (operations.get(server) ?? Promise.resolve()).catch(() => {}).then(async () => {
+          current(server, expected); trusted(ctx, server);
+          retire(server);
+          const previous = connections.get(server);
+          connections.delete(server);
+          await previous?.close();
+          const store = oauthStore(server);
+          const forget = async () => { await consentStore.forget(identity(server)); await store?.delete(); };
+          if (store?.withLock) await store.withLock(forget); else await forget();
+          current(server, expected); trusted(ctx, server);
+          ctx.ui.notify(`MCP ${displayLabel(server)}: saved connection approval and OAuth sign-in forgotten; disconnected. Other sessions will stop using saved sign-in on their next request.`, 'info');
+          return 0;
+        });
+        operations.set(server, operation);
+        try { await operation; }
+        finally { if (operations.get(server) === operation) operations.delete(server); }
+      } catch (error) { ctx.ui.notify((error as Error).message, 'error'); }
     },
   });
   pi.registerTool({

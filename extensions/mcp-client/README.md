@@ -95,7 +95,8 @@ Disabled entries must still be valid.
 - `/mcp`: server state and eligible/registered tool counts, without credentials.
 - `/mcp-connect SERVER`: connect or explicitly refresh the tool inventory using
   the current configuration snapshot. Config file edits require `/reload`.
-- `/mcp-auth SERVER`: interactive OAuth authorization for this session.
+- `/mcp-auth SERVER`: interactive OAuth authorization, saved in macOS Keychain on macOS; session-only elsewhere.
+- `/mcp-forget SERVER`: disconnect and delete the current configuration's remembered connection approval and OAuth credentials. Other sessions observe deleted sign-in before their next OAuth request; `consent: "allow"` still explicitly permits connections/actions.
 - `mcp` tool `action: "servers"`: configured names (backward-compatible).
 - `action: "status"`: per-server state and counts.
 - `action: "resources"`, `"templates"`, `"prompts"`: bounded catalog listings.
@@ -108,11 +109,21 @@ start. One failed server does not prevent healthy servers from becoming availabl
 States are `disabled`, `disconnected`, `connecting`, `ready`, `failed`,
 `auth_required`, and `closed`.
 
-Each connection and action asks for consent by default. Turn cancellation dismisses
-active consent dialogs and skips queued prompts without dispatching their actions.
-TUI and RPC clients with dialog support can approve prompts. Print/JSON sessions
-and clients without dialogs fail closed unless `consent: "allow"` explicitly
-authorizes that configured server.
+The first connection asks to **remember approval**. Later startups/reloads for the
+same server configuration and config source reuse it. Approval is bound to the
+full normalized configuration, resolved credentials/environment, and authority
+(global, project directory, or explicit config path). Global HTTP approvals work
+across projects; stdio approval also binds the effective working directory. Config
+changes require approval again. Project trust is still checked on every action.
+Only non-secret hashed approval records live under the agent directory's private
+`harbor-mcp/approvals/` directory; OAuth secrets never go there.
+
+Tool and resource actions **still ask for consent**: remembered connection consent
+does not grant remote tool execution. Turn cancellation dismisses active dialogs
+and skips queued prompts without dispatch. TUI and RPC can approve connections;
+headless sessions can reuse remembered approval but cannot create it. Actions in
+headless sessions still require explicit `consent: "allow"`, which authorizes both
+connections and actions for that configured server.
 Use `allowTools` to narrow tool authority; `denyTools` always wins. Lists match
 exact raw names, not generated Pi names or glob patterns. Empty allow-list means
 no tools. Filters apply to discovery and calls. Resource/prompt access remains
@@ -164,18 +175,54 @@ children, and aborts pending work. These are lifecycle controls, not an OS sandb
 
 ## OAuth
 
-Run `/mcp-auth SERVER` and open the displayed URL manually. SDK authorization-code
-flow handles discovery, PKCE and token refresh. The temporary callback listener
-binds to `127.0.0.1`, validates state, and closes on completion, shutdown, or the
-two-minute authorization deadline. Configured HTTP headers never accompany a
-cross-origin authorization request; all fetches require HTTPS or loopback HTTP
-and reject redirects. A pre-registered public client must allow loopback callbacks
-with an ephemeral port. Omit `clientId` only for servers supporting dynamic
-registration. Tokens and registration information last only for the Pi session;
-re-authorize after reload. If automatic token refresh cannot recover authorization,
-Harbor asks you to run `/mcp-auth` again instead of displaying a dead callback URL.
-No browser opens automatically. Durable keyring storage,
-first-party account auth and enterprise token exchange are not supported.
+Run `/mcp-auth SERVER` once and open the displayed URL manually. On macOS, tokens
+(including refresh tokens), client registration, and the original callback URI are
+saved in **macOS Keychain**, scoped to the server identity above. Restart/reload
+loads those credentials and the SDK refreshes them when needed, saving rotated
+tokens. Credential-bearing requests are serialized per identity with an OS file
+lock across Pi processes; each operation reloads current credentials under that
+lock so stale sessions cannot reuse rotated tokens or recreate forgotten sign-in.
+This also serializes concurrent OAuth tool calls for that identity. Shutdown
+closes the connection and drains accepted credential writes without deleting
+sign-in. Interactive login stages registration/tokens until it succeeds, so an
+abandoned login does not overwrite the previous sign-in. Expired/revoked
+authorization that cannot be refreshed asks you to sign in again; no browser opens
+automatically. `/mcp` reports `oauthStorage` without exposing credentials.
+
+The bundled Swift helper uses Apple's Security framework. It is compiled with
+a matching Swift compiler/SDK from Xcode or Command Line Tools (`xcode-select
+--install`) into a private, versioned `.harbor-mcp-oauth/` cache under Pi's agent
+directory. Helper compilation honors `DEVELOPER_DIR`, otherwise prefers a full
+Xcode installation at `/Applications/Xcode.app`, falling back to the selected
+system toolchain if that preferred installation cannot compile; it does not change
+the system's toolchain selection. Failed compilation can be retried in-session. macOS may ask you to allow
+Keychain access to that helper (and again after a helper/compiler update). Secrets
+travel only over bounded stdin/stdout pipes, never command-line arguments,
+environment variables, or plaintext files. A locked/denied Keychain, unsafe cache,
+missing compiler, or corrupt credential record fails closed with an actionable
+error; there is no silent plaintext or session-only fallback on macOS. Keychain
+access uses its own bounded wait (up to two minutes), outside the MCP handshake
+deadline. Cancelling a request stops it from dispatching after a delayed load. On other
+platforms OAuth remains session-only and warnings explicitly explain that limit.
+
+The SDK handles discovery, PKCE and refresh. The temporary interactive callback
+listener binds to `127.0.0.1`, validates state, and closes after login or shutdown;
+authorization has a two-minute deadline. Restoring sign-in does not open a callback
+listener. A new interactive login obtains a fresh dynamic registration rather
+than reusing a registration tied to a different callback. PKCE verifiers and state
+nonces are never persisted. A pre-registered client must support ephemeral
+loopback callback ports; omit `clientId` only for servers supporting dynamic
+registration. Configured headers never accompany cross-origin OAuth requests;
+all fetches require HTTPS or loopback HTTP and reject redirects.
+
+`/mcp-forget SERVER` removes local saved sign-in and connection consent for the
+current configuration after draining local credential writes and acquiring the
+shared identity lock. It does not revoke tokens at the provider or stop other Pi
+processes; those processes reload the removed state before their next OAuth
+request rather than persisting their old tokens again. Old identities after config
+changes remain separate Keychain items (service `Harbor MCP OAuth`); remove them
+through Keychain Access if no longer needed. First-party account auth and
+enterprise token exchange are not supported.
 
 ## Verification
 

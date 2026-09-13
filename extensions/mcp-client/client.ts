@@ -8,6 +8,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { CallToolResultSchema, type Progress, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { SessionOAuth } from './oauth.ts';
+import { CredentialStoreError, type OAuthStore } from './credential-store.ts';
 import { McpConfigError, validateConfig, resolveEnvironment, resolveHeaders, requestTimeout, startupTimeout, type ServerConfig } from './config.ts';
 import { collectPages, McpLimitError, withDeadline } from './pagination.ts';
 export { mergeConfig, validateConfig, type McpConfig, type ServerConfig } from './config.ts';
@@ -20,8 +21,8 @@ export function toolName(server: string, name: string) {
 class McpPublicError extends Error {
   constructor(readonly kind: 'cancelled' | 'timeout' | 'auth_required' | 'denied' | 'failure', message: string) { super(message); }
 }
-export function publicError(error: unknown, server?: { name: string; config: ServerConfig }): Error {
-  if (error instanceof McpPublicError || error instanceof McpLimitError || error instanceof McpConfigError) return error;
+export function publicError(error: unknown, server?: { name: string; config: ServerConfig; persistentOAuth?: boolean }): Error {
+  if (error instanceof McpPublicError || error instanceof McpLimitError || error instanceof McpConfigError || error instanceof CredentialStoreError) return error;
   const e = error as { name?: string; code?: number; status?: number };
   if (e?.name === 'AbortError') return new McpPublicError('cancelled', 'MCP request cancelled');
   if (e?.code === -32001 || e?.name === 'TimeoutError') return new McpPublicError('timeout', 'MCP request timed out');
@@ -30,7 +31,9 @@ export function publicError(error: unknown, server?: { name: string; config: Ser
     // Only embed command-safe names verbatim; never render terminal controls.
     const argument = /^[a-zA-Z0-9_.-]+$/.test(server.name) ? ` ${server.name}` : ' with the configured server name (use Tab completion)';
     const message = server.config.oauth
-      ? `Sign-in required for this session; run /mcp-auth${argument} in Pi. OAuth sign-in is not saved across sessions or reloads.`
+      ? server.persistentOAuth
+        ? `Sign-in required; run /mcp-auth${argument} in Pi. Saved authorization is missing or could not be refreshed.`
+        : `Sign-in required for this session; run /mcp-auth${argument} in Pi. OAuth sign-in is not saved across sessions or reloads.`
       : `Authentication required; check this server's configured credentials, then run /mcp-connect${argument} in Pi.`;
     return new McpPublicError('auth_required', message);
   }
@@ -83,18 +86,20 @@ export class McpConnection {
   private oauth?: SessionOAuth;
   private connecting?: Promise<Tool[]>;
   private authenticating?: Promise<Tool[]>;
+  private credentialQueue: Promise<unknown> = Promise.resolve();
   private authRequestSignal?: AbortSignal;
   private lifetime = new AbortController();
   private reconnect = false;
   private responseErrors = new WeakMap<Client, Error>();
   private currentStatus: ConnectionStatus;
 
-  constructor(readonly name: string, config: ServerConfig, readonly cwd = process.cwd()) {
+  constructor(readonly name: string, config: ServerConfig, readonly cwd = process.cwd(), private oauthStore?: OAuthStore) {
     this.config = validateConfig({ servers: { [name]: config } }).servers[name];
     this.currentStatus = { state: config.enabled === false ? 'disabled' : 'disconnected', toolCount: 0 };
   }
 
   get status(): ConnectionStatus { return { ...this.currentStatus }; }
+  get persistentOAuth(): boolean { return this.oauthStore !== undefined; }
 
   private options(signal?: AbortSignal, onprogress?: (progress: Progress) => void) {
     const timeout = requestTimeout(this.config);
@@ -106,12 +111,53 @@ export class McpConnection {
     return this.authenticating ?? this.connectCurrent();
   }
 
-  private async connectCurrent(): Promise<Tool[]> {
+  private async withCredentials<T>(operation: () => Promise<T>, reload = true, signal?: AbortSignal): Promise<T> {
+    if (!this.config.oauth) return operation();
+    const cancellation = AbortSignal.any([this.lifetime.signal, ...(signal ? [signal] : [])]);
+    cancellation.throwIfAborted();
+    const queued = this.credentialQueue.catch(() => {}).then(async () => {
+      cancellation.throwIfAborted();
+      const run = async () => {
+        cancellation.throwIfAborted();
+        if (reload && this.oauthStore) {
+          const saved = await this.oauthStore.load();
+          cancellation.throwIfAborted();
+          if (saved) {
+            if (this.oauth) this.oauth.adopt(saved);
+            else this.oauth = SessionOAuth.restore(this.config.oauth!, saved, this.oauthStore);
+          } else if (this.oauth) {
+            // Another process forgot this identity. Never let stale in-memory
+            // credentials recreate the deleted record on its next refresh.
+            await this.oauth.dispose(); this.oauth = undefined;
+            await this.client?.close(); this.client = undefined; this.reconnect = true;
+          }
+        }
+        return operation();
+      };
+      return this.oauthStore?.withLock ? this.oauthStore.withLock(run) : run();
+    });
+    this.credentialQueue = queued;
+    let onAbort: () => void = () => {};
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(cancellation.reason);
+      cancellation.addEventListener('abort', onAbort, { once: true });
+      if (cancellation.aborted) onAbort();
+    });
+    try { return await Promise.race([queued, aborted]); }
+    finally { cancellation.removeEventListener('abort', onAbort); }
+  }
+
+  private async connectCurrent(locked = false): Promise<Tool[]> {
     if (this.lifetime.signal.aborted) throw new Error('MCP connection closed');
     if (this.config.enabled === false) throw new Error('MCP server is disabled');
     if (this.connecting) return this.connecting;
-    this.connecting = this.establish();
-    try { return await this.connecting; } finally { this.connecting = undefined; }
+    this.connecting = locked ? this.establish() : this.withCredentials(() => this.establish());
+    try { return await this.connecting; }
+    catch (error) {
+      const safe = publicError(error, this);
+      if (!this.lifetime.signal.aborted) this.currentStatus = { state: safe instanceof McpPublicError && safe.kind === 'auth_required' ? 'auth_required' : 'failed', toolCount: 0, error: safe.message };
+      throw safe;
+    } finally { this.connecting = undefined; }
   }
 
   private async establish(): Promise<Tool[]> {
@@ -186,24 +232,27 @@ export class McpConnection {
 
   async authenticate(show: (url: string) => void): Promise<Tool[]> {
     if (this.authenticating) return this.authenticating;
-    this.authenticating = this.login(show);
+    this.authenticating = this.withCredentials(() => this.login(show), false);
     try { return await this.authenticating; } finally { this.authenticating = undefined; }
   }
 
   private async login(show: (url: string) => void): Promise<Tool[]> {
     if (!this.config.oauth || !this.config.url) throw new Error('OAuth is not configured for this server');
     if (this.config.enabled === false || this.lifetime.signal.aborted) throw new Error('MCP server is disabled or closed');
-    await this.connecting?.catch(() => {});
     await this.client?.close(); this.client = undefined;
-    await this.oauth?.close();
+    await this.oauth?.dispose();
     this.lifetime.signal.throwIfAborted();
-    this.oauth = await SessionOAuth.start(this.config.oauth, show);
-    const abort = () => { void this.oauth?.close(); };
+    this.oauth = await SessionOAuth.start(this.config.oauth, show, this.oauthStore);
+    const provider = this.oauth;
+    const abort = () => { void provider.close(); };
     this.lifetime.signal.addEventListener('abort', abort, { once: true });
     try {
       this.lifetime.signal.throwIfAborted();
-      try { return await this.connectCurrent(); } catch (error) { if (!this.oauth.authorizationStarted) throw error; }
-      const code = await this.oauth.code;
+      try {
+        const tools = await this.connectCurrent(true);
+        await provider.commit(); return tools;
+      } catch (error) { if (!provider.authorizationStarted) throw error; }
+      const code = await provider.code;
       const transport = this.transport;
       if (!(transport instanceof StreamableHTTPClientTransport || transport instanceof SSEClientTransport)) throw new Error('MCP OAuth transport unavailable');
       await withDeadline(startupTimeout(this.config), [this.lifetime.signal], async signal => {
@@ -213,9 +262,16 @@ export class McpConnection {
         try { await transport.finishAuth(code); signal.throwIfAborted(); }
         finally { this.authRequestSignal = undefined; signal.removeEventListener('abort', onAbort); }
       });
-      return await this.connectCurrent();
-    } catch (error) { throw publicError(error, this); }
-    finally { this.lifetime.signal.removeEventListener('abort', abort); await this.oauth.close(); }
+      const tools = await this.connectCurrent(true);
+      await provider.commit();
+      return tools;
+    } catch (error) {
+      await provider.dispose();
+      if (this.oauth === provider) this.oauth = undefined;
+      // connectCurrent may have installed a client after the initial reset.
+      await (this.client as Client | undefined)?.close().catch(() => {}); this.client = undefined;
+      throw publicError(error, this);
+    } finally { this.lifetime.signal.removeEventListener('abort', abort); await provider.close(); }
   }
 
   private async invoke<T>(fn: (client: Client, signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -223,13 +279,13 @@ export class McpConnection {
     if (!this.client && !this.reconnect) throw new Error('MCP server is disconnected');
     let client: Client | undefined;
     try {
-      return await withDeadline(requestTimeout(this.config), [signal, this.lifetime.signal], async s => {
-        if (!this.client && this.reconnect && !this.lifetime.signal.aborted) await this.connect();
+      return await this.withCredentials(() => withDeadline(requestTimeout(this.config), [signal, this.lifetime.signal], async s => {
+        if (!this.client && this.reconnect && !this.lifetime.signal.aborted) await (this.config.oauth ? this.establish() : this.connect());
         s.throwIfAborted();
         client = this.client;
         if (!client) throw new Error('MCP server is disconnected');
         return fn(client, s);
-      });
+      }), true, signal);
     } catch (error) { throw signal?.aborted ? new Error('MCP request cancelled') : (client && this.responseErrors.get(client)) ?? publicError(error, this); }
   }
 
@@ -286,8 +342,10 @@ export class McpConnection {
   async close() {
     this.lifetime.abort(new DOMException('MCP connection closed', 'AbortError'));
     this.currentStatus = { state: 'closed', toolCount: 0 };
-    this.oauth?.invalidateCredentials('all');
-    try { await this.oauth?.close(); await this.client?.close(); }
-    finally { try { await this.transport?.close(); } finally { this.client = undefined; } }
+    try { await this.client?.close(); }
+    finally {
+      try { await this.oauth?.dispose(); }
+      finally { try { await this.transport?.close(); } finally { this.client = undefined; } }
+    }
   }
 }

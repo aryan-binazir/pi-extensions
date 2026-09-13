@@ -49,6 +49,12 @@ test('registered background tool launches tool-limited Pi and pushes completion 
   subagents({events:{emit(){}},getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler),sendMessage:(message:any,options:any)=>notify({message,options})} as unknown as ExtensionAPI);
   await events.get('session_start')({},ctx);
   const response=await tools.get('subagent').execute('call',{task:'Read synthetic checkout',preset:'reader'},undefined,undefined,ctx);
+  const guidance=tools.get('subagent').promptGuidelines;
+  assert.match(guidance.join(' '),/end your turn.*pushed automatically.*without polling/);
+  assert.match(guidance.join(' '),/Do not call subagent_status or run sleep\/wait loops/);
+  assert.match(guidance.join(' '),/report-only Luna tracker/);
+  assert.match(tools.get('subagent_status').description,/do not poll.*requested progress check.*debugging.*truncated results/);
+  assert.equal(JSON.parse(response.content[0].text).notification,guidance[0]);
   const deadline=setTimeout(()=>notify({message:{content:'{}'},options:{timeout:true}}),5000);
   let completion;
   try {completion=await notification;}finally{clearTimeout(deadline);}

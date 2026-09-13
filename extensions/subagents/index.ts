@@ -15,6 +15,7 @@ const taskSchema = Type.Object({
   model: Type.Optional(Type.String()), thinking: Type.Optional(Type.String({pattern: '^(off|minimal|low|medium|high|xhigh|max)$'})), preset: Type.Optional(Type.Union([Type.Literal('reader'), Type.Literal('writer')])),
   tools: Type.Optional(Type.Array(Type.String())), extensions: Type.Optional(Type.Array(Type.String())), timeout: Type.Optional(Type.Integer({ minimum: 10, maximum: 3600000 })),
 });
+const completionGuidance = 'After calling subagent, do independent work or end your turn. Completion results are pushed automatically and resume the parent without polling. Do not call subagent_status or run sleep/wait loops just to await completion.';
 const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value });
 
 export default function subagents(pi: ExtensionAPI): void {
@@ -128,6 +129,7 @@ export default function subagents(pi: ExtensionAPI): void {
   // A before-switch handler can cancel the switch; committed switches emit shutdown.
   pi.registerTool({
     name: 'subagent', label: 'Subagent', description: 'Start a background Pi agent with only an explicit task brief, a validated workspace, and bounded tools. Returns task ID immediately; completion is pushed into this conversation. Context separation is not an OS sandbox. Same-directory writers serialize. Explicit child extensions may contribute hooks and commands; their custom tools are excluded by the built-in tool allowlist.', parameters: taskSchema,
+    promptGuidelines: [completionGuidance, 'The subagent extension automatically runs a shared report-only Luna tracker. Do not launch or poll a watcher; worker results arrive directly, independently of tracker reports.'],
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
       context = ctx;
@@ -135,11 +137,11 @@ export default function subagents(pi: ExtensionAPI): void {
       if (!task.model) throw new Error('A selected parent model or explicit provider/model is required');
       const handle = await trackedSpawn(task, signal);
       if (signal?.aborted) registry.cancel(handle.id);
-      return result({ id: handle.id, status: 'queued', notification: 'Completion will be delivered automatically' });
+      return result({ id: handle.id, status: 'queued', notification: completionGuidance });
     },
   });
   pi.registerTool({
-    name: 'subagent_status', label: 'Subagent status', description: 'Inspect bounded subagent summaries (up to 10 per page), or output detail by id (up to 8 KiB JSON text). Use offset/limit for summary pages and outputOffset/nextOutputOffset for retained output pages. Output offsets count UTF-16 code units. Completion notifications are automatic.', parameters: Type.Object({id: Type.Optional(Type.String({maxLength: 100})), offset: Type.Optional(Type.Integer({minimum: 0})), limit: Type.Optional(Type.Integer({minimum: 1, maximum: 10})), outputOffset: Type.Optional(Type.Integer({minimum: 0, maximum: 65536}))}),
+    name: 'subagent_status', label: 'Subagent status', description: 'Inspect bounded subagent summaries (up to 10 per page), or output detail by id (up to 8 KiB JSON text). Use offset/limit for summary pages and outputOffset/nextOutputOffset for retained output pages. Output offsets count UTF-16 code units. Completion notifications are automatic; do not poll for completion. Use subagent_status only for a requested progress check, debugging, or retrieving omitted/truncated results.', parameters: Type.Object({id: Type.Optional(Type.String({maxLength: 100})), offset: Type.Optional(Type.Integer({minimum: 0})), limit: Type.Optional(Type.Integer({minimum: 1, maximum: 10})), outputOffset: Type.Optional(Type.Integer({minimum: 0, maximum: 65536}))}),
     async execute(_id, params = {}) {
       if (params.id) {
         const task = registry.get(params.id);

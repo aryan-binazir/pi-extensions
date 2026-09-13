@@ -36,7 +36,7 @@ test('Pi package discovers exactly fourteen entrypoints and independently loads 
         subagents: {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []},
         worktree: {tools: ['bash'], commands: ['worktree'], shortcuts: []},
         'mcp-client': {tools: ['mcp'], commands: ['mcp', 'mcp-auth', 'mcp-connect'], shortcuts: []},
-        'computer-use': {tools: ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []},
+        'computer-use': {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []},
         'fast-mode': {tools: [], commands: ['fast'], shortcuts: []},
         'auto-caffeinate': {tools: [], commands: [], shortcuts: []},
         sentinel: {tools: [], commands: ['auto', 'sentinel'], shortcuts: []},

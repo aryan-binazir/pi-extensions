@@ -1,0 +1,120 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import { approve, boundedText, macLaunch, macResult, MacSession } from './mac-client.ts';
+import { registerMacTools } from './mac-tools.ts';
+
+const fixture = () => ({ command: process.execPath, args: [fileURLToPath(new URL('../../tests/fixtures/computer-mcp.mjs', import.meta.url))], stderr: 'pipe' as const });
+const ctx = (hasUI = false, answer = false): any => ({ hasUI, ui: { confirm: async () => answer } });
+const request: any = { message: 'Allow ChatGPT to use Fixture?', requestedSchema: { type: 'object', properties: {} }, _meta: { persist: ['always'], riskLevel: 'high' } };
+
+test('Mac discovery launches relay with official bundled Node and respects CODEX_HOME; never falls back', () => {
+  const paths: string[] = [];
+  const launch = macLaunch({ CODEX_HOME: '/custom-codex' }, '/fixture-home', path => { paths.push(path); return path.startsWith('/fixture-home/Applications/Codex.app/') || path.startsWith('/custom-codex/'); });
+  assert.equal(launch.command, '/fixture-home/Applications/Codex.app/Contents/Resources/cua_node/bin/node');
+  assert.match(launch.args![0], /mac-relay.mjs$/);
+  assert.equal(launch.args![1], '/custom-codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient');
+  assert.ok(paths.includes('/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node'));
+  assert.throws(() => macLaunch({}, '/fixture', () => false), /No native fallback/);
+});
+
+test('Mac surface is app targeted with pixel coordinates and explicit tools only', () => {
+  const tools: any[] = [];
+  registerMacTools({ on() {}, registerTool(tool: any) { tools.push(tool); } } as any);
+  assert.equal(tools.length, 7);
+  assert.ok(tools.every(tool => tool.executionMode === 'sequential'));
+  const click = tools.find(tool => tool.name === 'computer_click');
+  assert.ok(click.parameters.required.includes('app'));
+  assert.equal(click.parameters.properties.x.maximum, undefined);
+  assert.ok(click.parameters.properties.mouse_button);
+  assert.ok(click.parameters.properties.click_count);
+  assert.equal(click.parameters.properties.button, undefined);
+  assert.equal(click.parameters.properties.count, undefined);
+  assert.ok(tools.find(tool => tool.name === 'computer_key'));
+});
+
+test('approval is explicit, nonpersistent, denies headless and unsupported forms, cancels even with an unresolved UI', async () => {
+  const control = new AbortController();
+  assert.deepEqual(await approve(request, ctx(), control.signal), { action: 'decline' });
+  assert.deepEqual(await approve(request, ctx(true, false), control.signal), { action: 'decline' });
+  assert.deepEqual(await approve(request, ctx(true, true), control.signal), { action: 'accept', content: {} });
+  assert.deepEqual(await approve({ ...request, requestedSchema: { type: 'object', properties: { secret: { type: 'string' } } } }, ctx(true, true), control.signal), { action: 'decline' });
+  let uiSignal: AbortSignal | undefined;
+  const pending = approve(request, { hasUI: true, ui: { confirm: async (_title: string, text: string, options: any) => {
+    assert.match(text, /riskLevel/); uiSignal = options.signal; return new Promise<boolean>(() => {});
+  } } } as any, control.signal);
+  control.abort();
+  assert.deepEqual(await pending, { action: 'cancel' });
+  assert.equal(uiSignal?.aborted, true);
+});
+
+test('bounded response conversion preserves genuine errors and rejects malformed images', () => {
+  const text = 'é'.repeat(100000);
+  assert.ok(Buffer.byteLength(boundedText(text)) <= 65536);
+  assert.match(boundedText(text), /truncated/);
+  const bounded = macResult({ content: Array.from({ length: 10 }, () => ({ type: 'text' as const, text })), structuredContent: { large: text }, _meta: { large: text } });
+  assert.ok(Buffer.byteLength(JSON.stringify(bounded)) < 66000);
+  assert.equal(bounded.content.length, 1);
+  assert.throws(() => macResult({ isError: true, content: [{ type: 'text', text: 'Actual service denial' }] }), /Actual service denial/);
+  assert.throws(() => macResult({ content: [{ type: 'image', mimeType: 'text/html', data: 'AAAA' }] }), /Invalid/);
+  assert.throws(() => macResult({ content: [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }] }), /Invalid/);
+  const data = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO2kAAAAASUVORK5CYII=', 'base64').toString('base64');
+  assert.equal(macResult({ content: [{ type: 'image', mimeType: 'image/png', data }] }).content[0].type, 'image');
+  assert.equal(macResult({ content: [{ type: 'image', mimeType: 'image/png', data }] }, true).content.length, 0);
+  assert.throws(() => macResult({ content: [{ type: 'image', mimeType: 'image/png', data: 'A'.repeat(24 * 1024 * 1024) }] }), /oversized/);
+});
+
+test('real SDK fixture connects lazily once, routes elicitation, preserves tool errors, enforces schemas and allowlist', async () => {
+  let launches = 0;
+  const session = new MacSession(() => { launches++; return fixture(); }, 5000);
+  try {
+    assert.equal(launches, 0);
+    assert.match(JSON.stringify(await session.run('list_apps', {}, ctx())), /Fixture apps/);
+    assert.match(JSON.stringify(await session.run('get_app_state', { app: 'fixture' }, ctx())), /decline/);
+    assert.match(JSON.stringify(await session.run('get_app_state', { app: 'fixture' }, ctx(true, true))), /accept/);
+    assert.equal(launches, 1);
+    await assert.rejects(session.run('execute_code', {}, ctx()), /not allowed/);
+    await assert.rejects(session.run('click', { app: 'error' }, ctx()), /Real fixture policy denial.*\nMutation outcome/s);
+    assert.equal(launches, 1); // No automatic mutation retry.
+    await session.run('list_apps', {}, ctx());
+    assert.equal(launches, 2); // A subsequent explicit inspection reconnects.
+    await assert.rejects(session.run('click', { invented: true }, ctx()), /official click schema/);
+  } finally { await session.close(); }
+  await assert.rejects(session.run('list_apps', {}, ctx()), /session closed/);
+});
+
+test('cancellation closes an active SDK client before queued work reconnects; timeout and shutdown settle', async () => {
+  let launches = 0;
+  const session = new MacSession(() => { launches++; return fixture(); }, 5000);
+  try {
+    await session.run('list_apps', {}, ctx());
+    const control = new AbortController();
+    const waiting = session.run('get_app_state', { app: 'wait' }, ctx(), control.signal);
+    const rejected = assert.rejects(waiting, /abort/i);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const queued = session.run('list_apps', {}, ctx());
+    control.abort(); await rejected;
+    await queued; assert.equal(launches, 2);
+  } finally { await session.close(); }
+  const timeout = new MacSession(fixture, 30);
+  try { await assert.rejects(timeout.run('get_app_state', { app: 'wait' }, ctx()), /timed out/); }
+  finally { await timeout.close(); }
+});
+
+test('large JPEG observations survive conversion without regex recursion and are marked untrusted', () => {
+  const jpeg = Buffer.concat([Buffer.from([255, 216, 255]), Buffer.alloc(300000), Buffer.from([255, 217])]);
+  const result = macResult({ _meta: { subtitle: 'untrusted' }, content: [
+    { type: 'text', text: 'state '.repeat(4000) },
+    { type: 'image', mimeType: 'image/jpeg', data: jpeg.toString('base64'), _meta: { note: 'untrusted image' } },
+  ] });
+  assert.equal(result.content[1].type, 'image');
+  assert.equal(result.details.untrusted, true);
+  assert.deepEqual(result.details, { source: 'Codex computer-use service', untrusted: true });
+  assert.throws(() => macResult({ content: [{ type: 'resource_link', uri: 'https://example.invalid', name: 'unexpected' }] }), /unsupported/);
+});
+
+test('URL approval requests are denied without displaying a prompt', async () => {
+  assert.deepEqual(await approve({ mode: 'url', message: 'Open URL', url: 'https://example.invalid', elicitationId: 'fixture' }, {
+    hasUI: true, ui: { confirm() { throw new Error('must not prompt'); } },
+  } as any, new AbortController().signal), { action: 'decline' });
+});

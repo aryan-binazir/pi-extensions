@@ -26,7 +26,7 @@ A single extension can also be loaded with
 | Subagents | `subagent`, TypeScript workflows | Isolated task contexts, bounded background execution and approved workflow replay. |
 | Worktree | `/worktree` | Create or reuse a checkout and route the current session's shell and relative file tools. |
 | Harbor MCP | MCP tools, resources, templates and prompts; `/mcp` status | TypeScript client with bounded discovery, per-server deadlines and explicit consent. [Setup and limits](extensions/mcp-client/README.md). |
-| Computer use | Desktop tools | Pi directs screenshots and input through native Linux or macOS adapters. See [desktop setup](extensions/computer-use/README.md). |
+| Computer use | Desktop tools | Pi directs native Linux desktop tools or seven app-targeted macOS tools through the official Codex computer-use service. See [desktop setup](extensions/computer-use/README.md). |
 | Fast mode | `/fast` | Toggle supported base/fast model entries while retaining provider authentication and reasoning. [Provider support](docs/adr/006-search-fast-power.md). |
 | Auto-caffeinate | Agent lifecycle | Temporarily inhibit idle sleep during work on confirmed AC power, including background tasks. |
 | Sentinel | `/auto on`, `/auto off`, `/sentinel reload` | Default-off adaptive Luna review, with user-owned standing preferences and inherited child coverage. [Setup and boundaries](extensions/sentinel/README.md). |
@@ -188,7 +188,7 @@ does not change host launchers, shell aliases, global defaults or authentication
 Workflow replay is deliberately opt-in. Declining replay stops that invocation. To rerun every stage, change the source (for example, add a revision comment), review it again, and approve the resulting fresh journal. Each synchronous worker evaluation is limited to 100 ms independently of the overall workflow timeout. A journal write failure stops subsequent journal writes in that invocation; rerun after correcting storage rather than retrying unjournaled effects.
 
 External integrations never require a nested research or desktop-planning agent.
-Desktop actions require a usable native desktop service and its OS permissions.
+Desktop actions require a usable desktop service and its OS permissions. On macOS, install the official Codex computer-use client and ChatGPT/Codex bundled cua_node runtime; grant permissions to those apps, not the terminal. Run `/reload` after setup. Approval is explicit, never an automatic always grant; only the owned client/relay is closed, never the shared Sky service. See [setup and runtime limits](extensions/computer-use/README.md).
 Linux accessibility is reported unavailable when no supported service exists.
 The Linux/macOS CI matrix checks portable behavior; it does not prove a live Mac
 desktop session or priority-service entitlement. Unknown power state leaves idle

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import computerUse from './index.ts';
 import { pngResult, LinuxDesktop } from './native.ts';
 
-test('all five tools register with sequential execution and preserve screenshot intent', () => {
+test('all five Linux tools register with sequential execution and preserve screenshot intent', { skip: process.platform === 'darwin' }, () => {
   const tools: any[] = [];
   computerUse({ on() {}, registerTool(tool: any) { tools.push(tool); } } as any);
   assert.deepEqual(tools.map(t => t.name), ['computer_screenshot', 'computer_accessibility', 'computer_click', 'computer_type', 'computer_scroll']);
@@ -23,14 +23,7 @@ test('screenshot rejects invalid output and retains PNG dimensions', () => {
   const result = pngResult(pixel, 'HEADLESS-1'); assert.equal(result.width, 1); assert.equal(result.height, 1); assert.equal(result.output, 'HEADLESS-1');
 });
 
-test('macOS Swift helper typechecks without capturing or controlling desktop', { skip: process.platform !== 'darwin' }, async () => {
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const { fileURLToPath } = await import('node:url');
-  await promisify(execFile)('/usr/bin/swiftc', ['-typecheck', fileURLToPath(new URL('./macos.swift', import.meta.url))], { timeout: 60000, maxBuffer: 1024 * 1024 });
-});
-
-test('session shutdown blocks desktop use until a new session starts', async () => {
+test('session shutdown blocks desktop use until a new session starts', { skip: process.platform === 'darwin' }, async () => {
   const handlers = new Map<string, () => Promise<void>>(); const tools: any[] = [];
   computerUse({ on(name: string, handler: any) { handlers.set(name, handler); }, registerTool(tool: any) { tools.push(tool); } } as any);
   const accessibility = tools.find(tool => tool.name === 'computer_accessibility');
@@ -39,12 +32,4 @@ test('session shutdown blocks desktop use until a new session starts', async () 
   await handlers.get('session_start')!();
   if (process.platform === 'linux') assert.equal((await accessibility.execute('new', {})).details.available, false);
   await handlers.get('session_shutdown')!();
-});
-
-test('Mac shutdown during setup cannot start a late helper', async () => {
-  const { MacDesktop } = await import('./native.ts');
-  const backend = new MacDesktop();
-  const operation = backend.run({ action: 'screenshot' }, new AbortController().signal);
-  const rejected = assert.rejects(operation, /session closed/);
-  await backend.close(); await rejected;
 });

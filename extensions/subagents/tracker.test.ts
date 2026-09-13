@@ -106,3 +106,66 @@ test('snapshots retain bounded completions and queued counts; provider errors st
   assert.equal(snapshot.running.length, 4); assert.equal(snapshot.queuedCount, 20); assert.equal(snapshot.recentCompletions.length, 4);
   assert.match(f.tracker.status, /stream failed/); assert.deepEqual(f.reports, []); f.tracker.stop();
 });
+
+test('unchanged work and usage-only churn do not call Luna or publish again', async t => {
+  const f = fixture(t);
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  for (let i = 0; i < 4; i++) {
+    if (i % 2) f.tasks[0].usage = {input: i + 2, output: i + 1, totalTokens: i + 10};
+    f.tracker.update(); t.mock.timers.tick(60000); await tick();
+  }
+  assert.equal(f.calls.length, 1); assert.deepEqual(f.reports, ['Tracking']);
+  f.tracker.stop();
+});
+
+test('output, task identity, status and error changes report at the existing cadence', async t => {
+  const f = fixture(t);
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  const changes = [
+    () => { f.tasks[0].output = 'Tests passed'; },
+    () => { f.tasks.push({...f.tasks[0], id: 'queued', status: 'queued'}); },
+    () => { f.tasks[1].id = 'replacement'; },
+    () => { f.tasks[0].status = 'failed'; f.tasks[0].error = 'Build failed'; },
+    () => { f.tasks[0].error = 'Build failed: missing file'; },
+  ];
+  for (const [i, change] of changes.entries()) {
+    change(); f.tracker.update();
+    t.mock.timers.tick(59999); await tick(); assert.equal(f.calls.length, i + 1);
+    t.mock.timers.tick(1); await tick(); assert.equal(f.calls.length, i + 2);
+  }
+  assert.equal(f.reports.length, 6); f.tracker.stop();
+});
+
+test('failed reports retry unchanged work; successful reports dedup until lifecycle reset', async t => {
+  let fail = true;
+  const f = fixture(t, async function* () {
+    if (fail) { yield {type: 'error', error: {errorMessage: 'temporary failure'}}; return; }
+    yield {type: 'text_delta', delta: 'Recovered'}; yield {type: 'done', reason: 'stop'};
+  });
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  assert.match(f.tracker.status, /temporary failure/);
+  fail = false; t.mock.timers.tick(60000); await tick();
+  assert.equal(f.calls.length, 2); assert.deepEqual(f.reports, ['Recovered']);
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 2);
+  f.setTasks([]); f.tracker.update();
+  f.setTasks(f.tasks); f.tracker.update(); t.mock.timers.tick(0); await tick();
+  assert.equal(f.calls.length, 3); assert.deepEqual(f.reports, ['Recovered', 'Recovered']);
+  f.tracker.stop();
+});
+
+test('changes during a report are not accidentally acknowledged by its success', async t => {
+  let release!: () => void;
+  const f = fixture(t, async function* () {
+    await new Promise<void>(r => { release = r; });
+    yield {type: 'text_delta', delta: 'Observed'}; yield {type: 'done', reason: 'stop'};
+  });
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  f.tasks[0].output = 'New progress while Luna was responding';
+  release(); await tick();
+  t.mock.timers.tick(60000); await tick();
+  assert.equal(f.calls.length, 2);
+  assert.match(f.calls[1][1].messages[0].content, /New progress/);
+  release(); await tick();
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 2);
+  f.tracker.stop();
+});

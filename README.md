@@ -199,7 +199,11 @@ sleep settings untouched. No live provider call is needed for the fixture tests.
 Registered subagents share one report-only `openai-codex/gpt-5.6-luna` tracker
 with medium reasoning per owning session, covering direct and workflow children.
 It starts asynchronously with work, then requests at most once per minute with a
-30-second deadline. Snapshots contain at most four running children, queued
+30-second deadline. After a successful report, unchanged task state skips both
+the model call and report; token/cost usage changes alone do not count as progress.
+Task identity, status, brief, output or error changes can trigger the next report.
+Failed requests retry at the same cadence; stopping tracking resets deduplication.
+Snapshots contain at most four running children, queued
 counts and four recent completed children, with clipped briefs/output and usage;
 no parent history is sent. Reports are capped at 2,000 characters and delivered
 as bounded JSON observations marked as untrusted model-generated data, not

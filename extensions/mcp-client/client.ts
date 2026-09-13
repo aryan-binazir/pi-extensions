@@ -20,12 +20,20 @@ export function toolName(server: string, name: string) {
 class McpPublicError extends Error {
   constructor(readonly kind: 'cancelled' | 'timeout' | 'auth_required' | 'denied' | 'failure', message: string) { super(message); }
 }
-export function publicError(error: unknown): Error {
+export function publicError(error: unknown, server?: { name: string; config: ServerConfig }): Error {
   if (error instanceof McpPublicError || error instanceof McpLimitError || error instanceof McpConfigError) return error;
   const e = error as { name?: string; code?: number; status?: number };
   if (e?.name === 'AbortError') return new McpPublicError('cancelled', 'MCP request cancelled');
   if (e?.code === -32001 || e?.name === 'TimeoutError') return new McpPublicError('timeout', 'MCP request timed out');
-  if (error instanceof UnauthorizedError || e?.name === 'UnauthorizedError' || e?.code === 401 || e?.status === 401) return new McpPublicError('auth_required', 'MCP authentication required; use /mcp-auth SERVER');
+  if (error instanceof UnauthorizedError || e?.name === 'UnauthorizedError' || e?.code === 401 || e?.status === 401) {
+    if (!server) return new McpPublicError('auth_required', 'MCP authentication required');
+    // Only embed command-safe names verbatim; never render terminal controls.
+    const argument = /^[a-zA-Z0-9_.-]+$/.test(server.name) ? ` ${server.name}` : ' with the configured server name (use Tab completion)';
+    const message = server.config.oauth
+      ? `Sign-in required for this session; run /mcp-auth${argument} in Pi. OAuth sign-in is not saved across sessions or reloads.`
+      : `Authentication required; check this server's configured credentials, then run /mcp-connect${argument} in Pi.`;
+    return new McpPublicError('auth_required', message);
+  }
   if (e?.code === 403 || e?.status === 403) return new McpPublicError('denied', 'MCP authorization denied (403)');
   return new McpPublicError('failure', 'MCP request failed; server unavailable, invalid response, or protocol error');
 }
@@ -115,7 +123,7 @@ export class McpConnection {
       this.currentStatus = { state: 'ready', toolCount: tools.length };
       return tools;
     } catch (error) {
-      const safe = publicError(error);
+      const safe = publicError(error, this);
       if (!this.lifetime.signal.aborted) this.currentStatus = { state: safe instanceof McpPublicError && safe.kind === 'auth_required' ? 'auth_required' : 'failed', toolCount: 0, error: safe.message };
       throw safe;
     }
@@ -206,7 +214,7 @@ export class McpConnection {
         finally { this.authRequestSignal = undefined; signal.removeEventListener('abort', onAbort); }
       });
       return await this.connectCurrent();
-    } catch (error) { throw publicError(error); }
+    } catch (error) { throw publicError(error, this); }
     finally { this.lifetime.signal.removeEventListener('abort', abort); await this.oauth.close(); }
   }
 
@@ -222,7 +230,7 @@ export class McpConnection {
         if (!client) throw new Error('MCP server is disconnected');
         return fn(client, s);
       });
-    } catch (error) { throw signal?.aborted ? new Error('MCP request cancelled') : (client && this.responseErrors.get(client)) ?? publicError(error); }
+    } catch (error) { throw signal?.aborted ? new Error('MCP request cancelled') : (client && this.responseErrors.get(client)) ?? publicError(error, this); }
   }
 
   private async listTools(client: Client, signal: AbortSignal, timeout = requestTimeout(this.config)): Promise<Tool[]> {

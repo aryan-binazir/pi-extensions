@@ -78,7 +78,7 @@ test('closed OAuth listener rejects interactive reauthorization but retains refr
     assert.equal(oauth.clientMetadata.client_name, 'Harbor MCP');
     await oauth.close();
     for (const action of [() => oauth.redirectToAuthorization(new URL('https://auth.example/authorize')), () => oauth.saveCodeVerifier('new-verifier')]) {
-      assert.throws(action, error => { assert.match(publicError(error).message, /authentication required; use \/mcp-auth/); return true; });
+      assert.throws(action, error => { assert.match(publicError(error, { name: 'oauth', config: { url: 'https://mcp.example/mcp', oauth: {} } }).message, /sign-in required for this session; run \/mcp-auth oauth/i); return true; });
     }
     assert.equal(shown, 0);
     assert.equal(oauth.tokens()?.refresh_token, 'synthetic-refresh');

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import mcp from './index.ts';
 import { McpConnection, toolName, type ServerConfig } from './client.ts';
@@ -78,6 +79,37 @@ test('non-OAuth auth command leaves a healthy inventory untouched', async () => 
     assert.ok(h.active().includes(name));
     assert.match((await old.execute('still-valid', { text: 'still-valid' }, undefined, undefined, h.ctx)).content[0].text, /still-valid/);
   } finally { await h.close(); await fixture.close(); }
+});
+
+for (const oauth of [true, false]) test(`authentication warnings give usable recovery instructions (OAuth=${oauth})`, async () => {
+  const server = createServer((_req, res) => { res.writeHead(401); res.end('SECRET_DO_NOT_DISPLAY'); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`;
+  const h = await harness({ linear: { url, consent: 'allow', ...(oauth ? { oauth: {} } : { headers: { Authorization: 'Bearer SECRET' } }) } });
+  try {
+    await h.start();
+    const warning = h.notifications.find(message => message.startsWith('MCP linear:'))!;
+    assert.ok(warning);
+    if (oauth) {
+      assert.match(warning, /sign-in required for this session/i);
+      assert.match(warning, /\/mcp-auth linear/);
+      assert.match(warning, /not saved across sessions or reloads/);
+    } else {
+      assert.match(warning, /configured credentials/);
+      assert.match(warning, /\/mcp-connect linear/);
+      assert.doesNotMatch(warning, /mcp-auth/);
+    }
+    assert.doesNotMatch(warning, /SERVER|SECRET/);
+    const status = (await h.status()).find((entry: any) => entry.server === 'linear');
+    assert.equal(status.state, 'auth_required');
+    assert.equal(warning, `MCP linear: ${status.error}`);
+    await h.commands.get('mcp-connect').handler('linear', h.ctx);
+    assert.equal(h.notifications.at(-1), status.error);
+  } finally {
+    await h.close();
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });
 
 test('config errors identify their source and preserve safe validation reasons', async () => {

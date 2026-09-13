@@ -71,10 +71,22 @@ for (const [transport,jsonResponse] of [['http',false],['http',true],['sse',fals
  } finally {await connection.close();await fixture.close();}
 });
 
-test('SDK UnauthorizedError retains the actionable OAuth instruction',async()=>{
+test('authentication errors give contextual recovery instructions without leaking raw errors',async()=>{
  const {UnauthorizedError}=await import('@modelcontextprotocol/sdk/client/auth.js');
  const {publicError}=await import('./client.ts');
- assert.match(publicError(new UnauthorizedError()).message,/mcp-auth/);
+ const server={name:'linear',config:{url:'https://mcp.example/mcp',oauth:{}}};
+ for(const error of [new UnauthorizedError('SECRET'),{name:'UnauthorizedError'},{code:401},{status:401}]){
+  const safe=publicError(error,server);
+  assert.match(safe.message,/\/mcp-auth linear/);
+  assert.doesNotMatch(safe.message,/SERVER|SECRET/);
+  assert.equal(publicError(safe,server),safe);
+ }
+ assert.equal(publicError(new UnauthorizedError()).message,'MCP authentication required');
+ for(const name of ['two words','hidden\x1b[8m','line\nbreak']){
+  const message=publicError(new UnauthorizedError(),{...server,name}).message;
+  assert.match(message,/Tab completion/);
+  assert.doesNotMatch(message,/[\x00-\x1f\x7f-\x9f]/);
+ }
 });
 
 test('explicit reconnect replaces an exited stdio server without replaying its pending action',async()=>{

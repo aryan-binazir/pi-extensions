@@ -18,7 +18,7 @@ test('workflow registration requires exact source approval and protects sensitiv
  const previousAgentDir=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent-home');
  const tools=new Map<string,any>();const events=new Map<string,any>();
  subagents({events:{emit(){}},getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler)} as unknown as ExtensionAPI);
- const ctx={cwd,hasUI:false,mode:'tui',sessionManager:{getSessionId:()=> 'workflow-extension-test'},ui:{editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
+ const ctx={cwd,hasUI:false,mode:'tui',sessionManager:{getSessionId:()=> 'workflow-extension-test'},ui:{setStatus(){},editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
  try {
   await assert.rejects(tools.get('workflow').execute('id',{source:'return 1;'},undefined,undefined,ctx),/approval/);
   ctx.hasUI=true;
@@ -91,6 +91,7 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
       editor: async (_title: string, source: string) => source,
       confirm: async (title: string) => { approvals.push(title); return title.includes('child extensions') ? allowExtensions : true; },
       setWidget: () => {},
+      setStatus: () => {},
     },
   };
   try {
@@ -168,7 +169,7 @@ test('standalone registered subagents and workflows inherit active builtins and 
   const tools = new Map<string, any>(), events = new Map<string, any>();
   let active = ['read', 'subagent', 'workflow'];
   const ctx = {cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', hasUI: true, sessionManager: {getSessionId: () => 'standalone-only'}, ui: {
-    editor: async (_title: string, source: string) => source, confirm: async () => true, setWidget: () => {},
+    editor: async (_title: string, source: string) => source, confirm: async () => true, setWidget: () => {}, setStatus: () => {},
   }};
   subagents({events: {emit() {}}, getActiveTools: () => active, registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);
   const direct = (params: any) => tools.get('subagent').execute('call', params, undefined, undefined, ctx);

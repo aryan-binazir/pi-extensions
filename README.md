@@ -205,9 +205,10 @@ Task identity, status, brief, output or error changes can trigger the next repor
 Failed requests retry at the same cadence; stopping tracking resets deduplication.
 Snapshots contain at most four running children, queued
 counts and four recent completed children, with clipped briefs/output and usage;
-no parent history is sent. Reports are capped at 2,000 characters and delivered
-as bounded JSON observations marked as untrusted model-generated data, not
-instructions or authority, on the next turn without waking the parent.
+no parent history is sent. Reports are capped at 2,000 characters; a sanitized
+160-character preview replaces one footer status slot. Reports never enter chat
+history or model context and never wake the parent. The slot clears when work
+finishes, on cancel-all, or on shutdown.
 `subagent_status` also exposes tracker
 status/errors while preserving task details. Missing model/auth never selects a
 fallback. The tracker has no tools or execution authority; deterministic task

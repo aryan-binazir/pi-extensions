@@ -14,7 +14,7 @@ async function fixture(run:(host:any)=>Promise<void>){
  try{
   await writeFile(join(cwd,'pi'),`#!${process.execPath}\nconst task=process.argv.at(-1);if(task==='hold'){setInterval(()=>{},1000);}else if(task==='fail'){process.exit(2);}else{console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'fixture result'}]}}));}`);
   await chmod(join(cwd,'pi'),0o700);process.env.PATH=cwd+':'+priorPath;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent');
-  const ctx={cwd,model:{provider:'test',id:'fixture'},thinkingLevel:'off',hasUI:true,mode:'tui',sessionManager:{getSessionId:()=>sessionId},ui:{setWidget(){},editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
+  const ctx={cwd,model:{provider:'test',id:'fixture'},thinkingLevel:'off',hasUI:true,mode:'tui',sessionManager:{getSessionId:()=>sessionId},ui:{setStatus(){},setWidget(){},editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
   subagents({getActiveTools:()=>['read','write','edit','bash','grep','find','ls'],registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand(){},on:(name:string,fn:any)=>hooks.set(name,fn),sendMessage(){},events:{emit:(name:string,value:any)=>{if(name==='pi-interactive:background-activity')activity.push(value);}}} as any);
   await hooks.get('session_start')({},ctx);
   const execute=(name:string,args:any)=>tools.get(name).execute('fixture',args,undefined,undefined,ctx);

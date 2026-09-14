@@ -9,7 +9,7 @@ import {runWorkflow} from '../extensions/subagents/workflow.ts';
 const cwd = await mkdtemp(join(tmpdir(), 'fifo-regression-'));
 process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent');
 const tools = new Map<string, any>(), events = new Map<string, any>();
-const ctx = {cwd, hasUI: true, sessionManager:{getSessionId:()=> 'fifo-only'}, ui:{editor:async (_:string,s:string)=>s,confirm:async()=>true}};
+const ctx = {cwd, hasUI: true, sessionManager:{getSessionId:()=> 'fifo-only'}, ui:{setStatus(){},editor:async (_:string,s:string)=>s,confirm:async()=>true}};
 subagents({getActiveTools:()=>['read','workflow'],registerTool:(t:any)=>tools.set(t.name,t),registerCommand:()=>{},on:(n:string,h:any)=>events.set(n,h)} as any);
 const execute = (source:string, timeout=1000) => tools.get('workflow').execute('fifo',{source,timeout},undefined,undefined,ctx);
 try {

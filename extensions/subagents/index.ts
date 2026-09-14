@@ -45,16 +45,22 @@ export default function subagents(pi: ExtensionAPI): void {
     catch (error) { registry.notificationFailed(pending.map(task => task.id), error); }
   };
   const parent = () => ({ cwd: getActiveCwd(context?.cwd ?? process.cwd(), context?.sessionManager.getSessionId()), tools: pi.getActiveTools() });
+  const renderActiveAgents = () => {
+    if (!context?.hasUI) return;
+    const active = shuttingDown ? [] : registry.list().filter(task => ['queued', 'running'].includes(task.status));
+    context.ui.setWidget('interactive-tools:subagents', active.length ? [
+      `Subagents · ${active.length} active`,
+      ...active.map(task => `${task.id.slice(0, 8)} · ${task.status} · ${task.task.replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 100)}`),
+    ] : undefined);
+  };
   const createRegistry = () => new SubagentRegistry({
     allowedTools: () => delegationScope(parent()).tools,
     authorize: async task => { await assertChildTask(task, { parent: parent(), approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request) : undefined }); },
     invocation: task => piInvocation(task, context ? childGuard(context.cwd, context.sessionManager.getSessionId()) : undefined),
-    onUpdate: task => {
-      if (context?.hasUI) context.ui.setWidget(`subagent:${task.id}`, [`${task.id.slice(0, 8)} · ${task.status} · ${task.usage.input} in / ${task.usage.output} out`, task.output.slice(-2000)]);
-    },
+    onUpdate: renderActiveAgents,
     onComplete: task => {
+      renderActiveAgents();
       if (context?.hasUI) {
-        context.ui.setWidget(`subagent:${task.id}`, undefined);
         if (!registry.list().some(task => ['running', 'queued'].includes(task.status))) context.ui.setStatus('subagent-tracker', undefined);
       }
       if (shuttingDown || cancellingAll || task.owner !== 'parent') return;
@@ -71,12 +77,14 @@ export default function subagents(pi: ExtensionAPI): void {
   });
   const trackedSpawn = async (task: TaskSpec, signal?: AbortSignal, owner: 'parent' | 'workflow' = 'parent') => {
     const handle = await registry.spawn(task, signal, owner);
+    renderActiveAgents();
     if (!shuttingDown && !cancellingAll) tracker.update();
     const invalidate = () => { if (!shuttingDown && !cancellingAll) tracker.invalidate(); };
     signal?.addEventListener('abort', invalidate, {once: true});
     if (signal?.aborted) invalidate();
     void handle.done.then(task => {
       signal?.removeEventListener('abort', invalidate);
+      renderActiveAgents();
       if (!shuttingDown && !cancellingAll) {
         if (task.status === 'cancelled') tracker.invalidate(); else tracker.update();
       }
@@ -100,6 +108,7 @@ export default function subagents(pi: ExtensionAPI): void {
   });
   const stopAll = async () => {
     shuttingDown = true;
+    renderActiveAgents();
     tracker.stop();
     if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
     clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0; noticeTriggersTurn = false;

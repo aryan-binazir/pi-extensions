@@ -9,9 +9,11 @@ async function fixture(run: (host: any) => Promise<void>) {
   const cwd = await mkdtemp(join(tmpdir(), 'subagent-integration-'));
   const oldPath = process.env.PATH, oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   const tools = new Map<string, any>(), hooks = new Map<string, any>(), notifications: any[] = [];
+  const widgets = new Map<string, string[]>();
+  const setWidget = (key: string, value?: string[]) => { if (value === undefined) widgets.delete(key); else widgets.set(key, value); };
   const statuses = new Map<string, string>();
   const setStatus = (key: string, value?: string) => { if (value === undefined) statuses.delete(key); else statuses.set(key, value); };
-  const ctx = {cwd, hasUI: true, model: {provider: 'test', id: 'selected'}, thinkingLevel: 'low', sessionManager: {getSessionId: () => cwd}, ui: {setStatus, setWidget() {}, editor: async (_title: string, source: string) => source, confirm: async () => true}};
+  const ctx = {cwd, hasUI: true, model: {provider: 'test', id: 'selected'}, thinkingLevel: 'low', sessionManager: {getSessionId: () => cwd}, ui: {setStatus, setWidget, editor: async (_title: string, source: string) => source, confirm: async () => true}};
   try {
     await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nif(process.argv.at(-1)==='large')console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'界'.repeat(50000)}]}}));else if(process.argv.at(-1)==='batch'){console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'ready'}}));const timer=setInterval(()=>{if(require('node:fs').existsSync('release')){clearInterval(timer);console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}));}},5);}else if(process.argv.at(-1)==='hold')setInterval(()=>{},1000);else if(process.argv.at(-1)==='loop'){for(let i=0;i<4;i++){console.log(JSON.stringify({type:'tool_execution_start',toolCallId:String(i),toolName:'bash',args:{command:'missing'}}));console.log(JSON.stringify({type:'tool_execution_end',toolCallId:String(i),toolName:'bash',result:{content:[{type:'text',text:'not found'}],details:{}},isError:true}));}setInterval(()=>{},1000);}else console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify(process.argv.slice(2))}]}}));`);
     await chmod(join(cwd, 'pi'), 0o700);
@@ -28,7 +30,7 @@ async function fixture(run: (host: any) => Promise<void>) {
       }
       throw new Error('Child did not settle');
     };
-    await run({execute, settle, notifications, ctx, hooks, cwd, statuses});
+    await run({execute, settle, notifications, ctx, hooks, cwd, statuses, widgets});
   } finally {
     await hooks.get('session_shutdown')?.();
     if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
@@ -44,6 +46,26 @@ test('batch re-clipping marks omitted output even when each original notice fitt
   const batch = notifications.find((notice: any) => notice.type === 'subagent-complete' && notice.task.tasks);
   assert.equal(batch?.task.tasks.length, 2);
   assert.ok(batch.task.tasks.every((task: any) => task.outputTruncated && task.output.length < task.outputLength));
+}));
+
+test('one active panel shows silent running and queued children, promotes rows, then vanishes', async () => fixture(async ({execute, widgets, hooks}: any) => {
+  const first = await execute('subagent', {task: 'hold', preset: 'writer'});
+  const second = await execute('subagent', {task: 'hold', preset: 'writer'});
+  const key = 'interactive-tools:subagents';
+  assert.equal(widgets.size, 1);
+  assert.equal(widgets.get(key)?.length, 3);
+  assert.match(widgets.get(key)[1], new RegExp(`${first.details.id.slice(0, 8)}.*running.*hold`));
+  assert.match(widgets.get(key)[2], new RegExp(`${second.details.id.slice(0, 8)}.*queued.*hold`));
+  await execute('subagent_cancel', {id: first.details.id});
+  assert.equal(widgets.get(key)?.length, 2);
+  assert.match(widgets.get(key)[1], new RegExp(`${second.details.id.slice(0, 8)}.*running`));
+  assert.ok(!widgets.get(key).join(' ').includes(first.details.id.slice(0, 8)));
+  await execute('subagent_cancel', {id: second.details.id});
+  assert.equal(widgets.size, 0);
+  await execute('subagent', {task: 'hold', preset: 'reader'});
+  assert.equal(widgets.size, 1);
+  await hooks.get('session_shutdown')();
+  assert.equal(widgets.size, 0);
 }));
 
 test('fast-mode aliases resolve to the base model for direct and workflow children', async () => fixture(async ({execute, ctx, settle}: any) => {
@@ -169,7 +191,7 @@ test('registered delegation remains attached to its owning abort signal after re
 }));
 
 
-test('registered direct and workflow children share native monitoring without recursive delegation or paid wakeups', async () => fixture(async ({execute, ctx, notifications, statuses, cwd, settle}: any) => {
+test('registered direct and workflow children share native monitoring without recursive delegation or paid wakeups', async () => fixture(async ({execute, ctx, notifications, statuses, cwd, settle, widgets}: any) => {
   const calls: any[] = [];
   ctx.modelRegistry = {
     find: (provider: string, id: string) => { assert.equal(provider, 'openai-codex'); assert.equal(id, 'gpt-5.6-luna'); return {provider, id, maxTokens: 128000}; },
@@ -181,6 +203,7 @@ test('registered direct and workflow children share native monitoring without re
   const end = Date.now() + 4000;
   while (!calls.length && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(calls.length, 1); assert.match(calls[0][1].messages[0].content, /workflow/);
+  assert.equal(widgets.get('interactive-tools:subagents')?.length, 2, 'workflow child appears in shared panel');
   await execute('subagent', {task: 'hold', preset: 'reader'});
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(calls.length, 1);
@@ -200,6 +223,7 @@ test('registered direct and workflow children share native monitoring without re
   await writeFile(join(cwd, 'release'), 'go');
   await settle(last.details.id);
   assert.equal(statuses.has('subagent-tracker'), false, 'natural completion clears the footer');
+  assert.equal(widgets.size, 0, 'natural completion removes the empty active panel');
 }));
 
 test('missing model registry surfaces tracker failure in status while children remain usable', async () => fixture(async ({execute}: any) => {

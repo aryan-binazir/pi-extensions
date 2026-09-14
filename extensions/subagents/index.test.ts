@@ -18,7 +18,7 @@ test('workflow registration requires exact source approval and protects sensitiv
  const previousAgentDir=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent-home');
  const tools=new Map<string,any>();const events=new Map<string,any>();
  subagents({events:{emit(){}},getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler)} as unknown as ExtensionAPI);
- const ctx={cwd,hasUI:false,mode:'tui',sessionManager:{getSessionId:()=> 'workflow-extension-test'},ui:{setStatus(){},editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
+ const ctx={cwd,hasUI:false,mode:'tui',sessionManager:{getSessionId:()=> 'workflow-extension-test'},ui:{setWidget(){},setStatus(){},editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
  try {
   await assert.rejects(tools.get('workflow').execute('id',{source:'return 1;'},undefined,undefined,ctx),/approval/);
   ctx.hasUI=true;

@@ -64,8 +64,12 @@ The stash is memory-only and clears on session start, switch and reload. Vi mode
 The `subagent` tool starts a background Pi process with an explicit task brief,
 a `reader` or `writer` preset, optional tools/model/extensions/cwd, and a bounded
 timeout. Default and preset tools are limited to the parent's active permissions;
-explicit tool requests outside those permissions are rejected. It returns a task ID. Output and usage stream to the UI, and completion
-is pushed into the parent conversation. `subagent_status` inspects the registry;
+explicit tool requests outside those permissions are rejected. It returns a task ID.
+One shared panel above the editor lists queued and running children (including
+workflow children), with a short ID, status, and task brief. Silent children appear
+immediately; rows disappear on completion or cancellation, and the panel vanishes
+when empty. Completion is pushed into the parent conversation; output and usage
+remain available through `subagent_status`, which inspects the registry;
 `subagent_cancel` or `/subagents cancel ID` cancels a task. Same-directory writers
 queue behind one another. Timeouts, cancellation and session shutdown terminate
 process groups, including descendants in those groups. Separate groups/sessions,

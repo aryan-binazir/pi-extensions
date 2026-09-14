@@ -103,7 +103,7 @@ export class SubagentRegistry {
   private admissions = new AbortController();
   private readonly limit: number;
   constructor(private options: RegistryOptions = {}) {
-    this.limit = options.concurrency ?? 4;
+    this.limit = options.concurrency ?? 8;
     if (!Number.isInteger(this.limit) || this.limit < 1 || this.limit > 16) throw new Error('Concurrency must be 1–16');
   }
   async spawn(spec: TaskSpec, signal?: AbortSignal, owner: TaskResult['owner'] = 'parent'): Promise<TaskHandle> {

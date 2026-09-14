@@ -39,6 +39,20 @@ test('failure, timeout, cancellation and session shutdown settle real subprocess
   } finally {await registry.shutdown();}
 });
 
+test('default concurrency runs eight readers and queues the ninth until a slot opens', async () => {
+  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)']})});
+  try {
+    const tasks = [];
+    for (let i = 0; i < 9; i++) tasks.push(await registry.spawn({task: `reader ${i}`, cwd: tmpdir(), preset: 'reader'}));
+    assert.equal(registry.list().filter(task => task.status === 'running').length, 8);
+    assert.equal(registry.get(tasks[8].id)?.status, 'queued');
+    registry.cancel(tasks[0].id);
+    await tasks[0].done;
+    assert.equal(registry.get(tasks[8].id)?.status, 'running');
+    assert.equal(registry.list().filter(task => task.status === 'running').length, 8);
+  } finally { await registry.shutdown(); }
+});
+
 test('writers using a directory symlink serialize while unrelated readers can run', async () => {
   const cwd = await mkdtemp(join(tmpdir(),'writers-'));
   await symlink(cwd,join(cwd,'alias'));

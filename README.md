@@ -70,8 +70,8 @@ workflow children), with a short ID, status, and task brief. Silent children app
 immediately; rows disappear on completion or cancellation, and the panel vanishes
 when empty. Completion is pushed into the parent conversation; output and usage
 remain available through `subagent_status`, which inspects the registry;
-`subagent_cancel` or `/subagents cancel ID` cancels a task. Same-directory writers
-queue behind one another. Timeouts, cancellation and session shutdown terminate
+`subagent_cancel` or `/subagents cancel ID` cancels a task. Up to eight children
+run concurrently by default; same-directory writers still queue behind one another. Timeouts, cancellation and session shutdown terminate
 process groups, including descendants in those groups. Separate groups/sessions,
 including stock Pi's detached bash jobs, depend on Pi's own graceful cleanup;
 if Pi is wedged or killed first, those jobs can escape portable group cleanup.

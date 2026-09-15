@@ -188,7 +188,7 @@ Create `~/.pi/agent/pi-auto-permissions/config.json` (or under your
   "reviewer": {
     "provider": "openai-codex",
     "model": "gpt-5.6-luna",
-    "reasoningEffort": "medium",
+    "reasoningEffort": "low",
     "timeoutMs": 60000,
     "prefilter": false
   },
@@ -207,7 +207,7 @@ belongs to Sentinel). Authenticate to `openai-codex` with `/login` and ensure
 `gpt-5.6-luna` is available. The main agent can use a different model.
 
 Every Bash command is subject to the plugin's rules and, absent a hard deny or
-explicit bypass/standing approval, Luna review at medium reasoning. The optional
+explicit bypass/standing approval, Luna review at low reasoning. The optional
 single-token prefilter is disabled because it uses minimal reasoning regardless of
 the full review setting. Full-shell review costs more than reviewing only commands
 matched by the default rules. High-risk or uncertain actions may still require

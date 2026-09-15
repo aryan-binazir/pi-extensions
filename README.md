@@ -219,8 +219,14 @@ Its internal adapter is tested against **0.16.2**; unsupported versions show
 or enables an absent guard, edits policy, or makes model calls.
 
 The indicator refreshes once per second, including while idle and after settings
-menu changes, and clears its timer/status on reload or shutdown. It uses a normal
-footer status slot without replacing your footer. Headless sessions do no work.
+menu changes, and clears its timer/status on reload or shutdown. In the TUI it
+installs a compact custom footer: Auto is right-aligned on the directory/branch
+row, with token/cache/cost/context usage and the main model below. Long paths are
+truncated instead of adding a row. Other extensions' statuses retain their own
+row. It restores the default footer on shutdown; do not combine it with another
+custom-footer extension (Pi has one footer slot). The compact footer does not
+show Pi's auto-compaction or experimental-mode badges. RPC keeps the normal status
+API; headless sessions do no work.
 Rules-only mode, an empty ruleset, and an enabled minimal-reasoning prefilter are
 identified separately. This is **loaded-plugin/config status**, not a guarantee
 that credentials, provider requests, or every command's review will succeed; it

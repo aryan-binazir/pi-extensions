@@ -1,9 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { findConfigLoader, statusText, type ConfigLoader } from './adapter.ts';
 
-const KEY = 'auto-permissions-status';
+import { permissionFooter, STATUS_KEY as KEY } from './footer.ts';
 
-/** Display only: never changes permission policy, tools, prompts or the footer. */
+/** Display only: never changes permission policy, tools or prompts. */
 export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -11,6 +11,7 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   let unavailable = 'Auto: unavailable';
   let previous: string | undefined;
   let generation = 0;
+  let ownsFooter = false;
 
   const refresh = () => {
     if (!context?.hasUI) return;
@@ -29,6 +30,8 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
     if (timer) clearInterval(timer);
     timer = undefined;
     if (context?.hasUI) context.ui.setStatus(KEY, undefined);
+    if (ownsFooter) context?.ui.setFooter(undefined);
+    ownsFooter = false;
     context = undefined; loader = undefined; previous = undefined;
   };
 
@@ -36,6 +39,10 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
     stop();
     if (!ctx.hasUI) return;
     context = ctx;
+    if (ctx.mode === 'tui') {
+      ctx.ui.setFooter((tui, theme, data) => permissionFooter(() => context ?? ctx, theme, data, () => tui.requestRender()));
+      ownsFooter = true;
+    }
     unavailable = 'Auto: unavailable';
     const version = generation;
     refresh();

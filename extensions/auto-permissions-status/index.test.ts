@@ -135,6 +135,22 @@ test('real Pi loader discovers command provenance and dynamically loads the opti
   } finally { await stop?.(); session?.dispose(); await f.close(); }
 });
 
+test('TUI installs and restores the compact footer; RPC retains its status API', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const h = harness();
+  const footers: unknown[] = [];
+  const ctx = { ...h.ctx, mode: 'tui' as const, ui: { ...h.ctx.ui, setFooter: (factory: unknown) => { footers.push(factory); } } };
+  await h.emit('session_start', ctx);
+  assert.equal(typeof footers[0], 'function');
+  assert.equal(h.statuses.at(-1), 'Auto: unavailable');
+  await h.emit('session_shutdown', ctx);
+  assert.equal(footers.at(-1), undefined);
+  const count = footers.length;
+  await h.emit('session_start', { ...ctx, mode: 'rpc' });
+  assert.equal(footers.length, count, 'RPC must not install a TUI footer');
+  await h.emit('session_shutdown');
+});
+
 test('shutdown during async discovery prevents late status and timers', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const f = await fixture(); const h = harness(commands(f.root));

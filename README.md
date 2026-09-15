@@ -1,6 +1,6 @@
 # Pi interactive tools
 
-Fourteen independently selectable extensions for Pi 0.85.1. Install from this
+Fifteen independently selectable extensions for Pi 0.85.1. Install from this
 private Git repository using your existing GitHub SSH access:
 
 ```sh
@@ -31,6 +31,7 @@ A single extension can also be loaded with
 | Computer use | Desktop tools | Pi directs native Linux desktop tools or seven app-targeted macOS tools through the official Codex computer-use service. See [desktop setup](extensions/computer-use/README.md). |
 | Fast mode | `/fast` | Toggle supported base/fast model entries while retaining provider authentication and reasoning. [Provider support](docs/adr/006-search-fast-power.md). |
 | Auto-caffeinate | Agent lifecycle | Temporarily inhibit idle sleep during work on confirmed AC power, including background tasks. |
+| Auto Permissions status | Persistent footer | Display-only companion to Hank Warren's plugin: on/off, reviewer and effort, or unavailable/config error. |
 | Sentinel | `/auto on`, `/auto off`, `/sentinel reload` | Default-off adaptive Luna review, with user-owned standing preferences and inherited child coverage. [Setup and boundaries](extensions/sentinel/README.md). |
 
 ## Memory and sessions
@@ -201,7 +202,30 @@ Create `~/.pi/agent/pi-auto-permissions/config.json` (or under your
 }
 ```
 
+Enable this repository's **`auto-permissions-status`** extension with `pi config`
+for a persistent footer indicator. For a local checkout, add its absolute path to
+`extensions` in `~/.pi/agent/settings.json`:
+
+```json
+"/absolute/path/to/pi-extensions/extensions/auto-permissions-status/index.ts"
+```
+
 Run `/reload` or restart Pi, then use `/auto-permissions` to inspect settings.
+The companion shows **`Auto: on · Luna low`**, **`Auto: off`**, or
+**`Auto: unavailable`** when Hank's settings command is not loaded. It uses the
+loaded package's own config validator; invalid settings show **`Auto: config error`**.
+Its internal adapter is tested against **0.16.2**; unsupported versions show
+**`Auto: unavailable (adapter)`** until the adapter is updated. It never imports
+or enables an absent guard, edits policy, or makes model calls.
+
+The indicator refreshes once per second, including while idle and after settings
+menu changes, and clears its timer/status on reload or shutdown. It uses a normal
+footer status slot without replacing your footer. Headless sessions do no work.
+Rules-only mode, an empty ruleset, and an enabled minimal-reasoning prefilter are
+identified separately. This is **loaded-plugin/config status**, not a guarantee
+that credentials, provider requests, or every command's review will succeed; it
+does not inspect per-command bypasses or standing approvals.
+
 Review is enabled by default across sessions; no `/auto on` is needed (that command
 belongs to Sentinel). Authenticate to `openai-codex` with `/login` and ensure
 `gpt-5.6-luna` is available. The main agent can use a different model.

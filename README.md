@@ -162,7 +162,71 @@ When Sentinel is enabled, children additionally inherit its classifier, blocking
 reviewer, user policy, and root authorization. Without Sentinel, only launch-time
 checks apply. Neither mode sandboxes child tools or trusted extension JavaScript.
 
-## Sentinel preferences
+## Automatic Bash permissions (external package)
+
+This setup uses [Hank Warren's Auto Permissions](https://www.npmjs.com/package/@hank-warren/pi-auto-permissions),
+installed separately from this repository. Install the pinned version globally:
+
+```sh
+pi install npm:@hank-warren/pi-auto-permissions@0.16.2
+```
+
+Pi adds `"npm:@hank-warren/pi-auto-permissions@0.16.2"` to the `packages` array in
+`~/.pi/agent/settings.json`, preserving existing extensions. Do not also load the
+upstream `@ogulcancelik/pi-auto-permissions` package or enable Sentinel: overlapping
+guards can cause duplicate reviews. When installing this repository as a package,
+use `pi config` to deselect Sentinel.
+
+Create `~/.pi/agent/pi-auto-permissions/config.json` (or under your
+`PI_CODING_AGENT_DIR`):
+
+```json
+{
+  "enabled": true,
+  "reviewAllShell": true,
+  "rules": ["$defaults"],
+  "reviewer": {
+    "provider": "openai-codex",
+    "model": "gpt-5.6-luna",
+    "reasoningEffort": "medium",
+    "timeoutMs": 60000,
+    "prefilter": false
+  },
+  "guardianPolicy": {
+    "environment": [],
+    "allow": [],
+    "softDeny": [],
+    "hardDeny": []
+  }
+}
+```
+
+Run `/reload` or restart Pi, then use `/auto-permissions` to inspect settings.
+Review is enabled by default across sessions; no `/auto on` is needed (that command
+belongs to Sentinel). Authenticate to `openai-codex` with `/login` and ensure
+`gpt-5.6-luna` is available. The main agent can use a different model.
+
+Every Bash command is subject to the plugin's rules and, absent a hard deny or
+explicit bypass/standing approval, Luna review at medium reasoning. The optional
+single-token prefilter is disabled because it uses minimal reasoning regardless of
+the full review setting. Full-shell review costs more than reviewing only commands
+matched by the default rules. High-risk or uncertain actions may still require
+human confirmation; enabled does not mean approve everything.
+
+Put your natural-language preferences in `guardianPolicy`: trusted infrastructure
+in `environment`, scoped exceptions in `allow`, restrictions requiring explicit
+authorization in `softDeny`, and unconditional restrictions in `hardDeny`. These
+preferences supplement the built-in policy; they do not override deterministic
+hard-deny rules. No custom permissions are granted by the empty lists above.
+
+**Coverage is Bash only, not an OS sandbox.** Edits, writes, MCP and desktop tools
+are not gated. This repository's isolated subagents do not automatically inherit
+this external plugin; do not assume child coverage. Existing trusted-group or
+standing-approval configuration can bypass review. Usage and denial logs live next
+to the config by default. The pinned package does not update automatically; review
+new versions before explicitly upgrading.
+
+## Sentinel preferences (optional alternative)
 
 Auto review is **off by default for new chats**. Use `/auto on` to review your
 preferences and enable it for the current session, or `/auto off` to disable it.

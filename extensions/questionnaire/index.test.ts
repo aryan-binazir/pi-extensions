@@ -493,3 +493,41 @@ test("compact navigation and overflow notice leave the question text visible", a
     await running;
   }
 });
+
+test("frames depend only on state, not on earlier widths or selections", async () => {
+  const widths = [30, 80, 47];
+  const questions = [
+    {
+      id: "long",
+      label: "Long",
+      prompt: "Choose an option ".repeat(20),
+      allowOther: true,
+      options: Array.from({ length: 20 }, (_, i) => ({
+        value: String(i),
+        label: `Option-${i} ${"detail ".repeat(i % 4)}`,
+        description: i % 2 ? `Because ${"reason ".repeat(i)}` : undefined,
+      })),
+    },
+    question("second"),
+  ];
+  // One component sees every width; each reference component only ever sees one,
+  // so any layout reused across widths or selections shows up as a mismatch.
+  const mixed = host();
+  const references = widths.map(() => host());
+  const running = [mixed, ...references].map((h) => h.run(structuredClone(questions)));
+  try {
+    for (let step = 0; step < 24; step++) {
+      widths.forEach((width, index) => {
+        const frame = mixed.render(width);
+        assert.deepEqual(frame, references[index].render(width), `width ${width} drifted at step ${step}`);
+        assert.deepEqual(frame, mixed.render(width), `repeat render differed at step ${step}`);
+        assert.ok(frame.every((row: string) => visibleWidth(row) <= width), `overflow at width ${width}`);
+      });
+      const key = step < 20 ? "\x1b[B" : "\x1b[A";
+      for (const h of [mixed, ...references]) h.key(key);
+    }
+  } finally {
+    for (const h of [mixed, ...references]) h.key("\x1b");
+    await Promise.all(running);
+  }
+});

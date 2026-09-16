@@ -27,6 +27,22 @@ const parameters = Type.Object({
     { minItems: 1, maxItems: 12 },
   ),
 });
+const CONTROL_CHARS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+const clean = (text: string) =>
+  stripTerminalSequences(text).replace(CONTROL_CHARS, "");
+/** Rendered-text caches are keyed by fully styled strings, so a theme or width
+ * change produces new keys rather than stale frames. Bounded so a questionnaire
+ * walked across many tabs cannot retain more than a few screens of text. */
+const CACHE_LIMIT = 64;
+const memo = <T>(cache: Map<string, T>, key: string, build: () => T): T => {
+  const hit = cache.get(key);
+  if (hit !== undefined) return hit;
+  if (cache.size >= CACHE_LIMIT) cache.clear();
+  const value = build();
+  cache.set(key, value);
+  return value;
+};
+
 interface Answer {
   id: string;
   value: string;
@@ -101,6 +117,39 @@ export default function questionnaire(pi: ExtensionAPI) {
             let editing = false;
             let settled = false;
             const answers = new Map<string, Answer>();
+            // Sanitising and laying out question text is width-independent, so
+            // do it once per questionnaire instead of once per keystroke. Tab
+            // labels are always on screen; a question's body is only built when
+            // that question is first shown.
+            const cleanAnswers = new Map<string, string>();
+            const labels = params.questions.map((item) =>
+              clean(item.label || item.id),
+            );
+            const bodies: {
+              prompt: string;
+              optionRows: { suffix: string; description?: string }[];
+            }[] = [];
+            const bodyFor = (index: number) => {
+              const cached = bodies[index];
+              if (cached) return cached;
+              const item = params.questions[index];
+              const optionRows = item.options.map((option, i) => ({
+                suffix: ` ${i + 1}. ${clean(option.label)}`,
+                description: option.description
+                  ? `     ${clean(option.description)}`
+                  : undefined,
+              }));
+              if (item.allowOther !== false)
+                optionRows.push({
+                  suffix: ` ${item.options.length + 1}. Type something else`,
+                  description: undefined,
+                });
+              return (bodies[index] = { prompt: clean(item.prompt), optionRows });
+            };
+            const wrapCache = new Map<string, string[]>();
+            const truncCache = new Map<string, string>();
+            const headerCache = new Map<string, string>();
+            let cachedWidth = -1;
             const submit = (cancelled: boolean, reason?: string) => {
               if (settled) return;
               settled = true;
@@ -150,6 +199,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 label: value,
                 wasCustom: true,
               });
+              cleanAnswers.set(q.id, clean(value));
               editing = false;
               editor.setText("");
               advance();
@@ -215,6 +265,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                           label: option.label,
                           wasCustom: false,
                         });
+                        cleanAnswers.set(q.id, clean(option.label));
                         advance();
                       } else editing = true;
                     }
@@ -231,20 +282,36 @@ export default function questionnaire(pi: ExtensionAPI) {
                 // Add decoration one row at a time so resizing never shrinks the body budget.
                 const decorationRows = Math.min(4, Math.max(0, height - 9));
                 const budget = height - 1 - (showHeader ? 1 : 0) - decorationRows;
-                const clean = (text: string) => stripTerminalSequences(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+                if (cachedWidth !== width) {
+                  cachedWidth = width;
+                  wrapCache.clear();
+                  truncCache.clear();
+                  headerCache.clear();
+                }
+                // Wrapping and width-fitting dominate a render; both are pure in
+                // (styled text, width), and callers only read the results.
+                const wrap = (text: string) =>
+                  memo(wrapCache, text, () => wrapTextWithAnsi(text, w));
+                const fit = (line: string) =>
+                  memo(truncCache, line, () => truncateToWidth(line, width));
                 const q = params.questions[tab];
-                const tabs = params.questions.map((item, i) => {
-                  const label = `${answers.has(item.id) ? "✓ " : ""}${clean(item.label || item.id)}`;
-                  return theme.fg(tab === i ? "accent" : "muted", tab === i ? `[ ${label} ]` : label);
-                });
-                tabs.push(theme.fg(q ? "muted" : "accent", q ? "Submit" : "[ Submit ]"));
-                let header = params.questions.length > 1
-                  ? tabs.join("   ")
-                  : theme.fg("accent", "Question");
-                if (params.questions.length > 1 && truncateToWidth(header, w) !== header) {
+                const view = q ? bodyFor(tab) : undefined;
+                let header: string;
+                if (params.questions.length > 1) {
+                  const tabs = params.questions.map((item, i) => {
+                    const label = `${answers.has(item.id) ? "✓ " : ""}${labels[i]}`;
+                    return theme.fg(tab === i ? "accent" : "muted", tab === i ? `[ ${label} ]` : label);
+                  });
+                  tabs.push(theme.fg(q ? "muted" : "accent", q ? "Submit" : "[ Submit ]"));
+                  header = tabs.join("   ");
+                } else header = theme.fg("accent", "Question");
+                if (
+                  params.questions.length > 1 &&
+                  memo(headerCache, header, () => truncateToWidth(header, w)) !== header
+                ) {
                   const position = `${tab + 1}/${params.questions.length + 1}`;
                   const suffix = q ? " · Submit" : "";
-                  const label = q ? `${answers.has(q.id) ? "✓ " : ""}${clean(q.label || q.id)}` : "Submit";
+                  const label = q ? `${answers.has(q.id) ? "✓ " : ""}${labels[tab]}` : "Submit";
                   const labelWidth = w - position.length - suffix.length - 5;
                   const activeLabel = truncateToWidth(label, Math.max(1, labelWidth), "…");
                   header = labelWidth < 2
@@ -253,27 +320,31 @@ export default function questionnaire(pi: ExtensionAPI) {
                 }
                 const promptPrefix = !showHeader && params.questions.length > 1
                   ? (q ? `${tab + 1}/${params.questions.length + 1} ${w >= 28 ? "Submit" : "S"} | ` : "[ Submit ] ") : "";
-                const prompt = promptPrefix + (q ? clean(q.prompt) : "Review your answers");
+                const prompt = promptPrefix + (view ? view.prompt : "Review your answers");
                 const editorRows = editing ? editor.render(Math.max(10, w)) : [];
-                const wrappedPrompt = wrapTextWithAnsi(prompt, w);
+                const wrappedPrompt = wrap(prompt);
                 const content: string[] = [];
                 let focusRow = 0;
-                if (q && !editing) {
-                  const options = [...q.options];
-                  if (q.allowOther !== false) options.push({ value: "", label: "Type something else" });
-                  options.forEach((option, i) => {
+                if (view && !editing) {
+                  const optionRows = view.optionRows;
+                  for (let i = 0; i < optionRows.length; i++) {
+                    const option = optionRows[i];
                     if (selected === i) focusRow = content.length;
                     const color = selected === i ? "accent" : "text";
-                    content.push(...wrapTextWithAnsi(
-                      theme.fg(color, `${selected === i ? "❯" : " "} ${i + 1}. ${clean(option.label)}`), w,
+                    content.push(...wrap(
+                      theme.fg(color, `${selected === i ? "❯" : " "}${option.suffix}`),
                     ));
-                    if (option.description) content.push(...wrapTextWithAnsi(
-                      theme.fg("muted", `     ${clean(option.description)}`), w,
+                    if (option.description) content.push(...wrap(
+                      theme.fg("muted", option.description),
                     ));
-                  });
-                } else if (!q) {
-                  for (const item of params.questions) content.push(...wrapTextWithAnsi(
-                    `${clean(item.label || item.id)}: ${clean(answers.get(item.id)?.label ?? "(unanswered)")}`, w,
+                    // Once the viewport is provably full below the selected row,
+                    // further options cannot appear or shift the layout: the scroll
+                    // start pins to focusRow and promptLimit saturates at budget/2.
+                    if (i >= selected && content.length >= focusRow + budget) break;
+                  }
+                } else if (!view) {
+                  for (let i = 0; i < params.questions.length; i++) content.push(...wrap(
+                    `${labels[i]}: ${cleanAnswers.get(params.questions[i].id) ?? "(unanswered)"}`,
                   ));
                   content.push(theme.fg("accent", answers.size === params.questions.length
                     ? "Enter to submit all answers" : "Answer every question before submitting"));
@@ -301,7 +372,9 @@ export default function questionnaire(pi: ExtensionAPI) {
                 const hint = editing
                   ? "Ctrl+C cancel · Esc back · Enter save"
                   : `Esc cancel · ↑↓ choose · Enter select${params.questions.length > 1 ? " · Tab next" : ""}`;
-                const rule = theme.fg("borderMuted", "─".repeat(Math.max(0, width)));
+                const rule = decorationRows >= 1
+                  ? theme.fg("borderMuted", "─".repeat(Math.max(0, width)))
+                  : "";
                 return [
                   ...(decorationRows >= 1 ? [rule] : []),
                   ...(showHeader ? [` ${header}`] : []),
@@ -311,7 +384,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                   ...body.map((line) => ` ${line}`),
                   ` ${theme.fg("dim", hint)}`,
                   ...(decorationRows >= 2 ? [rule] : []),
-                ].map((line) => truncateToWidth(line, width));
+                ].map(fit);
               },
             };
           },

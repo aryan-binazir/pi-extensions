@@ -7,12 +7,19 @@ try {
 } catch { /* Leave base providers usable if the optional fast adapter is unavailable. */ }
 const WRAPPED=Symbol.for('pi-interactive:fast-provider');
 export const FAST_SUFFIX='~fast';
-function supported(model:Model<Api>):boolean {
+function eligibility(model:Model<Api>):boolean {
  try {
   const origin=new URL(model.baseUrl).origin;
   return (model.provider==='openai' && model.api==='openai-responses' && origin==='https://api.openai.com') ||
    (model.provider==='openai-codex' && model.api==='openai-codex-responses' && origin==='https://chatgpt.com');
  } catch {return false;}
+}
+// Registry lookups re-enter getModels() constantly; parse each base URL once per model object.
+const supportedCache=new WeakMap<Model<Api>,boolean>();
+function supported(model:Model<Api>):boolean {
+ let result=supportedCache.get(model);
+ if(result===undefined)supportedCache.set(model,result=eligibility(model));
+ return result;
 }
 export function withFastModels(original:Provider,view:Provider=original):Provider {
  if(!buildBaseOptions)return original;
@@ -22,8 +29,17 @@ export function withFastModels(original:Provider,view:Provider=original):Provide
  if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED] || original.getModels().some(model=>model.id.endsWith(FAST_SUFFIX))) return original;
  // Snapshot eligibility before registration; reading the composed view later would recurse.
  const eligible=new Map(view.getModels().filter(supported).map(model=>[model.id,model]));
- const custom=[...eligible.values()].filter(model=>!original.getModels().some(base=>base.id===model.id)&&!model.id.endsWith(FAST_SUFFIX));
- const aliases=(models:readonly Model<Api>[])=>models.flatMap(model=>eligible.has(model.id)&&supported(model)&&!model.id.endsWith(FAST_SUFFIX)?[model,{...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}]:[model]);
+ const bases=original.getModels();
+ const custom=[...eligible.values()].filter(model=>!bases.some(base=>base.id===model.id)&&!model.id.endsWith(FAST_SUFFIX));
+ // An alias is a pure copy of its base, so derive it once per base model object
+ // instead of rebuilding every alias on each getModels()/filterModels() call.
+ const aliasCache=new WeakMap<Model<Api>,Model<Api>|null>();
+ const aliasOf=(model:Model<Api>):Model<Api>|null=>{
+  let alias=aliasCache.get(model);
+  if(alias===undefined)aliasCache.set(model,alias=eligible.has(model.id)&&!model.id.endsWith(FAST_SUFFIX)&&supported(model)?{...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}:null);
+  return alias;
+ };
+ const aliases=(models:readonly Model<Api>[])=>{const out:Model<Api>[]=[];for(const model of models){out.push(model);const alias=aliasOf(model);if(alias)out.push(alias);}return out;};
  const resolve=(model:Model<Api>)=>{
   if(!model.id.endsWith(FAST_SUFFIX))return {model,fast:false};
   const baseId=model.id.slice(0,-FAST_SUFFIX.length);
@@ -36,7 +52,9 @@ export function withFastModels(original:Provider,view:Provider=original):Provide
   ...original,
   getModels:()=>{
    const models=original.getModels();
-   return [...aliases(models),...custom.filter(model=>!models.some(base=>base.id===model.id)).map(model=>({...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}))];
+   const out=aliases(models);
+   for(const model of custom)if(!models.some(base=>base.id===model.id)){const alias=aliasOf(model);if(alias)out.push(alias);}
+   return out;
   },
   filterModels:original.filterModels ? (models,credential)=>{
    const bases=models.filter(m=>!m.id.endsWith(FAST_SUFFIX));

@@ -5,17 +5,26 @@ import type { ExtensionContext, ReadonlyFooterDataProvider, Theme } from '@earen
 import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 export const STATUS_KEY = 'auto-permissions-status';
-const clean = (text: string) => stripVTControlCharacters(text).replace(/[\p{Cc}\p{Cf}]/gu, ' ');
+// Every escape sequence stripVTControlCharacters removes starts with a Cc code
+// point, so one early-exiting scan proves both passes are no-ops for plain text.
+const suspect = /[\p{Cc}\p{Cf}]/u;
+const clean = (text: string) => suspect.test(text)
+  ? stripVTControlCharacters(text).replace(/[\p{Cc}\p{Cf}]/gu, ' ') : text;
 const tokens = (n: number) => n < 1000 ? String(n) : n < 10000 ? `${(n / 1000).toFixed(1)}k`
   : n < 1000000 ? `${Math.round(n / 1000)}k` : `${(n / 1000000).toFixed(1)}M`;
 
 /** Give the right-hand status priority; truncate the path, never wrap a row. */
 export function rightAligned(left: string, right: string, width: number): string {
   width = Math.max(0, Math.floor(width));
-  const rhs = truncateToWidth(right, width, '');
-  const room = Math.max(0, width - visibleWidth(rhs) - 2);
-  const lhs = truncateToWidth(left, room, room >= 3 ? '...' : '');
-  return lhs + ' '.repeat(Math.max(0, width - visibleWidth(lhs) - visibleWidth(rhs))) + rhs;
+  // truncateToWidth returns its input unchanged once it fits, and it walks
+  // grapheme clusters to find that out. visibleWidth memoises per string, and
+  // both sides need their width anyway, so measure first and only cut on overflow.
+  let rightWidth = visibleWidth(right), rhs = right;
+  if (width <= 0 || rightWidth > width) { rhs = truncateToWidth(right, width, ''); rightWidth = visibleWidth(rhs); }
+  const room = Math.max(0, width - rightWidth - 2);
+  let leftWidth = visibleWidth(left), lhs = left;
+  if (room <= 0 || leftWidth > room) { lhs = truncateToWidth(left, room, room >= 3 ? '...' : ''); leftWidth = visibleWidth(lhs); }
+  return lhs + ' '.repeat(Math.max(0, width - leftWidth - rightWidth)) + rhs;
 }
 
 /** Uses public extension context only; does not fabricate an AgentSession or
@@ -28,17 +37,29 @@ export function permissionFooter(
 ) {
   const unsubscribe = data.onBranchChange(requestRender);
   let disposed = false;
+  // The TUI re-renders every child on each keystroke and streamed chunk, but the
+  // footer's inputs only move on session events. Key the finished rows on the
+  // themed strings that produce them and skip the width maths when nothing moved.
+  let cacheKey: string | undefined;
+  let cacheLines: string[] = [];
+  const home = process.env.HOME || process.env.USERPROFILE;
+  let rawCwd: string | undefined, homeCwd = '';
   return {
-    invalidate() {},
+    invalidate() { cacheKey = undefined; },
     dispose() { if (!disposed) { disposed = true; unsubscribe(); } },
     render(width: number): string[] {
       const ctx = context();
-      let cwd = ctx.sessionManager.getCwd();
-      const home = process.env.HOME || process.env.USERPROFILE;
-      if (home) {
-        const rel = relative(home, cwd);
-        if (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`)) cwd = rel ? `~${sep}${rel}` : '~';
+      const raw = ctx.sessionManager.getCwd();
+      if (raw !== rawCwd) {
+        // The cwd moves at most once a session; the path maths need not repeat.
+        let cwd = raw;
+        if (home) {
+          const rel = relative(home, cwd);
+          if (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`)) cwd = rel ? `~${sep}${rel}` : '~';
+        }
+        rawCwd = raw; homeCwd = cwd;
       }
+      const cwd = homeCwd;
       const branch = data.getGitBranch(), name = ctx.sessionManager.getSessionName();
       const path = clean(`${cwd}${branch ? ` (${branch})` : ''}${name ? ` • ${name}` : ''}`);
       const statuses = data.getExtensionStatuses();
@@ -46,7 +67,8 @@ export function permissionFooter(
       const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
       let cacheHit: number | undefined;
       const add = (usage: Usage) => {
-        for (const key of ['input', 'output', 'cacheRead', 'cacheWrite'] as const) totals[key] += usage[key];
+        totals.input += usage.input; totals.output += usage.output;
+        totals.cacheRead += usage.cacheRead; totals.cacheWrite += usage.cacheWrite;
         totals.cost += usage.cost.total;
       };
       // Match Pi's accounting scope: all entries, including tool and summary usage.
@@ -73,12 +95,22 @@ export function permissionFooter(
       let model = clean(ctx.model?.id ?? 'no-model');
       if (ctx.model?.reasoning) model += ` • ${ctx.thinkingLevel ?? 'off'}`;
       if (ctx.model && data.getAvailableProviderCount() > 1) model = `(${clean(ctx.model.provider)}) ${model}`;
-      const lines = [
-        rightAligned(theme.fg('dim', path), theme.fg('dim', auto), width),
-        rightAligned(theme.fg('dim', stats.join(' ')), theme.fg('dim', model), width),
-      ];
-      const other = [...statuses].filter(([key]) => key !== STATUS_KEY).sort(([a], [b]) => a.localeCompare(b));
-      if (other.length) lines.push(truncateToWidth(other.map(([, text]) => clean(text)).join(' '), Math.max(0, width), ''));
+      const pathRow = theme.fg('dim', path), autoRow = theme.fg('dim', auto);
+      const statsRow = theme.fg('dim', stats.join(' ')), modelRow = theme.fg('dim', model);
+      let others: string | undefined;
+      if (statuses.size - (statuses.has(STATUS_KEY) ? 1 : 0) > 0) {
+        const other = [...statuses].filter(([key]) => key !== STATUS_KEY).sort(([a], [b]) => a.localeCompare(b));
+        others = other.map(([, text]) => clean(text)).join(' ');
+      }
+      // Length-prefixed rather than separated: no themed string can forge a
+      // boundary, and a missing status row is -1, which no length can be.
+      const key = `${width}.${pathRow.length}.${autoRow.length}.${statsRow.length}`
+        + `.${modelRow.length}.${others?.length ?? -1}|`
+        + pathRow + autoRow + statsRow + modelRow + (others ?? '');
+      if (key === cacheKey) return cacheLines;
+      const lines = [rightAligned(pathRow, autoRow, width), rightAligned(statsRow, modelRow, width)];
+      if (others !== undefined) lines.push(truncateToWidth(others, Math.max(0, width), ''));
+      cacheKey = key; cacheLines = lines;
       return lines;
     },
   };

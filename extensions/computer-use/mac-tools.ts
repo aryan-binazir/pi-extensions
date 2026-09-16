@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type, type TProperties } from 'typebox';
 import { StringEnum } from '@earendil-works/pi-ai';
-import { MacSession } from './mac-client.ts';
+import { MacSession, loadMacSdk } from './mac-client.ts';
 
 export function registerMacTools(pi: ExtensionAPI) {
   let session = new MacSession();
@@ -25,8 +25,7 @@ export function registerMacTools(pi: ExtensionAPI) {
       name: definition.name, label: definition.name, executionMode: 'sequential', description: definition.description + guidance, parameters,
       async execute(_id, params, signal, _update, ctx) {
         // Pi validates the declared primitive schema; direct callers get the same checks.
-        const { AjvJsonSchemaValidator } = await import('@modelcontextprotocol/sdk/validation/ajv');
-        if (!new AjvJsonSchemaValidator().getValidator(parameters)(params).valid) throw new Error(`Invalid ${definition.name} parameters`);
+        if (!(await loadMacSdk()).validator(parameters)(params).valid) throw new Error(`Invalid ${definition.name} parameters`);
         if (definition.remote === 'click') {
           const p = params as Record<string, unknown>;
           if (p.element_index !== undefined ? p.x !== undefined || p.y !== undefined : p.x === undefined || p.y === undefined) throw new Error('Click requires element_index OR both screenshot pixel x/y, exclusively');

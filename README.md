@@ -303,8 +303,8 @@ interfaces and Pi package loader. Individual commands are `npm run typecheck`,
 Architecture decisions and the precise editor compatibility boundary are in
 [`docs/adr`](docs/adr).
 
-The repository's `bin/pi` is a copy of the existing mise launcher. This package
-does not change host launchers, shell aliases, global defaults or authentication.
+This package does not change host launchers, shell aliases, global defaults or
+authentication.
 
 Workflow replay is deliberately opt-in. Declining replay stops that invocation. To rerun every stage, change the source (for example, add a revision comment), review it again, and approve the resulting fresh journal. Each synchronous worker evaluation is limited to 100 ms independently of the overall workflow timeout. A journal write failure stops subsequent journal writes in that invocation; rerun after correcting storage rather than retrying unjournaled effects.
 

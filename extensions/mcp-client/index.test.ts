@@ -3,6 +3,8 @@ import test from 'node:test';
 import { mkdtemp,writeFile,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import mcp from './index.ts';
 import { startFixture } from './fixture.ts';
 
@@ -72,4 +74,20 @@ test('remote schemas cannot inject external references or oversized provider par
   assert.ok([...tools.keys()].some(name=>name.startsWith('mcp_fixture_valid_')));
   assert.equal(warnings.length,2);
  }finally{mocked.mock.restore();await handlers.get('session_shutdown')?.();await rm(dir,{recursive:true,force:true});}
+});
+
+test('registering the extension loads neither the MCP SDK nor zod',()=>{
+  // The SDK and zod cost roughly 330 ms and 9 MB to evaluate. Nothing before an actual
+  // connection needs them, so a fresh process must reach a registered extension without
+  // touching either. Run in a child: this file already pulls the SDK in for its fixtures.
+  const entry=JSON.stringify(fileURLToPath(new URL('./index.ts',import.meta.url)));
+  const script=`import { registerHooks } from 'node:module';
+const loaded = [];
+registerHooks({ load(url, context, next) { loaded.push(url); return next(url, context); } });
+const extension = (await import(${entry})).default;
+extension({ on(){}, registerTool(){}, registerCommand(){}, registerFlag(){}, getFlag(){}, getActiveTools:()=>[], setActiveTools(){} }, { agentDir: process.cwd(), oauthStore: () => undefined });
+console.log(loaded.filter(url => url.includes('@modelcontextprotocol') || url.includes('/zod/')).join(' '));`;
+  const child=spawnSync(process.execPath,['--import','tsx','--input-type=module','-e',script],{encoding:'utf8',cwd:fileURLToPath(new URL('.',import.meta.url))});
+  assert.equal(child.status,0,child.stderr);
+  assert.equal(child.stdout.trim(),'');
 });

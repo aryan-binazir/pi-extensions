@@ -170,3 +170,22 @@ test('fast installation preserves another extension legacy provider registration
  assert.equal(registry.find('openai','gpt-5.5')!.baseUrl,config.baseUrl);
  assert.ok(!runtime.getModels('openai').some(model=>model.id.endsWith('~fast')));
 });
+
+test('alias derivation tracks the live base model list rather than a stale snapshot',async()=>{
+ const original=openaiProvider();
+ const base=original.getModels().find(model=>model.id==='gpt-5.5')!;
+ const other=original.getModels().find(model=>model.id!=='gpt-5.5'&&model.baseUrl===base.baseUrl&&model.api===base.api)!;
+ let current:any[]=[base,other];
+ const mutable:any={...original,getModels:()=>current};
+ const provider=withFastModels(mutable);
+ assert.deepEqual(provider.getModels().map(model=>model.id),[base.id,base.id+'~fast',other.id,other.id+'~fast']);
+ // A refreshed catalog hands back fresh model objects; aliases must follow them.
+ current=[{...base,name:'Renamed'},{...other,baseUrl:'https://proxy.example/v1'}];
+ const refreshed=provider.getModels();
+ assert.deepEqual(refreshed.map(model=>model.id),[base.id,base.id+'~fast',other.id]);
+ assert.equal(refreshed.find(model=>model.id===base.id+'~fast')!.name,'Renamed (fast)');
+ // Returning to the original objects restores the original aliases.
+ current=[base,other];
+ assert.deepEqual(provider.getModels().map(model=>model.id),[base.id,base.id+'~fast',other.id,other.id+'~fast']);
+ assert.equal(provider.getModels().find(model=>model.id===base.id+'~fast')!.name,base.name+' (fast)');
+});

@@ -22,6 +22,13 @@ function normalize(value: unknown): Todo[] {
   return todos;
 }
 
+const clone = (snapshot: Snapshot): Snapshot => ({ version: 1, todos: snapshot.todos.map(item => ({ content: item.content, status: item.status })), staleTurns: snapshot.staleTurns });
+function parse(data: unknown): Snapshot {
+  const value = data as Snapshot;
+  if (value?.version !== 1 || !Number.isSafeInteger(value.staleTurns) || value.staleTurns < 0) throw new Error('Unsupported todo snapshot');
+  return { version: 1, todos: normalize(value.todos), staleTurns: value.staleTurns };
+}
+
 export default function todo(pi: ExtensionAPI): void {
   // Only trusted local code declares its own bounded storage/UI effects.
   let state: Snapshot = { version: 1, todos: [], staleTurns: 0 };
@@ -29,19 +36,40 @@ export default function todo(pi: ExtensionAPI): void {
   const paint = (ctx: ExtensionContext) => {
     if (ctx.hasUI) ctx.ui.setWidget('interactive-tools:todo', active() ? ['Todo — declared progress', ...state.todos.map(item => `${item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○'} ${item.content}`)] : undefined);
   };
+  // A branch is the fixed path from its tip back to the root, so both the restored state and the
+  // number of warnings its superseded snapshots produce are pure functions of the newest todo
+  // entry. Remembering those keeps repeated session tree navigation off the full-branch reparse.
+  let tip: object | undefined;
+  let tipState: Snapshot | undefined;
+  let tipSkipped = 0;
+  const valid = new WeakMap<object, boolean>();
+  const parses = (entry: object, data: unknown): boolean => {
+    let ok = valid.get(entry);
+    if (ok === undefined) { ok = true; try { parse(data); } catch { ok = false; } valid.set(entry, ok); }
+    return ok;
+  };
   const restore = (ctx: ExtensionContext) => {
-    state = { version: 1, todos: [], staleTurns: 0 };
-    for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type !== 'custom' || entry.customType !== entryType) continue;
-      try {
-        const value = entry.data as Snapshot;
-        if (value?.version !== 1 || !Number.isSafeInteger(value.staleTurns) || value.staleTurns < 0) throw new Error('Unsupported todo snapshot');
-        state = { version: 1, todos: normalize(value.todos), staleTurns: value.staleTurns };
-      } catch {
-        state = { version: 1, todos: [], staleTurns: 0 };
-        if (ctx.hasUI) ctx.ui.notify('Skipped invalid or unsupported todo snapshot', 'warning');
-      }
+    const branch = ctx.sessionManager.getBranch();
+    let newest = -1;
+    let newestData: unknown;
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const entry = branch[index];
+      if (entry.type === 'custom' && entry.customType === entryType) { newest = index; newestData = entry.data; break; }
     }
+    if (newest < 0) { tip = tipState = undefined; state = { version: 1, todos: [], staleTurns: 0 }; paint(ctx); return; }
+    if (branch[newest] !== tip) {
+      let skipped = 0;
+      for (let index = 0; index < newest; index++) {
+        const entry = branch[index];
+        if (entry.type === 'custom' && entry.customType === entryType && !parses(entry, entry.data)) skipped++;
+      }
+      let parsed: Snapshot | undefined;
+      try { parsed = parse(newestData); } catch { skipped++; }
+      valid.set(branch[newest], parsed !== undefined);
+      tip = branch[newest]; tipState = parsed; tipSkipped = skipped;
+    }
+    state = tipState ?? { version: 1, todos: [], staleTurns: 0 };
+    if (ctx.hasUI) for (let index = 0; index < tipSkipped; index++) ctx.ui.notify('Skipped invalid or unsupported todo snapshot', 'warning');
     paint(ctx);
   };
   pi.on('session_start', (_event, ctx) => restore(ctx));
@@ -58,18 +86,19 @@ export default function todo(pi: ExtensionAPI): void {
       signal?.throwIfAborted();
       const todos = normalize(params.todos);
       // Repeating the same declaration does not reset a stale-progress reminder.
-      const changed = JSON.stringify(todos) !== JSON.stringify(state.todos);
+      const previous = state.todos;
+      const changed = todos.length !== previous.length || todos.some((item, index) => item.content !== previous[index].content || item.status !== previous[index].status);
       const next: Snapshot = { version: 1, todos, staleTurns: changed ? 0 : state.staleTurns };
-      pi.appendEntry(entryType, structuredClone(next));
+      pi.appendEntry(entryType, clone(next));
       state = next;
       paint(ctx);
-      return { content: [{ type: 'text', text: todos.length ? `Declared progress saved: ${todos.filter(item => item.status === 'completed').length}/${todos.length} completed.` : 'Todo list cleared.' }], details: structuredClone(state) };
+      return { content: [{ type: 'text', text: todos.length ? `Declared progress saved: ${todos.filter(item => item.status === 'completed').length}/${todos.length} completed.` : 'Todo list cleared.' }], details: clone(state) };
     },
   });
   pi.on('before_agent_start', (event, _ctx) => {
     if (!active()) return;
     state = { ...state, staleTurns: Math.min(state.staleTurns + 1, 1_000_000) };
-    pi.appendEntry(entryType, structuredClone(state));
+    pi.appendEntry(entryType, clone(state));
     const warning = state.staleTurns >= 6 ? 'STALE TODO: Before proceeding, reconcile this list with actual work; explain blockers or clear obsolete tasks. Do not mark tasks complete without evidence.' : state.staleTurns >= 3 ? 'This todo list has not changed for several turns. Update actual progress or explain the blocker.' : 'Keep the todo list current as work progresses.';
     return { systemPrompt: `${event.systemPrompt}\n\n${warning}\nPersisted todos are declared progress, not verified completion:\n${state.todos.map(item => `[${item.status}] ${item.content}`).join('\n')}` };
   });

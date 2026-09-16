@@ -64,3 +64,26 @@ test('todo accepts 100 tasks and rejects an oversized replacement without changi
   assert.deepEqual(app.branch(), before);
   assert.doesNotMatch(app.widget()!.join('\n'), /Task 101/);
 });
+
+test('repeated branch switches restore each branch and still warn once per invalid snapshot', async () => {
+  const hooks = new Map<string, (event: any, ctx: any) => any>();
+  let branch: any[] = [];
+  let widget: string[] | undefined;
+  let warnings = 0;
+  todo({ registerTool: () => {}, on: (name: string, callback: any) => hooks.set(name, callback), appendEntry: (customType: string, data: unknown) => branch.push({ type: 'custom', customType, data }) } as unknown as ExtensionAPI);
+  const ctx = { hasUI: true, sessionManager: { getBranch: () => branch }, ui: { setWidget: (_key: string, value: string[] | undefined) => { widget = value; }, notify: () => { warnings++; } } } as unknown as ExtensionContext;
+  const snapshot = (content: string, staleTurns: number) => ({ type: 'custom', customType: 'interactive-tools:todo', data: { version: 1, todos: [{ content, status: 'pending' }], staleTurns } });
+  const broken = { type: 'custom', customType: 'interactive-tools:todo', data: { version: 999, todos: [] } };
+  const first = [broken, snapshot('Alpha', 2), broken, snapshot('Beta', 5)];
+  const second = [broken, snapshot('Alpha', 2), snapshot('Gamma', 3)];
+  for (let pass = 0; pass < 3; pass++) {
+    branch = first; await hooks.get('session_tree')!({}, ctx);
+    assert.deepEqual(widget, ['Todo — declared progress', '○ Beta']);
+    assert.equal(warnings, pass * 3 + 2);
+    branch = second; await hooks.get('session_tree')!({}, ctx);
+    assert.deepEqual(widget, ['Todo — declared progress', '○ Gamma']);
+    assert.equal(warnings, pass * 3 + 3);
+  }
+  // staleTurns travels with the restored snapshot, not with a neighbouring cached one.
+  assert.match((await hooks.get('before_agent_start')!({ systemPrompt: 'S' }, ctx)).systemPrompt, /not changed for several turns[\s\S]*Gamma/);
+});

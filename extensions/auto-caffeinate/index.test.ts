@@ -130,3 +130,41 @@ test('fire-and-forget background activity tolerates a throwing status callback',
   assert.equal(notifications,1);
  }finally{await keeper.shutdown();}
 });
+
+test('the watchdog only ticks while work is pending',async()=>{
+ // Every watchdog tick consults the clock, so counting clock reads counts ticks.
+ let reads=0,stops=0,ticks=0;
+ const idle=async(ms:number)=>{await new Promise<void>(resolve=>setTimeout(resolve,ms));};
+ const keeper=new PowerKeeper({power:async()=>{reads++;return 'ac';},now:()=>{ticks++;return Date.now();},
+  start:()=>({alive:()=>true,stop:async()=>{stops++;}}),lingerMs:20,checkMs:5,powerCacheMs:0});
+ try{
+  keeper.start();
+  const quiet=ticks;await idle(60);
+  assert.equal(ticks,quiet,'a started but idle session never wakes the event loop');
+  assert.equal(reads,0);
+  await keeper.setAgent(true);assert.equal(reads,1);
+  const working=reads;await idle(60);
+  assert.ok(reads>working,'the watchdog polls power while the agent works');
+  await keeper.setAgent(false);
+  await idle(80);
+  assert.equal(stops,1,'linger still expires with no event to drive it');
+  const settled=ticks;await idle(60);
+  assert.equal(ticks,settled,'and the watchdog stands down once work is gone');
+ }finally{await keeper.shutdown();}
+});
+
+test('cached supply types follow devices appearing and disappearing',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-power-hotplug-'));
+ try{
+  await mkdir(join(dir,'AC'));await writeFile(join(dir,'AC/type'),'Mains');await writeFile(join(dir,'AC/online'),'1');
+  assert.equal(await readPower('linux',dir),'ac');
+  await mkdir(join(dir,'USBC'));await writeFile(join(dir,'USBC/type'),'USB_PD');await writeFile(join(dir,'USBC/online'),'0');
+  await writeFile(join(dir,'AC/online'),'0');
+  assert.equal(await readPower('linux',dir),'battery');
+  await writeFile(join(dir,'USBC/online'),'1');
+  assert.equal(await readPower('linux',dir),'ac');
+  await rm(join(dir,'USBC'),{recursive:true});await rm(join(dir,'AC'),{recursive:true});
+  await mkdir(join(dir,'BAT0'));await writeFile(join(dir,'BAT0/type'),'Battery');
+  assert.equal(await readPower('linux',dir),'unknown');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

@@ -3,6 +3,12 @@ import { readdir,readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 export type Power='ac'|'battery'|'unknown';
+const MAINS=new Set(['Mains','USB','USB_C','USB_PD','USB_PD_DRP','Wireless']);
+// A device's `type` is fixed for as long as the device exists, so the directory
+// listing itself is a sound invalidation key: re-read every `type` only when a
+// supply appears or disappears. The watchdog polls twice a minute or faster and
+// those reads are the bulk of its cost -- `online` is the only volatile file.
+let mainsRoot:string|undefined,mainsKey='',mainsOnline:string[]=[];
 export async function readPower(platform=process.platform,root='/sys/class/power_supply'):Promise<Power>{
  try{
   if(platform==='darwin'){
@@ -14,13 +20,22 @@ export async function readPower(platform=process.platform,root='/sys/class/power
   // Fixed-power desktops commonly expose no power-supply devices at all; a
   // missing or unreadable directory stays unknown via the caller's catch.
   if(entries.length===0)return 'ac';
+  const key=entries.join('\0');
+  let online=mainsOnline;
+  if(root!==mainsRoot||key!==mainsKey){
+   online=[];
+   for(const entry of entries){
+    try {
+    if(MAINS.has((await readFile(join(root,entry,'type'),'utf8')).trim()))online.push(join(root,entry,'online'));
+    } catch { /* One incomplete supply does not hide another working AC source. */ }
+   }
+   mainsRoot=root;mainsKey=key;mainsOnline=online;
+  }
   let offline=false;
-  for(const entry of entries){
+  for(const path of online){
    try {
-   const type=(await readFile(join(root,entry,'type'),'utf8')).trim();
-   if(!['Mains','USB','USB_C','USB_PD','USB_PD_DRP','Wireless'].includes(type))continue;
-   const online=(await readFile(join(root,entry,'online'),'utf8')).trim();
-   if(online==='1')return 'ac';if(online==='0')offline=true;
+   const state=(await readFile(path,'utf8')).trim();
+   if(state==='1')return 'ac';if(state==='0')offline=true;
    } catch { /* One incomplete supply does not hide another working AC source. */ }
   }
   return offline?'battery':'unknown';
@@ -49,12 +64,22 @@ export class PowerKeeper {
  private agent=false;private tasks=new Set<string>();private until=0;private stopped=false;private inhibitor?:Inhibitor;
  private cachedPower:Power='unknown';private checkedAt=-Infinity;private retryAt=0;
  private timer?:ReturnType<typeof setInterval>;private queue:Promise<void>=Promise.resolve();
- private awake=false;
+ private awake=false;private watching=false;
  private publish(){const awake=!!this.inhibitor?.alive();if(awake!==this.awake){this.awake=awake;try{this.options.onChange(awake);}catch{/* A synchronous status callback failure must not interrupt power checks or cleanup. */}}}
  private readonly options:Required<KeeperOptions>;
  constructor(options:KeeperOptions={}){this.options={power:readPower,start:startInhibitor,now:Date.now,lingerMs:5000,checkMs:2000,powerCacheMs:1000,onChange:()=>{},...options};}
  private active(){return this.agent||this.tasks.size>0;}
- start(){if(!this.timer&&!this.stopped){this.timer=setInterval(()=>{void this.check(false);},this.options.checkMs);this.timer.unref();}}
+ start(){if(!this.stopped){this.watching=true;this.arm();}}
+ // The watchdog only has something to watch while work is in flight or lingering:
+ // it re-reads power, and respawns a dead inhibitor. An idle session would
+ // otherwise wake the event loop every checkMs forever to reach the same no-op,
+ // so the interval is armed on demand. Every transition into `needed` runs
+ // through check(), and only check() can observe the transition back out.
+ private arm(){
+  const needed=this.watching&&!this.stopped&&(this.active()||this.until>this.options.now());
+  if(needed){if(!this.timer){this.timer=setInterval(()=>{void this.check(false);},this.options.checkMs);this.timer.unref();}}
+  else if(this.timer){clearInterval(this.timer);this.timer=undefined;}
+ }
  async setAgent(active:boolean){if(this.stopped)return;const before=this.active();this.agent=active;if(before&&!this.active())this.until=this.options.now()+this.options.lingerMs;await this.check(false);}
  async background(id:string,active:boolean){if(this.stopped)return;const before=this.active();if(active)this.tasks.add(id);else this.tasks.delete(id);if(before&&!this.active())this.until=this.options.now()+this.options.lingerMs;await this.check(false);}
  check(force=true):Promise<void>{
@@ -67,8 +92,8 @@ export class PowerKeeper {
    if(!needed||power!=='ac'){await this.release();return;}
    if(this.inhibitor&&!this.inhibitor.alive()){this.inhibitor=undefined;this.retryAt=this.options.now()+30000;}
    if(!this.inhibitor&&this.options.now()>=this.retryAt){try{this.inhibitor=this.options.start();}catch{/* Unsupported/missing OS service: no-op. */}if(!this.inhibitor)this.retryAt=this.options.now()+30000;}
-  }).catch(async()=>{await this.release();}).finally(()=>this.publish());return this.queue;
+  }).catch(async()=>{await this.release();}).finally(()=>{this.publish();this.arm();});return this.queue;
  }
  private async release(){const current=this.inhibitor;this.inhibitor=undefined;try{await current?.stop();}finally{this.publish();}}
- async shutdown(){this.stopped=true;if(this.timer)clearInterval(this.timer);await this.queue;await this.release();this.tasks.clear();}
+ async shutdown(){this.stopped=true;this.watching=false;if(this.timer){clearInterval(this.timer);this.timer=undefined;}await this.queue;await this.release();this.tasks.clear();}
 }

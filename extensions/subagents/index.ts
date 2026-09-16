@@ -3,7 +3,6 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil
 import { Type } from 'typebox';
 import { assertChildTask, delegationScope, assertWorkflowRead } from './scope.ts';
 import { getActiveCwd } from '../worktree/routing.ts';
-import { childGuard } from '../sentinel/bridge.ts';
 import { piInvocation, SubagentRegistry, type TaskSpec } from './registry.ts';
 import { runWorkflow } from './workflow.ts';
 import { clipJson, taskView } from './presentation.ts';
@@ -83,7 +82,7 @@ export default function subagents(pi: ExtensionAPI): void {
         if (task.configProvenance.config !== configFor(context).identity) throw new Error('Subagent configuration or trust changed while queued; resubmit task');
         availableModel(task.model!, context.modelRegistry, task.profile);
       }
-      return piInvocation(task, context ? childGuard(context.cwd, context.sessionManager.getSessionId()) : undefined);
+      return piInvocation(task);
     },
     onUpdate: renderActiveAgents,
     onComplete: task => {

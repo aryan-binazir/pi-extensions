@@ -26,8 +26,7 @@
       "./extensions/computer-use/index.ts",
       "./extensions/fast-mode/index.ts",
       "./extensions/auto-caffeinate/index.ts",
-      "./extensions/auto-permissions-status/index.ts",
-      "./extensions/sentinel/index.ts"
+      "./extensions/auto-permissions-status/index.ts"
     ]
   },
   "scripts": {

@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import { createAgentSession, ModelRuntime, SessionManager, DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
 
 const root = resolve(import.meta.dirname, '..');
-const intended = ['questionnaire', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'computer-use', 'fast-mode', 'auto-caffeinate', 'auto-permissions-status', 'sentinel'];
+const intended = ['questionnaire', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'computer-use', 'fast-mode', 'auto-caffeinate', 'auto-permissions-status'];
 
-test('Pi package discovers exactly thirteen entrypoints and independently loads each', async () => {
+test('Pi package discovers exactly twelve entrypoints and independently loads each', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-package-test-'));
   try {
     const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -38,7 +38,6 @@ test('Pi package discovers exactly thirteen entrypoints and independently loads 
         'fast-mode': {tools: [], commands: ['fast'], shortcuts: []},
         'auto-caffeinate': {tools: [], commands: [], shortcuts: []},
         'auto-permissions-status': {tools: [], commands: [], shortcuts: []},
-        sentinel: {tools: [], commands: ['auto', 'sentinel'], shortcuts: []},
       };
       assert.deepEqual([...extension.tools.keys()].sort(), expected[feature].tools, feature);
       assert.deepEqual([...extension.commands.keys()].sort(), expected[feature].commands, feature);
@@ -61,7 +60,7 @@ test('Pi package discovers exactly thirteen entrypoints and independently loads 
 });
 
 
-test('bundled tools work with Sentinel loaded but auto off in a real headless session', async () => {
+test('bundled tools work together in a real headless session', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-managed-tools-'));
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {

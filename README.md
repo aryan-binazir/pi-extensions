@@ -1,6 +1,6 @@
 # Pi interactive tools
 
-Thirteen independently selectable extensions for Pi 0.85.1. Install from this
+Twelve independently selectable extensions for Pi 0.85.1. Install from this
 private Git repository using your existing GitHub SSH access:
 
 ```sh
@@ -30,7 +30,6 @@ A single extension can also be loaded with
 | Fast mode | `/fast` | Toggle supported base/fast model entries while retaining provider authentication and reasoning. [Provider support](docs/adr/006-search-fast-power.md). |
 | Auto-caffeinate | Agent lifecycle | Temporarily inhibit idle sleep during work on confirmed AC power, including background tasks. |
 | Auto Permissions status | Persistent footer | Display-only companion to Hank Warren's plugin: on/off, reviewer and effort, or unavailable/config error. |
-| Sentinel | `/auto on`, `/auto off`, `/sentinel reload` | Default-off adaptive Luna review, with user-owned standing preferences and inherited child coverage. [Setup and boundaries](extensions/sentinel/README.md). |
 
 ## Global system-prompt append (agent setup)
 
@@ -331,9 +330,7 @@ requires a merged GitHub PR whose head still matches the checkout. These
 commands preserve branch refs.
 
 Delegated children are launched with a validated workspace and builtin tool list.
-When Sentinel is enabled, children additionally inherit its classifier, blocking
-reviewer, user policy, and root authorization. Without Sentinel, only launch-time
-checks apply. Neither mode sandboxes child tools or trusted extension JavaScript.
+These launch-time checks do not sandbox child tools or trusted extension JavaScript.
 
 ## Automatic Bash permissions (external package)
 
@@ -346,9 +343,8 @@ pi install npm:@hank-warren/pi-auto-permissions@0.16.2
 
 Pi adds `"npm:@hank-warren/pi-auto-permissions@0.16.2"` to the `packages` array in
 `~/.pi/agent/settings.json`, preserving existing extensions. Do not also load the
-upstream `@ogulcancelik/pi-auto-permissions` package or enable Sentinel: overlapping
-guards can cause duplicate reviews. When installing this repository as a package,
-use `pi config` to deselect Sentinel.
+upstream `@ogulcancelik/pi-auto-permissions` package: overlapping
+guards can cause duplicate reviews.
 
 Create `~/.pi/agent/pi-auto-permissions/config.json` (or under your
 `PI_CODING_AGENT_DIR`):
@@ -404,8 +400,8 @@ identified separately. This is **loaded-plugin/config status**, not a guarantee
 that credentials, provider requests, or every command's review will succeed; it
 does not inspect per-command bypasses or standing approvals.
 
-Review is enabled by default across sessions; no `/auto on` is needed (that command
-belongs to Sentinel). Authenticate to `openai-codex` with `/login` and ensure
+Review is enabled by default across sessions. Authenticate to `openai-codex`
+with `/login` and ensure
 `gpt-5.6-luna` is available. The main agent can use a different model.
 
 Every Bash command is subject to the plugin's rules and, absent a hard deny or
@@ -427,18 +423,6 @@ this external plugin; do not assume child coverage. Existing trusted-group or
 standing-approval configuration can bypass review. Usage and denial logs live next
 to the config by default. The pinned package does not update automatically; review
 new versions before explicitly upgrading.
-
-## Sentinel preferences (optional alternative)
-
-Auto review is **off by default for new chats**. Use `/auto on` to review your
-preferences and enable it for the current session, or `/auto off` to disable it.
-Sentinel uses `openai-codex/gpt-5.6-luna` for asynchronous trajectory scoring and
-`openai-codex/codex-auto-review` for blocking review when a recent low-risk score
-cannot be reused. Your standing preferences belong in
-`~/.pi/agent/sentinel-policy.md`; both stages receive them. Optional settings live
-in `~/.pi/agent/sentinel.json`. Mid-session file changes block until reviewed with
-`/sentinel reload`. See [Sentinel documentation](extensions/sentinel/README.md)
-for examples, authentication, adaptive-review limits and subagent inheritance.
 
 ## Development
 

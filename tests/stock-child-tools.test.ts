@@ -24,7 +24,6 @@ test('stock Pi active permissions support default and preset children and workfl
     await session.bindExtensions({});
     const runner = session.extensionRunner!;
     assert.ok(!session.getActiveToolNames().includes('grep'));
-    // Sentinel is loaded, but a new chat defaults to auto off.
     assert.notEqual((await runner.emitToolCall({type: 'tool_call', toolName: 'read', toolCallId: 'init', input: {path: join(cwd, 'pi')}}))?.block, true);
     const ctx = {...runner.createContext()};
     Object.assign(ctx, {model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', modelRegistry: fixtureModelRegistry()});

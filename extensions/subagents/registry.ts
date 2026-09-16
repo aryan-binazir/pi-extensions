@@ -421,14 +421,13 @@ export class SubagentRegistry {
   }
 }
 
-export function piInvocation(spec: ValidTask, extra?: {env: Record<string, string>; extensions: string[]}) {
+export function piInvocation(spec: ValidTask) {
   const args = ['--mode', 'json', '-p', '--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--tools', spec.tools.join(','), '--system-prompt', 'You are a delegated agent. Your only task context is the explicit brief below. Use only the configured tools and assigned workspace. Do not assume parent conversation context.'];
   if (spec.model) args.push('--model', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
-  // The inherited guard runs last, after any user-approved argument-transforming hooks.
-  for (const extension of [...new Set([...spec.extensions.filter(path => !extra?.extensions.includes(path)), ...(extra?.extensions ?? [])])]) args.push('-e', extension);
+  for (const extension of new Set(spec.extensions)) args.push('-e', extension);
   args.push('--', spec.task);
-  const env = childEnv(process.env, {...extra?.env, PI_SUBAGENT_TIMEOUT_MS: String(spec.timeout)});
+  const env = childEnv(process.env, {PI_SUBAGENT_TIMEOUT_MS: String(spec.timeout)});
   return {
     command: 'node',
     supervised: true,

@@ -16,7 +16,6 @@
   "pi": {
     "extensions": [
       "./extensions/questionnaire/index.ts",
-      "./extensions/memory/index.ts",
       "./extensions/todo/index.ts",
       "./extensions/effort/index.ts",
       "./extensions/btw/index.ts",

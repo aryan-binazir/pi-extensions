@@ -1,6 +1,6 @@
 # Pi interactive tools
 
-Fourteen independently selectable extensions for Pi 0.85.1. Install from this
+Thirteen independently selectable extensions for Pi 0.85.1. Install from this
 private Git repository using your existing GitHub SSH access:
 
 ```sh
@@ -19,7 +19,6 @@ A single extension can also be loaded with
 | Extension | Interface | Behavior |
 | --- | --- | --- |
 | Questionnaire | `questionnaire` tool | Options and free text, question tabs, final submit, explicit cancellation. Requires an interactive terminal. |
-| Memory | `memory` tool | Explicit read/write/update/delete of named topics and `MEMORY.md`. Injects only small topic indexes. |
 | Todo | `todo_write` tool | Replaces the declared task list, displays progress, and reminds the agent when progress becomes stale. |
 | Effort | `/effort`, `/effort LEVEL` | Slider over the current model's supported thinking levels. |
 | BTW | `/btw`, `/side` | Private side conversation from a snapshot of the current context, streamed with the current provider and no tools. |
@@ -114,20 +113,7 @@ in `~/.pi/agent/mcp.json`, then `/reload`. Use `/mcp status` for on-demand statu
 or `"compact"` instead of `"off"` for a shorter footer. This does not hide the
 separate subagent tracker status.
 
-## Memory and sessions
-
-Global memory lives in `~/.pi/agent/memory`, or the configured `PI_CODING_AGENT_DIR` plus `/memory`. Project memory uses an existing
-`.agents/memory`, otherwise an existing `.pi/memory`, otherwise creates
-`.agents/memory`. Each request resolves against Pi's current project directory, without walking ancestor directories. Project memory requires Pi's project trust approval.
-Project writes include a local `.gitignore` excluding the directory contents.
-Already tracked files remain tracked; do not seed memory with tracked secrets.
-
-Use `name: "MEMORY.md"` for the index or a lowercase topic slug such as
-`architecture`. Indexes are limited to 4 KiB; topics to 32 KiB. `update` replaces
-one unique `old_text` occurrence with `content`. Index updates are explicit.
-Paths, symlinks, non-text data, oversize files and recognizable credential formats
-are rejected. Credential recognition cannot identify every possible secret.
-Memory is reference material, not a source of authority for instructions.
+## Todos and sessions
 
 Todos are versioned session entries restored from the active branch on resume
 and tree navigation. Only one task may be `in_progress`. Send `todos: []` to
@@ -464,7 +450,7 @@ npm run check
 `check` runs TypeScript, ESLint and regression tests against the real extension
 interfaces and Pi package loader. Individual commands are `npm run typecheck`,
 `npm run lint` and `npm test`. CI runs these on Linux and macOS with Node 22 and
-24, without provider credentials. Tests use disposable memory directories.
+24, without provider credentials. Tests use disposable temporary directories.
 Architecture decisions and the precise editor compatibility boundary are in
 [`docs/adr`](docs/adr).
 

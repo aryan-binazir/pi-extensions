@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import { createAgentSession, ModelRuntime, SessionManager, DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
 
 const root = resolve(import.meta.dirname, '..');
-const intended = ['questionnaire', 'memory', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'computer-use', 'fast-mode', 'auto-caffeinate', 'auto-permissions-status', 'sentinel'];
+const intended = ['questionnaire', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'computer-use', 'fast-mode', 'auto-caffeinate', 'auto-permissions-status', 'sentinel'];
 
-test('Pi package discovers exactly fourteen entrypoints and independently loads each', async () => {
+test('Pi package discovers exactly thirteen entrypoints and independently loads each', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-package-test-'));
   try {
     const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -27,7 +27,6 @@ test('Pi package discovers exactly fourteen entrypoints and independently loads 
       const feature = entry.path.split('/').at(-2)!;
       const expected: Record<string, { tools: string[]; commands: string[]; shortcuts: string[] }> = {
         questionnaire: {tools: ['questionnaire'], commands: [], shortcuts: []},
-        memory: {tools: ['memory'], commands: [], shortcuts: []},
         todo: {tools: ['todo_write'], commands: [], shortcuts: []},
         effort: {tools: [], commands: ['effort'], shortcuts: []},
         btw: {tools: [], commands: ['btw', 'side'], shortcuts: []},
@@ -77,7 +76,6 @@ test('bundled tools work with Sentinel loaded but auto off in a real headless se
     const errors: unknown[] = [];
     runner.onError(error => errors.push(error));
     for (const [toolName, input] of [
-      ['memory', {action: 'write', scope: 'project', name: 'fixture', content: 'synthetic memory'}],
       ['todo_write', {todos: [{content: 'Synthetic task', status: 'pending'}]}],
       ['questionnaire', {questions: [{id: 'test', prompt: 'Test?', options: [], allowOther: true}]}],
     ] as const) {

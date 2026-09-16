@@ -1,0 +1,7 @@
+# ADR 002: Branch-local declared todos
+
+Accepted for the interactive-tools package.
+
+Todos use the public session branch API and versioned custom entries, not a project file or full-session history. `todo_write` replaces a normalized list and permits at most one in-progress task. Restoration follows the selected branch on startup, resume, fork, reload and tree navigation. Each user turn persists the stale-turn count; reminders strengthen at three and six unchanged turns. Repeating an identical declaration does not reset that count. We retain per-user-turn custom-entry persistence to preserve the counter precisely across resume and tree navigation. The counter itself is never injected into the system prompt; reminder text changes only at the three/six-turn thresholds or when the declared list changes, avoiding per-turn prompt-prefix churn. Completion is only a tool caller's declaration, never inferred from assistant prose or tool activity. All-completed lists remain in history but clear the widget and reminders; `[]` clears the list. Invalid or future-version snapshots clear state rather than resurrecting obsolete progress.
+
+Schemas use Pi’s `StringEnum` for provider compatibility. Tests exercise registered tools and lifecycle hooks. The disposable sandbox harness additionally uses Pi's real SessionManager to prove disk resume, branch navigation and project-changing forks without provider calls.

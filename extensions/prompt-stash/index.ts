@@ -3,6 +3,16 @@ import { matchesKey } from "@earendil-works/pi-tui";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+const ESC = 0x1b;
+/** Legacy Ctrl+S byte, by the same code & 0x1f rule terminals use. */
+const CTRL_S_BYTE = "s".charCodeAt(0) & 0x1f;
+/** CSI u and modifyOtherKeys both spell the key out as a decimal codepoint. */
+const CTRL_S_CODEPOINT = String("s".charCodeAt(0));
+/** Bytes bracketed paste strips, so text holding them has to be set directly. */
+const CONTROL_BYTES = /[\x00-\x08\x0b\x0c\x0e-\x1f]/;
+
 /** One draft slot, scoped to this extension instance and never persisted. */
 export default function promptStash(pi: ExtensionAPI): void {
   let slot: { text: string; restore?: () => boolean } | undefined;
@@ -19,7 +29,7 @@ export default function promptStash(pi: ExtensionAPI): void {
     pi.events?.emit("pi-interactive:stash-capture", captured);
     if (!slot?.restore?.()) {
       // Bracketed paste strips control bytes; reduced UI adapters may lack it.
-      const hasControlBytes = slot && /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(slot.text);
+      const hasControlBytes = slot && CONTROL_BYTES.test(slot.text);
       if (slot && ctx.ui.pasteToEditor && !hasControlBytes) {
         ctx.ui.setEditorText("");
         ctx.ui.pasteToEditor(slot.text);
@@ -38,7 +48,7 @@ export default function promptStash(pi: ExtensionAPI): void {
     const text = ctx.ui.getEditorText();
     ctx.ui.setEditorComponent(factory);
     if (ctx.ui.getEditorText() !== text) {
-      if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text)) ctx.ui.setEditorText(text);
+      if (CONTROL_BYTES.test(text)) ctx.ui.setEditorText(text);
       else {
         ctx.ui.setEditorText("");
         ctx.ui.pasteToEditor(text);
@@ -64,17 +74,30 @@ export default function promptStash(pi: ExtensionAPI): void {
       // Decorate the actual component, retaining its identity, callbacks,
       // focus, vi state and paste registry rather than proxying its internals.
       editor.handleInput = (data) => {
-        const chunk = boundary + data;
+        const chunk = boundary === "" ? data : boundary + data;
         const wasPasting = pasting || boundary !== "";
-        for (const marker of chunk.matchAll(/\x1b\[20([01])~/g)) pasting = marker[1] === "0";
+        // Delimiters cannot overlap, so only the rightmost one sets the state.
+        const closed = chunk.lastIndexOf(PASTE_END);
+        const opened = chunk.indexOf(PASTE_START, closed < 0 ? 0 : closed + PASTE_END.length);
+        if (opened >= 0) pasting = true;
+        else if (closed >= 0) pasting = false;
         boundary = "";
-        // Vi accepts paste delimiters split across terminal input chunks.
-        for (let size = 2; size < 6; size++) {
-          const tail = chunk.slice(-size);
-          if (tail.length === size && ("\x1b[200~".startsWith(tail) || "\x1b[201~".startsWith(tail)))
-            boundary = tail;
+        // Vi accepts paste delimiters split across terminal input chunks. Every
+        // partial delimiter opens with ESC, so one must sit in the last four bytes.
+        const end = chunk.length;
+        if (chunk.charCodeAt(end - 2) === ESC || chunk.charCodeAt(end - 3) === ESC ||
+          chunk.charCodeAt(end - 4) === ESC || chunk.charCodeAt(end - 5) === ESC) {
+          for (let size = 2; size < 6; size++) {
+            const tail = chunk.slice(-size);
+            if (tail.length === size && (PASTE_START.startsWith(tail) || PASTE_END.startsWith(tail)))
+              boundary = tail;
+          }
         }
-        if (enabled && !wasPasting && !pasting && matchesKey(data, "ctrl+s")) {
+        // Ctrl+S is the raw byte or a CSI sequence naming its codepoint; ruling
+        // the rest out keeps ordinary typing off the costly key parser.
+        const lead = data.charCodeAt(0);
+        const stashKey = lead === CTRL_S_BYTE || (lead === ESC && data.includes(CTRL_S_CODEPOINT));
+        if (enabled && !wasPasting && !pasting && stashKey && matchesKey(data, "ctrl+s")) {
           toggle(ctx);
           tui.requestRender();
         } else input(data);

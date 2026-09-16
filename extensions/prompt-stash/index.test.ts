@@ -69,6 +69,22 @@ test("split bracketed paste Ctrl+S is not a stash command", () => {
   h.emit("session_shutdown");
 });
 
+test("the last delimiter in a chunk decides whether Ctrl+S is paste content", () => {
+  const h = stashHost(ViEditor);
+  // Several delimiters in one chunk, ending inside a paste: Ctrl+S is payload.
+  h.e.handleInput("\x1b[200~one\x1b[201~two\x1b[200~three");
+  h.e.handleInput("\x13");
+  assert.equal(h.status, undefined);
+  h.e.handleInput("\x1b[201~");
+  // The same chunk ending on a close delimiter leaves Ctrl+S a stash command.
+  h.e.setText("draft");
+  h.e.handleInput("\x1b[200~four\x1b[200~five\x1b[201~");
+  h.e.handleInput("\x13");
+  assert.match(h.status!, /stash/i);
+  assert.equal(h.e.getExpandedText(), "");
+  h.emit("session_shutdown");
+});
+
 test("repeated discovery does not stack wrappers; shutdown disables detached handlers", () => {
   const h = stashHost();
   const e = h.e;

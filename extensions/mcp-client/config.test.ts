@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { DEFAULT_INHERITED_ENV_VARS, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { type ServerConfig, validateConfig, mergeConfig, resolveEnvironment, resolveHeaders, requestTimeout, startupTimeout } from './config.ts';
 const validate = (server: unknown) => validateConfig({ servers: { test: server } }).servers.test;
 const aliases = {
@@ -96,6 +96,21 @@ test('runtime environment is minimal, fresh, fail closed and overrides inherited
     for (const config of [{ headers: { 'secret-invalid header': 'secret-value' } }, { headers: { X: 'secret\nvalue' } }, { envHeaders: { X: names[2] } }, { bearerTokenEnvVar: names[2] }] as ServerConfig[]) assert.throws(() => resolveHeaders(config), error => !String(error).includes('secret'));
     assert.throws(() => resolveHeaders({ bearerTokenEnvVar: names[0], oauth: {} }), /Ambiguous/);
   } finally { names.forEach((name, i) => { if (old[i] === undefined) delete process.env[name]; else process.env[name] = old[i]; }); }
+});
+test('inherited stdio environment stays identical to the MCP SDK default', () => {
+  // resolveEnvironment carries its own copy of the SDK's inherited-variable policy so
+  // configuration handling never loads the SDK. Probe every name the SDK knows about,
+  // including ones this machine does not set, so an upstream change cannot drift silently.
+  const old = DEFAULT_INHERITED_ENV_VARS.map(name => process.env[name]);
+  const restore = () => DEFAULT_INHERITED_ENV_VARS.forEach((name, i) => { if (old[i] === undefined) delete process.env[name]; else process.env[name] = old[i]; });
+  try {
+    for (const value of ['probe-value', '() { :; }']) {
+      for (const name of DEFAULT_INHERITED_ENV_VARS) process.env[name] = `${value}-${name}`;
+      assert.deepEqual(resolveEnvironment({}), getDefaultEnvironment());
+    }
+    for (const name of DEFAULT_INHERITED_ENV_VARS) delete process.env[name];
+    assert.deepEqual(resolveEnvironment({}), getDefaultEnvironment());
+  } finally { restore(); }
 });
 test('timeout precedence', () => {
   assert.equal(requestTimeout({}), 60000); assert.equal(startupTimeout({}), 10000);

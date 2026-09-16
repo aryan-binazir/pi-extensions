@@ -3,11 +3,12 @@ import { join, resolve } from 'node:path';
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
-import { McpConfigError } from './config.ts';
+import { McpConfigError, mergeConfig, validateConfig, type McpConfig } from './config.ts';
 import { ConsentStore, serverIdentity } from './consent-store.ts';
 import { createOAuthStore, type OAuthStore } from './credential-store.ts';
 import { Type } from 'typebox';
-import { boundedResult, McpConnection, mergeConfig, toolName, validateConfig, type McpConfig } from './client.ts';
+import { boundedResult, toolName } from './bounded.ts';
+import type { McpConnection } from './client.ts';
 
 export function displayLabel(value: string, limit = 80): string {
   // Strip escape sequences before control bytes; bound work and visible length.
@@ -41,10 +42,12 @@ export function schemaAllowed(schema: unknown): boolean {
   const check = (value: unknown, depth: number): boolean => {
     if (depth > 32) return false;
     if (!value || typeof value !== 'object') return true;
-    return Object.entries(value).every(([key, nested]) => {
-      if (['$ref', '$dynamicRef', '$recursiveRef'].includes(key) && (typeof nested !== 'string' || nested !== '#' && !nested.startsWith('#/'))) return false;
-      return check(nested, depth + 1);
-    });
+    for (const key of Object.keys(value)) {
+      const nested = (value as Record<string, unknown>)[key];
+      if ((key === '$ref' || key === '$dynamicRef' || key === '$recursiveRef') && (typeof nested !== 'string' || nested !== '#' && !nested.startsWith('#/'))) return false;
+      if (!check(nested, depth + 1)) return false;
+    }
+    return true;
   };
   return check(schema, 0) && Buffer.byteLength(JSON.stringify(schema)) <= 32768;
 }
@@ -137,6 +140,9 @@ export default function harborMcp(pi: ExtensionAPI, storage?: { agentDir?: strin
   const output = (value: unknown, server: string) => ({ content: [{ type: 'text' as const, text: `Untrusted MCP server output:\n${boundedResult(value, config.servers[server]?.maxOutputBytes)}` }], details: { server } });
 
   async function discover(server: string, ctx: ExtensionContext, authenticate: boolean, expected: number) {
+    // The MCP SDK costs ~330 ms and ~9 MB to load; nothing before an actual connection
+    // attempt needs it, so registration and sessions without servers never pay for it.
+    const { McpConnection } = await import('./client.ts');
     current(server, expected);
     if (config.servers[server].enabled === false) throw new Error('MCP server is disabled');
     if (authenticate && (!config.servers[server].oauth || !config.servers[server].url)) throw new Error('OAuth is not configured for this server');

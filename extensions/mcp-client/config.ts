@@ -1,5 +1,3 @@
-import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
-
 // Harbor MCP configuration. Third-party notices: docs/licenses/.
 export interface ServerConfig {
   command?: string; args?: string[]; env?: Record<string, string>;
@@ -115,9 +113,24 @@ function environmentValue(name: string): string {
 function interpolate(value: string): string {
   return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => environmentValue(name));
 }
+// Mirrors the MCP SDK's DEFAULT_INHERITED_ENV_VARS/getDefaultEnvironment. Kept here so
+// configuration handling stays free of the SDK (and zod), which costs ~140 ms and ~4 MB to
+// load; config.test.ts asserts this stays byte-identical to the SDK implementation.
+const inheritedEnvVars = process.platform === 'win32'
+  ? ['APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'PATH', 'PROCESSOR_ARCHITECTURE', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERNAME', 'USERPROFILE', 'PROGRAMFILES']
+  : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER'];
+function defaultEnvironment(): Record<string, string> {
+  const environment: Record<string, string> = {};
+  for (const key of inheritedEnvVars) {
+    const value = process.env[key];
+    // Skip functions, which are a security risk.
+    if (value !== undefined && !value.startsWith('()')) environment[key] = value;
+  }
+  return environment;
+}
 export function resolveEnvironment(config: ServerConfig): Record<string, string> {
   return Object.fromEntries([
-    ...Object.entries(getDefaultEnvironment()),
+    ...Object.entries(defaultEnvironment()),
     ...(config.envVars ?? []).map(name => [name, environmentValue(name)] as const),
     ...Object.entries(config.env ?? {}).map(([name, value]) => [variable(name), interpolate(value)] as const),
   ]);

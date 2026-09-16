@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -12,11 +11,7 @@ import { CredentialStoreError, type OAuthStore } from './credential-store.ts';
 import { McpConfigError, validateConfig, resolveEnvironment, resolveHeaders, requestTimeout, startupTimeout, type ServerConfig } from './config.ts';
 import { collectPages, McpLimitError, withDeadline } from './pagination.ts';
 export { mergeConfig, validateConfig, type McpConfig, type ServerConfig } from './config.ts';
-
-export function toolName(server: string, name: string) {
-  const hash = createHash('sha256').update(JSON.stringify([server, name])).digest('hex').slice(0, 16);
-  return `mcp_${server.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 16)}_${name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 20)}_${hash}`;
-}
+export { boundedResult, toolName } from './bounded.ts';
 
 class McpPublicError extends Error {
   constructor(readonly kind: 'cancelled' | 'timeout' | 'auth_required' | 'denied' | 'failure', message: string) { super(message); }
@@ -41,14 +36,6 @@ export function publicError(error: unknown, server?: { name: string; config: Ser
   return new McpPublicError('failure', 'MCP request failed; server unavailable, invalid response, or protocol error');
 }
 
-export function boundedResult(value: unknown, maxBytes = 65536): string {
-  let text: string;
-  try { text = JSON.stringify(value) ?? 'null'; }
-  catch { return '[MCP output omitted: value is too deeply nested or not JSON serializable]'; }
-  if (Buffer.byteLength(text) <= maxBytes) return text;
-  return Buffer.from(text).subarray(0, maxBytes - 64).toString('utf8') + '\n[MCP output truncated]';
-}
-
 // Bound bytes before the SDK parses JSON or buffers an SSE event. Long-lived
 // SSE connections may carry many bounded events without a cumulative cutoff.
 async function boundedFetch(input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1], onLimit: (error: Error) => void): Promise<Response> {
@@ -62,13 +49,20 @@ async function boundedFetch(input: Parameters<typeof fetch>[0], init: Parameters
       if (!eventStream) {
         bytes += chunk.byteLength;
         if (bytes > 2 * 1024 * 1024) limit();
-      } else for (const byte of chunk) {
-        if (++bytes > 2 * 1024 * 1024) limit();
-        if (byte === 13 || byte === 10 && !previousCR) {
-          if (lineBytes === 0) bytes = 0;
-          lineBytes = 0;
-        } else if (byte !== 10 || !previousCR) lineBytes++;
-        previousCR = byte === 13;
+      } else {
+        // Indexed access over locals; the iterator protocol and per-byte closure lookups
+        // cost roughly four times as much for every byte of every streamed event.
+        let total = bytes, line = lineBytes, cr = previousCR;
+        for (let i = 0; i < chunk.length; i++) {
+          const byte = chunk[i];
+          if (++total > 2 * 1024 * 1024) { bytes = total; lineBytes = line; previousCR = cr; limit(); }
+          if (byte === 13 || byte === 10 && !cr) {
+            if (line === 0) total = 0;
+            line = 0;
+          } else if (byte !== 10 || !cr) line++;
+          cr = byte === 13;
+        }
+        bytes = total; lineBytes = line; previousCR = cr;
       }
       controller.enqueue(chunk);
     },

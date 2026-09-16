@@ -4,13 +4,12 @@ import { chmod, link, lstat, mkdir, open, realpath, rm } from 'node:fs/promises'
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
-import {
-  OAuthClientInformationFullSchema,
-  OAuthClientInformationSchema,
-  OAuthTokensSchema,
-  type OAuthClientInformationMixed,
-  type OAuthTokens,
-} from '@modelcontextprotocol/sdk/shared/auth.js';
+import type { OAuthClientInformationMixed, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+
+// The SDK's credential schemas pull in zod (~120 ms, ~3 MB). Nothing needs them until a
+// stored credential is actually read or written, which only happens on OAuth paths.
+let authSchemas: Promise<typeof import('@modelcontextprotocol/sdk/shared/auth.js')> | undefined;
+function credentialSchemas() { return authSchemas ??= import('@modelcontextprotocol/sdk/shared/auth.js'); }
 
 const SERVICE = 'Harbor MCP OAuth';
 const STATE_LIMIT = 64 * 1024;
@@ -97,21 +96,24 @@ function validateRedirectUrl(value: unknown): string {
   return value;
 }
 
-function validateState(value: unknown): OAuthState {
+async function validateState(value: unknown): Promise<OAuthState> {
   if (!isRecord(value) || Object.keys(value).some(key => !['clientInformation', 'tokens', 'redirectUrl'].includes(key)) || jsonBytes(value) > STATE_LIMIT) {
     throw failure('invalid-state');
   }
   const state: OAuthState = { redirectUrl: validateRedirectUrl(value.redirectUrl) };
-  if (value.clientInformation !== undefined) {
-    const full = OAuthClientInformationFullSchema.safeParse(value.clientInformation);
-    const information = full.success ? full : OAuthClientInformationSchema.safeParse(value.clientInformation);
-    if (!information.success) throw failure('invalid-state');
-    state.clientInformation = information.data;
-  }
-  if (value.tokens !== undefined) {
-    const tokens = OAuthTokensSchema.safeParse(value.tokens);
-    if (!tokens.success) throw failure('invalid-state');
-    state.tokens = tokens.data;
+  if (value.clientInformation !== undefined || value.tokens !== undefined) {
+    const { OAuthClientInformationFullSchema, OAuthClientInformationSchema, OAuthTokensSchema } = await credentialSchemas();
+    if (value.clientInformation !== undefined) {
+      const full = OAuthClientInformationFullSchema.safeParse(value.clientInformation);
+      const information = full.success ? full : OAuthClientInformationSchema.safeParse(value.clientInformation);
+      if (!information.success) throw failure('invalid-state');
+      state.clientInformation = information.data;
+    }
+    if (value.tokens !== undefined) {
+      const tokens = OAuthTokensSchema.safeParse(value.tokens);
+      if (!tokens.success) throw failure('invalid-state');
+      state.tokens = tokens.data;
+    }
   }
   if (jsonBytes(state) > STATE_LIMIT) throw failure('invalid-state');
   return state;
@@ -372,10 +374,10 @@ function makeStore(key: string, runner: HelperRunner): OAuthStore {
         throw failure('unavailable');
       }
       if (!response.found) return undefined;
-      return validateState(response.payload);
+      return await validateState(response.payload);
     },
     async save(value) {
-      const state = validateState(value);
+      const state = await validateState(value);
       let response: unknown;
       try { response = await request('save', state); }
       catch (error) { throw error instanceof CredentialStoreError ? error : failure('unavailable'); }

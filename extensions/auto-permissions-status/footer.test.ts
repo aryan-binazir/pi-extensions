@@ -72,3 +72,19 @@ test('missing status and unknown context remain explicit; terminal controls are 
   assert.match(lines[1], /\?\/128k/);
   f.footer.dispose();
 });
+
+test('memoised rows still follow width, cwd and empty-status changes', () => {
+  const f = fixture();
+  const wide = f.footer.render(140);
+  assert.equal(visibleWidth(f.footer.render(80)[0]), 80);
+  assert.deepEqual(f.footer.render(140), wide);
+  f.ctx.sessionManager.getCwd = () => '/workspace/other';
+  assert.match(f.footer.render(140)[0], /^\/workspace\/other \(main\)/);
+  f.statuses.set('tracker', '');
+  const blank = f.footer.render(140);
+  assert.equal(blank.length, 3);
+  assert.equal(blank[2], '');
+  f.statuses.delete('tracker');
+  assert.equal(f.footer.render(140).length, 2);
+  f.footer.dispose();
+});

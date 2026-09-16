@@ -3,14 +3,49 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport, type StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { ElicitRequestSchema, type ElicitRequest, type ElicitResult, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
-import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import type { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
+import type { ElicitRequest, ElicitResult, CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
+
+// The SDK graph (zod, ajv) costs ~350ms and ~13MB to load and is unreachable
+// until a Mac tool actually runs. Keep it out of extension startup.
+let sdk: Promise<{
+  Client: typeof import('@modelcontextprotocol/sdk/client/index.js').Client;
+  StdioClientTransport: typeof import('@modelcontextprotocol/sdk/client/stdio.js').StdioClientTransport;
+  ElicitRequestSchema: typeof import('@modelcontextprotocol/sdk/types.js').ElicitRequestSchema;
+  validator: (schema: unknown) => (value: unknown) => { valid: boolean };
+}> | undefined;
+export function loadMacSdk() {
+  return (sdk ??= Promise.all([
+    import('@modelcontextprotocol/sdk/client/index.js'),
+    import('@modelcontextprotocol/sdk/client/stdio.js'),
+    import('@modelcontextprotocol/sdk/types.js'),
+    import('@modelcontextprotocol/sdk/validation/ajv'),
+  ]).then(([client, stdio, types, ajv]) => {
+    // One Ajv instance, and one compiled validator per schema: compiling is
+    // code generation and used to happen on every single tool call.
+    const instance = new ajv.AjvJsonSchemaValidator();
+    const compiled = new WeakMap<object, (value: unknown) => { valid: boolean }>();
+    return {
+      Client: client.Client,
+      StdioClientTransport: stdio.StdioClientTransport,
+      ElicitRequestSchema: types.ElicitRequestSchema,
+      validator: (schema: unknown) => {
+        const key = schema as object;
+        let validate = compiled.get(key);
+        if (!validate) compiled.set(key, (validate = instance.getValidator(schema as never) as never));
+        return validate;
+      },
+    };
+  }));
+}
 
 export function boundedText(text: string): string {
+  // UTF-8 spends 1..3 bytes per UTF-16 unit, so both ends of the range are decided
+  // from the length alone and nothing is copied unless it is really truncated.
+  if (text.length <= 16384) return text;
+  if (text.length <= 65536 && Buffer.byteLength(text) <= 65536) return text;
   const bytes = Buffer.from(text), suffix = '\n[truncated]';
-  if (bytes.length <= 65536) return text;
   let end = 65536 - Buffer.byteLength(suffix);
   while ((bytes[end] & 0xc0) === 0x80) end--;
   return bytes.subarray(0, end).toString('utf8') + suffix;
@@ -36,6 +71,24 @@ export async function approve(params: ElicitRequest['params'], ctx: ExtensionCon
   } catch { return { action: signal.aborted ? 'cancel' : 'decline' }; }
   finally { signal.removeEventListener('abort', abort); controller.abort(); }
 }
+const pngMagic = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+/**
+ * True exactly when `text` is the canonical base64 of `image`, which is what
+ * `image.toString('base64') === text` decided before. Canonical output only ever
+ * contains `[A-Za-z0-9+/=]` in a length divisible by four, so this also subsumes
+ * the separate charset and padding scans. Comparing 192KiB at a time keeps the
+ * transient encode buffer off the heap: a whole-screenshot re-encode allocated a
+ * second copy of every base64 string the service sent.
+ */
+function canonicalBase64(image: Buffer, text: string): boolean {
+  if (Math.ceil(image.length / 3) * 4 !== text.length) return false;
+  const step = 3 * 65536;
+  for (let offset = 0, cursor = 0; offset < image.length; offset += step, cursor += (step / 3) * 4) {
+    const piece = image.toString('base64', offset, Math.min(offset + step, image.length));
+    if (piece !== text.substring(cursor, cursor + piece.length)) return false;
+  }
+  return true;
+}
 export function macResult(result: CallToolResult, omitImages = false) {
   if (result.isError) throw new Error(boundedText(result.content.filter(c => c.type === 'text').map(c => c.text).join('\n') || 'Codex computer-use service error'));
   const content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[] = [];
@@ -46,12 +99,11 @@ export function macResult(result: CallToolResult, omitImages = false) {
     if (item.type === 'text') continue;
     if (item.type !== 'image') throw new Error('Invalid unsupported Codex computer-use content');
     if (item.data.length > Math.ceil(16 * 1024 * 1024 / 3) * 4) throw new Error('Invalid oversized image');
-    if (item.data.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(item.data)) throw new Error('Invalid image base64');
     const image = Buffer.from(item.data, 'base64');
-    if (image.toString('base64') !== item.data) throw new Error('Invalid image base64');
+    if (!canonicalBase64(image, item.data)) throw new Error('Invalid image base64');
     bytes += image.length;
     if (bytes > 16 * 1024 * 1024) throw new Error('Invalid oversized aggregate images');
-    const valid = item.mimeType === 'image/png' ? image.length >= 24 && image.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) && image.toString('ascii', 12, 16) === 'IHDR'
+    const valid = item.mimeType === 'image/png' ? image.length >= 24 && image.subarray(0, 8).equals(pngMagic) && image.toString('ascii', 12, 16) === 'IHDR'
       : item.mimeType === 'image/jpeg' ? image.length >= 4 && image[0] === 255 && image[1] === 216 && image[2] === 255 && image.at(-2) === 255 && image.at(-1) === 217
       : item.mimeType === 'image/webp' && image.length >= 16 && image.toString('ascii', 0, 4) === 'RIFF' && image.toString('ascii', 8, 12) === 'WEBP';
     if (!valid) throw new Error('Invalid image MIME or magic');
@@ -83,6 +135,7 @@ export class MacSession {
       let onAbort!: () => void;
       const cancelled = new Promise<never>((_resolve, reject) => { onAbort = () => reject(control.signal.reason); control.signal.addEventListener('abort', onAbort, { once: true }); });
       const operation = (async () => {
+        const { Client, StdioClientTransport, ElicitRequestSchema, validator } = await loadMacSdk();
         if (!this.client) {
           const client = new Client({ name: 'pi-computer-use', version: '1' }, { capabilities: { elicitation: { form: {} } } });
           this.client = client;
@@ -93,7 +146,7 @@ export class MacSession {
         }
         control.signal.throwIfAborted();
         const tool = this.tools.find(tool => tool.name === name);
-        if (!tool || !new AjvJsonSchemaValidator().getValidator(tool.inputSchema)(args).valid) throw new Error(`Arguments do not match official ${name} schema`);
+        if (!tool || !validator(tool.inputSchema)(args).valid) throw new Error(`Arguments do not match official ${name} schema`);
         sent = true;
         return macResult(await this.client!.callTool({ name, arguments: args }, undefined, { signal: control.signal }) as CallToolResult, omitImages);
       })();

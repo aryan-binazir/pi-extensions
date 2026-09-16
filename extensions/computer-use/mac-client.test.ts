@@ -118,3 +118,35 @@ test('URL approval requests are denied without displaying a prompt', async () =>
     hasUI: true, ui: { confirm() { throw new Error('must not prompt'); } },
   } as any, new AbortController().signal), { action: 'decline' });
 });
+
+test('image base64 is accepted exactly when it is the canonical encoding of its bytes', () => {
+  const png = Buffer.alloc(4096);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png); png.write('IHDR', 12, 'ascii');
+  for (let i = 24; i < png.length; i += 5) png[i] = i & 255;
+  const accepts = (data: string) => { try { macResult({ content: [{ type: 'image', mimeType: 'image/png', data }] }); return true; } catch (error) { return !/Invalid image base64/.test((error as Error).message); } };
+  const canonical = (data: string) => Buffer.from(data, 'base64').toString('base64') === data;
+  const encoded = png.toString('base64');
+  for (const data of [encoded, '', 'AAAA', 'AAA=', 'AB==', 'AQ==', 'A===', '====', 'QQ==QQ==', 'A'.repeat(5), '****', encoded + 'A', encoded.slice(0, -1), encoded + '==', encoded.slice(0, 8) + '*' + encoded.slice(9), encoded.slice(0, 8) + '=' + encoded.slice(9)]) {
+    assert.equal(accepts(data), canonical(data), JSON.stringify(data.slice(0, 16)));
+  }
+  // The comparison runs 192KiB at a time; a corruption straddling a chunk edge must still be caught.
+  const wide = Buffer.alloc(3 * 65536 * 2 + 9);
+  for (let i = 0; i < wide.length; i += 3) wide[i] = i & 255;
+  const big = wide.toString('base64');
+  for (const at of [0, 262143, 262144, 262145, big.length - 2]) {
+    const broken = big.slice(0, at) + (big[at] === 'A' ? 'B' : 'A') + big.slice(at + 1);
+    assert.equal(accepts(broken), canonical(broken), 'boundary ' + at);
+  }
+});
+
+test('bounded text truncates on real UTF-8 bytes, not code unit count', () => {
+  assert.equal(boundedText('a'.repeat(65536)), 'a'.repeat(65536));
+  assert.match(boundedText('a'.repeat(65537)), /\n\[truncated\]$/);
+  assert.equal(boundedText('é'.repeat(32768)), 'é'.repeat(32768));
+  const wide = 'é'.repeat(32769);
+  assert.ok(wide.length <= 65536 && Buffer.byteLength(wide) > 65536);
+  assert.ok(Buffer.byteLength(boundedText(wide)) <= 65536);
+  assert.match(boundedText(wide), /\n\[truncated\]$/);
+  assert.equal(boundedText('日'.repeat(21845)), '日'.repeat(21845));
+  assert.match(boundedText('日'.repeat(21846)), /\n\[truncated\]$/);
+});

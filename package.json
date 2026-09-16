@@ -1,5 +1,6 @@
 {
   "name": "@aryan-binazir/pi-interactive-tools",
+  "license": "MIT",
   "version": "0.1.0",
   "private": true,
   "description": "Independent interactive tools and agent workflows for Pi",

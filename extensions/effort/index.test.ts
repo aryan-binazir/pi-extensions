@@ -65,6 +65,7 @@ function host(t: TestContext, defaults = { model: "test", level: "high" }) {
     notices,
     key: (s: string) => component.handleInput(s),
     render: (width = 80) => component.render(width).join("\n"),
+    lines: (width = 80): string[] => component.render(width),
   };
 }
 test("slider traverses only actual supported thinking levels", async (t) => {
@@ -232,4 +233,34 @@ test("an unacknowledged replacement session times out without applying effort", 
   later.ctx.sessionManager.getSessionFile = () => "/synthetic/missing";
   await Promise.resolve();
   assert.deepEqual(later.changes, []);
+});
+
+test("repeated renders survive width, selection and model changes", async (t) => {
+  const h = host(t);
+  const result = h.commands.effort.handler("", h.ctx);
+  const wide = h.render(80);
+  const narrow = h.render(40);
+  const tiny = h.render(3);
+  assert.equal(h.render(80), wide);
+  assert.equal(h.render(40), narrow);
+  assert.equal(h.render(3), tiny);
+  h.key("[C");
+  const moved = h.render(80);
+  assert.notEqual(moved, wide);
+  h.key("[D");
+  assert.equal(h.render(80), wide);
+  h.key("[C");
+  assert.equal(h.render(80), moved);
+  h.ctx.model.id = "renamed-model";
+  assert.match(h.render(80), /renamed-model/);
+  // Each render hands back its own array; a caller mutating one must not
+  // change what the next render returns.
+  const first = h.lines(80);
+  const second = h.lines(80);
+  assert.notEqual(first, second);
+  assert.deepEqual(first, second);
+  first[0] = "tampered";
+  assert.deepEqual(h.lines(80), second);
+  h.key("");
+  await result;
 });

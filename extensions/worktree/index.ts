@@ -1,11 +1,13 @@
 import { createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
-import { Worktrees } from './manager.ts';
 import { getActiveCwd, resolveToolPath, setActiveCwd } from './routing.ts';
 const entryType = 'agent-workflows:worktree';
+// Hoisted out of the per-tool-call handler: membership tests only, never mutated.
+const routedTools = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls']);
+const directoryTools = new Set(['grep', 'find', 'ls']);
 export default function worktree(pi: ExtensionAPI): void {
-  const paint = (ctx: ExtensionContext) => { if (ctx.hasUI) ctx.ui.setStatus(entryType, getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()) === ctx.cwd ? undefined : `Worktree: ${getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId())}`); };
+  const paint = (ctx: ExtensionContext) => { if (ctx.hasUI) { const active = getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()); ctx.ui.setStatus(entryType, active === ctx.cwd ? undefined : `Worktree: ${active}`); } };
   let previousSession: { cwd: string; id: string } | undefined;
   const restore = async (ctx: ExtensionContext) => {
     const id = ctx.sessionManager.getSessionId();
@@ -13,10 +15,15 @@ export default function worktree(pi: ExtensionAPI): void {
     previousSession = { cwd: ctx.cwd, id };
     setActiveCwd(ctx.cwd, undefined, ctx.sessionManager.getSessionId());
     let path: unknown;
-    for (const entry of ctx.sessionManager.getBranch()) {
+    // Only the last matching entry wins, so scan back and stop at it instead of
+    // walking the whole branch on every session_start/session_tree.
+    const branch = ctx.sessionManager.getBranch();
+    for (let index = branch.length - 1; index >= 0; index--) {
+      const entry = branch[index];
       if (entry.type === 'custom' && entry.customType === entryType) {
         const data = entry.data as { version?: number; path?: unknown } | undefined;
         path = data?.version === 1 ? data.path : undefined;
+        break;
       }
     }
     if (typeof path === 'string' && isAbsolute(path)) {
@@ -35,10 +42,10 @@ export default function worktree(pi: ExtensionAPI): void {
   pi.on('session_tree', (_event, ctx) => restore(ctx));
   pi.on('session_shutdown', (_event, ctx) => { setActiveCwd(ctx.cwd, undefined, ctx.sessionManager.getSessionId()); paint(ctx); });
   pi.on('tool_call', (event, ctx) => {
-    if (!['read', 'write', 'edit', 'grep', 'find', 'ls'].includes(event.toolName)) return;
+    if (!routedTools.has(event.toolName)) return;
     const input = event.input as { path?: unknown };
     if (typeof input.path === 'string') input.path = resolveToolPath(input.path, getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()));
-    else if (input.path === undefined && ['grep', 'find', 'ls'].includes(event.toolName)) input.path = getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId());
+    else if (input.path === undefined && directoryTools.has(event.toolName)) input.path = getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId());
   });
   pi.registerTool({
     ...createBashToolDefinition(process.cwd()),
@@ -56,8 +63,11 @@ export default function worktree(pi: ExtensionAPI): void {
       try {
         const words = commandWords(args);
         const command = words.shift() ?? 'list';
-        const trees = new Worktrees(ctx.cwd);
         if (command === 'original') { activate(ctx, ctx.cwd); return; }
+        // Git plumbing is only reachable from this command; keep it off the
+        // extension's import path so registration does not pay for it.
+        const { Worktrees } = await import('./manager.ts');
+        const trees = new Worktrees(ctx.cwd);
         if (command === 'list') { if (ctx.hasUI) ctx.ui.notify((await trees.list()).map(item => `${item.branch || '(detached)'} ${item.path}`).join('\n'), 'info'); return; }
         if (!ctx.hasUI) throw new Error('Worktree mutations require an interactive confirmation UI');
         if (command === 'remove' || command === 'cleanup') {

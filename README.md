@@ -33,6 +33,47 @@ A single extension can also be loaded with
 | Auto Permissions status | Persistent footer | Display-only companion to Hank Warren's plugin: on/off, reviewer and effort, or unavailable/config error. |
 | Sentinel | `/auto on`, `/auto off`, `/sentinel reload` | Default-off adaptive Luna review, with user-owned standing preferences and inherited child coverage. [Setup and boundaries](extensions/sentinel/README.md). |
 
+## Global system-prompt append (agent setup)
+
+[`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) is the version-controlled source for shared
+cross-project instructions. It starts as a placeholder; add global preferences
+there, keep repository rules in `AGENTS.md`, and keep extension guidance in its
+extension. Pi appends this file to its default system prompt rather than replacing
+it. Package installation alone does not activate a root-level append file.
+
+Agents setting up this repository must link this file into Pi's global agent
+directory. Run the following from a **stable checkout** of this repository, not a
+temporary worktree (the checkout must remain available):
+
+```sh
+(
+  set -eu
+  source_file="$(pwd -P)/APPEND_SYSTEM.md"
+  agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+  target="$agent_dir/APPEND_SYSTEM.md"
+  test -f "$source_file"
+  mkdir -p "$agent_dir"
+  if [ -L "$target" ] && [ "$(readlink "$target")" = "$source_file" ]; then
+    printf 'Already linked: %s\n' "$target"
+  elif [ -e "$target" ] || [ -L "$target" ]; then
+    printf 'Existing append file/link: %s. Preserve it and ask before replacing or merging.\n' "$target" >&2
+    exit 1
+  else
+    ln -s "$source_file" "$target"
+  fi
+  test -f "$target"
+  test "$(readlink "$target")" = "$source_file"
+)
+```
+
+The default target is `~/.pi/agent/APPEND_SYSTEM.md`; `PI_CODING_AGENT_DIR`
+overrides that directory. Preserve existing files and symlinks, including broken
+links; obtain approval before merging or replacing them. Never use a force-link
+command to discard existing instructions. Verify the link as above, then run
+`/reload` in Pi or restart it. Edit the repository source, not a separate copy;
+future source updates are picked up on reload. If the checkout moves, update the
+link. This is an explicit local setup step, not an automatic install hook.
+
 ## MCP / Linear (external package)
 
 Harbor MCP is retired and no longer bundled. Use the free external

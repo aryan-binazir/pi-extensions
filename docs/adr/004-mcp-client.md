@@ -1,6 +1,8 @@
 # 004: Keep MCP protocol and Pi policy separate
 
-Accepted for the external integrations stack.
+Status: retired; superseded by [ADR 011](011-external-mcp-adapter.md).
+
+Historical decision for the removed bundled client, not current setup guidance.
 
 Pi has no built-in MCP client. The extension must support stdio, Streamable HTTP and legacy SSE without owning a second JSON-RPC implementation.
 

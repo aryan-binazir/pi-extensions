@@ -1,12 +1,16 @@
 # ADR 007: Harbor MCP
 
-## Decision
+Status: retired; superseded by [ADR 011](011-external-mcp-adapter.md).
+
+This records the removed implementation, not the current adapter’s guarantees.
+
+## Historical decision
 
 Harbor MCP is Pi's bundled TypeScript MCP client. Use the official TypeScript MCP
 SDK for protocol framing, transports, progress, cancellation and authentication;
 keep Pi-specific configuration, consent and lifecycle behavior in the extension.
 No separate adapter or additional runtime is needed. Existing `mcp` tool names,
-commands and the `extensions/mcp-client/index.ts` entrypoint remain compatible.
+commands and the bundled client entrypoint remained compatible.
 
 Third-party attribution and licenses are in [`../licenses`](../licenses).
 
@@ -25,7 +29,7 @@ Third-party attribution and licenses are in [`../licenses`](../licenses).
 
 - Only JSON is read. Unknown fields, conflicting aliases, unsupported policies
   and invalid transport fields fail closed. No external agent's config or
-  credentials are loaded. See the extension README for accepted field names.
+  credentials are loaded. The former extension README documented accepted field names.
 - No enterprise token exchange, remote execution environments, header-helper
   commands, plugin imports, persistent catalog cache, `required`/exec-exit policy,
   sampling or elicitation. Resource templates are not automatically expanded.
@@ -85,6 +89,5 @@ header-origin isolation and synthetic OAuth PKCE.
 During verification, a throwaway harness exercised the actual transports and
 extension registration boundary inside an ephemeral Node container with synthetic
 credentials and no external network. That scratch harness is intentionally not
-shipped. The maintained, reproducible integration coverage lives in
-`extensions/mcp-client/*.test.ts` and runs with `npm run check`. This does not prove live provider authentication, graphical
+shipped. The former bundled-client integration tests were removed with the client. This does not prove live provider authentication, graphical
 browser login, a real model conversation, or macOS behavior.

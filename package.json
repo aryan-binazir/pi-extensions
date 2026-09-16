@@ -24,7 +24,6 @@
       "./extensions/prompt-stash/index.ts",
       "./extensions/subagents/index.ts",
       "./extensions/worktree/index.ts",
-      "./extensions/mcp-client/index.ts",
       "./extensions/computer-use/index.ts",
       "./extensions/fast-mode/index.ts",
       "./extensions/auto-caffeinate/index.ts",

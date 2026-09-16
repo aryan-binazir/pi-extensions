@@ -1,74 +1,121 @@
-# Harbor MCP setup
+# MCP / Linear setup (external adapter)
 
-Install this package with Pi and your existing GitHub SSH access:
-
-```sh
-pi install git:git@github.com:aryan-binazir/pi-extensions@main
-pi config
-```
-
-Before enabling Harbor, disable or uninstall any other MCP client extension to
-avoid overlapping tools and commands. If you followed the previous setup guide,
-remove its separately installed adapter first:
+Harbor MCP is retired. Install the free external adapter separately; this
+repository no longer ships a general MCP client:
 
 ```sh
-pi remove npm:pi-mcp-adapter
+pi install npm:pi-mcp-adapter@2.34.0
 ```
 
-Enable `extensions/mcp-client/index.ts`, then restart Pi or run `/reload`. For a
-development checkout use `pi install /absolute/path/to/pi-extensions` instead;
-do not install both copies. If you previously excluded this extension in package
-settings, remove that exclusion through `pi config`. No separate MCP plugin,
-additional runtime or helper executable is required.
+Remove any explicit loading of the retired Harbor entrypoint and avoid loading
+multiple MCP clients. This is a Pi package install, not a repository dependency.
+Review upgrades before changing the pin.
 
-Create `~/.pi/agent/mcp.json` for user-wide configuration, or `.pi/mcp.json` in a
-trusted project. An explicit `--mcp-config /path/to/config.json` overrides complete
-same-name server entries. Example (replace with your service's documented URL):
+## Configuration
+
+Merge this example into `~/.pi/agent/mcp.json` (or
+`$PI_CODING_AGENT_DIR/mcp.json`), the Pi-specific global override. Preserve unrelated
+settings and servers. Do not copy the old Harbor `servers`/`consent` format.
 
 ```json
 {
-  "servers": {
-    "service": {
-      "url": "https://mcp.example.com/mcp",
-      "oauth": {},
-      "consent": "ask"
+  "settings": {
+    "hostConfigDiscovery": "off",
+    "mcpFooterStatus": "off",
+    "approveTools": true,
+    "scriptMode": false
+  },
+  "mcpServers": {
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "auth": "oauth",
+      "lifecycle": "lazy",
+      "approveTools": [
+        "prepare_*",
+        "create_*",
+        "save_*",
+        "update_*",
+        "delete_*",
+        "retire_*",
+        "restore_*",
+        "resolve_*",
+        "submit_*",
+        "merge_*",
+        "share_*",
+        "unshare_*",
+        "mark_*"
+      ]
     }
   }
 }
 ```
 
-Reload config, then use `/mcp` for status, `/mcp-connect service` to connect or
-refresh tools, and `/mcp-auth service` to sign in (saved in macOS Keychain on macOS). The example assumes
-a server supporting dynamic public-client registration; otherwise configure
-`oauth.clientId` using a registered public client supporting ephemeral loopback
-callbacks. The authorization URL is shown, not automatically opened. Authenticate
-again only when saved authorization cannot be refreshed. On macOS, install Xcode
-Command Line Tools if needed (`xcode-select --install`) and allow the Harbor helper
-Keychain access when macOS asks. Keychain failures are reported rather than falling
-back to insecure storage. OAuth is session-only on other platforms.
+The per-server `approveTools` array **overrides** the global setting and matches
+original MCP tool names, not proxy-prefixed names such as `linear_create_issue`.
+This covers current Linear mutation names, including preparation and resolution
+operations. Read calls not matching these patterns run automatically after
+connection/authentication. This is **name matching, not semantic classification**
+and does not rely on server read-only annotations. New unmatched mutation verbs
+would also run without this approval gate: review the discovered catalog when it
+changes and extend the patterns, or temporarily set Linear's `approveTools` to
+`true`. Other servers still require approval for every tool call unless explicitly
+overridden. Disabling `scriptMode` hides `mcpScript`; it is not a sandbox.
 
-For bearer-token servers, use `bearerTokenEnvVar` with an exported environment
-variable instead of OAuth. Do not commit credentials. Read the service's current
-MCP documentation for its supported endpoint, scopes, and administrator settings.
-Installing the client does not grant account access.
+`hostConfigDiscovery: "off"` disables automatic host-specific discovery, not
+standard shared files or explicit imports. The adapter also reads shared global
+MCP files (notably `~/.config/mcp/mcp.json`) and project `.mcp.json` / `.pi/mcp.json`;
+project overrides take precedence over this global policy. Audit those files and
+any explicit imports before trusting the effective configuration. `/mcp setup`
+can inspect configuration paths; do not adopt unrelated host configurations.
 
-The first connection asks to remember approval for that exact configuration and
-config source; later startups/reloads reuse it. Tool and resource actions still
-ask for consent by default. Headless startup may reuse remembered connection
-approval, but actions still require explicit `consent: "allow"`. Use
-`/mcp-forget service` to disconnect and remove that configuration's saved approval
-and OAuth sign-in. This does not revoke tokens at the provider; other running
-sessions observe the deleted sign-in before their next OAuth request. Exact raw-name
-`allowTools`/`denyTools` lists narrow tools, with deny taking precedence. Remote
-read-only annotations never grant permission. Stdio servers execute with your
-user's permissions, not inside an automatic sandbox.
+`mcpFooterStatus: "off"` hides the persistent MCP footer without changing
+connections or tool availability. Use `/mcp status` on demand, or set `"compact"`
+for a shorter footer. Separate subagent tracker status is unaffected. Run
+`/reload` after changing this setting.
 
-Harbor accepts alternative JSON field names (`mcp_servers`,
-`startup_timeout_sec`, `tool_timeout_sec`, `enabled_tools`, `disabled_tools`,
-`env_vars`, `http_headers`, `env_http_headers`, `bearer_token_env_var`). This is
-a JSON-only configuration format. Unknown fields and conflicting aliases fail
-closed; third-party adapter configurations need explicit conversion.
+## Authenticate and use
 
-See the [client reference](../extensions/mcp-client/README.md) for the complete
-configuration, transport, deadline, output, OAuth and compatibility boundaries.
-Update this package through Pi's normal package updates, then reload.
+Run `/reload` or restart Pi, then:
+
+```text
+/mcp-auth linear
+```
+
+Complete the browser OAuth flow with your Linear account. If Pi is remote and
+the browser cannot reach its localhost callback, follow the adapter's manual
+callback instructions. Authentication grants account access, not blanket mutation
+approval. Persistent OAuth uses the OS credential store by default and fails
+closed if it is unavailable. No credentials, authorization codes, callback URLs,
+or token files belong in this repository. The old Harbor credentials/config are
+not automatically migrated; authenticate through the adapter.
+
+Use `/mcp` for status and `/mcp reconnect linear` to refresh discovery. Lazy
+lifecycle connects on demand rather than at startup. The single `mcp` proxy is
+the default; discover and inspect a tool before calling it:
+
+```js
+mcp({ connect: "linear" })
+mcp({ server: "linear" })
+mcp({ search: "linear issues" })
+mcp({ describe: "linear_get_issue" })
+mcp({ tool: "linear_get_issue", args: { id: "TEAM-123" } })
+```
+
+Use the actual names and argument schema returned by discovery, not assumptions
+from these examples. Matching mutations prompt **Allow once**, **Allow for
+session**, or **Deny**. Prefer Allow once when each mutation should be reviewed;
+session grants can persist on the active session branch and restore on resume.
+Headless calls needing approval fail closed with `approval_required`. Permission
+broker extensions can affect decisions; this guide assumes no broker overrides.
+Bash-only Auto Permissions does not itself protect MCP calls.
+
+Native Pi tools are optional: add `"directTools": true` to Linear to register
+all its tools, or an array of selected original names for a smaller tool list.
+The same approval policy applies to direct and proxy calls. The proxy avoids
+loading every schema into model context. Reload after configuration changes.
+
+The adapter is free to install; Linear access, provider usage and other services
+may have their own costs. Installation does not grant service access. No live
+OAuth or remote mutation is exercised by this repository's tests. See the
+[upstream package documentation](https://www.npmjs.com/package/pi-mcp-adapter)
+for transport, credential-store and platform limitations.

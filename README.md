@@ -1,6 +1,6 @@
 # Pi interactive tools
 
-Fifteen independently selectable extensions for Pi 0.85.1. Install from this
+Fourteen independently selectable extensions for Pi 0.85.1. Install from this
 private Git repository using your existing GitHub SSH access:
 
 ```sh
@@ -27,12 +27,33 @@ A single extension can also be loaded with
 | Prompt stash | `Ctrl+S` | Stash, restore or swap one draft slot; a footer indicator shows occupancy. |
 | Subagents | `subagent`, TypeScript workflows | Isolated task contexts, bounded background execution and approved workflow replay. |
 | Worktree | `/worktree` | Create or reuse a checkout and route the current session's shell and relative file tools. |
-| Harbor MCP | MCP tools, resources, templates and prompts; `/mcp` status | TypeScript client with bounded discovery, per-server deadlines and explicit consent. [Setup and limits](extensions/mcp-client/README.md). |
 | Computer use | Desktop tools | Pi directs native Linux desktop tools or seven app-targeted macOS tools through the official Codex computer-use service. See [desktop setup](extensions/computer-use/README.md). |
 | Fast mode | `/fast` | Toggle supported base/fast model entries while retaining provider authentication and reasoning. [Provider support](docs/adr/006-search-fast-power.md). |
 | Auto-caffeinate | Agent lifecycle | Temporarily inhibit idle sleep during work on confirmed AC power, including background tasks. |
 | Auto Permissions status | Persistent footer | Display-only companion to Hank Warren's plugin: on/off, reviewer and effort, or unavailable/config error. |
 | Sentinel | `/auto on`, `/auto off`, `/sentinel reload` | Default-off adaptive Luna review, with user-owned standing preferences and inherited child coverage. [Setup and boundaries](extensions/sentinel/README.md). |
+
+## MCP / Linear (external package)
+
+Harbor MCP is retired and no longer bundled. Use the free external
+[`pi-mcp-adapter`](https://www.npmjs.com/package/pi-mcp-adapter):
+
+```sh
+pi install npm:pi-mcp-adapter@2.34.0
+```
+
+Follow [MCP setup](docs/mcp-plugin-setup.md) for the configuration, then run
+`/reload` and `/mcp-auth linear`. Use the `mcp` proxy to discover, describe and
+call tools; native/direct tools are optional. The documented policy allows
+Linear reads automatically and requires approval for current mutation-name
+patterns. It is name matching, not semantic classification: review new unmatched
+verbs. Other servers require approval by default. Keep credentials out of this
+repository; do not load the retired client alongside the adapter.
+
+Hide the persistent MCP footer with `"mcpFooterStatus": "off"` under `settings`
+in `~/.pi/agent/mcp.json`, then `/reload`. Use `/mcp status` for on-demand status,
+or `"compact"` instead of `"off"` for a shorter footer. This does not hide the
+separate subagent tracker status.
 
 ## Memory and sessions
 

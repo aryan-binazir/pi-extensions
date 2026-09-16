@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import { createAgentSession, ModelRuntime, SessionManager, DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
 
 const root = resolve(import.meta.dirname, '..');
-const intended = ['questionnaire', 'memory', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'mcp-client', 'computer-use', 'fast-mode', 'auto-caffeinate', 'auto-permissions-status', 'sentinel'];
+const intended = ['questionnaire', 'memory', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'computer-use', 'fast-mode', 'auto-caffeinate', 'auto-permissions-status', 'sentinel'];
 
-test('Pi package discovers exactly fifteen entrypoints and independently loads each', async () => {
+test('Pi package discovers exactly fourteen entrypoints and independently loads each', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-package-test-'));
   try {
     const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -35,7 +35,6 @@ test('Pi package discovers exactly fifteen entrypoints and independently loads e
         'prompt-stash': {tools: [], commands: [], shortcuts: []},
         subagents: {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []},
         worktree: {tools: ['bash'], commands: ['worktree'], shortcuts: []},
-        'mcp-client': {tools: ['mcp'], commands: ['mcp', 'mcp-auth', 'mcp-connect', 'mcp-forget'], shortcuts: []},
         'computer-use': {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []},
         'fast-mode': {tools: [], commands: ['fast'], shortcuts: []},
         'auto-caffeinate': {tools: [], commands: [], shortcuts: []},

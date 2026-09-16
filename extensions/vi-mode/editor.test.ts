@@ -761,3 +761,99 @@ test("vertical operator rejection preserves valid line and counted motions", () 
     assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), command);
   }
 });
+
+test("word motions give every ASCII character the unicode rules' class", () => {
+  const word = /[\p{L}\p{N}\p{M}_]/u;
+  for (let code = 33; code < 127; code++) {
+    const c = String.fromCharCode(code);
+    const e = editor();
+    // In "a<c>a b" the first w lands on c when c is punctuation and on b when
+    // c keeps the run a word, which reads the class straight off the cursor.
+    e.setText(`a${c}a b`);
+    keys(e, "\x1b0w");
+    assert.equal(e.getCursor().col, word.test(c) ? 4 : 1, `w over ${JSON.stringify(c)}`);
+  }
+  const e = editor();
+  e.setText("one_two three-four");
+  keys(e, "\x1b0w");
+  assert.equal(e.getCursor().col, 8, "underscore keeps a word together");
+  keys(e, "w");
+  assert.equal(e.getCursor().col, 13, "a hyphen is its own punctuation word");
+});
+
+test("cursor placement stays exact across a long multi-line draft", () => {
+  const e = editor();
+  // insertTextAtCursor keeps the draft raw where setText would collapse it.
+  const draft = Array.from({ length: 40 }, (_, i) => `line ${i} ${"x".repeat(i)}`).join("\n");
+  e.insertTextAtCursor(draft);
+  keys(e, "\x1bgg");
+  assert.deepEqual(e.getCursor(), { line: 0, col: 0 });
+  keys(e, "G");
+  assert.deepEqual(e.getCursor(), { line: 39, col: 0 });
+  keys(e, "$");
+  assert.deepEqual(e.getCursor(), { line: 39, col: "line 39 ".length + 38 });
+  keys(e, "20G");
+  assert.deepEqual(e.getCursor(), { line: 19, col: 0 });
+  keys(e, "$hh");
+  assert.deepEqual(e.getCursor(), { line: 19, col: "line 19 ".length + 16 });
+  assert.equal(e.getText(), draft, "motions never rewrite the draft");
+});
+
+test("gg, ^ and I land on the first non-blank of an indented line", () => {
+  const e = editor();
+  e.setText("    alpha\n\t beta\n\n   gamma");
+  keys(e, "\x1bgg");
+  assert.deepEqual(e.getCursor(), { line: 0, col: 4 });
+  keys(e, "3G^");
+  assert.deepEqual(e.getCursor(), { line: 2, col: 0 }, "a blank line has no non-blank");
+  keys(e, "4G$^");
+  assert.deepEqual(e.getCursor(), { line: 3, col: 3 });
+  keys(e, "2G$I");
+  assert.deepEqual(e.getCursor(), { line: 1, col: 2 }, "a tab counts as one blank");
+});
+
+test("visual highlighting wraps each selected character on its own", () => {
+  const e = editor();
+  e.setText("abcdef");
+  keys(e, "\x1b0vll");
+  const painted = e.render(40).join("\n");
+  assert.ok(painted.includes("\x1b[7ma\x1b[0m\x1b[7mb\x1b[0m\x1b[7mc\x1b[0m"));
+  assert.ok(!painted.includes("\x1b[7mabc\x1b[0m"));
+  e.setText("héllo wörld");
+  keys(e, "\x1b0vl");
+  assert.ok(e.render(40).join("\n").includes("\x1b[7mh\x1b[0m\x1b[7mé\x1b[0m"));
+});
+
+test("visual rows reproduce the draft in order at every width", () => {
+  for (const draft of ["abcdefghij", "ab\ncdef\n\nghi", "x".repeat(37) + "\nyz"]) {
+    for (const width of [5, 8, 13, 40]) {
+      const e = editor();
+      e.insertTextAtCursor(draft);
+      e.focused = false;
+      keys(e, "\x1bggv");
+      const rows = e
+        .render(width)
+        .slice(1, -1)
+        .map((row) => row.replace(/\x1b\[[0-9;]*m/g, "").trim());
+      const where = `${JSON.stringify(draft)} @ ${width}`;
+      for (const row of rows) assert.ok(visibleWidth(row) <= width, where);
+      assert.ok(draft.replace(/\n/g, "").startsWith(rows.join("")), where);
+      assert.ok(rows.join("").length > 0, where);
+    }
+  }
+});
+
+test("paste markers stay atomic for operators and backspace", () => {
+  const e = editor();
+  e.handleInput("\x1b[200~" + "payload\n".repeat(12) + "\x1b[201~");
+  const marker = e.getText();
+  assert.match(marker, /^\[paste #\d+ \+\d+ lines\]$/);
+  e.handleInput("\x1b");
+  keys(e, "0lx");
+  assert.equal(e.getText(), "", "x inside a marker removes the whole marker");
+  keys(e, "u");
+  assert.equal(e.getText(), marker);
+  keys(e, "A");
+  e.handleInput("\x7f");
+  assert.equal(e.getText(), "", "backspace at the marker end removes the whole marker");
+});

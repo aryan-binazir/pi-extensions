@@ -150,3 +150,37 @@ test('removing active checkout through an alias resets routing before the canoni
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test('tool path resolution normalizes exactly like path.resolve for every segment shape', async () => {
+  const { resolve } = await import('node:path');
+  const { resolveToolPath } = await import('./routing.ts');
+  const cwds = ['/base/dir', '/base/dir/', '/', '/base/./dir', '/base//dir', '/base/dir/..'];
+  const segments = ['a', 'b.ts', '.', '..', '', 'x y', 'file.name.ext', '.hidden', '...'];
+  const prefixes = ['', '/', '@', '@/', './', '../'];
+  for (const cwd of cwds) {
+    for (const prefix of prefixes) {
+      for (const first of segments) {
+        for (const second of segments) {
+          for (const raw of [`${prefix}${first}`, `${prefix}${first}/${second}`, `${prefix}${first}//${second}`, `${prefix}${first}/${second}/`]) {
+            const stripped = raw.startsWith('@') ? raw.slice(1) : raw;
+            assert.equal(resolveToolPath(raw, cwd), stripped.startsWith('/') ? resolve(stripped) : resolve(cwd, stripped), `${raw} in ${cwd}`);
+          }
+        }
+      }
+    }
+  }
+});
+
+test('routing identities stay distinct as sessions and directories interleave', () => {
+  const pairs: Array<[string, string | undefined]> = [['/one', 'a'], ['/one', 'b'], ['/two', 'a'], ['/one', undefined]];
+  try {
+    for (const [cwd, session] of pairs) setActiveCwd(cwd, `/target${cwd}-${session}`, session);
+    for (const [cwd, session] of pairs) assert.equal(getActiveCwd(cwd, session), `/target${cwd}-${session}`, `${cwd} ${session}`);
+    // Unnormalized spellings of one directory share a single identity.
+    assert.equal(getActiveCwd('/one/', 'a'), '/target/one-a');
+    assert.equal(getActiveCwd('/two/./', 'a'), '/target/two-a');
+    setActiveCwd('/one', undefined, 'a');
+    assert.equal(getActiveCwd('/one', 'a'), '/one');
+    assert.equal(getActiveCwd('/one', 'b'), '/target/one-b');
+  } finally { for (const [cwd, session] of pairs) setActiveCwd(cwd, undefined, session); }
+});

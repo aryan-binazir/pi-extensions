@@ -1,8 +1,13 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import type { Editor } from "@earendil-works/pi-tui";
+/**
+ * Editors that cache `getText()` publish this hook so the adapter can drop the
+ * cache when it writes `state.lines` behind the editor's back.
+ */
+export const invalidateTextCache = Symbol("pi-interactive:vi-text-cache");
+
 // Pi 0.85.1 has public cursor reads but no cursor setter. Keep this coupling here.
-export function placeCursor(editor: Editor, offset: number): void {
-  const before = editor.getText().slice(0, Math.max(0, offset)).split("\n");
+export function setCursorPosition(editor: Editor, line: number, col: number): void {
   const internal = editor as unknown as {
     state: {
       cursorLine: number;
@@ -13,10 +18,21 @@ export function placeCursor(editor: Editor, offset: number): void {
   };
   if (!internal.state || typeof internal.state.cursorLine !== "number")
     throw new Error("Unsupported Pi editor cursor layout (expected Pi 0.85.1)");
-  internal.state.cursorLine = before.length - 1;
-  internal.state.cursorCol = before.at(-1)!.length;
+  internal.state.cursorLine = line;
+  internal.state.cursorCol = col;
   internal.preferredVisualCol = null;
   internal.snappedFromCursorCol = null;
+}
+/** Counting newlines beats slicing and splitting a draft on every cursor move. */
+export function placeCursor(editor: Editor, offset: number, text = editor.getText()): void {
+  const end = Math.min(text.length, Math.max(0, offset) || 0);
+  let line = 0,
+    start = 0;
+  for (let i = text.indexOf("\n"); i >= 0 && i < end; i = text.indexOf("\n", i + 1)) {
+    line++;
+    start = i + 1;
+  }
+  setCursorPosition(editor, line, end - start);
 }
 /** Preserve raw pasted bytes that public setText otherwise normalizes. */
 export function retainRawText(editor: Editor, text: string): void {
@@ -24,11 +40,16 @@ export function retainRawText(editor: Editor, text: string): void {
     state: {
       lines: string[];
     };
+    [invalidateTextCache]?: () => void;
   };
   if (!Array.isArray(internal.state?.lines))
     throw new Error("Unsupported Pi editor text layout (expected Pi 0.85.1)");
   internal.state.lines = text.split("\n");
+  internal[invalidateTextCache]?.();
 }
+
+/** Characters `projectDisplay` rewrites; anything else projects to itself. */
+export const NEEDS_PROJECTION = /[\x00-\x09\x0b-\x1f\x7f-\x9f]/;
 
 /** Safe terminal text and a UTF-16 offset map back to the unchanged raw draft. */
 export function projectDisplay(text: string): {
@@ -58,10 +79,11 @@ export function projectDisplay(text: string): {
 export function renderProjected(
   editor: Editor,
   render: () => string[],
+  draft = editor.getText(),
 ): string[] {
-  if (!/[\x00-\x09\x0b-\x1f\x7f-\x9f]/.test(editor.getText())) return render();
-  const projection = projectDisplay(editor.getText());
-  if (projection.text === editor.getText()) return render();
+  if (!NEEDS_PROJECTION.test(draft)) return render();
+  const projection = projectDisplay(draft);
+  if (projection.text === draft) return render();
   const internal = editor as unknown as {
     state: { lines: string[]; cursorLine: number; cursorCol: number };
     preferredVisualCol: number | null;
@@ -79,7 +101,7 @@ export function renderProjected(
       .slice(0, state.cursorLine)
       .reduce((sum, line) => sum + line.length + 1, 0) + state.cursorCol;
   state.lines = projection.text.split("\n");
-  placeCursor(editor, projection.offsets[offset]);
+  placeCursor(editor, projection.offsets[offset], projection.text);
   try {
     return render();
   } finally {
@@ -118,20 +140,24 @@ export function writePastes(editor: Editor, state: PasteState): void {
   internal.pastes = new Map(state.pastes);
   internal.pasteCounter = state.counter;
 }
-export function pasteMarkers(editor: Editor, text = editor.getText()) {
+const MARKER = /\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g;
+export function pasteMarkers(editor: Editor, text = editor.getText()): RegExpExecArray[] {
   const { pastes } = pasteInternal(editor);
-  return [...text.matchAll(/\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g)]
-    .filter((match) => pastes.has(Number(match[1])));
+  // An empty registry can never match, so skip scanning the draft entirely.
+  if (pastes.size === 0) return [];
+  return [...text.matchAll(MARKER)].filter((match) => pastes.has(Number(match[1])));
 }
 /** Replace once so marker-shaped text inside a payload remains literal. */
 export function expandPastes(editor: Editor, text: string): string {
   const { pastes } = pasteInternal(editor);
-  return text.replace(/\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g,
+  if (pastes.size === 0) return text;
+  return text.replace(MARKER,
     (marker, id: string) => pastes.get(Number(id)) ?? marker);
 }
 /** Stock Pi thresholds/marker format with safe whitespace-preserving payloads. */
 export function collapsePaste(editor: Editor, text: string): string {
-  const lines = text.split("\n").length;
+  let lines = 1;
+  for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) lines++;
   if (lines <= 10 && text.length <= 1000) return text;
   const internal = pasteInternal(editor);
   let id = internal.pasteCounter + 1;

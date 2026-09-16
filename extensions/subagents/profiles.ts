@@ -23,7 +23,7 @@ const astra = 'openai-codex/gpt-6-astra';
 export const bundledProfiles = {
   defaultProfile: 'implement',
   profiles: {
-    research: {model: 'openai-codex/gpt-5.6-luna', thinking: 'medium', description: 'Research', useWhen: 'Gather evidence and compare options.'},
+    research: {model: 'openai-codex/gpt-5.6-luna', thinking: 'medium', description: 'Research', useWhen: 'Gather evidence, compare options, or monitor long-running scripts (e.g. call-*). Report observed progress or failures; silence alone is not a stall. Do not duplicate the built-in subagent tracker.'},
     'implement-small': {model: astra, thinking: 'low', description: 'Settled implementation', useWhen: 'Local change with a settled approach and clear verification.'},
     implement: {model: astra, thinking: 'medium', description: 'General implementation', useWhen: 'Default for implementation work.'},
     'implement-complex': {model: astra, thinking: 'high', description: 'Complex implementation', useWhen: 'Substantial uncertainty or high risk.'},

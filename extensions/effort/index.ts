@@ -120,6 +120,25 @@ export default function effort(pi: ExtensionAPI) {
                 clampThinkingLevel(model, pi.getThinkingLevel()),
               );
               closeSlider = () => done(undefined);
+              // Width-aware truncation dominates a render, so the output is
+              // memoised in two tiers: the border, header and footer depend
+              // only on the width, and each level row only on the selection,
+              // so a repaint or a cursor move repeats no measuring work.
+              // Both tiers are bounded by the supported level count.
+              let frameWidth = -1;
+              let frameModel = "";
+              let top = "";
+              let bottom = "";
+              let head: string[] = [];
+              let tail: string[] = [];
+              let rows: (string[] | undefined)[] = [];
+              const layout = (width: number, inner: number, text: string) =>
+                wrapTextWithAnsi(stripTerminalSequences(text), inner).map(
+                  (line) =>
+                    width < 5
+                      ? truncateToWidth(line, width, "")
+                      : `│ ${truncateToWidth(line, inner, "", true)} │`,
+                );
               return {
                 invalidate() {},
                 handleInput(data: string) {
@@ -135,46 +154,54 @@ export default function effort(pi: ExtensionAPI) {
                     return;
                   }
                   if (
+                    data === "h" ||
                     matchesKey(data, "left") ||
-                    matchesKey(data, "down") ||
-                    data === "h"
+                    matchesKey(data, "down")
                   )
                     selected = Math.max(0, selected - 1);
-                  if (
+                  else if (
+                    data === "l" ||
                     matchesKey(data, "right") ||
-                    matchesKey(data, "up") ||
-                    data === "l"
+                    matchesKey(data, "up")
                   )
                     selected = Math.min(levels.length - 1, selected + 1);
                   tui.requestRender();
                 },
                 render(width: number) {
                   const innerWidth = Math.max(1, width - 4);
-                  const lines = [
-                    `Effort — ${model.id}`,
-                    "",
+                  if (width !== frameWidth || model.id !== frameModel) {
+                    frameWidth = width;
+                    frameModel = model.id;
+                    const blank = layout(width, innerWidth, "");
+                    head = [
+                      ...layout(width, innerWidth, `Effort — ${model.id}`),
+                      ...blank,
+                    ];
+                    tail = [
+                      ...blank,
+                      ...layout(
+                        width,
+                        innerWidth,
+                        "←→ adjust • Enter applies • Esc cancels",
+                      ),
+                    ];
+                    rows = [];
+                    if (width >= 5) {
+                      top = `╭${"─".repeat(width - 2)}╮`;
+                      bottom = `╰${"─".repeat(width - 2)}╯`;
+                    }
+                  }
+                  const row = (rows[selected] ??= layout(
+                    width,
+                    innerWidth,
                     levels
                       .map((value, i) =>
                         i === selected ? `[● ${value}]` : `○ ${value}`,
                       )
                       .join(" ─ "),
-                    "",
-                    "←→ adjust • Enter applies • Esc cancels",
-                  ].flatMap((s) =>
-                    wrapTextWithAnsi(
-                      stripTerminalSequences(s),
-                      innerWidth,
-                    ),
-                  );
-                  if (width < 5)
-                    return lines.map((line) => truncateToWidth(line, width, ""));
-                  return [
-                    `╭${"─".repeat(width - 2)}╮`,
-                    ...lines.map((line) =>
-                      `│ ${truncateToWidth(line, innerWidth, "", true)} │`,
-                    ),
-                    `╰${"─".repeat(width - 2)}╯`,
-                  ];
+                  ));
+                  if (width < 5) return [...head, ...row, ...tail];
+                  return [top, ...head, ...row, ...tail, bottom];
                 },
               };
             },

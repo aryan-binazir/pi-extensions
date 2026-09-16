@@ -2,12 +2,18 @@ import type { TaskResult } from './registry.ts';
 
 /** Bound the serialized string, including JSON escaping and multi-byte text. */
 export function clipJson(text: string, bytes: number, tail = false): string {
-  if (Buffer.byteLength(JSON.stringify(text), 'utf8') <= bytes) return text;
+  // Every UTF-16 unit serializes to 1–6 bytes plus the two quotes, so both
+  // bounds decide most probes outright. Keeping the probe count and search
+  // path identical matters: JSON escaping of lone surrogates is not monotone
+  // in the prefix length, so the answer depends on which lengths are visited.
+  if (text.length * 6 + 2 <= bytes) return text;
   const take = (length: number) => tail ? text.slice(text.length - length) : text.slice(0, length);
+  const overflows = (length: number) => length + 2 > bytes || Buffer.byteLength(JSON.stringify(take(length)), 'utf8') > bytes;
+  if (!overflows(text.length)) return text;
   let low = 0, high = text.length;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    if (Buffer.byteLength(JSON.stringify(take(middle)), 'utf8') <= bytes) low = middle;
+    if (!overflows(middle)) low = middle;
     else high = middle - 1;
   }
   return take(low);

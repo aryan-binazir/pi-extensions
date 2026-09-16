@@ -64,6 +64,34 @@ export interface RegistryOptions {
 const READ_TOOLS = ['read', 'grep', 'find', 'ls'];
 const ALL_TOOLS = [...READ_TOOLS, 'write', 'edit', 'bash'];
 const CAP = 64 * 1024;
+const RETAINED = 50;
+const ACTIVE_STATUS = new Set<TaskResult['status']>(['queued', 'running']);
+const SUPERVISOR = fileURLToPath(new URL('./process-supervisor.mjs', import.meta.url));
+
+/** Overlay variables on an environment instead of copying it. Reading every
+ * process.env key through the host interceptor costs about a millisecond per
+ * spawn; node's spawn walks the prototype chain when it builds the child
+ * environment ("prototype values are intentionally included"), so the child
+ * receives exactly the same variables for one traversal instead of three. */
+function childEnv(base: NodeJS.ProcessEnv, overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.assign(Object.create(base) as NodeJS.ProcessEnv, overrides);
+}
+
+/** Snapshot a record without structuredClone, which re-copies retained output. */
+function cloneResult(result: TaskResult): TaskResult {
+  const {usage} = result;
+  const snapshot: TaskResult = {
+    id: result.id, owner: result.owner, model: result.model, thinking: result.thinking,
+    task: result.task, cwd: result.cwd, status: result.status,
+    output: result.output, stderr: result.stderr, droppedRecords: result.droppedRecords,
+    usage: {...usage},
+  };
+  if (usage.cost) snapshot.usage.cost = {...usage.cost};
+  if (result.usageIncomplete !== undefined) snapshot.usageIncomplete = result.usageIncomplete;
+  if (result.error !== undefined) snapshot.error = result.error;
+  if (result.notificationError !== undefined) snapshot.notificationError = result.notificationError;
+  return snapshot;
+}
 
 export async function validateTask(spec: TaskSpec, allowedTools?: string[]): Promise<ValidTask> {
   if (!spec || typeof spec.task !== 'string' || !spec.task.trim() || spec.task.length > 32000) throw new Error('Task brief must contain 1–32000 characters');
@@ -124,7 +152,9 @@ export class SubagentRegistry {
     } finally { clearTimeout(timer); }
     signal?.throwIfAborted();
     if (this.closed) throw new Error('Registry is shut down');
-    if ([...this.entries.values()].filter(entry => !entry.finished).length >= 1000) throw new Error('Outstanding task capacity reached; wait for queued work');
+    let outstanding = 0;
+    for (const entry of this.entries.values()) if (!entry.finished) outstanding++;
+    if (outstanding >= 1000) throw new Error('Outstanding task capacity reached; wait for queued work');
     let resolve!: Entry['resolve'];
     const done = new Promise<TaskResult>(r => { resolve = r; });
     const id = randomUUID();
@@ -142,8 +172,29 @@ export class SubagentRegistry {
     this.pump();
     return { id, done };
   }
-  list(offset = 0, limit = this.entries.size): TaskResult[] { return [...this.entries.values()].slice(offset, offset + limit).map(e => structuredClone(e.result)); }
-  get(id: string): TaskResult | undefined { const entry = this.entries.get(id); return entry && structuredClone(entry.result); }
+  list(offset = 0, limit = this.entries.size): TaskResult[] {
+    const page: TaskResult[] = [];
+    const end = offset + limit;
+    let index = 0;
+    for (const entry of this.entries.values()) {
+      if (index >= end) break;
+      if (index >= offset) page.push(cloneResult(entry.result));
+      index++;
+    }
+    return page;
+  }
+  /** Ordered live view of unfinished work, without cloning retained output. */
+  activeTasks(): {id: string; status: TaskResult['status']; task: string}[] {
+    const active: {id: string; status: TaskResult['status']; task: string}[] = [];
+    for (const {result} of this.entries.values())
+      if (ACTIVE_STATUS.has(result.status)) active.push({id: result.id, status: result.status, task: result.task});
+    return active;
+  }
+  hasActive(): boolean {
+    for (const {result} of this.entries.values()) if (ACTIVE_STATUS.has(result.status)) return true;
+    return false;
+  }
+  get(id: string): TaskResult | undefined { const entry = this.entries.get(id); return entry && cloneResult(entry.result); }
   notificationFailed(ids: string[], error: unknown): void {
     for (const id of ids) {
       const entry = this.entries.get(id);
@@ -200,6 +251,18 @@ export class SubagentRegistry {
     this.running++;
     if (entry.writer) this.writers.add(entry.spec.cwd);
     entry.result.status = 'running';
+    // Streamed text arrives in many small pieces. Truncating the whole retained
+    // tail on every piece copies CAP characters per delta, so let the tail run
+    // over budget and collapse it lazily: repeated tail-truncation and a single
+    // one at read time yield the same last-CAP characters.
+    const tail = (field: 'output' | 'stderr') => {
+      let buffer = entry.result[field];
+      const trim = () => buffer.length > CAP ? (buffer = buffer.slice(-CAP)) : buffer;
+      Object.defineProperty(entry.result, field, {configurable: true, enumerable: true, get: trim, set: value => { buffer = value; }});
+      return (text: string) => { buffer += text; if (buffer.length > CAP * 2) trim(); };
+    };
+    const appendOutput = tail('output');
+    const appendStderr = tail('stderr');
     let pending = '';
     let pendingBytes = 0;
     let skipping = false;
@@ -232,7 +295,7 @@ export class SubagentRegistry {
           }
         }
         if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
-          entry.result.output = (entry.result.output + String(event.assistantMessageEvent.delta)).slice(-CAP);
+          appendOutput(String(event.assistantMessageEvent.delta));
         }
         if (event.type === 'message_end' && event.message?.role === 'assistant') {
           const message = event.message;
@@ -256,7 +319,7 @@ export class SubagentRegistry {
         }
         if (this.options.onUpdate && ['message_update', 'message_end'].includes(event.type) && Date.now() - lastUpdateAt >= 100) {
           lastUpdateAt = Date.now();
-          this.options.onUpdate(structuredClone(entry.result));
+          this.options.onUpdate(cloneResult(entry.result));
         }
       } catch { /* Non-JSON diagnostic output is retained separately by stderr. */ }
     };
@@ -265,7 +328,7 @@ export class SubagentRegistry {
       if (allowed && entry.spec.tools.some(tool => !allowed.includes(tool))) throw new Error('Child tools exceed current parent permissions at launch');
       const invocation = this.options.invocation?.(entry.spec) ?? piInvocation(entry.spec);
       entry.supervised = invocation.supervised;
-      entry.process = spawn(invocation.command, invocation.args, {cwd: entry.spec.cwd, env: {...(invocation.env ?? process.env), PI_SUBAGENT_TIMEOUT_MS: String(Math.max(10, entry.deadlineAt - Date.now()))}, detached: true, stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe']});
+      entry.process = spawn(invocation.command, invocation.args, {cwd: entry.spec.cwd, env: childEnv(invocation.env ?? process.env, {PI_SUBAGENT_TIMEOUT_MS: String(Math.max(10, entry.deadlineAt - Date.now()))}), detached: true, stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe']});
       entry.process.stdout?.setEncoding('utf8');
       entry.process.stderr?.setEncoding('utf8');
       entry.process.stdout?.on('data', chunk => {
@@ -299,7 +362,7 @@ export class SubagentRegistry {
       });
       let control = '';
       entry.process.stdio[4]?.on('data', chunk => { control = (control + String(chunk)).slice(0, 16); });
-      entry.process.stderr?.on('data', chunk => { entry.result.stderr = (entry.result.stderr + String(chunk)).slice(-CAP); });
+      entry.process.stderr?.on('data', chunk => appendStderr(String(chunk)));
       entry.process.on('error', error => { entry.result.error = error.message; sawError = true; });
       entry.process.on('close', (exitCode, signal) => {
         const reported = /^\d{1,3}\n$/.test(control) && Number(control) <= 255 ? Number(control) : undefined;
@@ -312,6 +375,10 @@ export class SubagentRegistry {
           if (entry.result.status === 'failed' && !entry.result.error) entry.result.error = `Child exited with code ${code}`;
         }
         this.finish(entry);
+        // Stream bookkeeping is dead once the child is closed, but the retained
+        // entry keeps these listeners alive; the tool-call fingerprints alone
+        // hold 1024 digests per retained child.
+        toolCalls.clear(); pending = ''; pendingBytes = 0; control = '';
       });
       // Reap descendants even when they inherited pipes from an exited parent.
       entry.process.on('exit', () => {
@@ -332,12 +399,18 @@ export class SubagentRegistry {
     clearTimeout(entry.timer); clearTimeout(entry.killTimer);
     // Queued cancellation does not hold a process slot.
     if (entry.process || entry.result.status === 'failed') { this.running--; if (entry.writer) this.writers.delete(entry.spec.cwd); }
-    const snapshot = structuredClone(entry.result);
+    const snapshot = cloneResult(entry.result);
     try { this.options.onComplete?.(snapshot); } catch (error) { entry.result.notificationError = `Completion notification failed: ${String(error).slice(0,1000)}`; }
     finally {
-      entry.resolve(structuredClone(entry.result));
-      const finished = [...this.entries.values()].filter(item => item.finished);
-      for (const old of finished.slice(0, Math.max(0, finished.length - 50))) this.entries.delete(old.result.id);
+      entry.resolve(cloneResult(entry.result));
+      let finished = 0;
+      for (const item of this.entries.values()) if (item.finished) finished++;
+      let excess = finished - RETAINED;
+      if (excess > 0) for (const item of this.entries.values()) {
+        if (!item.finished) continue;
+        this.entries.delete(item.result.id);
+        if (--excess === 0) break;
+      }
       this.pump();
     }
   }
@@ -350,11 +423,11 @@ export function piInvocation(spec: ValidTask, extra?: {env: Record<string, strin
   // The inherited guard runs last, after any user-approved argument-transforming hooks.
   for (const extension of [...new Set([...spec.extensions.filter(path => !extra?.extensions.includes(path)), ...(extra?.extensions ?? [])])]) args.push('-e', extension);
   args.push('--', spec.task);
-  const env: NodeJS.ProcessEnv = {...process.env, ...extra?.env, PI_SUBAGENT_TIMEOUT_MS: String(spec.timeout)};
+  const env = childEnv(process.env, {...extra?.env, PI_SUBAGENT_TIMEOUT_MS: String(spec.timeout)});
   return {
     command: 'node',
     supervised: true,
-    args: [fileURLToPath(new URL('./process-supervisor.mjs', import.meta.url)), 'pi', ...args],
+    args: [SUPERVISOR, 'pi', ...args],
     env,
   };
 }

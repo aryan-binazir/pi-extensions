@@ -45,13 +45,32 @@ export default function subagents(pi: ExtensionAPI): void {
     catch (error) { registry.notificationFailed(pending.map(task => task.id), error); }
   };
   const parent = () => ({ cwd: getActiveCwd(context?.cwd ?? process.cwd(), context?.sessionManager.getSessionId()), tools: pi.getActiveTools() });
+  // A brief never changes for an id, so its collapsed form is derived once
+  // rather than on every repaint of a panel that updates ten times a second.
+  const briefs = new Map<string, string>();
+  const brief = (id: string, task: string) => {
+    let label = briefs.get(id);
+    if (label === undefined) {
+      if (briefs.size > 1024) briefs.clear();
+      label = task.replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
+      briefs.set(id, label);
+    }
+    return label;
+  };
+  // null until the panel's on-screen state is known; an unchanged panel is not
+  // repainted, so a silently streaming child costs nothing here.
+  let painted: string | undefined | null = null;
   const renderActiveAgents = () => {
     if (!context?.hasUI) return;
-    const active = shuttingDown ? [] : registry.list().filter(task => ['queued', 'running'].includes(task.status));
-    context.ui.setWidget('interactive-tools:subagents', active.length ? [
+    const active = shuttingDown ? [] : registry.activeTasks();
+    const lines = active.length ? [
       `Subagents · ${active.length} active`,
-      ...active.map(task => `${task.id.slice(0, 8)} · ${task.status} · ${task.task.replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 100)}`),
-    ] : undefined);
+      ...active.map(task => `${task.id.slice(0, 8)} · ${task.status} · ${brief(task.id, task.task)}`),
+    ] : undefined;
+    const rendered = lines?.join('\n');
+    if (rendered === painted) return;
+    painted = rendered;
+    context.ui.setWidget('interactive-tools:subagents', lines);
   };
   const createRegistry = () => new SubagentRegistry({
     allowedTools: () => delegationScope(parent()).tools,
@@ -61,7 +80,7 @@ export default function subagents(pi: ExtensionAPI): void {
     onComplete: task => {
       renderActiveAgents();
       if (context?.hasUI) {
-        if (!registry.list().some(task => ['running', 'queued'].includes(task.status))) context.ui.setStatus('subagent-tracker', undefined);
+        if (!registry.hasActive()) context.ui.setStatus('subagent-tracker', undefined);
       }
       if (shuttingDown || cancellingAll || task.owner !== 'parent') return;
       noticeTriggersTurn ||= task.status !== 'cancelled';
@@ -101,6 +120,7 @@ export default function subagents(pi: ExtensionAPI): void {
   });
   pi.on('session_start', (_event, ctx) => {
     context = ctx;
+    painted = null;
     if (shuttingDown) {
       registry = createRegistry();
       shuttingDown = false;

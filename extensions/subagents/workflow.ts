@@ -5,7 +5,7 @@ import { mkdir, open, realpath, rename, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import ts from 'typescript';
+import type ts from 'typescript';
 import { validateTask, type TaskSpec } from './registry.ts';
 import { abortable } from './cancellation.ts';
 export interface WorkflowOptions {
@@ -35,6 +35,10 @@ const active = new Set<string>();
 const CAP = 1024 * 1024;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const execute = promisify(execFile);
+// The TypeScript compiler is ~1.3s and ~12MB of startup this extension only
+// needs when an approved workflow is actually compiled.
+let compiler: Promise<typeof ts> | undefined;
+const typescript = () => (compiler ??= import('typescript').then(module => module.default));
 // Pi may itself be a Bun executable. Probe Node independently and use the
 // returned absolute executable, never Pi's emulated process.versions.node.
 async function workflowRuntime(signal?: AbortSignal) {
@@ -85,6 +89,9 @@ export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
   const timeout = options.timeout ?? 3600000;
   if (!Number.isInteger(timeout) || timeout < 10 || timeout > 3600000)
     throw new Error('Workflow timeout must be 10–3600000 milliseconds');
+  // Load the compiler before the run's deadline starts, exactly as an eager
+  // module-level import did; the caller's timeout budget is for the workflow.
+  await typescript();
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), timeout);
   const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
@@ -108,14 +115,15 @@ async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
   if (!approved)
     throw new Error('Workflow requires explicit source approval');
   const runtime = await workflowRuntime(options.signal);
+  const tsc = await typescript();
   const cwd = await realpath(options.cwd);
-  const identity = digest(JSON.stringify({ version: 1, source: options.source, cwd, policy: options.policyIdentity, defaults: options.defaultTask, node: runtime.version, typescript: ts.version, platform: process.platform }));
+  const identity = digest(JSON.stringify({ version: 1, source: options.source, cwd, policy: options.policyIdentity, defaults: options.defaultTask, node: runtime.version, typescript: tsc.version, platform: process.platform }));
   if (active.has(identity))
     throw new Error('Identical workflow is already running');
-  const compiled = ts.transpileModule(`async function workflow(api: any) {\n${options.source}\n}`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }, reportDiagnostics: true });
-  const errors = compiled.diagnostics?.filter(d => d.category === ts.DiagnosticCategory.Error) ?? [];
+  const compiled = tsc.transpileModule(`async function workflow(api: any) {\n${options.source}\n}`, { compilerOptions: { target: tsc.ScriptTarget.ES2022, module: tsc.ModuleKind.None }, reportDiagnostics: true });
+  const errors = compiled.diagnostics?.filter(d => d.category === tsc.DiagnosticCategory.Error) ?? [];
   if (errors.length)
-    throw new Error(ts.flattenDiagnosticMessageText(errors[0].messageText, '\n'));
+    throw new Error(tsc.flattenDiagnosticMessageText(errors[0].messageText, '\n'));
   const timeout = options.timeout ?? 3600000;
   if (!Number.isInteger(timeout) || timeout < 10 || timeout > 3600000)
     throw new Error('Workflow timeout must be 10–3600000 milliseconds');

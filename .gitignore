@@ -5,3 +5,6 @@ _scratch/
 .pi/
 .env
 .env.*
+
+# Machine-local subagent profile overrides (including nested checkouts).
+**/.pi/subagents.local.json

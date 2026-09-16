@@ -1,3 +1,4 @@
+import { fixtureModelRegistry } from './test-support.ts';
 import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -18,7 +19,7 @@ test('workflow registration requires exact source approval and protects sensitiv
  const previousAgentDir=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=join(cwd,'agent-home');
  const tools=new Map<string,any>();const events=new Map<string,any>();
  subagents({events:{emit(){}},getActiveTools: () => ['read','write','edit','bash','grep','find','ls'], registerTool:(tool:any)=>tools.set(tool.name,tool),registerCommand:()=>{},on:(name:string,handler:any)=>events.set(name,handler)} as unknown as ExtensionAPI);
- const ctx={cwd,hasUI:false,mode:'tui',sessionManager:{getSessionId:()=> 'workflow-extension-test'},ui:{setWidget(){},setStatus(){},editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
+ const ctx={modelRegistry: fixtureModelRegistry(),cwd,hasUI:false,mode:'tui',sessionManager:{getSessionId:()=> 'workflow-extension-test'},ui:{setWidget(){},setStatus(){},editor:async(_title:string,source:string)=>source,confirm:async()=>true}};
  try {
   await assert.rejects(tools.get('workflow').execute('id',{source:'return 1;'},undefined,undefined,ctx),/approval/);
   ctx.hasUI=true;
@@ -41,7 +42,7 @@ test('registered background tool launches tool-limited Pi and pushes completion 
  const tools=new Map<string,any>();const events=new Map<string,any>();
  let notify!:(value:{message:any;options:any})=>void;
  const notification=new Promise<{message:any;options:any}>(resolve=>{notify=resolve;});
- const ctx={cwd,model:{provider:'test',id:'fixture'},thinkingLevel:'off',hasUI:false,mode:'print',sessionManager:{getSessionId:()=>sessionId}};
+ const ctx={modelRegistry: fixtureModelRegistry(),cwd,model:{provider:'test',id:'fixture'},thinkingLevel:'off',hasUI:false,mode:'print',sessionManager:{getSessionId:()=>sessionId}};
  try {
   await writeFile(join(cwd,'pi'),`#!${process.execPath}\nconst output=JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()});process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:output}],usage:{input:3,output:4}}})+'\\n');`);
   await chmod(join(cwd,'pi'),0o700);
@@ -86,7 +87,7 @@ test('RPC UI approves extensions once per real spawn and reauthorizes cached wor
   let allowExtensions = true;
   let completions = 0;
   const ctx = {
-    cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', hasUI: true, mode: 'rpc', sessionManager: {getSessionId: () => sessionId},
+    modelRegistry: fixtureModelRegistry(), cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', hasUI: true, mode: 'rpc', sessionManager: {getSessionId: () => sessionId},
     ui: {
       editor: async (_title: string, source: string) => source,
       confirm: async (title: string) => { approvals.push(title); return title.includes('child extensions') ? allowExtensions : true; },
@@ -130,7 +131,7 @@ test('cancelled switches keep the registry usable; committed shutdown reaps chil
   const previousPath = process.env.PATH;
   const sessionId = 'subagent-switch-test';
   const tools = new Map<string, any>(), events = new Map<string, any>();
-  const ctx = {cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', hasUI: false, mode: 'print', sessionManager: {getSessionId: () => sessionId}};
+  const ctx = {modelRegistry: fixtureModelRegistry(),cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', hasUI: false, mode: 'print', sessionManager: {getSessionId: () => sessionId}};
   try {
     await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:String(process.pid)}}));setInterval(()=>{},1000);`);
     await chmod(join(cwd, 'pi'), 0o700);
@@ -168,7 +169,7 @@ test('standalone registered subagents and workflows inherit active builtins and 
   const previousPath = process.env.PATH, previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const tools = new Map<string, any>(), events = new Map<string, any>();
   let active = ['read', 'subagent', 'workflow'];
-  const ctx = {cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', hasUI: true, sessionManager: {getSessionId: () => 'standalone-only'}, ui: {
+  const ctx = {modelRegistry: fixtureModelRegistry(),cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', hasUI: true, sessionManager: {getSessionId: () => 'standalone-only'}, ui: {
     editor: async (_title: string, source: string) => source, confirm: async () => true, setWidget: () => {}, setStatus: () => {},
   }};
   subagents({events: {emit() {}}, getActiveTools: () => active, registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: () => {}, on: (name: string, handler: any) => events.set(name, handler), sendMessage: () => {}} as unknown as ExtensionAPI);

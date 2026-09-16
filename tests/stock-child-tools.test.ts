@@ -1,3 +1,4 @@
+import { fixtureModelRegistry } from '../extensions/subagents/test-support.ts';
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -26,11 +27,13 @@ test('stock Pi active permissions support default and preset children and workfl
     // Sentinel is loaded, but a new chat defaults to auto off.
     assert.notEqual((await runner.emitToolCall({type: 'tool_call', toolName: 'read', toolCallId: 'init', input: {path: join(cwd, 'pi')}}))?.block, true);
     const ctx = {...runner.createContext()};
-    Object.assign(ctx, {model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off'});
+    Object.assign(ctx, {model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', modelRegistry: fixtureModelRegistry()});
     const execute = async (name: string, params: any) => await session!.getToolDefinition(name)!.execute(name, params, undefined, undefined, ctx) as any;
+    const expectedTools = new Map<string, string[]>();
     for (const preset of [undefined, 'reader', 'writer']) {
       const result = await execute('subagent', {task: 'Synthetic child', ...(preset ? {preset} : {})});
       assert.ok(result.details.id);
+      expectedTools.set(result.details.id, preset === 'reader' ? ['read'] : ['bash', 'edit', 'read', 'write']);
     }
     await assert.rejects(execute('subagent', {task: 'Forbidden explicit tool', tools: ['grep']}), /parent permissions/);
     const deadline = Date.now() + 5000;
@@ -40,9 +43,9 @@ test('stock Pi active permissions support default and preset children and workfl
       tasks = (await execute('subagent_status', {})).details;
     }
     assert.equal(tasks.length, 3);
-    for (const [i, task] of tasks.entries()) {
+    for (const task of tasks) {
       assert.equal(task.status, 'succeeded');
-      assert.deepEqual(JSON.parse(task.output).tools.sort(), i === 1 ? ['read'] : ['bash', 'edit', 'read', 'write']);
+      assert.deepEqual(JSON.parse(task.output).tools.sort(), expectedTools.get(task.id));
     }
     let replayPrompts = 0;
     Object.assign(ctx, {hasUI: true, ui: {...ctx.ui, editor: async (_title: string, source: string) => source, confirm: async (title: string) => {if (title.includes('Replay')) replayPrompts++; return true;}, setWidget() {}}});

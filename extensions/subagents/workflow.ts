@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import type ts from 'typescript';
 import { validateTask, type TaskSpec } from './registry.ts';
 import { abortable } from './cancellation.ts';
+import { assertTaskFields } from './profiles.ts';
 export interface WorkflowOptions {
   source: string;
   cwd: string;
@@ -15,6 +16,8 @@ export interface WorkflowOptions {
   policyIdentity: string;
   allowedTools?: () => string[];
   defaultTask?: Pick<TaskSpec, 'model' | 'thinking'>;
+  profileIdentity?: string;
+  normalizeTask?: (task: TaskSpec) => TaskSpec;
   approve?: (source: string) => Promise<boolean>;
   approveReplay?: (stages: string[]) => Promise<boolean>;
   authorizeRead?: (path: string) => Promise<void>;
@@ -117,7 +120,7 @@ async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
   const runtime = await workflowRuntime(options.signal);
   const tsc = await typescript();
   const cwd = await realpath(options.cwd);
-  const identity = digest(JSON.stringify({ version: 1, source: options.source, cwd, policy: options.policyIdentity, defaults: options.defaultTask, node: runtime.version, typescript: tsc.version, platform: process.platform }));
+  const identity = digest(JSON.stringify({ version: 1, source: options.source, cwd, policy: options.policyIdentity, defaults: options.defaultTask, profiles: options.profileIdentity, node: runtime.version, typescript: tsc.version, platform: process.platform }));
   if (active.has(identity))
     throw new Error('Identical workflow is already running');
   const compiled = tsc.transpileModule(`async function workflow(api: any) {\n${options.source}\n}`, { compilerOptions: { target: tsc.ScriptTarget.ES2022, module: tsc.ModuleKind.None }, reportDiagnostics: true });
@@ -226,12 +229,13 @@ async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
         activeStages.add(key);
         try {
           const input = args.task as Record<string, unknown>;
+          assertTaskFields(input);
           if (input.cwd !== undefined && typeof input.cwd !== 'string')
             throw new Error('Invalid child cwd');
           // validateTask checks every task field at this untrusted IPC boundary.
           const inherited = {...options.defaultTask, ...input, cwd: input.cwd ? resolve(cwd, input.cwd) : cwd};
           if (input.thinking === undefined && typeof input.model === 'string') inherited.thinking = /:(off|minimal|low|medium|high|xhigh|max)$/.exec(input.model)?.[1] ?? options.defaultTask?.thinking;
-          const task = await validateTask(inherited as unknown as TaskSpec, options.allowedTools?.());
+          const task = await validateTask(options.normalizeTask ? options.normalizeTask({...input, cwd: inherited.cwd} as unknown as TaskSpec) : inherited as unknown as TaskSpec, options.allowedTools?.());
           if (options.defaultTask && !task.model) throw new Error('A selected parent model or explicit provider/model is required');
           const childRelative = relative(cwd, task.cwd);
           if (childRelative === '..' || childRelative.startsWith('../') || isAbsolute(childRelative))

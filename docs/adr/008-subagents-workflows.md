@@ -13,3 +13,28 @@ Every spawn requires a stable explicit stage label, passes the same launch-time 
 Successful stages are atomically journaled in the Pi agent directory. Replay identity includes exact source, canonical cwd, policy envelope, Node/TypeScript versions, and platform. Explicit stage labels avoid scheduler-dependent replay; concurrently duplicated labels fail. Source approval is required again on resume, followed by a separate confirmation listing the stages that will be reused. Declining stops without new work. Cached child stages still revalidate their task and current permissions.
 
 Replay deliberately does not prove that previous file effects still exist. The replay dialog requires the user to confirm that the cached outputs and side effects remain valid in the current checkout. A changed source or policy starts a different journal. Checkpoints are successful-stage reuse, not rollback or transactional filesystem snapshots; an interrupted external effect may require human reconciliation before retry.
+
+
+## Named model/thinking profiles
+
+Delegation defaults to `implement` (openai-codex/gpt-6-astra medium), not implicit
+parent inheritance. Committed defaults merge field-by-field with agent-directory
+`subagents.json`, then trusted current-cwd `.pi/subagents.local.json`; explicit
+spawn fields win. Reader/writer presets remain permission-only. Configuration
+cannot add tools, extensions, cwd authority or tracker settings. See the
+[profile schema and precedence](../../README.md#subagent-profiles).
+
+A session/reload snapshot drives direct spawns, workflow spawns, generated parent
+guidance and dynamically re-registered tool descriptions. Cwd/trust transitions
+replace the snapshot. Routed cwd trust is deliberately not inferred from the
+original session; local overrides require a matching trusted Pi session cwd.
+Missing files are optional; invalid configuration blocks delegation until reload.
+Selected models use Pi ModelRegistry `find`/`getAvailable` with OpenAI fast aliases
+reduced to base IDs; no fuzzy or fallback model selection is performed here.
+Thinking is capability-clamped with Pi's helper and exposed with provenance.
+
+Workflow identity includes configuration provenance/content and captured parent
+selection (conservatively even for profiles that do not inherit). Cached spawn
+stages resolve again before replay; live stages reject cwd/config changes.
+Per-task status retains bounded profile/selection provenance, not full settings.
+The report-only Luna tracker is not a profile and its defaults are unchanged.

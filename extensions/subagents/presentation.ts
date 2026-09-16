@@ -24,6 +24,8 @@ export function taskView(task: TaskResult, outputBytes = 512, outputOffset?: num
   const output = clipJson(source, outputBytes, outputOffset === undefined);
   return {
     id: task.id, owner: task.owner, status: task.status,
+    profile: task.profile && clipJson(task.profile, 64),
+    configProvenance: task.configProvenance && Object.fromEntries(Object.entries(task.configProvenance).map(([key, value]) => [key, clipJson(value, 256)])),
     model: task.model && clipJson(task.model, 256), thinking: task.thinking,
     task: clipJson(task.task, 128), cwd: clipJson(task.cwd, 512),
     usage: task.usage, usageIncomplete: task.usageIncomplete,

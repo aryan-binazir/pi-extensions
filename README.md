@@ -35,11 +35,29 @@ A single extension can also be loaded with
 
 ## Global system-prompt append (agent setup)
 
+Agent setup checklist:
+
+1. Install this repository with the command above; use `pi config` to enable the
+   desired extensions, including Subagents for profile-based delegation.
+2. Install external plugins separately: [MCP / Linear](#mcp--linear-external-package)
+   uses `pi-mcp-adapter`; the Auto Permissions status extension is only a display
+   companion, not the permissions plugin itself (see its setup section below).
+3. Symlink `APPEND_SYSTEM.md` using the guarded command below. Package installation
+   does **not** install this link.
+4. Run `/reload` or restart Pi after installing/enabling extensions and linking
+   the append file. For profiles, optionally configure global/local overrides as
+   described in [Subagent profiles](#subagent-profiles).
+
 [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) is the version-controlled source for shared
-cross-project instructions. It starts as a placeholder; add global preferences
-there, keep repository rules in `AGENTS.md`, and keep extension guidance in its
-extension. Pi appends this file to its default system prompt rather than replacing
-it. Package installation alone does not activate a root-level append file.
+cross-project instructions, including editable subagent selection guidance.
+Keep repository rules in `AGENTS.md`. Pi appends this file to its default system
+prompt rather than replacing it.
+
+For subagents, **both pieces are included**: Pi loads the static selection guidance
+from the symlinked file, and the enabled Subagents extension appends the effective
+profile catalog through its prompt hook. The CLI only lets you inspect that same
+catalog; the extension calls the shared resolver directly, not the Bash script.
+Neither installing the package nor linking the file substitutes for the other.
 
 Agents setting up this repository must link this file into Pi's global agent
 directory. Run the following from a **stable checkout** of this repository, not a
@@ -125,7 +143,7 @@ The stash is memory-only and clears on session start, switch and reload. Vi mode
 ## Subagents and TypeScript workflows
 
 The `subagent` tool starts a background Pi process with an explicit task brief,
-a `reader` or `writer` preset, optional tools/model/extensions/cwd, and a bounded
+a `reader` or `writer` permission preset, optional profile/tools/model/extensions/cwd, and a bounded
 timeout. Default and preset tools are limited to the parent's active permissions;
 explicit tool requests outside those permissions are rejected. It returns a task ID.
 One shared panel above the editor lists queued and running children (including
@@ -140,7 +158,8 @@ including stock Pi's detached bash jobs, depend on Pi's own graceful cleanup;
 if Pi is wedged or killed first, those jobs can escape portable group cleanup.
 
 The default deadline is one hour, including approval and queue time. Children
-inherit the selected parent model and thinking level unless explicitly overridden.
+default to the `implement` profile: **openai-codex/gpt-6-astra, medium**.
+[Named profiles](#subagent-profiles) select model/thinking independently of permissions.
 Fast aliases use the base model without the priority-tier extension. Aborting the
 parent turn also stops its children.
 A Node supervisor watches an inherited owner pipe and cleans up on owner loss;
@@ -189,6 +208,111 @@ replay confirmation. Replay reuses recorded results; it does not prove that prio
 file effects still exist. Confirm replay only after checking that those effects
 remain valid. Declining aborts without starting children. Failed stages run again,
 and unfinished capability calls prevent a successful workflow result.
+
+### Subagent profiles
+
+Use `profile` in either `subagent` or workflow `api.spawn`:
+
+```ts
+await api.spawn({task: "Inspect the API contract", profile: "research", preset: "reader"}, "contract");
+await api.spawn({task: "Implement and verify the agreed change", profile: "implement", preset: "writer"}, "implement");
+```
+
+Bundled profiles are `research` (Luna medium), `implement-small` (Astra low),
+`implement` (Astra medium, default), `implement-complex` and `review` (Astra high).
+Use low only for a settled approach, local scope and clear verification; high for
+substantial uncertainty or high risk. Task length alone is not a downgrade reason.
+The extension appends the effective profile catalog to the parent's system prompt.
+Editable selection guidance lives in the shared [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md);
+use the symlink setup above to load it globally. The hook calls the same resolver
+as the read-only CLI—no subprocess is launched during prompt setup.
+
+Inspect the configuration from this checkout:
+
+```sh
+./extensions/subagents/show-config
+./extensions/subagents/show-config --cwd /path/to/project --json
+```
+
+The CLI uses Node 22.19+ and installed repository dependencies, with no new runtime.
+It reads local overrides only when Pi has **saved trust** for that project; it
+never changes trust. Session-only trust/default trust policies are not inferred
+by this standalone command. It prints freshly loaded settings, not a running
+session's cached snapshot, and does not check live model availability. The
+extension still uses the current session's trust and validates models at spawn.
+
+Settings merge **field by field**: bundled defaults →
+`${PI_CODING_AGENT_DIR:-~/.pi/agent}/subagents.json` → trusted active-project
+`.pi/subagents.local.json` → explicit spawn overrides. For example, either settings
+file can contain:
+
+```json
+{
+  "defaultProfile": "implement",
+  "profiles": {
+    "implement": {"thinking": "high", "useWhen": "Changes to this critical service"},
+    "parent": {
+      "model": "inherit",
+      "thinking": "inherit",
+      "description": "Parent selection",
+      "useWhen": "Match the parent model and effort"
+    }
+  }
+}
+```
+
+Edit the global file with `nvim ~/.pi/agent/subagents.json` (use
+`$PI_CODING_AGENT_DIR/subagents.json` if the agent directory is customized).
+To override it for one project, create `.pi/subagents.local.json` in that project's
+root containing only the fields to change, for example:
+
+```json
+{
+  "profiles": {
+    "implement-small": {"thinking": "medium"}
+  }
+}
+```
+
+This keeps the global model, descriptions and other profiles, but uses medium
+thinking for `implement-small` in that trusted project. Add
+`.pi/subagents.local.json` to that project's `.gitignore` (already ignored in
+this repository), then `/reload`. Remove the local override to restore the global
+value on the next reload. A missing global file uses bundled defaults.
+
+Only `defaultProfile` and `profiles` are accepted at the top level. Each profile
+accepts `model`, `thinking`, `description`, `useWhen`. New profiles require model
+and thinking; text fields default empty. Names use lowercase letters, digits and
+hyphens, start with a letter, and have at most 48 characters. At most 24 profiles,
+240 characters per text/model field, and 64 KiB per settings file are accepted.
+Missing files fall back; malformed files, unknown fields/profiles and unavailable
+selected models fail explicitly. Configure models/auth in Pi (`models.json`,
+`/login`) or remap the profile, then `/reload`; there is no model substitution.
+Model availability uses Pi's registry snapshot, not a network entitlement check.
+Runtime-only provider extensions must also be explicitly available in the child;
+profiles do not enable extension discovery or copy provider implementations.
+
+`task.model` overrides the profile model, including `"inherit"` for the selected
+parent model. Thinking precedence is `task.thinking` → explicit `task.model`
+`:thinking` suffix → profile thinking. Inheriting a **model does not inherit
+thinking**: set the profile's `thinking` to `"inherit"` to use the parent's level.
+Explicit task thinking accepts Pi levels (`off`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`), not `inherit`. Profile models keep thinking in its separate field.
+Pi's capability clamping is applied and noted in status. OpenAI `~fast` aliases
+resolve to their base model; child priority-tier extensions are not auto-loaded.
+
+The effective settings snapshot lasts until session start/reload, or an active
+cwd/trust change. Local settings are read only at that cwd, never ancestors.
+A routed worktree cannot reuse the original session's trust: its local settings
+are excluded until opened as Pi's own trusted session cwd. Local files are
+machine-owned and gitignored; this does not untrack files already committed.
+Settings symlinks/non-regular files are rejected. `subagent_status` includes each
+task's profile, resolved model/thinking, bounded field provenance and configuration
+fingerprint. Tool descriptions refresh profile choices without enabling tools.
+Workflow identity includes the effective configuration and captured parent model/
+thinking; a change starts a different journal. Cached spawn stages recheck model
+availability. New stages fail if cwd/trust/configuration changed during approval
+or execution. The report-only Luna tracker remains independent and unchanged.
 
 ## Worktrees
 
@@ -366,7 +490,10 @@ Failed requests retry at the same cadence; stopping tracking resets deduplicatio
 Snapshots contain at most four running children, queued
 counts and four recent completed children, with clipped briefs/output and usage;
 no parent history is sent. Reports are capped at 2,000 characters; a sanitized
-160-character preview replaces one footer status slot. Reports never enter chat
+plain-text preview (at most 100 display columns, word-safe ellipsis) replaces one
+footer status slot without a tracker prefix. Terminal width is used when available
+at publication; Pi still owns final footer layout. `/subagents` includes the full
+latest report (not necessarily current task state), alongside task and tracker status. Reports never enter chat
 history or model context and never wake the parent. The slot clears when work
 finishes, on cancel-all, or on shutdown.
 `subagent_status` also exposes tracker

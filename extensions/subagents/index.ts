@@ -9,12 +9,15 @@ import { runWorkflow } from './workflow.ts';
 import { clipJson, taskView } from './presentation.ts';
 import { abortable } from './cancellation.ts';
 import { SubagentTracker } from './tracker.ts';
+import { sanitizeTrackerReport, trackerFooter } from './tracker-footer.ts';
+import { availableModel, assertTaskFields, loadProfiles, profileGuidance, profileLocation, resolveProfile, type ProfileConfig } from './profiles.ts';
 
 const taskSchema = Type.Object({
   task: Type.String({ minLength: 1, maxLength: 32000 }), cwd: Type.Optional(Type.String()),
+  profile: Type.Optional(Type.String({maxLength: 48})),
   model: Type.Optional(Type.String()), thinking: Type.Optional(Type.String({pattern: '^(off|minimal|low|medium|high|xhigh|max)$'})), preset: Type.Optional(Type.Union([Type.Literal('reader'), Type.Literal('writer')])),
   tools: Type.Optional(Type.Array(Type.String())), extensions: Type.Optional(Type.Array(Type.String())), timeout: Type.Optional(Type.Integer({ minimum: 10, maximum: 3600000 })),
-});
+}, {additionalProperties: false});
 const completionGuidance = 'After calling subagent, do independent work or end your turn. Completion results are pushed automatically and resume the parent without polling. Do not call subagent_status or run sleep/wait loops just to await completion.';
 const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value });
 
@@ -75,7 +78,13 @@ export default function subagents(pi: ExtensionAPI): void {
   const createRegistry = () => new SubagentRegistry({
     allowedTools: () => delegationScope(parent()).tools,
     authorize: async task => { await assertChildTask(task, { parent: parent(), approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request) : undefined }); },
-    invocation: task => piInvocation(task, context ? childGuard(context.cwd, context.sessionManager.getSessionId()) : undefined),
+    invocation: task => {
+      if (context && task.configProvenance) {
+        if (task.configProvenance.config !== configFor(context).identity) throw new Error('Subagent configuration or trust changed while queued; resubmit task');
+        availableModel(task.model!, context.modelRegistry, task.profile);
+      }
+      return piInvocation(task, context ? childGuard(context.cwd, context.sessionManager.getSessionId()) : undefined);
+    },
     onUpdate: renderActiveAgents,
     onComplete: task => {
       renderActiveAgents();
@@ -89,10 +98,14 @@ export default function subagents(pi: ExtensionAPI): void {
     },
   });
   let registry = createRegistry();
+  let latestReport: string | undefined;
   const tracker = new SubagentTracker(() => context, () => registry.list(), report => {
+    latestReport = sanitizeTrackerReport(report);
     // Observations are transient UI, never new conversation/model messages.
     // One stable footer slot replaces earlier reports, even when they change.
-    if (context?.hasUI) context.ui.setStatus('subagent-tracker', `tracker · ${report.replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 160)}`);
+    // setStatus has no width callback; use the terminal width when available,
+    // without replacing Pi's footer or interfering with other status slots.
+    if (context?.hasUI) context.ui.setStatus('subagent-tracker', trackerFooter(report, process.stdout.columns));
   });
   const trackedSpawn = async (task: TaskSpec, signal?: AbortSignal, owner: 'parent' | 'workflow' = 'parent') => {
     const handle = await registry.spawn(task, signal, owner);
@@ -112,14 +125,36 @@ export default function subagents(pi: ExtensionAPI): void {
     void handle.done.then(() => pi.events.emit('pi-interactive:background-activity', { id: handle.id, active: false }));
     return handle;
   };
-  const normalize = (task: Omit<TaskSpec, 'cwd'> & { cwd?: string }, ctx: ExtensionContext): TaskSpec => ({
-    ...task,
-    model: task.model ?? (ctx.model && `${ctx.model.provider}/${ctx.model.id}`),
-    thinking: task.thinking ?? /:(off|minimal|low|medium|high|xhigh|max)$/.exec(task.model ?? '')?.[1] ?? ctx.thinkingLevel,
-    cwd: resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), task.cwd ?? '.'),
+  let snapshot: ProfileConfig | undefined;
+  let configError: Error | undefined;
+  let locationKey = '';
+  const configFor = (ctx: ExtensionContext, reload = false): ProfileConfig => {
+    const location = profileLocation(ctx, getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()));
+    const key = JSON.stringify(location);
+    if (reload || key !== locationKey) {
+      locationKey = key; snapshot = undefined; configError = undefined;
+      try { snapshot = loadProfiles(location.cwd, location.trusted); }
+      catch (error) { configError = error instanceof Error ? error : new Error(String(error)); }
+      registerSubagent(snapshot);
+    }
+    if (configError) throw configError;
+    return snapshot!;
+  };
+  const normalize = (task: Omit<TaskSpec, 'cwd'> & {cwd?: string}, ctx: ExtensionContext, config = configFor(ctx)): TaskSpec => {
+    assertTaskFields(task);
+    if (task.cwd !== undefined && typeof task.cwd !== 'string') throw new Error('Invalid child cwd');
+    return resolveProfile({...task, cwd: resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), task.cwd ?? '.')}, config, ctx);
+  };
+  pi.on('before_agent_start', (event, ctx) => {
+    if (!pi.getActiveTools().some(tool => tool === 'subagent' || tool === 'workflow')) return;
+    let guidance: string;
+    try { guidance = profileGuidance(configFor(ctx), ctx); }
+    catch (error) { guidance = `Subagent delegation is unavailable: ${String(error)}`; }
+    return {systemPrompt: `${event.systemPrompt}\n\n${guidance}`};
   });
   pi.on('session_start', (_event, ctx) => {
     context = ctx;
+    try { configFor(ctx, true); } catch (error) { if (ctx.hasUI) ctx.ui.notify(String(error), 'error'); }
     painted = null;
     if (shuttingDown) {
       registry = createRegistry();
@@ -128,6 +163,7 @@ export default function subagents(pi: ExtensionAPI): void {
   });
   const stopAll = async () => {
     shuttingDown = true;
+    latestReport = undefined;
     renderActiveAgents();
     tracker.stop();
     if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
@@ -160,8 +196,8 @@ export default function subagents(pi: ExtensionAPI): void {
     return {cancelled};
   };
   // A before-switch handler can cancel the switch; committed switches emit shutdown.
-  pi.registerTool({
-    name: 'subagent', label: 'Subagent', description: 'Start a background Pi agent with only an explicit task brief, a validated workspace, and bounded tools. Returns task ID immediately; completion is pushed into this conversation. Context separation is not an OS sandbox. Same-directory writers serialize. Explicit child extensions may contribute hooks and commands; their custom tools are excluded by the built-in tool allowlist.', parameters: taskSchema,
+  const registerSubagent = (config?: ProfileConfig) => pi.registerTool({
+    name: 'subagent', label: 'Subagent', description: 'Start a background Pi agent with only an explicit task brief, a validated workspace, and bounded tools. Returns task ID immediately; completion is pushed into this conversation. Context separation is not an OS sandbox. Same-directory writers serialize. Explicit child extensions may contribute hooks and commands; their custom tools are excluded by the built-in tool allowlist.' + (config ? ` Profiles: ${Object.keys(config.profiles).join(', ')}; default: ${config.defaultProfile}.` : ''), parameters: taskSchema,
     promptGuidelines: [completionGuidance, 'The subagent extension automatically runs a shared report-only Luna tracker. Do not launch or poll a watcher; worker results arrive directly, independently of tracker reports.'],
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
@@ -173,6 +209,7 @@ export default function subagents(pi: ExtensionAPI): void {
       return result({ id: handle.id, status: 'queued', notification: completionGuidance });
     },
   });
+  registerSubagent();
   pi.registerTool({
     name: 'subagent_status', label: 'Subagent status', description: 'Inspect bounded subagent summaries (up to 10 per page), or output detail by id (up to 8 KiB JSON text). Use offset/limit for summary pages and outputOffset/nextOutputOffset for retained output pages. Output offsets count UTF-16 code units. Completion notifications are automatic; do not poll for completion. Use subagent_status only for a requested progress check, debugging, or retrieving omitted/truncated results.', parameters: Type.Object({id: Type.Optional(Type.String({maxLength: 100})), offset: Type.Optional(Type.Integer({minimum: 0})), limit: Type.Optional(Type.Integer({minimum: 1, maximum: 10})), outputOffset: Type.Optional(Type.Integer({minimum: 0, maximum: 65536}))}),
     async execute(_id, params = {}) {
@@ -191,7 +228,7 @@ export default function subagents(pi: ExtensionAPI): void {
     async execute(_id, params) { return result(await cancelTasks(params.id)); },
   });
   pi.registerTool({
-    name: 'workflow', label: 'TypeScript workflow', description: 'Compile and run an explicitly user-approved TypeScript async function body. api exposes spawn(task, stableStageLabel), parallel(array of async functions), retry(attempts, async function), checkpoint(key, async function), bounded readFile(path,maxBytes). Successful stages replay only with identical approved source, cwd, and tool scope. Requires interactive source review.',
+    name: 'workflow', label: 'TypeScript workflow', description: 'Compile and run an explicitly user-approved TypeScript async function body. api exposes spawn(task, stableStageLabel), parallel(array of async functions), retry(attempts, async function), checkpoint(key, async function), bounded readFile(path,maxBytes). Successful stages replay only with identical approved source, cwd, and tool scope. api.spawn accepts the same task/profile/model/thinking/preset/tools/extensions/cwd/timeout as subagent. Requires interactive source review.',
     parameters: Type.Object({ source: Type.String({ minLength: 1, maxLength: 64000 }), timeout: Type.Optional(Type.Integer({ minimum: 10, maximum: 3600000 })) }),
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
@@ -202,11 +239,18 @@ export default function subagents(pi: ExtensionAPI): void {
       signal?.addEventListener('abort', abort, { once: true });
       const cwd = getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId());
       try {
+        const config = configFor(ctx);
+        const selectionContext = {model: ctx.model, thinkingLevel: ctx.thinkingLevel, modelRegistry: ctx.modelRegistry};
         const run = runWorkflow({
           source: params.source, cwd, timeout: params.timeout, signal: controller.signal,
           journalDirectory: join(getAgentDir(), 'workflow-journals'), policyIdentity: delegationScope(parent()).replayIdentity,
           allowedTools: () => delegationScope(parent()).tools,
           defaultTask: {model: ctx.model && `${ctx.model.provider}/${ctx.model.id}`, thinking: ctx.thinkingLevel},
+          profileIdentity: config.identity,
+          normalizeTask: task => {
+            if (configFor(ctx).identity !== config.identity || getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()) !== cwd) throw new Error('Workflow configuration or workspace changed; restart workflow');
+            return resolveProfile(task, config, selectionContext);
+          },
           approve: ctx.hasUI ? async source => {
             const reviewed = await abortable(ctx.ui.editor('Review workflow TypeScript; submit unchanged source to continue', source), controller.signal);
             return reviewed === source && await ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.', {signal: controller.signal});
@@ -243,11 +287,11 @@ export default function subagents(pi: ExtensionAPI): void {
     },
   });
   pi.registerCommand('subagents', {
-    description: 'Show background agents or cancel: /subagents [cancel ID|all]', handler: async (args, ctx) => {
+    description: 'Show background agents and latest report or cancel: /subagents [cancel ID|all]', handler: async (args, ctx) => {
       context = ctx;
       const [command, id] = args.trim().split(/\s+/);
       if (command === 'cancel' && id) ctx.ui.notify((await cancelTasks(id)).cancelled ? 'Cancellation completed' : 'No active task with that ID', 'info');
-      else ctx.ui.notify(JSON.stringify(registry.list().map(({ id, status, usage }) => ({ id, status, usage }))), 'info');
+      else ctx.ui.notify(JSON.stringify({tasks: registry.list().map(({ id, status, usage }) => ({ id, status, usage })), tracker: tracker.status, latestReport: latestReport ?? null}), 'info');
     },
   });
 }

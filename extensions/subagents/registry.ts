@@ -4,10 +4,13 @@ import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { abortable } from './cancellation.ts';
 import { fileURLToPath } from 'node:url';
+import type { SelectionProvenance } from './profiles.ts';
 
 export interface TaskSpec {
   task: string;
   cwd: string;
+  profile?: string;
+  configProvenance?: SelectionProvenance;
   model?: string;
   thinking?: string;
   tools?: string[];
@@ -18,6 +21,8 @@ export interface TaskSpec {
 export interface TaskResult {
   id: string;
   owner: 'parent' | 'workflow';
+  profile?: string;
+  configProvenance?: SelectionProvenance;
   model?: string;
   thinking?: string;
   task: string;
@@ -81,7 +86,7 @@ function childEnv(base: NodeJS.ProcessEnv, overrides: NodeJS.ProcessEnv): NodeJS
 function cloneResult(result: TaskResult): TaskResult {
   const {usage} = result;
   const snapshot: TaskResult = {
-    id: result.id, owner: result.owner, model: result.model, thinking: result.thinking,
+    id: result.id, owner: result.owner, profile: result.profile, configProvenance: result.configProvenance && {...result.configProvenance}, model: result.model, thinking: result.thinking,
     task: result.task, cwd: result.cwd, status: result.status,
     output: result.output, stderr: result.stderr, droppedRecords: result.droppedRecords,
     usage: {...usage},
@@ -159,7 +164,7 @@ export class SubagentRegistry {
     const done = new Promise<TaskResult>(r => { resolve = r; });
     const id = randomUUID();
     const entry: Entry = {
-      spec: validated, result: { id, owner, model: validated.model, thinking: validated.thinking, task: validated.task, cwd: validated.cwd, status: 'queued', output: '', stderr: '', droppedRecords: 0, usage: {input: 0, output: 0} },
+      spec: validated, result: { id, owner, profile: validated.profile, configProvenance: validated.configProvenance, model: validated.model, thinking: validated.thinking, task: validated.task, cwd: validated.cwd, status: 'queued', output: '', stderr: '', droppedRecords: 0, usage: {input: 0, output: 0} },
       resolve, done, deadlineAt, writer: validated.extensions.length > 0 || validated.tools.some(tool => !READ_TOOLS.includes(tool)), finished: false,
     };
     this.entries.set(id, entry);

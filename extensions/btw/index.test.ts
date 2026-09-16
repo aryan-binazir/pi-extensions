@@ -501,3 +501,58 @@ test("BTW strips residual terminal reset controls from provider output", async (
   h.key("\x1b");
   await running;
 });
+
+test("paging past the top of a long side transcript stops on the first turn", async () => {
+  const h = host([{ type: "text_delta", delta: "answer line\n\n".repeat(40) }]);
+  const result = h.commands.btw.handler("First question", h.ctx);
+  await tick();
+  for (const question of ["Second question", "Third question", "Fourth question"]) {
+    h.key(question);
+    h.key("\r");
+    await tick();
+  }
+  const bottom = h.render();
+  for (let i = 0; i < 40; i++) h.key("\x1b[5~");
+  const top = h.render();
+  assert.match(top, /First question/);
+  assert.doesNotMatch(top, /Fourth question/);
+  assert.equal(h.lines().length, 36);
+  // Paging back down only lands on the newest lines if the run past the top was
+  // clamped to the real transcript height rather than left to run away.
+  for (let i = 0; i < 40; i++) h.key("\x1b[6~");
+  assert.equal(h.render(), bottom);
+  h.key("\x1b");
+  await result;
+});
+
+test("a repainted transcript follows the answer as it streams in", async () => {
+  const h = host();
+  let push!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    push = resolve;
+  });
+  h.ctx.modelRegistry.getProvider = () => ({
+    streamSimple: () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "text_delta", delta: "alpha " };
+        await gate;
+        yield { type: "text_delta", delta: "omega" };
+      },
+    }),
+  });
+  const result = h.commands.btw.handler("Question", h.ctx);
+  await tick();
+  assert.match(h.render(), /alpha/);
+  assert.doesNotMatch(h.render(), /omega/);
+  push();
+  await tick();
+  assert.match(h.render(), /alpha omega/);
+  h.key("Second question");
+  h.key("\r");
+  await tick();
+  const transcript = h.render();
+  assert.match(transcript, /alpha omega/);
+  assert.match(transcript, /Second question/);
+  h.key("\x1b");
+  await result;
+});

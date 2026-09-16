@@ -23,6 +23,24 @@ const MAX_ANSWER = 32000;
 const MAX_HISTORY = 64000;
 const MAX_SNAPSHOT = 96000;
 const MAX_QUESTION = 16000;
+/** Control characters that must never reach the terminal, stripped on every repaint. */
+const CONTROL_CHARS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+/** Ceiling on transcript lines kept painted between frames. */
+const MAX_PAINTED = 2048;
+/** Marks a queued question, so a block never reuses lines painted for another kind. */
+const QUEUED = Symbol("queued");
+
+/** One transcript block, plus the identities that decide whether its lines are stale. */
+type Block = {
+  source: unknown;
+  revision: unknown;
+  lines: () => string[];
+};
+type PaintedBlock = Omit<Block, "lines"> & {
+  w: number;
+  palette: string;
+  lines: string[];
+};
 
 /** A disposable side conversation: never invokes agent tools or appends messages. */
 export default function btw(pi: ExtensionAPI) {
@@ -47,7 +65,6 @@ export default function btw(pi: ExtensionAPI) {
     }
     const model = ctx.model;
     const branch = ctx.sessionManager.getBranch();
-    const context = buildSessionContext(branch);
     // The installed 0.85.1 binary supports retainedTail checkpoints while the
     // npm SDK bearing the same version still uses firstKeptEntryId. Honor the
     // newer format explicitly; never replay messages that preceded its summary.
@@ -59,12 +76,15 @@ export default function btw(pi: ExtensionAPI) {
       }
     }
     const checkpoint = branch[checkpointIndex];
+    let messages: ReturnType<typeof buildSessionContext>["messages"];
     if (
       checkpoint?.type === "compaction" &&
       "retainedTail" in checkpoint &&
       Array.isArray(checkpoint.retainedTail)
     ) {
-      context.messages = [
+      // The checkpoint supersedes everything before it, so walking the whole
+      // branch to build a context that is about to be replaced is wasted work.
+      messages = [
         {
           role: "compactionSummary",
           summary: checkpoint.summary,
@@ -76,10 +96,29 @@ export default function btw(pi: ExtensionAPI) {
           .slice(checkpointIndex + 1)
           .flatMap(sessionEntryToContextMessages),
       ];
+    } else {
+      messages = buildSessionContext(branch).messages;
     }
     // Serializing makes historical tool calls/results inert text. Pi handles both
     // legacy compactions and retainedTail checkpoints before serialization.
-    const conversation = serializeConversation(convertToLlm(context.messages));
+    // Each message serializes on its own and the parts are joined with a fixed
+    // separator, so serializing a run of messages yields exactly that stretch of
+    // the whole text. Walk backwards in doubling steps and stop once the tail
+    // overflows the snapshot budget: the snapshot is identical, but a long
+    // session is never rendered in full — and the slice below cannot pin that
+    // full rendering in memory for the life of the side conversation, which is
+    // how a V8 sliced string retains the string it was cut from.
+    let conversation = "";
+    let cut = messages.length;
+    while (cut > 0 && conversation.length <= MAX_SNAPSHOT) {
+      const from = Math.max(0, cut - Math.max(8, messages.length - cut));
+      const older = serializeConversation(
+        convertToLlm(messages.slice(from, cut)),
+      );
+      if (older)
+        conversation = conversation ? `${older}\n\n${conversation}` : older;
+      cut = from;
+    }
     let snapshot =
       conversation.length > MAX_SNAPSHOT
         ? `[Earlier snapshot text omitted to fit side context]\n${conversation.slice(-MAX_SNAPSHOT)}`
@@ -100,6 +139,8 @@ export default function btw(pi: ExtensionAPI) {
           let scroll = 0;
           let controller: AbortController | undefined;
           const turns: { question: string; answer: string; error?: string }[] = [];
+          let painted = new Map<number, PaintedBlock>();
+          let asked: { w: number; palette: string; question: string; lines: string[] } | undefined;
           const editor = new Editor(tui, {
             borderColor: (s) => theme.fg("accent", s),
             selectList: {
@@ -115,6 +156,8 @@ export default function btw(pi: ExtensionAPI) {
             closed = true;
             controller?.abort();
             turns.length = 0;
+            painted.clear();
+            asked = undefined;
             pending.length = 0;
             currentQuestion = "";
             answer = "";
@@ -267,15 +310,26 @@ export default function btw(pi: ExtensionAPI) {
               const framed = width >= 3 && totalHeight >= 3;
               const w = Math.max(1, width - (framed ? 2 : 0));
               const innerHeight = totalHeight - (framed ? 2 : 0);
-              const clean = (text: string) => stripTerminalSequences(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+              const clean = (text: string) => stripTerminalSequences(text).replace(CONTROL_CHARS, "");
               const padding = w >= 3 ? 1 : 0;
               const markdownTheme = getMarkdownTheme();
+              // A repaint is dominated by markdown rendering, so lines are reused
+              // whenever the width, the palette and the text are all unchanged.
+              // getMarkdownTheme() hands back fresh closures every call, so probe
+              // the palette for a value that moves only when the theme does.
+              const palette = `${theme.fg("mdHeading", "")}${theme.bg("userMessageBg", "")}`;
               const userLines = (question: string) => {
+                // The question above a streaming answer is otherwise redrawn on
+                // every chunk even though only the answer below it is moving.
+                if (asked?.w === w && asked.palette === palette && asked.question === question)
+                  return asked.lines;
                 const box = new Box(padding, 1, (text) => theme.bg("userMessageBg", text));
                 box.addChild(new Markdown(clean(question), 0, 0, markdownTheme, {
                   color: (text) => theme.fg("userMessageText", text),
                 }, { preserveOrderedListMarkers: true, preserveBackslashEscapes: true }));
-                return box.render(w);
+                const lines = box.render(w);
+                asked = { w, palette, question, lines };
+                return lines;
               };
               const turnLines = (question: string, reply: string) => [
                 ...userLines(question),
@@ -284,19 +338,8 @@ export default function btw(pi: ExtensionAPI) {
                 ...new Markdown(clean(reply), padding, 0, markdownTheme).render(w),
                 "",
               ];
-              const lines = [
-                ...turns.flatMap((turn) => turnLines(
-                  turn.question,
-                  turn.error
-                    ? [turn.answer, turn.error].filter(Boolean).join("\n\n")
-                    : turn.answer || "(No answer)",
-                )),
-                ...(busy ? turnLines(currentQuestion, answer || "…") : []),
-                ...pending.flatMap((question) => userLines(`(queued)\n${question}`)),
-              ];
-              if (!lines.length) lines.push(...wrapTextWithAnsi("Ask a side question below.", w));
               const footer = [
-                ...wrapTextWithAnsi(stripTerminalSequences(status).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""), w),
+                ...wrapTextWithAnsi(stripTerminalSequences(status).replace(CONTROL_CHARS, ""), w),
                 ...editor.render(w),
               ].slice(-(Math.max(1, innerHeight - 2)));
               const header = wrapTextWithAnsi(
@@ -304,8 +347,80 @@ export default function btw(pi: ExtensionAPI) {
                 w,
               ).slice(0, Math.max(0, innerHeight - footer.length - 1));
               const height = Math.max(0, innerHeight - header.length - footer.length);
-              scroll = Math.min(scroll, Math.max(0, lines.length - height));
-              const end = Math.max(height, lines.length - scroll);
+              // The transcript is a stack of blocks — completed turns, the turn in
+              // flight, then queued questions. Only the scrolled window is on screen,
+              // so lay the blocks out back to front and stop once it is covered:
+              // turns above the viewport are never re-rendered, which keeps a repaint
+              // proportional to the window instead of the whole side conversation.
+              const blocks = turns.length + (busy ? 1 : 0) + pending.length;
+              const blockAt = (index: number): Block => {
+                const turn = turns[index];
+                if (turn)
+                  return {
+                    source: turn,
+                    revision: undefined,
+                    lines: () =>
+                      turnLines(
+                        turn.question,
+                        turn.error
+                          ? [turn.answer, turn.error].filter(Boolean).join("\n\n")
+                          : turn.answer || "(No answer)",
+                      ),
+                  };
+                if (busy && index === turns.length)
+                  return {
+                    source: currentQuestion,
+                    revision: answer,
+                    lines: () => turnLines(currentQuestion, answer || "…"),
+                  };
+                const queued = pending[index - turns.length - (busy ? 1 : 0)];
+                return {
+                  source: queued,
+                  revision: QUEUED,
+                  lines: () => userLines(`(queued)\n${queued}`),
+                };
+              };
+              // Only the streaming turn changes between frames, so reuse the lines
+              // painted last frame while the block's own text holds still: a
+              // keystroke then never repaints a finished answer.
+              const repainted = new Map<number, PaintedBlock>();
+              const stack: string[][] = [];
+              let first = blocks;
+              let laid = 0;
+              while (first > 0 && laid < scroll + height) {
+                const block = blockAt(--first);
+                const cached = painted.get(first);
+                const blockLines =
+                  cached &&
+                  cached.w === w &&
+                  cached.palette === palette &&
+                  cached.source === block.source &&
+                  cached.revision === block.revision
+                    ? cached.lines
+                    : block.lines();
+                // Keep only what the bottom of the transcript needs: an unbounded
+                // cache would grow with a scrolled-back side conversation.
+                if (laid <= MAX_PAINTED)
+                  repainted.set(first, {
+                    w,
+                    palette,
+                    source: block.source,
+                    revision: block.revision,
+                    lines: blockLines,
+                  });
+                stack.push(blockLines);
+                laid += blockLines.length;
+              }
+              painted = repainted;
+              let lines = stack.reverse().flat();
+              if (first === 0) {
+                // Every block is laid out, so the true total is known: clamp a scroll
+                // that ran past the top, and fall back to the empty-transcript hint.
+                if (!lines.length)
+                  lines = wrapTextWithAnsi("Ask a side question below.", w);
+                scroll = Math.min(scroll, Math.max(0, lines.length - height));
+              }
+              const end = lines.length - scroll;
               const visible = lines.slice(Math.max(0, end - height), end);
               const content = [
                 ...header,

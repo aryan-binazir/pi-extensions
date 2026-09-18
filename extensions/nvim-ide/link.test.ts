@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -101,6 +101,21 @@ test('connects with the token, tracks selection and mentions, calls tools, recon
     assert.equal(states.filter(s => s.connected).length >= 2, true);
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
   await assert.rejects(link.call('getOpenEditors'), /not connected/);
+});
+
+test('a missing lock directory is polled until it can be watched', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
+  const parent = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const dir = join(parent, 'ide');
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 100, alive: () => true });
+  try {
+    link.start();
+    await new Promise(r => setTimeout(r, 150));
+    await mkdir(dir);
+    await writeFile(join(dir, `${ide.port()}.lock`), JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token }));
+    await until(() => link.connected, 2000);
+  } finally { await link.stop(); await ide.close(); await rm(parent, { recursive: true, force: true }); }
 });
 
 test('wrong token is refused and never reported as connected', async () => {

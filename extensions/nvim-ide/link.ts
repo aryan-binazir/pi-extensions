@@ -115,7 +115,8 @@ export class IdeLink {
     this.socket = socket;
     socket.on('message', data => this.receive(data.toString()));
     socket.on('error', () => { /* close follows; handled there */ });
-    socket.on('close', () => { if (this.socket === socket) { this.drop(new Error('IDE disconnected')); this.schedule(); } });
+    // The lock may outlive a dropped connection (editor restart, socket error), so a disconnect always polls.
+    socket.on('close', () => { if (this.socket === socket) { this.drop(new Error('IDE disconnected')); this.schedule(this.options.retryMs ?? 15000); } });
     socket.once('open', () => {
       this.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'pi-nvim-ide', version: '1' } })
         .then(() => { if (this.socket !== socket) return; this.notify('notifications/initialized'); this.ready = true; this.emit(); })
@@ -130,9 +131,11 @@ export class IdeLink {
       this.watcher.on('error', () => { this.watcher?.close(); this.watcher = undefined; });
     } catch { /* directory missing: the poll handles it and a later attempt retries the watch */ }
   }
-  private schedule(delay = this.options.retryMs ?? 15000): void {
+  /** With no lock found and a live watch, nothing runs until a lock file changes; the poll covers an unwatchable directory. */
+  private schedule(delay?: number): void {
     if (!this.started || this.timer) return;
     if (!this.watcher) this.watchLocks();
+    if (delay === undefined) { if (this.watcher) return; delay = this.options.retryMs ?? 15000; }
     this.timer = setTimeout(() => { this.timer = undefined; void this.attempt(); }, delay);
     this.timer.unref();
   }

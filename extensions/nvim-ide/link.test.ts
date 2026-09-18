@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { IdeLink, chooseLock, readLocks, type Lock, type LinkState } from './link.ts';
+import { IdeLink, chooseLock, maxSelectionChars, readLocks, type Lock, type LinkState } from './link.ts';
 import { editorContext, statusText } from './index.ts';
 
 const token = 'a3f1c2d4e5f60718293a4b5c6d7e8f90';
@@ -133,7 +133,7 @@ test('wrong token is refused and never reported as connected', async () => {
 
 test('editor context renders selection, cursor and mentions, and nothing when disconnected', () => {
   assert.equal(editorContext({ connected: false, mentions: 0 }, []), undefined);
-  const withSelection = editorContext({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'x'.repeat(5000), filePath: '/f.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 2 }, isEmpty: false } }, []);
+  const withSelection = editorContext({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'x'.repeat(maxSelectionChars + 1), filePath: '/f.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 2 }, isEmpty: false } }, []);
   assert.match(withSelection!, /^# Editor context \(Neovim\)/);
   assert.match(withSelection!, /Selected lines 5-7:/);
   assert.match(withSelection!, /…\[truncated\]/);
@@ -235,9 +235,9 @@ test('server-initiated requests: ping is answered, anything else gets method-not
     }
     await until(() => seen.length === 2);
     assert.deepEqual(seen, [{ jsonrpc: '2.0', id: 'srv-ping', result: {} }, { jsonrpc: '2.0', id: 'srv-other', error: { code: -32601, message: 'Method not found' } }]);
-    ide.broadcast('selection_changed', { text: 'y'.repeat(10_000), filePath: '/w/big.ts', selection: { start: { line: 0, character: 0 }, end: { line: 500, character: 0 }, isEmpty: false } });
+    ide.broadcast('selection_changed', { text: 'y'.repeat(maxSelectionChars + 10), filePath: '/w/big.ts', selection: { start: { line: 0, character: 0 }, end: { line: 500, character: 0 }, isEmpty: false } });
     await until(() => link.state.selection?.filePath === '/w/big.ts');
-    assert.equal(link.state.selection?.text.length, 4000);
+    assert.equal(link.state.selection?.text.length, maxSelectionChars);
     assert.equal(link.connected, true, 'junk from the server does not drop the link');
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
 });

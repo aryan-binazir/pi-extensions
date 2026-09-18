@@ -16,7 +16,7 @@ export interface Lock { port: number; pid: number; authToken: string; workspaceF
 export interface LinkState { connected: boolean; ideName?: string; port?: number; selection?: Selection; mentions: number }
 
 /** Selection text kept in memory and sent to the model is capped here; nvim sends the whole visual range. */
-export const maxSelectionChars = 4000;
+export const maxSelectionChars = 50_000;
 /** `NVIM_IDE_TRACE=/path` appends link state transitions to that file; off otherwise. */
 const traceFile = process.env.NVIM_IDE_TRACE;
 export const trace = traceFile ? (message: string) => { try { appendFileSync(traceFile, `${new Date().toISOString()} ${message}\n`); } catch { /* tracing must never break the link */ } } : undefined;
@@ -116,7 +116,7 @@ export class IdeLink {
     const WebSocket = await loadWs();
     if (!this.started || this.socket) return;
     this.lock = lock;
-    const socket = new WebSocket(`ws://127.0.0.1:${lock.port}`, { headers: { 'x-claude-code-ide-authorization': lock.authToken }, handshakeTimeout: 3000, perMessageDeflate: false });
+    const socket = new WebSocket(`ws://127.0.0.1:${lock.port}`, { headers: { 'x-claude-code-ide-authorization': lock.authToken }, handshakeTimeout: 3000, perMessageDeflate: false, skipUTF8Validation: true });
     this.socket = socket;
     socket.on('message', data => this.receive(data.toString()));
     socket.on('error', error => trace?.(`socket error ${error.message}`));

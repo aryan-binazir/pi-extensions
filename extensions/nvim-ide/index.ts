@@ -6,8 +6,8 @@ import { Type } from 'typebox';
 import { IdeLink, maxSelectionChars, type LinkState, type Mention } from './link.ts';
 
 const statusKey = 'nvim-ide';
-const maxMentionLines = 200;
-const maxMentionChars = 8000;
+const maxMentionLines = 2000;
+const maxMentionChars = 200_000;
 
 const clip = (text: string, limit: number): string => text.length > limit ? `${text.slice(0, limit)}\n…[truncated]` : text;
 

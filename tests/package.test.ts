@@ -6,9 +6,9 @@ import { test } from 'node:test';
 import { createAgentSession, ModelRuntime, SessionManager, DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
 
 const root = resolve(import.meta.dirname, '..');
-const intended = ['questionnaire', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'computer-use', 'fast-mode', 'auto-caffeinate', 'auto-permissions-status'];
+const intended = ['questionnaire', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'computer-use', 'fast-mode', 'auto-caffeinate', 'auto-permissions-status', 'nvim-ide'];
 
-test('Pi package discovers exactly twelve entrypoints and independently loads each', async () => {
+test('Pi package discovers exactly thirteen entrypoints and independently loads each', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-package-test-'));
   try {
     const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -38,6 +38,7 @@ test('Pi package discovers exactly twelve entrypoints and independently loads ea
         'fast-mode': {tools: [], commands: ['fast'], shortcuts: []},
         'auto-caffeinate': {tools: [], commands: [], shortcuts: []},
         'auto-permissions-status': {tools: [], commands: [], shortcuts: []},
+        'nvim-ide': {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['nvim'], shortcuts: []},
       };
       assert.deepEqual([...extension.tools.keys()].sort(), expected[feature].tools, feature);
       assert.deepEqual([...extension.commands.keys()].sort(), expected[feature].commands, feature);

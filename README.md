@@ -48,6 +48,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
 | Auto Permissions status | Displays the separately installed Bash-approval plugin's status. |
+| [Neovim IDE](docs/adr/012-nvim-ide.md) | Connects to claudecode.nvim like Claude Code does: selection and `:ClaudeCodeSend` context, editor tools, jumps to pi edits. |
 
 See [session/editor behavior and worktree boundaries](docs/extension-behavior.md)
 for operational details. Prompt stash's shortcut applies only to the main editor;

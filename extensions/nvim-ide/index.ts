@@ -125,7 +125,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerCommand('nvim', {
+  pi.registerCommand('vim', {
     description: 'Editor link: status (default), follow on|off, reconnect',
     async handler(args, context) {
       const words = args.trim().split(/\s+/).filter(Boolean);

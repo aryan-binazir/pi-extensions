@@ -38,7 +38,7 @@ test('Pi package discovers exactly thirteen entrypoints and independently loads 
         'fast-mode': {tools: [], commands: ['fast'], shortcuts: []},
         'auto-caffeinate': {tools: [], commands: [], shortcuts: []},
         'auto-permissions-status': {tools: [], commands: [], shortcuts: []},
-        'nvim-ide': {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['nvim'], shortcuts: []},
+        'nvim-ide': {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['vim'], shortcuts: []},
       };
       assert.deepEqual([...extension.tools.keys()].sort(), expected[feature].tools, feature);
       assert.deepEqual([...extension.commands.keys()].sort(), expected[feature].commands, feature);

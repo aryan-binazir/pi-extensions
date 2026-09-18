@@ -1,6 +1,6 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { watch, type FSWatcher } from 'node:fs';
+import { appendFileSync, watch, type FSWatcher } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import type WebSocket from 'ws';
 
@@ -17,6 +17,9 @@ export interface LinkState { connected: boolean; ideName?: string; port?: number
 
 /** Selection text kept in memory and sent to the model is capped here; nvim sends the whole visual range. */
 export const maxSelectionChars = 4000;
+/** `NVIM_IDE_TRACE=/path` appends link state transitions to that file; off otherwise. */
+const traceFile = process.env.NVIM_IDE_TRACE;
+export const trace = traceFile ? (message: string) => { try { appendFileSync(traceFile, `${new Date().toISOString()} ${message}\n`); } catch { /* tracing must never break the link */ } } : undefined;
 export const defaultLockDir = (): string => join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'ide');
 const pidAlive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } };
 const trimSep = (path: string): string => path.length > 1 && path.endsWith(sep) ? path.slice(0, -1) : path;
@@ -105,8 +108,10 @@ export class IdeLink {
 
   private async attempt(): Promise<void> {
     if (!this.started || this.socket) return;
+    trace?.('attempt');
     const lock = chooseLock(await readLocks(this.options.lockDir ?? defaultLockDir(), this.options.alive), this.options.cwd);
     if (!this.started || this.socket) return;
+    trace?.(`lock ${lock ? lock.port : 'none'}`);
     if (!lock) { this.schedule(); return; }
     const WebSocket = await loadWs();
     if (!this.started || this.socket) return;
@@ -114,25 +119,27 @@ export class IdeLink {
     const socket = new WebSocket(`ws://127.0.0.1:${lock.port}`, { headers: { 'x-claude-code-ide-authorization': lock.authToken }, handshakeTimeout: 3000, perMessageDeflate: false });
     this.socket = socket;
     socket.on('message', data => this.receive(data.toString()));
-    socket.on('error', () => { /* close follows; handled there */ });
+    socket.on('error', error => trace?.(`socket error ${error.message}`));
     // The lock may outlive a dropped connection (editor restart, socket error), so a disconnect always polls.
-    socket.on('close', () => { if (this.socket === socket) { this.drop(new Error('IDE disconnected')); this.schedule(this.options.retryMs ?? 15000); } });
+    socket.on('close', (code, reason) => { trace?.(`close ${code} ${reason} current=${this.socket === socket}`); if (this.socket === socket) { this.drop(new Error('IDE disconnected')); this.schedule(this.options.retryMs ?? 15000); } });
     socket.once('open', () => {
+      trace?.('open');
       this.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'pi-nvim-ide', version: '1' } })
-        .then(() => { if (this.socket !== socket) return; this.notify('notifications/initialized'); this.ready = true; this.emit(); })
-        .catch(() => socket.terminate());
+        .then(() => { if (this.socket !== socket) return; this.notify('notifications/initialized'); this.ready = true; trace?.('ready'); this.emit(); })
+        .catch(error => { trace?.(`initialize failed ${error.message}`); socket.terminate(); });
     });
   }
   /** A lock file appearing or changing wakes discovery at once; the poll below is only a fallback (the directory may not exist yet, and some filesystems do not report changes). */
   private watchLocks(): void {
     if (this.watcher) return;
     try {
-      this.watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (_event, name) => { if (!this.started || this.socket || (name && !name.endsWith('.lock'))) return; if (this.timer) { clearTimeout(this.timer); this.timer = undefined; } this.schedule(200); });
-      this.watcher.on('error', () => { this.watcher?.close(); this.watcher = undefined; });
+      this.watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (event, name) => { trace?.(`watch ${event} ${name} socket=${!!this.socket} timer=${!!this.timer}`); if (!this.started || this.socket || (name && !name.endsWith('.lock'))) return; if (this.timer) { clearTimeout(this.timer); this.timer = undefined; } this.schedule(200); });
+      this.watcher.on('error', error => { trace?.(`watch error ${error.message}`); this.watcher?.close(); this.watcher = undefined; });
     } catch { /* directory missing: the poll handles it and a later attempt retries the watch */ }
   }
   /** With no lock found and a live watch, nothing runs until a lock file changes; the poll covers an unwatchable directory. */
   private schedule(delay?: number): void {
+    trace?.(`schedule ${delay ?? 'default'} timer=${!!this.timer} watcher=${!!this.watcher}`);
     if (!this.started || this.timer) return;
     if (!this.watcher) this.watchLocks();
     if (delay === undefined) { if (this.watcher) return; delay = this.options.retryMs ?? 15000; }
@@ -140,6 +147,7 @@ export class IdeLink {
     this.timer.unref();
   }
   private drop(error: Error): void {
+    trace?.(`drop ${error.message}`);
     const wasReady = this.ready;
     this.socket?.removeAllListeners('close');
     this.socket = undefined; this.ready = false; this.lock = undefined; this.selection = undefined;

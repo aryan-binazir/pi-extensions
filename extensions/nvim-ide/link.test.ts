@@ -165,3 +165,91 @@ test('a lock file appearing wakes discovery through the directory watch, not the
     assert.ok(Date.now() - started < 1500, 'connected well before the 60s poll');
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
 });
+
+test('editor restart: dropped connection then a new lock on a new port reconnects to the new server', async () => {
+  const first = fakeIde();
+  await once(first.server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 60_000, alive: () => true });
+  const lockFor = () => JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token });
+  try {
+    link.start();
+    await writeFile(join(dir, `${first.port()}.lock`), lockFor());
+    await until(() => link.connected);
+    // claudecode.nvim removes its lock before closing the socket
+    await rm(join(dir, `${first.port()}.lock`));
+    await first.close();
+    await until(() => !link.connected);
+    const second = fakeIde();
+    await once(second.server, 'listening');
+    try {
+      // atomic write like the plugin: temp file then rename
+      await writeFile(join(dir, `${second.port()}.lock.tmp.1.2`), lockFor());
+      const { rename } = await import('node:fs/promises');
+      await rename(join(dir, `${second.port()}.lock.tmp.1.2`), join(dir, `${second.port()}.lock`));
+      await until(() => link.connected, 2000);
+      assert.equal(link.state.port, second.port());
+      assert.equal(await link.call('getOpenEditors'), 'ok:getOpenEditors');
+    } finally { await second.close(); }
+  } finally { await link.stop(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('an editor that accepts the socket but never answers initialize is not connected, and links once it responds', async () => {
+  let answer = false;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  server.on('connection', socket => socket.on('message', raw => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === 'initialize' && answer) socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }));
+  }));
+  await once(server, 'listening');
+  const port = (server.address() as { port: number }).port;
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const states: boolean[] = [];
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 100, requestTimeoutMs: 100, alive: () => true, onChange: s => states.push(s.connected) });
+  try {
+    await writeFile(join(dir, `${port}.lock`), JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token }));
+    link.start();
+    await new Promise(r => setTimeout(r, 350));
+    assert.equal(link.connected, false);
+    assert.deepEqual(states, [], 'a stalled handshake never reports connected');
+    answer = true;
+    await until(() => link.connected, 2000);
+  } finally { await link.stop(); await new Promise<void>(done => { for (const c of server.clients) c.terminate(); server.close(() => done()); }); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('server-initiated requests: ping is answered, anything else gets method-not-found, and selection text is capped', async () => {
+  const seen: unknown[] = [];
+  const ide = fakeIde(socket => socket.on('message', raw => { const m = JSON.parse(raw.toString()); if (m.id === 'srv-ping' || m.id === 'srv-other') seen.push(m); }));
+  await once(ide.server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 100, alive: () => true });
+  try {
+    await writeFile(join(dir, `${ide.port()}.lock`), JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token }));
+    link.start();
+    await until(() => link.connected);
+    for (const client of ide.server.clients) {
+      client.send(JSON.stringify({ jsonrpc: '2.0', id: 'srv-ping', method: 'ping' }));
+      client.send(JSON.stringify({ jsonrpc: '2.0', id: 'srv-other', method: 'sampling/createMessage', params: {} }));
+      client.send('not json at all');
+      client.send(JSON.stringify({ jsonrpc: '2.0', id: 999, result: {} }));
+    }
+    await until(() => seen.length === 2);
+    assert.deepEqual(seen, [{ jsonrpc: '2.0', id: 'srv-ping', result: {} }, { jsonrpc: '2.0', id: 'srv-other', error: { code: -32601, message: 'Method not found' } }]);
+    ide.broadcast('selection_changed', { text: 'y'.repeat(10_000), filePath: '/w/big.ts', selection: { start: { line: 0, character: 0 }, end: { line: 500, character: 0 }, isEmpty: false } });
+    await until(() => link.state.selection?.filePath === '/w/big.ts');
+    assert.equal(link.state.selection?.text.length, 4000);
+    assert.equal(link.connected, true, 'junk from the server does not drop the link');
+  } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('stop during discovery and stop twice are clean, and start after stop is a no-op', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 100, alive: () => true });
+  try {
+    link.start();
+    await link.stop();
+    await link.stop();
+    assert.equal(link.connected, false);
+    await assert.rejects(link.call('getOpenEditors'), /not connected/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

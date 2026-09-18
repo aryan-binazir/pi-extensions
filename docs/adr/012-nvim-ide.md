@@ -16,9 +16,11 @@ Edits are shown, not gated. After a successful `edit` or `write` the editor open
 
 Line numbers differ across the protocol: `selection_changed` positions are zero-based LSP positions, `at_mentioned` and `openFile` lines are one-based. The prompt block converts selection lines to one-based.
 
+Setting `NVIM_IDE_TRACE=/path/to/file` appends link state transitions (discovery, watch events, handshake, disconnects) to that file; it is the intended first step when the status bar does not show an editor. A Neovim sitting at a hit-enter prompt accepts the socket but cannot answer `initialize` until the prompt is dismissed; the link stays disconnected rather than half-connected in that case.
+
 ## Verification
 
-Tests run a fake IDE server with the real `ws` package: token verification, lock discovery and precedence, selection and mention tracking with malformed payloads, tool call success, error, timeout and abort, reconnection after the server drops the client, and prompt rendering. A live probe against a running claudecode.nvim 2390c6e returned workspace folders, open editors, the current selection and diagnostics through the same client.
+Tests run a fake IDE server with the real `ws` package. The adapter is driven end to end through a fake extension API with `CLAUDE_CONFIG_DIR` pointed at a temporary lock directory: status text and repaint deduplication, prompt injection and mention consumption, follow-after-edit including the off switch and non-file tools, the three tools' argument mapping, `/vim` output, and behaviour after the editor exits. Link tests cover token verification, lock discovery and precedence, selection and mention tracking with malformed payloads, tool call success, error, timeout and abort, reconnection after the server drops the client, editor restart on a new port via the directory watch with an atomic temp-file rename, a stalled `initialize`, server-initiated ping and unknown requests, selection capping, and prompt rendering. A live probe against a running claudecode.nvim 2390c6e returned workspace folders, open editors, the current selection and diagnostics through the same client.
 
 ## Sources
 

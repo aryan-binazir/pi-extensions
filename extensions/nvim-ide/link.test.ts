@@ -63,7 +63,7 @@ test('connects with the token, tracks selection and mentions, calls tools, recon
   await once(ide.server, 'listening');
   const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const states: LinkState[] = [];
-  const link = new IdeLink({ cwd: '/w/project', lockDir: dir, retryMs: 20, requestTimeoutMs: 100, alive: () => true, onChange: s => states.push(s) });
+  const link = new IdeLink({ cwd: '/w/project', lockDir: dir, retryMs: 200, requestTimeoutMs: 100, alive: () => true, onChange: s => states.push(s) });
   try {
     link.start();
     await new Promise(r => setTimeout(r, 60));
@@ -107,7 +107,7 @@ test('wrong token is refused and never reported as connected', async () => {
   const ide = fakeIde();
   await once(ide.server, 'listening');
   const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
-  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 20, alive: () => true });
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 200, alive: () => true });
   try {
     await writeFile(join(dir, `${ide.port()}.lock`), JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: 'wrong-token-1234' }));
     link.start();
@@ -134,4 +134,19 @@ test('status text shows connection, active file, cursor line or selected range',
   assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: '', filePath: '/w/math.ts', start: { line: 5, character: 0 }, end: { line: 5, character: 0 }, isEmpty: true } }), 'Neovim ✓ math.ts:6');
   assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'abc', filePath: '/w/math.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 1 }, isEmpty: false } }), 'Neovim ✓ math.ts:5-7 ▮');
   assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'ab', filePath: '/w/math.ts', start: { line: 4, character: 0 }, end: { line: 4, character: 2 }, isEmpty: false } }), 'Neovim ✓ math.ts:5 ▮');
+});
+
+test('a lock file appearing wakes discovery through the directory watch, not the poll', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 60_000, alive: () => true });
+  try {
+    link.start();
+    await new Promise(r => setTimeout(r, 50));
+    const started = Date.now();
+    await writeFile(join(dir, `${ide.port()}.lock`), JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token }));
+    await until(() => link.connected, 2000);
+    assert.ok(Date.now() - started < 1500, 'connected well before the 60s poll');
+  } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
 });

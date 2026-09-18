@@ -3,10 +3,9 @@ import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { basename, resolve } from 'node:path';
 import { Type } from 'typebox';
-import { IdeLink, type LinkState, type Mention } from './link.ts';
+import { IdeLink, maxSelectionChars, type LinkState, type Mention } from './link.ts';
 
 const statusKey = 'nvim-ide';
-const maxSelectionChars = 4000;
 const maxMentionLines = 200;
 const maxMentionChars = 8000;
 
@@ -54,7 +53,9 @@ export default function nvimIde(pi: ExtensionAPI): void {
   let ctx: ExtensionContext | undefined;
   let follow = true;
   const editPaths = new Map<string, string>();
-  const paint = (state: LinkState) => { if (ctx?.hasUI) ctx.ui.setStatus(statusKey, statusText(state)); };
+  let shown: string | undefined;
+  // Cursor moves arrive several times a second; only touch the TUI when the text differs.
+  const paint = (state: LinkState) => { const text = statusText(state); if (text === shown || !ctx?.hasUI) return; shown = text; ctx.ui.setStatus(statusKey, text); };
   const need = (): IdeLink => { if (!link?.connected) throw new Error('No editor connected. Start Neovim with claudecode.nvim in this directory.'); return link; };
 
   pi.on('session_start', async (_event, context) => {

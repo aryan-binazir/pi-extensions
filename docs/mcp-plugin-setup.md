@@ -30,36 +30,25 @@ settings and servers. Do not copy the old Harbor `servers`/`consent` format.
       "url": "https://mcp.linear.app/mcp",
       "auth": "oauth",
       "lifecycle": "lazy",
-      "approveTools": [
-        "prepare_*",
-        "create_*",
-        "save_*",
-        "update_*",
-        "delete_*",
-        "retire_*",
-        "restore_*",
-        "resolve_*",
-        "submit_*",
-        "merge_*",
-        "share_*",
-        "unshare_*",
-        "mark_*"
-      ]
+      "approveTools": false
     }
   }
 }
 ```
 
-The per-server `approveTools` array **overrides** the global setting and matches
-original MCP tool names, not proxy-prefixed names such as `linear_create_issue`.
-This covers current Linear mutation names, including preparation and resolution
-operations. Read calls not matching these patterns run automatically after
-connection/authentication. This is **name matching, not semantic classification**
-and does not rely on server read-only annotations. New unmatched mutation verbs
-would also run without this approval gate: review the discovered catalog when it
-changes and extend the patterns, or temporarily set Linear's `approveTools` to
-`true`. Other servers still require approval for every tool call unless explicitly
-overridden. Disabling `scriptMode` hides `mcpScript`; it is not a sandbox.
+The per-server `approveTools` setting **overrides** the global setting. The
+Linear-only `false` setting implements the standing preference in [AGENTS.md](../AGENTS.md).
+Other servers still require approval for every tool call unless explicitly
+overridden. Preserve unrelated settings and servers when applying this example.
+Back up the user config before editing, validate the resulting JSON, and run
+`/reload` afterward. Configure the external adapter rather than modifying its
+installed package files.
+
+Supported approval settings are `true` (prompt for every tool), `false` (no
+adapter approval prompts), or an array of tool-name patterns (prompt only for
+matching tools; unmatched tools run without prompting). Pattern matching is not
+semantic read/write classification. Disabling `scriptMode` hides `mcpScript`;
+it is not a sandbox.
 
 `hostConfigDiscovery: "off"` disables automatic host-specific discovery, not
 standard shared files or explicit imports. The adapter also reads shared global
@@ -83,8 +72,8 @@ Run `/reload` or restart Pi, then:
 
 Complete the browser OAuth flow with your Linear account. If Pi is remote and
 the browser cannot reach its localhost callback, follow the adapter's manual
-callback instructions. Authentication grants account access, not blanket mutation
-approval. Persistent OAuth uses the OS credential store by default and fails
+callback instructions. Authentication grants account access; the approval policy above separately
+allows Linear mutations without adapter prompts. Persistent OAuth uses the OS credential store by default and fails
 closed if it is unavailable. No credentials, authorization codes, callback URLs,
 or token files belong in this repository. The old Harbor credentials/config are
 not automatically migrated; authenticate through the adapter.
@@ -102,9 +91,11 @@ mcp({ tool: "linear_get_issue", args: { id: "TEAM-123" } })
 ```
 
 Use the actual names and argument schema returned by discovery, not assumptions
-from these examples. Matching mutations prompt **Allow once**, **Allow for
-session**, or **Deny**. Prefer Allow once when each mutation should be reviewed;
-session grants can persist on the active session branch and restore on resume.
+from these examples. When approval is enabled for a tool, the popup offers **Allow once**, **Allow for
+session**, or **Deny**; there is no persistent **Always allow** option. Session
+grants are scoped to the server, tool definition, and exact arguments: changing
+arguments prompts again. Grants can persist on the active session branch and
+restore on resume. With the Linear setting above, this popup is bypassed.
 Headless calls needing approval fail closed with `approval_required`. Permission
 broker extensions can affect decisions; this guide assumes no broker overrides.
 Bash-only Auto Permissions does not itself protect MCP calls.

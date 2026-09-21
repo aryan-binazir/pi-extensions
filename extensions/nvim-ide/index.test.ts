@@ -4,11 +4,14 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { WebSocketServer } from 'ws';
-import nvimIde from './index.ts';
+import nvimIde, { editorContext, statusText } from './index.ts';
+import { maxSelectionChars } from './link.ts';
+import { fakeIde, token, until } from './test-support.ts';
 
-const token = 'a3f1c2d4e5f60718293a4b5c6d7e8f90';
 type Handler = (event: any, ctx: any) => any;
+
+/** Absence has no positive signal to wait on; give in-flight socket traffic a beat before asserting nothing happened. */
+const settle = () => new Promise(resolve => setTimeout(resolve, 50));
 
 /** Enough of Pi's ExtensionAPI to drive the adapter: handlers, tools and commands are captured. */
 function fakePi() {
@@ -28,53 +31,52 @@ function fakeCtx(cwd: string) {
   const notices: string[] = [];
   return { ctx: { cwd, hasUI: true, ui: { setStatus: (_key: string, text: string | undefined) => status.push(text), notify: (message: string) => notices.push(message) } }, status, notices };
 }
-function fakeIde() {
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: (info: { req: { headers: Record<string, unknown> } }) => info.req.headers['x-claude-code-ide-authorization'] === token });
-  const calls: { name: string; arguments: any }[] = [];
-  server.on('connection', socket => socket.on('message', raw => {
-    const message = JSON.parse(raw.toString());
-    const reply = (result: unknown) => socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
-    if (message.method === 'initialize') reply({});
-    else if (message.method === 'tools/call') { calls.push(message.params); reply({ content: [{ type: 'text', text: `${message.params.name}(${JSON.stringify(message.params.arguments)})` }] }); }
-  }));
-  const port = () => (server.address() as { port: number }).port;
-  const broadcast = (method: string, params: unknown) => { for (const client of server.clients) client.send(JSON.stringify({ jsonrpc: '2.0', method, params })); };
-  return { server, calls, port, broadcast, close: () => new Promise<void>(done => { for (const client of server.clients) client.terminate(); server.close(() => done()); }) };
-}
-const until = (check: () => boolean, ms = 3000) => new Promise<void>((resolve, reject) => { const start = Date.now(); const tick = () => check() ? resolve() : Date.now() - start > ms ? reject(new Error('timeout')) : setTimeout(tick, 10); tick(); });
 
-test('adapter end to end: status, prompt context, mentions, follow-after-edit, tools and /vim', async () => {
+type Connected = { ide: ReturnType<typeof fakeIde>; project: string } & ReturnType<typeof fakePi> & ReturnType<typeof fakeCtx>;
+
+/** A running fake editor, a project with `a.ts`, its lock file, and the adapter already through session_start. */
+async function withConnectedIde(body: (harness: Connected) => Promise<void>): Promise<void> {
   const ide = fakeIde();
   await once(ide.server, 'listening');
   const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const project = join(root, 'project');
-  await mkdir(join(root, 'ide'), { recursive: true });
-  await mkdir(project);
-  await writeFile(join(project, 'a.ts'), 'line1\nline2\nline3\nline4\n');
-  await writeFile(join(root, 'ide', `${ide.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [project], ideName: 'Neovim', authToken: token }));
   const previous = process.env.CLAUDE_CONFIG_DIR;
-  process.env.CLAUDE_CONFIG_DIR = root;
-  const { api, fire, tools, commands } = fakePi();
-  const { ctx, status, notices } = fakeCtx(project);
   try {
-    nvimIde(api as any);
+    await mkdir(join(root, 'ide'), { recursive: true });
+    await mkdir(project);
+    await writeFile(join(project, 'a.ts'), 'line1\nline2\nline3\nline4\n');
+    await writeFile(join(root, 'ide', `${ide.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [project], ideName: 'Neovim', authToken: token }));
+    process.env.CLAUDE_CONFIG_DIR = root;
+    const pi = fakePi();
+    const context = fakeCtx(project);
+    nvimIde(pi.api as any);
+    await pi.fire('session_start', {}, context.ctx);
+    await until(() => context.status.includes('Neovim ✓'));
+    await body({ ide, project, ...pi, ...context });
+    await pi.fire('session_shutdown', {}, context.ctx);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+    await ide.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test('a connected editor registers its tools and reports the selection in the status bar and system prompt', async () => {
+  await withConnectedIde(async ({ ide, project, fire, tools, commands, ctx, status }) => {
     assert.deepEqual([...tools.keys()].sort(), ['nvim_context', 'nvim_diagnostics', 'nvim_open']);
     assert.deepEqual([...commands.keys()], ['vim']);
-
-    await fire('session_start', {}, ctx);
-    await until(() => status.includes('Neovim ✓'));
 
     // Ambient selection reaches the status bar and the system prompt; repaints only on change.
     ide.broadcast('selection_changed', { text: 'line2\nline3', filePath: join(project, 'a.ts'), selection: { start: { line: 1, character: 0 }, end: { line: 2, character: 5 }, isEmpty: false } });
     await until(() => status.at(-1) === 'Neovim ✓ a.ts:2-3 ▮');
     const paints = status.length;
     ide.broadcast('selection_changed', { text: 'line2\nline3', filePath: join(project, 'a.ts'), selection: { start: { line: 1, character: 0 }, end: { line: 2, character: 5 }, isEmpty: false } });
-    await new Promise(r => setTimeout(r, 50));
+    await settle();
     assert.equal(status.length, paints, 'identical selection does not repaint');
 
     ide.broadcast('at_mentioned', { filePath: join(project, 'a.ts'), lineStart: 3, lineEnd: 4 });
     ide.broadcast('at_mentioned', { filePath: join(project, 'missing.ts'), lineStart: 1, lineEnd: 1 });
-    await new Promise(r => setTimeout(r, 50));
+    await settle();
     const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
     assert.match(turn.systemPrompt, /^BASE\n\n# Editor context \(Neovim\)/);
     assert.match(turn.systemPrompt, /Selected lines 2-3:\n```\nline2\nline3\n```/);
@@ -83,8 +85,11 @@ test('adapter end to end: status, prompt context, mentions, follow-after-edit, t
     const next = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
     assert.doesNotMatch(next.systemPrompt, /User sent from editor/, 'mentions are consumed by the turn that injected them');
     assert.match(next.systemPrompt, /Selected lines 2-3/, 'ambient selection persists');
+  });
+});
 
-    // Follow after edit: successful edit opens the file at the first changed line; errors and writes without a line still open the file.
+test('follow after edit opens the changed file, and /vim follow turns it off', async () => {
+  await withConnectedIde(async ({ ide, project, fire, commands, ctx, notices }) => {
     await fire('tool_execution_start', { toolCallId: 't1', toolName: 'edit', args: { path: 'a.ts', edits: [] } }, ctx);
     await fire('tool_execution_end', { toolCallId: 't1', toolName: 'edit', isError: false, result: { details: { firstChangedLine: 7 } } }, ctx);
     await until(() => ide.calls.length === 1);
@@ -92,28 +97,34 @@ test('adapter end to end: status, prompt context, mentions, follow-after-edit, t
     await fire('tool_execution_start', { toolCallId: 't2', toolName: 'write', args: { path: join(project, 'b.ts'), content: '' } }, ctx);
     await fire('tool_execution_end', { toolCallId: 't2', toolName: 'write', isError: false, result: {} }, ctx);
     await until(() => ide.calls.length === 2);
-    assert.deepEqual(ide.calls[1].arguments, { filePath: join(project, 'b.ts'), preview: false, makeFrontmost: true });
+    assert.deepEqual(ide.calls[1].arguments, { filePath: join(project, 'b.ts'), preview: false, makeFrontmost: true }, 'a write with no changed line still opens the file');
     await fire('tool_execution_start', { toolCallId: 't3', toolName: 'edit', args: { path: 'a.ts' } }, ctx);
     await fire('tool_execution_end', { toolCallId: 't3', toolName: 'edit', isError: true, result: {} }, ctx);
     await fire('tool_execution_start', { toolCallId: 't4', toolName: 'bash', args: { command: 'ls' } }, ctx);
     await fire('tool_execution_end', { toolCallId: 't4', toolName: 'bash', isError: false, result: {} }, ctx);
-    await new Promise(r => setTimeout(r, 50));
+    await settle();
     assert.equal(ide.calls.length, 2, 'failed edits and non-file tools do not move the editor');
 
     await commands.get('vim').handler('follow off', ctx);
     assert.equal(notices.at(-1), 'Editor follows pi edits: off');
     await fire('tool_execution_start', { toolCallId: 't5', toolName: 'edit', args: { path: 'a.ts' } }, ctx);
     await fire('tool_execution_end', { toolCallId: 't5', toolName: 'edit', isError: false, result: { details: { firstChangedLine: 1 } } }, ctx);
-    await new Promise(r => setTimeout(r, 50));
+    await settle();
     assert.equal(ide.calls.length, 2, 'follow off suppresses the jump');
     await commands.get('vim').handler('follow nonsense', ctx);
-    assert.equal(notices.at(-1), 'Editor follows pi edits: off');
+    assert.equal(notices.at(-1), 'Editor follows pi edits: off', 'an unrecognised argument only reports the current setting');
     await commands.get('vim').handler('follow on', ctx);
     assert.equal(notices.at(-1), 'Editor follows pi edits: on');
+  });
+});
+
+test('editor tools resolve paths, and a closed editor clears status, prompt and tools', async () => {
+  await withConnectedIde(async ({ ide, project, fire, tools, commands, ctx, status, notices }) => {
+    ide.broadcast('selection_changed', { text: 'line2', filePath: join(project, 'a.ts'), selection: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 }, isEmpty: false } });
+    await until(() => status.at(-1) === 'Neovim ✓ a.ts:2 ▮');
     await commands.get('vim').handler('', ctx);
     assert.match(notices.at(-1)!, new RegExp(`^Editor link: Neovim on port ${ide.port()}, follow on, viewing .*a\\.ts$`));
 
-    // Tools route to the IDE with resolved paths.
     const open = await tools.get('nvim_open').execute('id', { path: 'a.ts', startLine: 2 }, undefined, undefined, ctx);
     assert.equal(open.content[0].text, `openFile(${JSON.stringify({ filePath: join(project, 'a.ts'), preview: false, makeFrontmost: true, startLine: 2, endLine: 2 })})`);
     const diagnostics = await tools.get('nvim_diagnostics').execute('id', { path: 'a.ts' }, undefined, undefined, ctx);
@@ -123,21 +134,13 @@ test('adapter end to end: status, prompt context, mentions, follow-after-edit, t
     const context = await tools.get('nvim_context').execute('id', {}, undefined, undefined, ctx);
     assert.match(context.content[0].text, /Workspace folders:\ngetWorkspaceFolders\(\{\}\)\n\nOpen editors:\ngetOpenEditors\(\{\}\)\n\nCurrent selection:\ngetCurrentSelection\(\{\}\)/);
 
-    // Editor goes away: status clears, prompt is untouched, tools fail clearly, /vim explains.
     await ide.close();
     await until(() => status.at(-1) === undefined);
-    const alone = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
-    assert.equal(alone, undefined);
+    assert.equal(await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx), undefined);
     await assert.rejects(tools.get('nvim_context').execute('id', {}, undefined, undefined, ctx), /No editor connected/);
     await commands.get('vim').handler('', ctx);
     assert.match(notices.at(-1)!, /not connected/);
-
-    await fire('session_shutdown', {}, ctx);
-  } finally {
-    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
-    await ide.close();
-    await rm(root, { recursive: true, force: true });
-  }
+  });
 });
 
 test('session without an editor: no status, no prompt injection, shutdown is clean', async () => {
@@ -149,7 +152,7 @@ test('session without an editor: no status, no prompt injection, shutdown is cle
   try {
     nvimIde(api as any);
     await fire('session_start', {}, ctx);
-    await new Promise(r => setTimeout(r, 100));
+    await settle();
     assert.deepEqual(status, []);
     assert.equal(await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx), undefined);
     await fire('session_shutdown', {}, ctx);
@@ -158,4 +161,24 @@ test('session without an editor: no status, no prompt injection, shutdown is cle
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('editor context renders selection, cursor and mentions, and nothing when disconnected', () => {
+  assert.equal(editorContext({ connected: false, mentions: 0 }, []), undefined);
+  const withSelection = editorContext({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'x'.repeat(maxSelectionChars + 1), filePath: '/f.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 2 }, isEmpty: false } }, []);
+  assert.match(withSelection!, /^# Editor context \(Neovim\)/);
+  assert.match(withSelection!, /Selected lines 5-7:/);
+  assert.match(withSelection!, /…\[truncated\]/);
+  const cursor = editorContext({ connected: true, mentions: 0, selection: { text: '', filePath: '/g.ts', start: { line: 0, character: 0 }, end: { line: 0, character: 0 }, isEmpty: true } }, [{ mention: { filePath: '/h.ts', lineStart: 2, lineEnd: 3 }, text: 'a\nb' }, { mention: { filePath: '/dir' } }]);
+  assert.match(cursor!, /Active file: \/g\.ts \(cursor at line 1\)/);
+  assert.match(cursor!, /User sent from editor: \/h\.ts lines 2-3\n```\na\nb\n```/);
+  assert.match(cursor!, /User sent from editor: \/dir$/);
+});
+
+test('status text shows connection, active file, cursor line or selected range', () => {
+  assert.equal(statusText({ connected: false, mentions: 0 }), undefined);
+  assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0 }), 'Neovim ✓');
+  assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: '', filePath: '/w/math.ts', start: { line: 5, character: 0 }, end: { line: 5, character: 0 }, isEmpty: true } }), 'Neovim ✓ math.ts:6');
+  assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'abc', filePath: '/w/math.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 1 }, isEmpty: false } }), 'Neovim ✓ math.ts:5-7 ▮');
+  assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'ab', filePath: '/w/math.ts', start: { line: 4, character: 0 }, end: { line: 4, character: 2 }, isEmpty: false } }), 'Neovim ✓ math.ts:5 ▮');
 });

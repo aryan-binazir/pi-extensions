@@ -20,7 +20,7 @@ export function setActiveCwd(originalCwd: string, cwd?: string, sessionId?: stri
   if (cwd) paths.set(identity(originalCwd, sessionId), resolve(cwd)); else paths.delete(identity(originalCwd, sessionId));
 }
 
-const separators = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+const unicodeSpaces = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 // An empty, "." or ".." segment is exactly what normalizeString rewrites, so a
 // POSIX path with none is already its own path.resolve() output and joining two
 // such paths with a separator yields the resolve() of the pair.
@@ -42,7 +42,7 @@ function joinable(cwd: string): boolean {
  * checks on the same interpretation before handing a path to the built-in tool.
  */
 export function resolveToolPath(raw: string, cwd: string): string {
-  let path = raw.replace(separators, ' ');
+  let path = raw.replace(unicodeSpaces, ' ');
   if (path.startsWith('@')) path = path.slice(1);
   if (!posix && path.startsWith('/') && !path.startsWith('//') && !path.includes('\\')) {
     const match = path.match(windowsDrive);

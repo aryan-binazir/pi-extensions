@@ -9,20 +9,21 @@ let wsModule: Promise<typeof WebSocket> | undefined;
 const loadWs = () => (wsModule ??= import('ws').then(m => m.default));
 const OPEN = 1, CLOSED = 3;
 
-export interface Position { line: number; character: number }
-export interface Selection { text: string; filePath: string; start: Position; end: Position; isEmpty: boolean }
+interface Position { line: number; character: number }
+interface Selection { text: string; filePath: string; start: Position; end: Position; isEmpty: boolean }
 export interface Mention { filePath: string; lineStart?: number; lineEnd?: number }
-export interface Lock { port: number; pid: number; authToken: string; workspaceFolders: string[]; ideName: string; mtimeMs: number }
+export interface Lock { port: number; authToken: string; workspaceFolders: string[]; ideName: string; mtimeMs: number }
 export interface LinkState { connected: boolean; ideName?: string; port?: number; selection?: Selection; mentions: number }
 
 /** Selection text kept in memory and sent to the model is capped here; nvim sends the whole visual range. */
 export const maxSelectionChars = 50_000;
 /** `NVIM_IDE_TRACE=/path` appends link state transitions to that file; off otherwise. */
 const traceFile = process.env.NVIM_IDE_TRACE;
-export const trace = traceFile ? (message: string) => { try { appendFileSync(traceFile, `${new Date().toISOString()} ${message}\n`); } catch { /* tracing must never break the link */ } } : undefined;
-export const defaultLockDir = (): string => join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'ide');
+const trace = traceFile ? (message: string) => { try { appendFileSync(traceFile, `${new Date().toISOString()} ${message}\n`); } catch { /* tracing must never break the link */ } } : undefined;
+const defaultLockDir = (): string => join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'ide');
 const pidAlive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } };
 const trimSep = (path: string): string => path.length > 1 && path.endsWith(sep) ? path.slice(0, -1) : path;
+const isPosition = (value: unknown): value is Position => !!value && typeof value === 'object' && Number.isInteger((value as Position).line) && Number.isInteger((value as Position).character);
 
 export async function readLocks(dir: string, alive: (pid: number) => boolean = pidAlive): Promise<Lock[]> {
   let names: string[];
@@ -34,10 +35,11 @@ export async function readLocks(dir: string, alive: (pid: number) => boolean = p
     try {
       const file = join(dir, name);
       const [raw, info] = await Promise.all([readFile(file, 'utf8'), stat(file)]);
-      const data = JSON.parse(raw) as Partial<Lock> & { transport?: string };
+      // `pid` and `transport` are read from the file to validate it, but neither is worth keeping on the Lock.
+      const data = JSON.parse(raw) as Partial<Lock> & { transport?: string; pid?: number };
       if (data.transport !== 'ws' || typeof data.authToken !== 'string' || !Number.isInteger(data.pid) || !Array.isArray(data.workspaceFolders)) continue;
       if (!alive(data.pid as number)) continue;
-      locks.push({ port: Number(port), pid: data.pid as number, authToken: data.authToken, workspaceFolders: data.workspaceFolders.filter((f): f is string => typeof f === 'string').map(f => trimSep(resolve(f))), ideName: typeof data.ideName === 'string' ? data.ideName : 'IDE', mtimeMs: info.mtimeMs });
+      locks.push({ port: Number(port), authToken: data.authToken, workspaceFolders: data.workspaceFolders.filter((f): f is string => typeof f === 'string').map(f => trimSep(resolve(f))), ideName: typeof data.ideName === 'string' ? data.ideName : 'IDE', mtimeMs: info.mtimeMs });
     } catch { /* unreadable or partial lock file: skip it */ }
   }
   return locks;
@@ -59,7 +61,7 @@ export function chooseLock(locks: Lock[], cwd: string, envPort = process.env.CLA
 interface Pending { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 type Content = { type: string; text?: string }[];
 
-export interface LinkOptions {
+interface LinkOptions {
   cwd: string;
   onChange?: (state: LinkState) => void;
   lockDir?: string;
@@ -94,7 +96,6 @@ export class IdeLink {
     this.drop(new Error('IDE link stopped'));
     if (socket && socket.readyState !== CLOSED) await new Promise<void>(done => { socket.once('close', () => done()); socket.close(); setTimeout(() => { socket.terminate(); done(); }, 500).unref(); });
   }
-  /** Force a fresh discovery pass now instead of waiting for the retry timer. */
   reconnect(): void { const socket = this.socket; this.drop(new Error('reconnecting')); socket?.terminate(); void this.attempt(); }
   takeMentions(): Mention[] { const taken = this.mentions; this.mentions = []; if (taken.length) this.emit(); return taken; }
 
@@ -129,7 +130,7 @@ export class IdeLink {
         .catch(error => { trace?.(`initialize failed ${error.message}`); socket.terminate(); });
     });
   }
-  /** A lock file appearing or changing wakes discovery at once; the poll below is only a fallback (the directory may not exist yet, and some filesystems do not report changes). */
+  /** Discovery is woken by the lock directory watch; schedule()'s poll only covers a directory that cannot be watched (it may not exist yet, and some filesystems do not report changes). */
   private watchLocks(): void {
     if (this.watcher) return;
     try {
@@ -137,7 +138,6 @@ export class IdeLink {
       this.watcher.on('error', error => { trace?.(`watch error ${error.message}`); this.watcher?.close(); this.watcher = undefined; });
     } catch { /* directory missing: the poll handles it and a later attempt retries the watch */ }
   }
-  /** With no lock found and a live watch, nothing runs until a lock file changes; the poll covers an unwatchable directory. */
   private schedule(delay?: number): void {
     trace?.(`schedule ${delay ?? 'default'} timer=${!!this.timer} watcher=${!!this.watcher}`);
     if (!this.started || this.timer) return;
@@ -204,4 +204,3 @@ export class IdeLink {
     }
   }
 }
-const isPosition = (value: unknown): value is Position => !!value && typeof value === 'object' && Number.isInteger((value as Position).line) && Number.isInteger((value as Position).character);

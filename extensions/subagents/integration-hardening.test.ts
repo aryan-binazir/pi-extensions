@@ -1,50 +1,19 @@
-import { fixtureModelRegistry } from './test-support.ts';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import subagents from './index.ts';
+import { fixtureModelRegistry, until, withHost } from './test-support.ts';
 
-/** Poll a positive condition instead of sleeping for a guessed duration. */
-async function until<T>(probe: () => T | Promise<T>, what: string, budget = 4000): Promise<NonNullable<T>> {
-  const end = Date.now() + budget;
-  for (;;) {
-    const value = await probe();
-    if (value) return value as NonNullable<T>;
-    if (Date.now() >= end) throw new Error(`Timed out waiting for ${what}`);
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-}
+const pi = `if(process.argv.at(-1)==='large')console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'\u754c'.repeat(50000)}]}}));else if(process.argv.at(-1)==='batch'){console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'ready'}}));const timer=setInterval(()=>{if(require('node:fs').existsSync('release')){clearInterval(timer);console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}));}},5);}else if(process.argv.at(-1)==='hold')setInterval(()=>{},1000);else if(process.argv.at(-1)==='loop'){for(let i=0;i<4;i++){console.log(JSON.stringify({type:'tool_execution_start',toolCallId:String(i),toolName:'bash',args:{command:'missing'}}));console.log(JSON.stringify({type:'tool_execution_end',toolCallId:String(i),toolName:'bash',result:{content:[{type:'text',text:'not found'}],details:{}},isError:true}));}setInterval(()=>{},1000);}else console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify(process.argv.slice(2))}]}}));`;
 
-async function fixture(run: (host: any) => Promise<void>) {
-  const cwd = await mkdtemp(join(tmpdir(), 'subagent-integration-'));
-  const oldPath = process.env.PATH, oldAgentDir = process.env.PI_CODING_AGENT_DIR;
-  const tools = new Map<string, any>(), hooks = new Map<string, any>(), notifications: any[] = [];
-  const commands = new Map<string, any>(), uiNotices: string[] = [];
-  const widgets = new Map<string, string[]>();
-  const setWidget = (key: string, value?: string[]) => { if (value === undefined) widgets.delete(key); else widgets.set(key, value); };
-  const statuses = new Map<string, string>();
-  const setStatus = (key: string, value?: string) => { if (value === undefined) statuses.delete(key); else statuses.set(key, value); };
-  const ctx = {modelRegistry: fixtureModelRegistry(),cwd, hasUI: true, model: {provider: 'test', id: 'selected'}, thinkingLevel: 'low', sessionManager: {getSessionId: () => cwd}, ui: {notify: (text: string) => uiNotices.push(text), setStatus, setWidget, editor: async (_title: string, source: string) => source, confirm: async () => true}};
-  try {
-    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nif(process.argv.at(-1)==='large')console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'界'.repeat(50000)}]}}));else if(process.argv.at(-1)==='batch'){console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'ready'}}));const timer=setInterval(()=>{if(require('node:fs').existsSync('release')){clearInterval(timer);console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}));}},5);}else if(process.argv.at(-1)==='hold')setInterval(()=>{},1000);else if(process.argv.at(-1)==='loop'){for(let i=0;i<4;i++){console.log(JSON.stringify({type:'tool_execution_start',toolCallId:String(i),toolName:'bash',args:{command:'missing'}}));console.log(JSON.stringify({type:'tool_execution_end',toolCallId:String(i),toolName:'bash',result:{content:[{type:'text',text:'not found'}],details:{}},isError:true}));}setInterval(()=>{},1000);}else console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify(process.argv.slice(2))}]}}));`);
-    await chmod(join(cwd, 'pi'), 0o700);
-    process.env.PATH = `${cwd}:${oldPath ?? ''}`; process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent');
-    subagents({events: {emit() {}}, getActiveTools: () => ['read','write','edit','bash'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: (name: string, command: any) => commands.set(name, command), on: (name: string, hook: any) => hooks.set(name, hook), sendMessage: (message: any, options: any) => notifications.push({type: message.customType, task: JSON.parse(message.content), options})} as any);
-    await hooks.get('session_start')({}, ctx);
-    const execute = (name: string, args: any = {}, signal?: AbortSignal) => tools.get(name).execute(name, args, signal, undefined, ctx);
+function fixture(run: (host: any) => Promise<void>) {
+  return withHost({prefix: 'subagent-integration-', pi, tools: ['read', 'write', 'edit', 'bash'], ctx: {model: {provider: 'test', id: 'selected'}, thinkingLevel: 'low'}}, async host => {
     const settle = (id: string) => until(async () => {
-      const task = (await execute('subagent_status')).details.find((task: any) => task.id === id);
-      return task && !['queued','running'].includes(task.status) ? task : undefined;
+      const task = (await host.execute('subagent_status')).details.find((task: any) => task.id === id);
+      return task && !['queued', 'running'].includes(task.status) ? task : undefined;
     }, `child ${id} to settle`);
-    await run({execute, settle, notifications, ctx, hooks, cwd, statuses, widgets, commands, uiNotices});
-  } finally {
-    await hooks.get('session_shutdown')?.();
-    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
-    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
-    await rm(cwd, {recursive: true, force: true});
-  }
+    await run({...host, settle});
+  });
 }
 
 test('batch re-clipping marks omitted output even when each original notice fitted', async () => fixture(async ({execute, settle, notifications}: any) => {

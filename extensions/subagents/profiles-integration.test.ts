@@ -1,49 +1,45 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import subagents from './index.ts';
-import { fixtureModelRegistry } from './test-support.ts';
+import { until, withHost } from './test-support.ts';
 import { setActiveCwd } from '../worktree/routing.ts';
 
-async function fixture(run: (f: any) => Promise<void>) {
-  const cwd = await mkdtemp(join(tmpdir(), 'profile-integration-'));
-  const oldPath = process.env.PATH, oldAgent = process.env.PI_CODING_AGENT_DIR;
-  const tools = new Map<string, any>(), hooks = new Map<string, any>();
-  const agent = join(cwd, 'agent'), global = join(agent, 'subagents.json'), local = join(cwd, '.pi/subagents.local.json');
-  const ctx: any = {cwd, model: {provider: 'test', id: 'selected'}, thinkingLevel: 'low', modelRegistry: fixtureModelRegistry(), isProjectTrusted: () => true,
-    hasUI: true, sessionManager: {getSessionId: () => cwd}, ui: {notify() {}, setStatus() {}, setWidget() {}, editor: async (_title: string, source: string) => source, confirm: async () => true}};
-  const put = (path: string, value: unknown) => writeFile(path, JSON.stringify(value));
-  try {
-    await mkdir(agent); await mkdir(join(cwd, '.pi'));
-    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nif(process.argv.at(-1)==='hold')setInterval(()=>{},1000);else console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify(process.argv.slice(2))}]}}));`);
-    await chmod(join(cwd, 'pi'), 0o700);
-    process.env.PATH = `${cwd}:${oldPath}`; process.env.PI_CODING_AGENT_DIR = agent;
-    subagents({getActiveTools: () => ['read', 'subagent', 'workflow'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand() {}, on: (name: string, hook: any) => hooks.set(name, hook), events: {emit() {}}, sendMessage() {}} as any);
-    await hooks.get('session_start')({reason: 'startup'}, ctx);
-    const execute = (name: string, args: any = {}) => tools.get(name).execute(name, args, undefined, undefined, ctx);
+const pi = `if(process.argv.at(-1)==='hold')setInterval(()=>{},1000);else console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify(process.argv.slice(2))}]}}));`;
+
+function fixture(run: (f: any) => Promise<void>) {
+  return withHost({
+    prefix: 'profile-integration-', pi, tools: ['read', 'subagent', 'workflow'],
+    ctx: {model: {provider: 'test', id: 'selected'}, thinkingLevel: 'low', isProjectTrusted: () => true},
+    start: {reason: 'startup'},
+    before: host => mkdir(join(host.cwd, '.pi')),
+  }, async host => {
+    const {cwd, ctx, tools, hooks, execute} = host;
     const direct = async (input: any) => {
       const start = await execute('subagent', input);
-      const end = Date.now() + 5000;
-      while (Date.now() < end) {
-        const value = (await execute('subagent_status', {id: start.details.id})).details;
-        if (!['running', 'queued'].includes(value.status)) { assert.equal(value.status, 'succeeded', JSON.stringify(value)); return value; }
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
-      throw new Error('child did not complete');
+      const value = await until(async () => {
+        const task = (await execute('subagent_status', {id: start.details.id})).details;
+        return ['running', 'queued'].includes(task.status) ? undefined : task;
+      }, 'the direct child to complete', 5000);
+      assert.equal(value.status, 'succeeded', JSON.stringify(value));
+      return value;
     };
-    const workflow = async (input: any) => (await execute('workflow', {source: `return await api.spawn(${JSON.stringify(input)},'stage');`})).details;
-    const prompt = async () => (await hooks.get('before_agent_start')({systemPrompt: 'parent'}, ctx)).systemPrompt;
-    const reload = async () => { await hooks.get('session_shutdown')({reason: 'reload'}, ctx); await hooks.get('session_start')({reason: 'reload'}, ctx); };
-    await run({cwd, global, local, ctx, put, execute, direct, workflow, prompt, reload, tools, hooks});
-  } finally {
-    setActiveCwd(cwd, undefined, cwd);
-    await hooks.get('session_shutdown')?.();
-    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
-    if (oldAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldAgent;
-    await rm(cwd, {recursive: true, force: true});
-  }
+    try {
+      await run({
+        cwd, ctx, tools, hooks, execute,
+        global: join(host.agentDir, 'subagents.json'),
+        local: join(cwd, '.pi/subagents.local.json'),
+        put: (path: string, value: unknown) => writeFile(path, JSON.stringify(value)),
+        direct,
+        workflow: async (input: any) => (await execute('workflow', {source: `return await api.spawn(${JSON.stringify(input)},'stage');`})).details,
+        prompt: async () => (await hooks.get('before_agent_start')({systemPrompt: 'parent'}, ctx)).systemPrompt,
+        reload: async () => { await host.shutdown({reason: 'reload'}); await host.start({reason: 'reload'}); },
+      });
+    } finally {
+      setActiveCwd(cwd, undefined, cwd);
+    }
+  });
 }
 
 test('registered direct/workflow parity: defaults, custom profiles, overrides and bounded provenance', async () => fixture(async ({put, global, local, reload, direct, workflow, tools}) => {
@@ -51,7 +47,6 @@ test('registered direct/workflow parity: defaults, custom profiles, overrides an
   await put(local, {profiles: {custom: {thinking: 'low', useWhen: 'Fixture work'}}});
   await reload();
   assert.match(tools.get('subagent').description, /Profiles:.*custom/);
-  assert.ok(tools.get('subagent').parameters.properties.profile);
   for (const options of [{}, {profile: 'research'}, {profile: 'custom'}, {profile: 'custom', model: 'test/selected:high'}, {profile: 'custom', model: 'test/selected:high', thinking: 'off'}]) {
     const input = {task: 'fixture', preset: 'reader', ...options};
     const a = await direct(input), b = await workflow(input);

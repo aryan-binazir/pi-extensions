@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -67,19 +68,23 @@ test('writers using a directory symlink serialize while unrelated readers can ru
   } finally {await registry.shutdown();await rm(cwd,{recursive:true,force:true});}
 });
 
-test('notification errors settle tasks and do not strand queued writers', async () => {
- const registry=new SubagentRegistry({concurrency:1,invocation:()=>({command:process.execPath,args:['-e',`console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}}))`]}),onComplete:()=>{throw new Error('UI gone');}});
+test('notification failures settle tasks, keep the child error and do not strand queued writers', async () => {
+ const registry=new SubagentRegistry({concurrency:1,onComplete:()=>{throw new Error('UI gone');},invocation:spec=>({command:process.execPath,args:['-e',spec.task==='fail'
+  ? `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'error',errorMessage:'provider refused request'}}))`
+  : `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}}))`]})});
  try {
   const first=await registry.spawn({task:'one',cwd:tmpdir()});
   const second=await registry.spawn({task:'two',cwd:tmpdir()});
   const results=await Promise.all([first.done,second.done]);
   assert.ok(results.every(r=>r.status==='succeeded' && r.notificationError?.includes('UI gone')));
+  const failed=await (await registry.spawn({task:'fail',cwd:tmpdir()})).done;
+  assert.equal(failed.status,'failed');
+  assert.equal(failed.error,'provider refused request');
+  assert.match(failed.notificationError!,/UI gone/);
  } finally {await registry.shutdown();}
 });
 
 test('timeout reaps a child and its ordinary process-group descendants', async()=>{
- const {readFile}=await import('node:fs/promises');
- const {execFileSync}=await import('node:child_process');
  const cwd=await mkdtemp(join(tmpdir(),'process-tree-'));const marker=join(cwd,'pid');
  const script=`const {spawn}=require('child_process');const child=spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'],{stdio:'ignore'});require('fs').writeFileSync(${JSON.stringify(marker)},String(child.pid));setInterval(()=>{},1000);`;
  const registry=new SubagentRegistry({invocation:()=>({command:process.execPath,args:['-e',script]})});
@@ -149,19 +154,6 @@ test('streamed deltas and stderr keep only the last 64 KiB, mid-stream and at co
       assert.ok(update.length <= 64 * 1024);
       assert.ok(expected.includes(update));
     }
-  } finally { await registry.shutdown(); }
-});
-
-test('notification failures preserve the original child error', async () => {
-  const registry = new SubagentRegistry({
-    invocation: () => ({command: process.execPath, args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'error',errorMessage:'provider refused request'}}))`]}),
-    onComplete: () => { throw new Error('UI gone'); },
-  });
-  try {
-    const result = await (await registry.spawn({task: 'fail', cwd: tmpdir()})).done;
-    assert.equal(result.status, 'failed');
-    assert.equal(result.error, 'provider refused request');
-    assert.match(result.notificationError!, /UI gone/);
   } finally { await registry.shutdown(); }
 });
 

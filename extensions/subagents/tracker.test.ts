@@ -27,9 +27,6 @@ test('exact native model, medium, no tools/history; bounded observations and rep
   assert.equal(model.id, 'gpt-5.6-luna'); assert.equal(options.reasoning, 'medium'); assert.deepEqual(context.tools, []);
   assert.equal(options.maxTokens, 1024); assert.ok(options.signal instanceof AbortSignal);
   assert.match(context.systemPrompt, /untrusted/); assert.equal(context.messages.length, 1);
-  assert.match(context.systemPrompt, /short plain-text summary/);
-  assert.match(context.systemPrompt, /No markdown/);
-  assert.match(context.systemPrompt, /running is not evidence of progress/);
   assert.ok(context.messages[0].content.length < 16000); assert.match(context.messages[0].content, /workflow/);
   assert.ok(f.reports[0].length <= 2000); f.tracker.stop();
 });

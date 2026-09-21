@@ -23,9 +23,13 @@ export function setCursorPosition(editor: Editor, line: number, col: number): vo
   internal.preferredVisualCol = null;
   internal.snappedFromCursorCol = null;
 }
+/** Clamp a draft offset into range; `|| 0` also turns a NaN offset into the start. */
+export function clampOffset(offset: number, length: number): number {
+  return Math.min(length, Math.max(0, offset) || 0);
+}
 /** Counting newlines beats slicing and splitting a draft on every cursor move. */
 export function placeCursor(editor: Editor, offset: number, text = editor.getText()): void {
-  const end = Math.min(text.length, Math.max(0, offset) || 0);
+  const end = clampOffset(offset, text.length);
   let line = 0,
     start = 0;
   for (let i = text.indexOf("\n"); i >= 0 && i < end; i = text.indexOf("\n", i + 1)) {
@@ -143,7 +147,6 @@ export function writePastes(editor: Editor, state: PasteState): void {
 const MARKER = /\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g;
 export function pasteMarkers(editor: Editor, text = editor.getText()): RegExpExecArray[] {
   const { pastes } = pasteInternal(editor);
-  // An empty registry can never match, so skip scanning the draft entirely.
   if (pastes.size === 0) return [];
   return [...text.matchAll(MARKER)].filter((match) => pastes.has(Number(match[1])));
 }
@@ -168,18 +171,29 @@ export function collapsePaste(editor: Editor, text: string): string {
   return lines > 10 ? `[paste #${id} +${lines} lines]` : `[paste #${id} ${text.length} chars]`;
 }
 
-// Pi 0.85.1 copies getText() without its paste registry before extension shutdown.
-// Keep this compatibility fix at that exact runtime boundary, including /reload.
+/** Restore a draft byte for byte, with its payloads, cursor and change event. */
+export function restoreRawDraft(editor: Editor, text: string, payloads: PasteState): void {
+  // setText resets the destination's history; then restore the exact visible draft.
+  editor.setText("");
+  retainRawText(editor, text);
+  writePastes(editor, payloads);
+  placeCursor(editor, text.length);
+  editor.onChange?.(text);
+}
+
 const viEditor = Symbol.for("pi-interactive:vi-editor");
 const handoffInstalled = Symbol.for("pi-interactive:editor-handoff");
-export function installEditorHandoff(editor?: Editor): void {
-  if (editor) {
+/** Claim an editor as vi's, so the handoff restores its raw draft rather than a normalized one. */
+export function markViEditor(editor: Editor): void {
   Object.defineProperty(editor, viEditor, { value: true });
   // Stock submission expands recursively; use the same single pass as draft reads.
   Object.defineProperty(editor, "expandPasteMarkers", {
     value: (text: string) => expandPastes(editor, text),
   });
-  }
+}
+// Pi 0.85.1 copies getText() without its paste registry before extension shutdown.
+// Keep this compatibility fix at that exact runtime boundary, including /reload.
+export function installEditorHandoff(): void {
   const prototype = InteractiveMode.prototype as unknown as {
     [handoffInstalled]?: boolean;
     setCustomEditorComponent: (factory: unknown) => void;
@@ -202,17 +216,14 @@ export function installEditorHandoff(editor?: Editor): void {
       this.editor.setText(expandPastes(source, text));
       return;
     }
-    // setText resets the destination's history; then restore the exact visible draft.
     if (viEditor in this.editor) {
-      this.editor.setText("");
-      retainRawText(this.editor, text);
-    } else {
-      // Stock rendering relies on setText's CRLF/tab normalization.
-      this.editor.setText(text);
+      restoreRawDraft(this.editor, text, payloads);
+      return;
     }
+    // Stock rendering relies on setText's CRLF/tab normalization.
+    this.editor.setText(text);
     writePastes(this.editor, payloads);
     placeCursor(this.editor, this.editor.getText().length);
-    if (viEditor in this.editor) this.editor.onChange?.(text);
   };
   // Inline custom UI also restores getText() via setText(), clearing paste data.
   const showCustom = prototype.showExtensionCustom;

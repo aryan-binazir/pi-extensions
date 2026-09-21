@@ -12,8 +12,9 @@ import {
   projectDisplay,
   renderProjected,
   clearBaseUndo,
+  clampOffset,
   readPastes, writePastes, pasteMarkers, expandPastes, collapsePaste,
-  type PasteState, installEditorHandoff, invalidateTextCache, NEEDS_PROJECTION,
+  type PasteState, installEditorHandoff, markViEditor, invalidateTextCache, NEEDS_PROJECTION,
 } from "./adapter.ts";
 let graphemes: Intl.Segmenter | undefined;
 /** Constructing a segmenter costs milliseconds; plain ASCII drafts never need one. */
@@ -52,8 +53,14 @@ const CLOSING: Record<string, string> = {
 };
 const OPENING: Record<string, string> = { ")": "(", "]": "[", "}": "{", ">": "<" };
 const MAX_DRAFT = 1024 * 1024;
+/**
+ * The draft keeps `\r` so a pasted payload survives byte for byte; submission
+ * strips it too, because a prompt must not carry bare carriage returns.
+ */
+const DRAFT_CONTROLS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
+const SUBMIT_CONTROLS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 function safeDraft(text: string): string {
-  return text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "");
+  return text.replace(DRAFT_CONTROLS, "");
 }
 type Snapshot = {
   text: string;
@@ -98,6 +105,25 @@ export class ViEditor extends CustomEditor {
   private scanText: string | undefined;
   private scanned = { project: false, segment: false };
   private draft: string | undefined;
+
+  constructor(...args: ConstructorParameters<typeof CustomEditor>) {
+    super(...args);
+    markViEditor(this);
+    installEditorHandoff();
+    this.previousHardwareCursor = this.tui.getShowHardwareCursor();
+    this.tui.setShowHardwareCursor(true);
+    this.cursorShape();
+  }
+  /**
+   * Abandon a half-typed command: its operator, object prefix and count. A
+   * register already named with `"x` outlives this, as it does in vi.
+   */
+  private resetPending(): void {
+    this.op = "";
+    this.prefix = "";
+    this.count = "";
+    this.registerPending = false;
+  }
   /**
    * `getText()` joins the line array on every call and vi consults the draft
    * dozens of times per keystroke. Cache it and drop the cache at the few places
@@ -111,9 +137,8 @@ export class ViEditor extends CustomEditor {
     this.draft = undefined;
   }
   /**
-   * Whether the draft needs display projection and grapheme segmentation. Both
-   * questions scan the whole draft, and every render asks them, so answer once
-   * per draft instead.
+   * Whether the draft needs display projection and grapheme segmentation: both
+   * scan the whole draft and every render asks, so answer once per draft.
    */
   private scan(): { project: boolean; segment: boolean } {
     const text = this.text();
@@ -176,7 +201,7 @@ export class ViEditor extends CustomEditor {
     const history = this.undoHistory;
     this.onSubmit = (expanded) => {
       this.setText("");
-      submit?.(expanded.trim().replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""));
+      submit?.(expanded.trim().replace(SUBMIT_CONTROLS, ""));
     };
     try {
       super.handleInput(data);
@@ -202,13 +227,6 @@ export class ViEditor extends CustomEditor {
     this.move(p + text.length);
   }
 
-  constructor(...args: ConstructorParameters<typeof CustomEditor>) {
-    super(...args);
-    installEditorHandoff(this);
-    this.previousHardwareCursor = this.tui.getShowHardwareCursor();
-    this.tui.setShowHardwareCursor(true);
-    this.cursorShape();
-  }
   override setText(text: string): void {
     if (this.mode === "visual" || this.mode === "line") this.mode = "normal";
     this.anchor = 0;
@@ -220,10 +238,7 @@ export class ViEditor extends CustomEditor {
     this.insertion = undefined;
     this.paste = undefined;
     this.pasteOpening = "";
-    this.op = "";
-    this.prefix = "";
-    this.count = "";
-    this.registerPending = false;
+    this.resetPending();
     writePastes(this, { pastes: new Map(), counter: 0 });
     this.writeText(collapsePaste(this, safeDraft(text)));
     this.move(this.text().length);
@@ -306,10 +321,10 @@ export class ViEditor extends CustomEditor {
     this.writeText(s.text);
     this.cursorTo(s.pos);
   }
-  /** Cursor placement by binary search, so a motion never rescans the draft. */
+  /** Binary search, so a motion never rescans the draft. */
   private cursorTo(offset: number): void {
     const starts = this.starts();
-    const end = Math.min(this.text().length, Math.max(0, offset) || 0);
+    const end = clampOffset(offset, this.text().length);
     let low = 0,
       high = starts.length - 1;
     while (low < high) {
@@ -425,8 +440,7 @@ export class ViEditor extends CustomEditor {
         this.mode = "insert";
         this.cursorShape();
       }
-      this.op = "";
-      this.prefix = "";
+      this.resetPending();
       this.register = '"';
       return;
     }
@@ -452,9 +466,58 @@ export class ViEditor extends CustomEditor {
     }
     this.move(a);
     this.mode = op === "c" ? "insert" : "normal";
-    this.op = "";
-    this.prefix = "";
+    this.resetPending();
     this.cursorShape();
+  }
+  /**
+   * `p`/`P`, replacing a visual selection or inserting at the cursor. Both
+   * forms decide a span and a linewise padding, then write the same edit.
+   */
+  private put(key: string, n: number): void {
+    const r = this.registers.get(this.register);
+    this.register = '"';
+    if (!r) return;
+    const t = this.text();
+    const visual = this.mode === "visual" || this.mode === "line";
+    let a = 0,
+      b = 0,
+      value = "",
+      before = "",
+      after = "";
+    if (visual) {
+      [a, b] = this.range();
+      const selected = expandPastes(this, t.slice(a, b));
+      if (r.text.length * n + this.getExpandedText().length - selected.length > MAX_DRAFT) return;
+      value = r.text.repeat(n);
+      if (this.mode === "line") {
+        if (t.slice(a, b).endsWith("\n") || value.endsWith("\n")) after = "\n";
+      } else if (r.line) {
+        if (a > this.lineStart(a)) before = "\n";
+        if (b < t.length || value.endsWith("\n")) after = "\n";
+      }
+      if (after) value = value.replace(/\n$/, "");
+      this.checkpoint();
+      this.registers.set('"', { text: selected, line: this.mode === "line" });
+    } else {
+      a = b = key === "P" ? this.pos() : Math.min(this.lineEnd(), this.next(this.pos()));
+      if (r.text.length * n + this.getExpandedText().length > MAX_DRAFT) return;
+      this.checkpoint();
+      value = r.text.repeat(n);
+      if (r.line) {
+        a = b = key === "P" ? this.lineStart() : Math.min(t.length, this.lineEnd() + 1);
+        if (a === t.length && t && !t.endsWith("\n")) before = "\n";
+        else after = "\n";
+        value = value.replace(/\n$/, "");
+      }
+    }
+    this.writeText(t.slice(0, a) + before + collapsePaste(this, value) + after + t.slice(b));
+    this.move(a + before.length);
+    if (visual) {
+      this.mode = "normal";
+      this.anchor = 0;
+      this.visualScroll = 0;
+      this.cursorShape();
+    }
   }
   private object(key: string, around: boolean): [number, number] | undefined {
     const t = this.text(),
@@ -521,7 +584,7 @@ export class ViEditor extends CustomEditor {
     this.tui.setShowHardwareCursor(this.previousHardwareCursor);
     this.tui.terminal.write("\x1b[0 q");
   }
-  handleInput(data: string): void {
+  override handleInput(data: string): void {
     if (this.pasteOpening) {
       data = this.pasteOpening + data;
       this.pasteOpening = "";
@@ -584,10 +647,7 @@ export class ViEditor extends CustomEditor {
         this.move(Math.max(this.lineStart(), this.previous(this.pos())));
       this.insertion = undefined;
       this.mode = "normal";
-      this.op = "";
-      this.count = "";
-      this.prefix = "";
-      this.registerPending = false;
+      this.resetPending();
       this.cursorShape();
       return;
     }
@@ -624,12 +684,9 @@ export class ViEditor extends CustomEditor {
       this.anchor = 0;
       this.visualScroll = 0;
       this.preferredColumn = undefined;
-      this.op = "";
-      this.count = "";
-      this.prefix = "";
-      this.register = '"';
-      this.registerPending = false;
       this.discardArgument = false;
+      this.resetPending();
+      this.register = '"';
       this.cursorShape();
       return;
     }
@@ -643,9 +700,7 @@ export class ViEditor extends CustomEditor {
           this.move(Math.max(r[0], r[1] - 1));
         }
       }
-      this.prefix = "";
-      this.op = "";
-      this.registerPending = false;
+      this.resetPending();
       this.register = '"';
       return;
     }
@@ -738,8 +793,7 @@ export class ViEditor extends CustomEditor {
     if (p !== undefined) {
       if (this.op) {
         if ((data === "j" || data === "k") && this.lineStart(p) === this.lineStart()) {
-          this.op = "";
-          this.prefix = "";
+          this.resetPending();
           this.register = '"';
           return;
         }
@@ -785,51 +839,7 @@ export class ViEditor extends CustomEditor {
       return;
     }
     if (data === "p" || data === "P") {
-      const r = this.registers.get(this.register);
-      this.register = '"';
-      if (r) {
-        const t = this.text();
-        if (this.mode === "visual" || this.mode === "line") {
-          const [a, b] = this.range();
-          if (r.text.length * n + this.getExpandedText().length - expandPastes(this, t.slice(a, b)).length > MAX_DRAFT) return;
-          let value = r.text.repeat(n), before = "", after = "";
-          if (this.mode === "line") {
-            if (t.slice(a, b).endsWith("\n") || value.endsWith("\n")) after = "\n";
-          } else if (r.line) {
-            if (a > this.lineStart(a)) before = "\n";
-            if (b < t.length || value.endsWith("\n")) after = "\n";
-          }
-          if (after) value = value.replace(/\n$/, "");
-          this.checkpoint();
-          this.registers.set('"', { text: expandPastes(this, t.slice(a, b)), line: this.mode === "line" });
-          this.writeText(t.slice(0, a) + before + collapsePaste(this, value) + after + t.slice(b));
-          this.move(a + before.length);
-          this.mode = "normal";
-          this.anchor = 0;
-          this.visualScroll = 0;
-          this.cursorShape();
-          return;
-        }
-        let p =
-          data === "P"
-            ? this.pos()
-            : Math.min(this.lineEnd(), this.next(this.pos()));
-        if (r.text.length * n + this.getExpandedText().length > MAX_DRAFT) return;
-        this.checkpoint();
-        let value = r.text.repeat(n), before = "", after = "";
-        if (r.line) {
-          p =
-            data === "P"
-              ? this.lineStart()
-              : Math.min(t.length, this.lineEnd() + 1);
-          if (p === t.length && t && !t.endsWith("\n"))
-            before = "\n";
-          else after = "\n";
-          value = value.replace(/\n$/, "");
-        }
-        this.writeText(t.slice(0, p) + before + collapsePaste(this, value) + after + t.slice(p));
-        this.move(p + before.length);
-      }
+      this.put(data, n);
       return;
     }
     if ("iaIAoO".includes(data)) {
@@ -860,7 +870,7 @@ export class ViEditor extends CustomEditor {
     );
     this.tui.requestRender();
   }
-  protected renderBottomBorder(width: number, hidden: number): string {
+  protected override renderBottomBorder(width: number, hidden: number): string {
     const pending = `${this.count}${this.op}${this.prefix}`;
     const label = truncateToWidth(
       ` ${this.mode.toUpperCase()}${pending ? ` ${pending}` : ""} `,
@@ -869,7 +879,7 @@ export class ViEditor extends CustomEditor {
     );
     return super.renderBottomBorder(Math.max(0, width - visibleWidth(label)), hidden) + label;
   }
-  render(width: number): string[] {
+  override render(width: number): string[] {
     if (this.mode !== "visual" && this.mode !== "line") {
       const lines = this.scan().project
         ? renderProjected(this, () => super.render(width), this.text())

@@ -2,14 +2,16 @@ import { execFile, spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, realpath, rename, rm, stat } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type ts from 'typescript';
-import { validateTask, type TaskSpec } from './registry.ts';
+import { validateTask, validateTimeout, type TaskSpec } from './registry.ts';
+import { thinkingSuffix } from './thinking.ts';
 import { abortable } from './cancellation.ts';
 import { assertTaskFields } from './profiles.ts';
-export interface WorkflowOptions {
+import { insideRoot } from './scope.ts';
+interface WorkflowOptions {
   source: string;
   cwd: string;
   journalDirectory: string;
@@ -34,10 +36,10 @@ interface Journal {
     value: unknown;
   }>;
 }
-const active = new Set<string>();
+const runningIdentities = new Set<string>();
 const CAP = 1024 * 1024;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
-const execute = promisify(execFile);
+const execFileAsync = promisify(execFile);
 // The TypeScript compiler is ~1.3s and ~12MB of startup this extension only
 // needs when an approved workflow is actually compiled.
 let compiler: Promise<typeof ts> | undefined;
@@ -52,13 +54,13 @@ async function workflowRuntime(signal?: AbortSignal) {
     bun?: string;
   };
   try {
-    const { stdout } = await execute('node', ['-p', 'JSON.stringify({execPath:process.execPath,version:process.versions.node,bun:process.versions.bun})'], { env, signal, timeout: 5000, maxBuffer: 4096 });
+    const { stdout } = await execFileAsync('node', ['-p', 'JSON.stringify({execPath:process.execPath,version:process.versions.node,bun:process.versions.bun})'], { env, signal, timeout: 5000, maxBuffer: 4096 });
     runtime = JSON.parse(stdout);
     if (!runtime || typeof runtime !== 'object')
       throw new Error('Invalid Node probe response');
   }
-  catch {
-    throw new Error('Workflow requires a real Node executable on PATH (Node 22.19+ or 24+)');
+  catch (error) {
+    throw new Error('Workflow requires a real Node executable on PATH (Node 22.19+ or 24+)', {cause: error});
   }
   const parts = /^(\d+)\.(\d+)\.(\d+)$/.exec(runtime.version ?? '');
   const major = Number(parts?.[1]), minor = Number(parts?.[2]);
@@ -70,7 +72,7 @@ async function workflowRuntime(signal?: AbortSignal) {
   try {
     // Check the actual permission model, including denied filesystem/process
     // capabilities, before sending any approved workflow to this executable.
-    const { stdout } = await execute(runtime.execPath, [permissionFlag, '--input-type=module', '-e', `
+    const { stdout } = await execFileAsync(runtime.execPath, [permissionFlag, '--input-type=module', '-e', `
  import { readFileSync } from 'node:fs';
  import { spawnSync } from 'node:child_process';
  if (process.versions.bun || process.versions.node !== ${JSON.stringify(runtime.version)} || !process.permission || process.permission.has('fs.read') || process.permission.has('fs.write') || process.permission.has('child') || process.permission.has('worker')) process.exit(1);
@@ -82,16 +84,14 @@ async function workflowRuntime(signal?: AbortSignal) {
     if (stdout !== 'permissions-ok')
       throw new Error('Permission probe failed');
   }
-  catch {
-    throw new Error('Workflow Node permission capability probe failed');
+  catch (error) {
+    throw new Error('Workflow Node permission capability probe failed', {cause: error});
   }
   return { ...runtime, permissionFlag };
 }
 /** Body of async function workflow(api), compiled only after exact source approval. */
 export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
-  const timeout = options.timeout ?? 3600000;
-  if (!Number.isInteger(timeout) || timeout < 10 || timeout > 3600000)
-    throw new Error('Workflow timeout must be 10–3600000 milliseconds');
+  const timeout = validateTimeout(options.timeout, 'Workflow timeout');
   // Load the compiler before the run's deadline starts, exactly as an eager
   // module-level import did; the caller's timeout budget is for the workflow.
   await typescript();
@@ -102,7 +102,7 @@ export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
   finally { clearTimeout(timer); }
 }
 
-async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
+async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number}): Promise<unknown> {
   if (typeof options.source !== 'string' || !options.source.trim() || options.source.length > 64000)
     throw new Error('Workflow source must contain 1–64000 characters');
   if (options.signal?.aborted)
@@ -111,9 +111,9 @@ async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
   try {
     approved = await abortable(options.approve?.(options.source) ?? false, options.signal);
   }
-  catch {
-    if (options.signal?.aborted) throw new Error('Workflow aborted');
-    throw new Error('Workflow approval failed');
+  catch (error) {
+    if (options.signal?.aborted) throw new Error('Workflow aborted', {cause: error});
+    throw new Error('Workflow approval failed', {cause: error});
   }
   if (!approved)
     throw new Error('Workflow requires explicit source approval');
@@ -121,16 +121,13 @@ async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
   const tsc = await typescript();
   const cwd = await realpath(options.cwd);
   const identity = digest(JSON.stringify({ version: 1, source: options.source, cwd, policy: options.policyIdentity, defaults: options.defaultTask, profiles: options.profileIdentity, node: runtime.version, typescript: tsc.version, platform: process.platform }));
-  if (active.has(identity))
+  if (runningIdentities.has(identity))
     throw new Error('Identical workflow is already running');
   const compiled = tsc.transpileModule(`async function workflow(api: any) {\n${options.source}\n}`, { compilerOptions: { target: tsc.ScriptTarget.ES2022, module: tsc.ModuleKind.None }, reportDiagnostics: true });
   const errors = compiled.diagnostics?.filter(d => d.category === tsc.DiagnosticCategory.Error) ?? [];
   if (errors.length)
     throw new Error(tsc.flattenDiagnosticMessageText(errors[0].messageText, '\n'));
-  const timeout = options.timeout ?? 3600000;
-  if (!Number.isInteger(timeout) || timeout < 10 || timeout > 3600000)
-    throw new Error('Workflow timeout must be 10–3600000 milliseconds');
-  active.add(identity);
+  runningIdentities.add(identity);
   const controller = new AbortController();
   const abort = () => controller.abort();
   options.signal?.addEventListener('abort', abort, { once: true });
@@ -207,9 +204,8 @@ async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
         }
         catch { /* Already gone. */ }
     };
-    const abortWorker = () => stop();
-    controller.signal.addEventListener('abort', abortWorker, { once: true });
-    const timer = setTimeout(() => controller.abort(), timeout);
+    controller.signal.addEventListener('abort', stop, { once: true });
+    const timer = setTimeout(() => controller.abort(), options.timeout);
     const activeStages = new Set<string>();
     const capabilities = async (message: Record<string, unknown>) => {
       if (controller.signal.aborted)
@@ -234,11 +230,10 @@ async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
             throw new Error('Invalid child cwd');
           // validateTask checks every task field at this untrusted IPC boundary.
           const inherited = {...options.defaultTask, ...input, cwd: input.cwd ? resolve(cwd, input.cwd) : cwd};
-          if (input.thinking === undefined && typeof input.model === 'string') inherited.thinking = /:(off|minimal|low|medium|high|xhigh|max)$/.exec(input.model)?.[1] ?? options.defaultTask?.thinking;
+          if (input.thinking === undefined && typeof input.model === 'string') inherited.thinking = thinkingSuffix.exec(input.model)?.[1] ?? options.defaultTask?.thinking;
           const task = await validateTask(options.normalizeTask ? options.normalizeTask({...input, cwd: inherited.cwd} as unknown as TaskSpec) : inherited as unknown as TaskSpec, options.allowedTools?.());
           if (options.defaultTask && !task.model) throw new Error('A selected parent model or explicit provider/model is required');
-          const childRelative = relative(cwd, task.cwd);
-          if (childRelative === '..' || childRelative.startsWith('../') || isAbsolute(childRelative))
+          if (!insideRoot(cwd, task.cwd))
             throw new Error('Child cwd escapes workflow cwd');
           const signature = digest(JSON.stringify(task));
           const cached = journal.stages[key];
@@ -262,8 +257,7 @@ async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
         if (typeof args?.path !== 'string' || typeof args.maxBytes !== 'number' || !Number.isInteger(args.maxBytes) || args.maxBytes < 1 || args.maxBytes > 65536)
           throw new Error('Invalid bounded readFile request');
         const path = await realpath(resolve(cwd, args.path));
-        const rel = relative(cwd, path);
-        if (rel === '..' || rel.startsWith('../') || isAbsolute(rel))
+        if (!insideRoot(cwd, path))
           throw new Error('readFile escapes workflow cwd');
         const authorizedFile = await stat(path);
         await abortable(options.authorizeRead?.(path), controller.signal);
@@ -348,7 +342,7 @@ async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
       clearTimeout(timer);
       controller.abort();
       stop();
-      controller.signal.removeEventListener('abort', abortWorker);
+      controller.signal.removeEventListener('abort', stop);
       if (worker.exitCode === null && worker.signalCode === null)
         await new Promise<void>(resolveExit => worker.once('close', () => resolveExit()));
     }
@@ -358,6 +352,6 @@ async function runApprovedWorkflow(options: WorkflowOptions): Promise<unknown> {
     await Promise.allSettled(pending);
     await writeQueue.catch(() => { });
     options.signal?.removeEventListener('abort', abort);
-    active.delete(identity);
+    runningIdentities.delete(identity);
   }
 }

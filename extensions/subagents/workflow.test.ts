@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { runWorkflow } from './workflow.ts';
 
 test('workflow rejects unapproved source, executes approved TS, and replays successful stages', async () => {
@@ -45,11 +48,17 @@ test('capabilities enforce read bounds, retries, checkpoints, and restricted glo
 test('abort cancels outstanding children and unfinished workflow calls cannot report success', async () => {
  const cwd=await mkdtemp(join(tmpdir(),'workflow-abort-'));
  let cancelled=0;
- const base={cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'same',approve:async()=>true,approveReplay:async()=>true,spawn:async(_task:unknown,signal:AbortSignal)=>await new Promise((_,reject)=>{const abort=()=>{cancelled++;reject(new Error('cancelled'));};signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();})};
+ // Aborting once the child is actually running is deterministic; a wall-clock
+ // deadline here would have to cover the Node probe and worker spawn as well.
+ let onSpawn:(()=>void)|undefined;
+ const base={cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'same',approve:async()=>true,approveReplay:async()=>true,spawn:async(_task:unknown,signal:AbortSignal)=>await new Promise((_,reject)=>{const abort=()=>{cancelled++;reject(new Error('cancelled'));};signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();onSpawn?.();})};
  try {
   await assert.rejects(runWorkflow({...base,source:'void api.spawn({task:"hang"},"hang");return "incorrect success";'}),/unfinished/);
   assert.equal(cancelled,1);
-  await assert.rejects(runWorkflow({...base,source:'return await api.spawn({task:"hang"},"hang");',timeout:100}),/aborted/);
+  const running=new AbortController();
+  onSpawn=()=>running.abort();
+  await assert.rejects(runWorkflow({...base,source:'return await api.spawn({task:"hang"},"hang");',signal:running.signal}),/aborted/);
+  onSpawn=undefined;
   assert.equal(cancelled,2);
   await assert.rejects(runWorkflow({...base,source:'return 1;',approve:async()=>{throw new Error('UI failed');}}),/approval failed/);
  } finally {await rm(cwd,{recursive:true,force:true});}
@@ -117,8 +126,7 @@ test('parallel duplicate stages are reserved before asynchronous task validation
 });
 
 test('FIFO capability, timeout and registered shutdown settle in a bounded subprocess', async () => {
-  const {execFile} = await import('node:child_process');
-  const {promisify} = await import('node:util');
-  const {stdout} = await promisify(execFile)(process.execPath, ['--import', 'tsx', 'tests/fifo-regression.fixture.ts'], {timeout: 15000, killSignal: 'SIGKILL'});
+  const fixture = fileURLToPath(new URL('../../tests/fifo-regression.fixture.ts', import.meta.url));
+  const {stdout} = await promisify(execFile)(process.execPath, ['--import', 'tsx', fixture], {timeout: 15000, killSignal: 'SIGKILL'});
   assert.match(stdout, /FIFO_REGRESSION_PASS/);
 });

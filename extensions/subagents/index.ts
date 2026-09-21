@@ -3,7 +3,8 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil
 import { Type } from 'typebox';
 import { assertChildTask, delegationScope, assertWorkflowRead } from './scope.ts';
 import { getActiveCwd } from '../worktree/routing.ts';
-import { piInvocation, SubagentRegistry, type TaskSpec } from './registry.ts';
+import { piInvocation, SubagentRegistry, TIMEOUT_BOUNDS, type TaskSpec } from './registry.ts';
+import { thinkingPattern } from './thinking.ts';
 import { runWorkflow } from './workflow.ts';
 import { clipJson, taskView } from './presentation.ts';
 import { abortable } from './cancellation.ts';
@@ -14,8 +15,8 @@ import { availableModel, assertTaskFields, loadProfiles, profileGuidance, profil
 const taskSchema = Type.Object({
   task: Type.String({ minLength: 1, maxLength: 32000 }), cwd: Type.Optional(Type.String()),
   profile: Type.Optional(Type.String({maxLength: 48})),
-  model: Type.Optional(Type.String()), thinking: Type.Optional(Type.String({pattern: '^(off|minimal|low|medium|high|xhigh|max)$'})), preset: Type.Optional(Type.Union([Type.Literal('reader'), Type.Literal('writer')])),
-  tools: Type.Optional(Type.Array(Type.String())), extensions: Type.Optional(Type.Array(Type.String())), timeout: Type.Optional(Type.Integer({ minimum: 10, maximum: 3600000 })),
+  model: Type.Optional(Type.String()), thinking: Type.Optional(Type.String({pattern: `^${thinkingPattern}$`})), preset: Type.Optional(Type.Union([Type.Literal('reader'), Type.Literal('writer')])),
+  tools: Type.Optional(Type.Array(Type.String())), extensions: Type.Optional(Type.Array(Type.String())), timeout: Type.Optional(Type.Integer(TIMEOUT_BOUNDS)),
 }, {additionalProperties: false});
 const completionGuidance = 'After calling subagent, do independent work or end your turn. Completion results are pushed automatically and resume the parent without polling. Do not call subagent_status or run sleep/wait loops just to await completion.';
 const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value });
@@ -87,9 +88,7 @@ export default function subagents(pi: ExtensionAPI): void {
     onUpdate: renderActiveAgents,
     onComplete: task => {
       renderActiveAgents();
-      if (context?.hasUI) {
-        if (!registry.hasActive()) context.ui.setStatus('subagent-tracker', undefined);
-      }
+      if (context?.hasUI && !registry.hasActive()) context.ui.setStatus('subagent-tracker', undefined);
       if (shuttingDown || cancellingAll || task.owner !== 'parent') return;
       noticeTriggersTurn ||= task.status !== 'cancelled';
       if (notices.length < 16) notices.push(taskView(task, 4096)); else overflowNotices++;
@@ -160,13 +159,17 @@ export default function subagents(pi: ExtensionAPI): void {
       shuttingDown = false;
     }
   });
+  /** Drop the tracker footer and any completion notices batched for the parent. */
+  const stopReporting = () => {
+    tracker.stop();
+    if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
+    clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0; noticeTriggersTurn = false;
+  };
   const stopAll = async () => {
     shuttingDown = true;
     latestReport = undefined;
     renderActiveAgents();
-    tracker.stop();
-    if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
-    clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0; noticeTriggersTurn = false;
+    stopReporting();
     for (const controller of workflows) controller.abort();
     await registry.shutdown();
     await Promise.allSettled(workflowRuns);
@@ -175,9 +178,7 @@ export default function subagents(pi: ExtensionAPI): void {
   const cancelTasks = async (id: string) => {
     if (id === 'all') {
       cancellingAll = true;
-      tracker.stop();
-      if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
-      clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0; noticeTriggersTurn = false;
+      stopReporting();
       const runs = [...workflowRuns];
       for (const controller of workflows) controller.abort();
       try {
@@ -194,7 +195,6 @@ export default function subagents(pi: ExtensionAPI): void {
     await registry.wait(id);
     return {cancelled};
   };
-  // A before-switch handler can cancel the switch; committed switches emit shutdown.
   const registerSubagent = (config?: ProfileConfig) => pi.registerTool({
     name: 'subagent', label: 'Subagent', description: 'Start a background Pi agent with only an explicit task brief, a validated workspace, and bounded tools. Returns task ID immediately; completion is pushed into this conversation. Context separation is not an OS sandbox. Same-directory writers serialize. Explicit child extensions may contribute hooks and commands; their custom tools are excluded by the built-in tool allowlist.' + (config ? ` Profiles: ${Object.keys(config.profiles).join(', ')}; default: ${config.defaultProfile}.` : ''), parameters: taskSchema,
     promptGuidelines: [completionGuidance, 'The subagent extension automatically runs a shared report-only Luna tracker. Do not launch or poll a watcher; worker results arrive directly, independently of tracker reports.'],
@@ -204,7 +204,6 @@ export default function subagents(pi: ExtensionAPI): void {
       const task = normalize(params, ctx);
       if (!task.model) throw new Error('A selected parent model or explicit provider/model is required');
       const handle = await trackedSpawn(task, signal);
-      if (signal?.aborted) registry.cancel(handle.id);
       return result({ id: handle.id, status: 'queued', notification: completionGuidance });
     },
   });
@@ -212,14 +211,16 @@ export default function subagents(pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'subagent_status', label: 'Subagent status', description: 'Inspect bounded subagent summaries (up to 10 per page), or output detail by id (up to 8 KiB JSON text). Use offset/limit for summary pages and outputOffset/nextOutputOffset for retained output pages. Output offsets count UTF-16 code units. Completion notifications are automatic; do not poll for completion. Use subagent_status only for a requested progress check, debugging, or retrieving omitted/truncated results.', parameters: Type.Object({id: Type.Optional(Type.String({maxLength: 100})), offset: Type.Optional(Type.Integer({minimum: 0})), limit: Type.Optional(Type.Integer({minimum: 1, maximum: 10})), outputOffset: Type.Optional(Type.Integer({minimum: 0, maximum: 65536}))}),
     async execute(_id, params = {}) {
+      const trackedResult = (value: unknown) => {
+        const bounded = result(value);
+        return {...bounded, tracker: tracker.status, content: [...bounded.content, {type: 'text' as const, text: tracker.status}]};
+      };
       if (params.id) {
         const task = registry.get(params.id);
         if (!task) throw new Error('Unknown or no longer retained subagent id');
-        const value = result(taskView(task, 8192, params.outputOffset ?? 0));
-        return {...value, tracker: tracker.status, content: [...value.content, {type: 'text' as const, text: tracker.status}]};
+        return trackedResult(taskView(task, 8192, params.outputOffset ?? 0));
       }
-      const value = result(registry.list(params.offset ?? 0, params.limit ?? 10).map(task => taskView(task)));
-      return {...value, tracker: tracker.status, content: [...value.content, {type: 'text' as const, text: tracker.status}]};
+      return trackedResult(registry.list(params.offset ?? 0, params.limit ?? 10).map(task => taskView(task)));
     },
   });
   pi.registerTool({
@@ -228,7 +229,7 @@ export default function subagents(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: 'workflow', label: 'TypeScript workflow', description: 'Compile and run an explicitly user-approved TypeScript async function body. api exposes spawn(task, stableStageLabel), parallel(array of async functions), retry(attempts, async function), checkpoint(key, async function), bounded readFile(path,maxBytes). Successful stages replay only with identical approved source, cwd, and tool scope. api.spawn accepts the same task/profile/model/thinking/preset/tools/extensions/cwd/timeout as subagent. Requires interactive source review.',
-    parameters: Type.Object({ source: Type.String({ minLength: 1, maxLength: 64000 }), timeout: Type.Optional(Type.Integer({ minimum: 10, maximum: 3600000 })) }),
+    parameters: Type.Object({ source: Type.String({ minLength: 1, maxLength: 64000 }), timeout: Type.Optional(Type.Integer(TIMEOUT_BOUNDS)) }),
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
       context = ctx;

@@ -5,11 +5,10 @@ import { getAgentDir, type ExtensionContext } from '@earendil-works/pi-coding-ag
 import { clampThinkingLevel } from '@earendil-works/pi-ai/compat';
 import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import type { TaskSpec } from './registry.ts';
+import { thinkingLevel, thinkingSuffix } from './thinking.ts';
 
-const levels = /^(off|minimal|low|medium|high|xhigh|max)$/;
-const suffix = /:(off|minimal|low|medium|high|xhigh|max)$/;
 const namePattern = /^[a-z][a-z0-9-]{0,47}$/;
-export interface Profile { model: string; thinking: string; description: string; useWhen: string }
+interface Profile { model: string; thinking: string; description: string; useWhen: string }
 export interface ProfileConfig {
   defaultProfile: string;
   profiles: Record<string, Profile>;
@@ -20,7 +19,7 @@ export interface ProfileConfig {
 }
 export interface SelectionProvenance { config: string; profile: string; model: string; thinking: string }
 const astra = 'openai-codex/gpt-6-astra';
-export const bundledProfiles = {
+const bundledProfiles = {
   defaultProfile: 'implement',
   profiles: {
     research: {model: 'openai-codex/gpt-5.6-luna', thinking: 'medium', description: 'Research', useWhen: 'Gather evidence, compare options, or monitor long-running scripts (e.g. call-*). Report observed progress or failures; silence alone is not a stall. Do not duplicate the built-in subagent tracker.'},
@@ -30,11 +29,11 @@ export const bundledProfiles = {
     review: {model: astra, thinking: 'high', description: 'Review', useWhen: 'Find correctness, security and regression risks.'},
   },
 };
-function object(value: unknown, where: string): Record<string, unknown> {
+function assertObject(value: unknown, where: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${where}: expected an object`);
   return value as Record<string, unknown>;
 }
-function fields(value: Record<string, unknown>, allowed: string[], where: string) {
+function assertKnownFields(value: Record<string, unknown>, allowed: string[], where: string) {
   for (const key of Object.keys(value)) if (!allowed.includes(key)) throw new Error(`${where}: unknown field ${key}`);
 }
 function modelSetting(value: unknown): asserts value is string {
@@ -60,19 +59,19 @@ export function loadProfiles(cwd: string, trusted: boolean, agentDir = getAgentD
   let defaultProfile = 'implement';
   const sources: string[] = [];
   const merge = (raw: unknown, source: string) => {
-    const value = object(raw, source);
-    fields(value, ['defaultProfile', 'profiles'], source);
+    const value = assertObject(raw, source);
+    assertKnownFields(value, ['defaultProfile', 'profiles'], source);
     if (value.defaultProfile !== undefined) {
       if (typeof value.defaultProfile !== 'string' || !namePattern.test(value.defaultProfile)) throw new Error('defaultProfile must be a profile name');
       defaultProfile = value.defaultProfile; provenance.defaultProfile = source;
     }
-    if (value.profiles !== undefined) for (const [name, rawProfile] of Object.entries(object(value.profiles, 'profiles'))) {
+    if (value.profiles !== undefined) for (const [name, rawProfile] of Object.entries(assertObject(value.profiles, 'profiles'))) {
       if (!namePattern.test(name)) throw new Error(`Invalid profile name: ${name}`);
-      const profile = object(rawProfile, `profiles.${name}`);
-      fields(profile, ['model', 'thinking', 'description', 'useWhen'], `profiles.${name}`);
+      const profile = assertObject(rawProfile, `profiles.${name}`);
+      assertKnownFields(profile, ['model', 'thinking', 'description', 'useWhen'], `profiles.${name}`);
       for (const [field, entry] of Object.entries(profile)) {
-        if (field === 'model') { modelSetting(entry); if (suffix.test(entry)) throw new Error(`profiles.${name}: put thinking in thinking, not a model suffix`); }
-        else if (field === 'thinking') { if (typeof entry !== 'string' || !(levels.test(entry) || entry === 'inherit')) throw new Error(`profiles.${name}: invalid thinking level`); }
+        if (field === 'model') { modelSetting(entry); if (thinkingSuffix.test(entry)) throw new Error(`profiles.${name}: put thinking in thinking, not a model suffix`); }
+        else if (field === 'thinking') { if (typeof entry !== 'string' || !(thinkingLevel.test(entry) || entry === 'inherit')) throw new Error(`profiles.${name}: invalid thinking level`); }
         else if (typeof entry !== 'string' || entry.length > 240 || /\p{Cc}/u.test(entry)) throw new Error(`profiles.${name}.${field}: expected single-line text, at most 240 characters`);
         provenance[`${name}.${field}`] = source;
       }
@@ -95,7 +94,7 @@ export function loadProfiles(cwd: string, trusted: boolean, agentDir = getAgentD
   return {...config, identity: createHash('sha256').update(JSON.stringify(config)).digest('hex')};
 }
 
-export function baseModel(model: string): string { return model.replace(/^(openai(?:-codex)?\/.+)~fast$/, '$1'); }
+function baseModel(model: string): string { return model.replace(/^(openai(?:-codex)?\/.+)~fast$/, '$1'); }
 /** Use the synchronous Pi registry snapshot; never fuzzy-match or pick a fallback. */
 export function availableModel(model: string, registry: ExtensionContext['modelRegistry'], profile?: string) {
   const slash = model.indexOf('/');
@@ -106,21 +105,21 @@ export function availableModel(model: string, registry: ExtensionContext['modelR
 export function resolveProfile(task: TaskSpec, config: ProfileConfig, ctx: Pick<ExtensionContext, 'model' | 'thinkingLevel' | 'modelRegistry'>): TaskSpec {
   if (task.profile !== undefined && (typeof task.profile !== 'string' || !namePattern.test(task.profile))) throw new Error('Invalid subagent profile name');
   if (task.model !== undefined) modelSetting(task.model);
-  if (task.thinking !== undefined && (typeof task.thinking !== 'string' || !levels.test(task.thinking))) throw new Error('Invalid subagent thinking level');
+  if (task.thinking !== undefined && (typeof task.thinking !== 'string' || !thinkingLevel.test(task.thinking))) throw new Error('Invalid subagent thinking level');
   const name = task.profile ?? config.defaultProfile;
   if (typeof name !== 'string' || !Object.hasOwn(config.profiles, name)) throw new Error(`Unknown subagent profile ${String(name)}. Choose: ${Object.keys(config.profiles).join(', ')}`);
   const profile = config.profiles[name];
   const selected = task.model ?? profile.model;
   modelSetting(selected);
-  const explicitSuffix = task.model?.match(suffix)?.[1];
+  const explicitSuffix = task.model?.match(thinkingSuffix)?.[1];
   const inherited = selected === 'inherit';
-  const rawModel = inherited ? ctx.model && `${ctx.model.provider}/${ctx.model.id}` : selected.replace(suffix, '');
+  const rawModel = inherited ? ctx.model && `${ctx.model.provider}/${ctx.model.id}` : selected.replace(thinkingSuffix, '');
   if (!rawModel) throw new Error('A selected parent model is required for model inherit');
   const model = baseModel(rawModel);
   const found = availableModel(model, ctx.modelRegistry, name);
   let thinking: string | undefined = task.thinking ?? explicitSuffix ?? profile.thinking;
   if (thinking === 'inherit') thinking = ctx.thinkingLevel;
-  if (typeof thinking !== 'string' || !levels.test(thinking)) throw new Error('Invalid subagent thinking level');
+  if (typeof thinking !== 'string' || !thinkingLevel.test(thinking)) throw new Error('Invalid subagent thinking level');
   const effectiveThinking = clampThinkingLevel(found, thinking as ModelThinkingLevel);
   return {...task, profile: name, model: `${found.provider}/${found.id}`, thinking: effectiveThinking, configProvenance: {
     config: config.identity,
@@ -130,12 +129,11 @@ export function resolveProfile(task: TaskSpec, config: ProfileConfig, ctx: Pick<
   }};
 }
 export function profileGuidance(config: ProfileConfig, parent?: Pick<ExtensionContext, 'model' | 'thinkingLevel'>): string {
-  const selection = (p: Profile) => `${p.model === 'inherit' ? (parent?.model ? baseModel(`${parent.model.provider}/${parent.model.id}`) + ' (inherit)' : 'inherit parent model') : baseModel(p.model)} / ${p.thinking === 'inherit' ? `${parent?.thinkingLevel ?? 'parent thinking'} (inherit)` : p.thinking}`;
-  const p = config.profiles[config.defaultProfile];
+  const selection = (profile: Profile) => `${profile.model === 'inherit' ? (parent?.model ? baseModel(`${parent.model.provider}/${parent.model.id}`) + ' (inherit)' : 'inherit parent model') : baseModel(profile.model)} / ${profile.thinking === 'inherit' ? `${parent?.thinkingLevel ?? 'parent thinking'} (inherit)` : profile.thinking}`;
   return [
     'Available subagent profiles (subagent and api.spawn):',
-    `Default profile (used when profile is omitted): ${config.defaultProfile} (${selection(p)}).`,
-    ...Object.entries(config.profiles).map(([name, p]) => `${name}: ${selection(p)} — ${p.description}${p.useWhen ? `; ${p.useWhen}` : ''}`),
+    `Default profile (used when profile is omitted): ${config.defaultProfile} (${selection(config.profiles[config.defaultProfile])}).`,
+    ...Object.entries(config.profiles).map(([name, profile]) => `${name}: ${selection(profile)} — ${profile.description}${profile.useWhen ? `; ${profile.useWhen}` : ''}`),
   ].join('\n');
 }
 /** Routed worktrees do not inherit the original session's trust decision. */
@@ -145,5 +143,5 @@ export function profileLocation(ctx: ExtensionContext, activeCwd: string) {
 }
 
 export function assertTaskFields(task: object): void {
-  fields(task as Record<string, unknown>, ['task', 'cwd', 'model', 'thinking', 'profile', 'tools', 'preset', 'extensions', 'timeout'], 'subagent task');
+  assertKnownFields(task as Record<string, unknown>, ['task', 'cwd', 'model', 'thinking', 'profile', 'tools', 'preset', 'extensions', 'timeout'], 'subagent task');
 }

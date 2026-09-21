@@ -1,4 +1,5 @@
 node_modules/
+extensions/guard/guard.local.json
 _scratch/
 .claude/
 .codex/

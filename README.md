@@ -26,7 +26,10 @@ load; helpers and tests are not extensions.
    - [Bash approvals](docs/agent-setup.md#automatic-bash-permissions-external-package):
      Hank Warren's Auto Permissions. This repo's status extension is only its
      display companion, not the approval engine.
-4. **Reload Pi.** Complete provider/server authentication where required.
+4. **Set up Guard**, if wanted: follow [Guard setup](#guard-setup-for-agents) to
+   copy the sample rules and link your local configuration. Installation alone
+   does not enable the rules.
+5. **Reload Pi.** Complete provider/server authentication where required.
 
 With Subagents enabled, the system prompt includes **both** the editable selection
 instructions from `APPEND_SYSTEM.md` and the effective profile catalog added by the
@@ -47,12 +50,82 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
+| [Guard](#guard-setup-for-agents) | Blocks non-draft PR creation and administrator merges in recognizable Bash `gh` calls. |
 | Auto Permissions status | Displays the separately installed Bash-approval plugin's status. |
 | [Neovim IDE](docs/adr/012-nvim-ide.md) | Connects to claudecode.nvim like Claude Code does: selection and `:ClaudeCodeSend` context, editor tools, jumps to pi edits. |
 
 See [session/editor behavior and worktree boundaries](docs/extension-behavior.md)
 for operational details. Prompt stash's shortcut applies only to the main editor;
 Pi's model/thinking save bindings remain unchanged.
+
+## Guard setup for agents
+
+Enable Guard with `pi config`, or add the stable checkout's
+`extensions/guard/index.ts` to `extensions` in your Pi settings. Preserve other
+entries. Guard reads `$PI_CODING_AGENT_DIR/guard.json` (default
+`~/.pi/agent/guard.json`) before each Bash call; `/reload` is needed to load the
+extension, not to edit its rules.
+
+From a **stable checkout** (not a temporary worktree), run this Bash setup after
+reviewing [`extensions/guard/guard.json`](extensions/guard/guard.json):
+
+```bash
+(
+  set -eu
+  repo=$(git rev-parse --show-toplevel)
+  local_rules="$repo/extensions/guard/guard.local.json"
+  agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+  case "$agent_dir" in
+    '~') agent_dir="$HOME" ;;
+    '~/'*) agent_dir="$HOME/${agent_dir#\~/}" ;;
+  esac
+  target="$agent_dir/guard.json"
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    printf 'Preserving existing config: %s — inspect before changing it.\n' "$target"
+    exit 1
+  fi
+  if [ ! -e "$local_rules" ] && [ ! -L "$local_rules" ]; then
+    # noclobber also protects against an intervening file creation.
+    (set -C; cat "$repo/extensions/guard/guard.json" > "$local_rules")
+  fi
+  mkdir -p "$agent_dir"
+  ln -s "$local_rules" "$target"
+  ls -l "$target"
+)
+```
+
+Completion: verify the link targets your local file, enable the extension, and
+ask the user to run `/reload`. If a config already exists, inspect it and agree
+on changes with the user; back it up before editing. Keep personal rules in the
+ignored `guard.local.json`, not the tracked sample. Setup is manual: the package
+never copies or links configuration automatically.
+
+Both sample booleans are required; set either to `false` to disable that rule:
+
+- `requireDraftPr`: require an effective `--draft` or `-d` on `gh pr create`
+  (including `gh pr new`). `--draft=false` is not a draft. `--dry-run` receives
+  the same check. `--web`/`-w` is blocked with instructions to drop it and pass
+  `--draft`: gh cannot create drafts with `--web`. `gh pr ready` remains allowed.
+- `blockAdminMerge`: reject an effective `--admin` on `gh pr merge`; instruct the
+  agent to satisfy normal review/check requirements. `--admin=false` is allowed.
+
+Missing config means inactive. Invalid/unreadable config or a broken config
+symlink blocks Bash with a
+repair message; other tools remain available to fix it. No model or approval
+popup is involved. A blocked Bash call is stopped in full before any of it runs.
+
+**Scope is a workflow guardrail, not a sandbox.** It recognizes literal simple
+`gh` commands, absolute paths to `gh`, leading environment assignments, repository
+selection, quoting, comments, and simple `;`, `&&`, `||`, pipe/newline chains.
+It distinguishes flags from title/body values and understands short clusters and
+repeated boolean flags. Help requests are allowed. It does not interpret shell
+expansion, substitutions (including `url=$(gh pr create ...)`), heredocs,
+functions, aliases, redirections, scripts, grouping (`(...)`, `{ ...; }`),
+control flow (`if`, loops), `!`, `time`, or wrappers such as `command`, `env`, and
+`bash -c`. Complex shell can evade checks or be misclassified;
+use direct simple invocations for predictable results. `gh api`, MCP/API calls,
+user `!`/`!!` commands and subagent sessions without Guard loaded are not covered.
+This does not extend the separate Bash Auto Permissions reviewer to MCP.
 
 ## Subagent configuration
 

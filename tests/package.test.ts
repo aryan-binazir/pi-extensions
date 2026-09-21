@@ -21,6 +21,7 @@ const expected: Record<string, { tools: string[]; commands: string[]; shortcuts:
   'auto-caffeinate': {tools: [], commands: [], shortcuts: []},
   'auto-permissions-status': {tools: [], commands: [], shortcuts: []},
   'nvim-ide': {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['vim'], shortcuts: []},
+  guard: {tools: [], commands: [], shortcuts: []},
 };
 const intended = Object.keys(expected);
 

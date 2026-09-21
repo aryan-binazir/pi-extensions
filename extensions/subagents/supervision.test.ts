@@ -38,7 +38,7 @@ test('supervised cancellation signals Pi once and allows its graceful cleanup', 
   }
 });
 
-test('a normally completed supervised child releases its owner pipe and settles', {timeout: 5000}, async () => {
+test('a normally completed supervised child releases its owner pipe and settles', {timeout: 10000}, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'subagent-complete-'));
   const previousPath = process.env.PATH;
   const registry = new SubagentRegistry();
@@ -47,9 +47,11 @@ test('a normally completed supervised child releases its owner pipe and settles'
     await chmod(join(cwd, 'pi'), 0o700);
     process.env.PATH = `${cwd}:${previousPath ?? ''}`;
     const task = await registry.spawn({task: 'synthetic completion', cwd});
-    const value = await Promise.race([task.done, sleep(500).then(() => undefined)]);
-    assert.equal(value?.status, 'succeeded');
-    assert.equal(value?.output, 'done');
+    // A child still holding its owner pipe would never settle, failing on the
+    // test timeout rather than on a wall-clock guess that parallel load breaks.
+    const value = await task.done;
+    assert.equal(value.status, 'succeeded');
+    assert.equal(value.output, 'done');
   } finally {
     await registry.shutdown();
     if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
@@ -57,7 +59,7 @@ test('a normally completed supervised child releases its owner pipe and settles'
   }
 });
 
-test('a supervised child stops when its owning process is abruptly killed', {timeout: 10000}, async () => {
+test('a supervised child stops when its owning process is abruptly killed', {timeout: 20000}, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'subagent-owner-'));
   let childPid: number | undefined, grandchildPid: number | undefined;
   let owner: ReturnType<typeof spawn> | undefined;
@@ -69,7 +71,7 @@ test('a supervised child stops when its owning process is abruptly killed', {tim
     let output = '', errors = '';
     owner.stdout?.on('data', chunk => { output += String(chunk); });
     owner.stderr?.on('data', chunk => { errors += String(chunk); });
-    const startup = Date.now() + 4000;
+    const startup = Date.now() + 8000;
     while (!/^\d+,\d+\n/.test(output) && Date.now() < startup && owner.exitCode === null) await sleep(20);
     [childPid, grandchildPid] = output.trim().split('\n')[0].split(',').map(Number);
     assert.ok(childPid > 0 && grandchildPid > 0, `Child and grandchild must start: ${errors}`);

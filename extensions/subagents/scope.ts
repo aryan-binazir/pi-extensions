@@ -3,7 +3,13 @@ import { isAbsolute, relative, sep } from 'node:path';
 
 export const READ_TOOLS = ['read', 'grep', 'find', 'ls'];
 export const ALL_TOOLS = [...READ_TOOLS, 'write', 'edit', 'bash'];
-export interface DelegationScope { cwd: string; tools: string[] }
+interface DelegationScope { cwd: string; tools: string[] }
+
+/** True when `path` is `root` or below it. Both must already be canonical. */
+export function insideRoot(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
 
 /** Launch-time scope only: child builtins and trusted extensions are not sandboxed. */
 export function delegationScope(parent: DelegationScope) {
@@ -16,9 +22,9 @@ function sensitiveComponent(name: string) {
 }
 
 export async function assertWorkspacePath(root: string, path: string): Promise<void> {
-  const rel = relative(await realpath(root), await realpath(path));
-  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error('Path is outside parent workspace');
-  if (rel.split(sep).some(sensitiveComponent)) throw new Error('Path is sensitive or repository control data');
+  const canonicalRoot = await realpath(root), target = await realpath(path);
+  if (!insideRoot(canonicalRoot, target)) throw new Error('Path is outside parent workspace');
+  if (relative(canonicalRoot, target).split(sep).some(sensitiveComponent)) throw new Error('Path is sensitive or repository control data');
 }
 
 export async function assertChildTask(task: { cwd: string; tools: string[]; extensions?: string[] }, options: { parent: DelegationScope; approve?: (request: string) => Promise<boolean> }): Promise<void> {

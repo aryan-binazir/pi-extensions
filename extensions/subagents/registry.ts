@@ -5,6 +5,8 @@ import { isAbsolute } from 'node:path';
 import { abortable } from './cancellation.ts';
 import { fileURLToPath } from 'node:url';
 import type { SelectionProvenance } from './profiles.ts';
+import { ALL_TOOLS, READ_TOOLS } from './scope.ts';
+import { thinkingLevel, thinkingPattern } from './thinking.ts';
 
 export interface TaskSpec {
   task: string;
@@ -41,7 +43,7 @@ export interface TaskResult {
   error?: string;
   notificationError?: string;
 }
-export interface TaskHandle { id: string; done: Promise<TaskResult> }
+interface TaskHandle { id: string; done: Promise<TaskResult> }
 interface ValidTask extends TaskSpec { tools: string[]; extensions: string[]; timeout: number }
 interface Entry {
   spec: ValidTask;
@@ -58,7 +60,7 @@ interface Entry {
   finished: boolean;
   detachSignal?: () => void;
 }
-export interface RegistryOptions {
+interface RegistryOptions {
   concurrency?: number;
   allowedTools?: () => string[];
   invocation?: (spec: ValidTask) => { command: string; args: string[]; env?: NodeJS.ProcessEnv; supervised?: boolean };
@@ -66,18 +68,23 @@ export interface RegistryOptions {
   onUpdate?: (task: TaskResult) => void;
   onComplete?: (task: TaskResult) => void;
 }
-const READ_TOOLS = ['read', 'grep', 'find', 'ls'];
-const ALL_TOOLS = [...READ_TOOLS, 'write', 'edit', 'bash'];
 const CAP = 64 * 1024;
 const RETAINED = 50;
 const ACTIVE_STATUS = new Set<TaskResult['status']>(['queued', 'running']);
 const SUPERVISOR = fileURLToPath(new URL('./process-supervisor.mjs', import.meta.url));
+export const TIMEOUT_BOUNDS = {minimum: 10, maximum: 3600000};
+/** One bound for every child and workflow deadline. */
+export function validateTimeout(timeout: number | undefined, what: string): number {
+  const value = timeout ?? TIMEOUT_BOUNDS.maximum;
+  if (!Number.isInteger(value) || value < TIMEOUT_BOUNDS.minimum || value > TIMEOUT_BOUNDS.maximum)
+    throw new Error(`${what} must be ${TIMEOUT_BOUNDS.minimum}–${TIMEOUT_BOUNDS.maximum} milliseconds`);
+  return value;
+}
+const FAST_ALIAS = new RegExp(`^(openai(?:-codex)?\\/.+)~fast(?=:${thinkingPattern}$|$)`);
 
-/** Overlay variables on an environment instead of copying it. Reading every
- * process.env key through the host interceptor costs about a millisecond per
- * spawn; node's spawn walks the prototype chain when it builds the child
- * environment ("prototype values are intentionally included"), so the child
- * receives exactly the same variables for one traversal instead of three. */
+/** Overlay variables on an environment instead of copying it: node's spawn walks
+ * the prototype chain when it builds the child environment, so the child gets the
+ * same variables for one traversal of the host's intercepted process.env. */
 function childEnv(base: NodeJS.ProcessEnv, overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.assign(Object.create(base) as NodeJS.ProcessEnv, overrides);
 }
@@ -105,16 +112,15 @@ export async function validateTask(spec: TaskSpec, allowedTools?: string[]): Pro
   if (!(await stat(cwd)).isDirectory()) throw new Error('Task cwd must be a directory');
   // Fast aliases belong to the parent's extension; discovery-free children use
   // the real base model, preserving any explicit thinking suffix.
-  const model = typeof spec.model === 'string' ? spec.model.replace(/^(openai(?:-codex)?\/.+)~fast(?=:(?:off|minimal|low|medium|high|xhigh|max)$|$)/, '$1') : spec.model;
+  const model = typeof spec.model === 'string' ? spec.model.replace(FAST_ALIAS, '$1') : spec.model;
   if (model !== undefined && (typeof model !== 'string' || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:/-]+$/.test(model))) throw new Error('Model must be provider/model');
-  if (spec.thinking !== undefined && !/^(off|minimal|low|medium|high|xhigh|max)$/.test(spec.thinking)) throw new Error('Invalid thinking level');
+  if (spec.thinking !== undefined && !thinkingLevel.test(spec.thinking)) throw new Error('Invalid thinking level');
   if (spec.preset !== undefined && !['reader', 'writer'].includes(spec.preset)) throw new Error('Unknown preset');
   const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS).filter(tool => !allowedTools || allowedTools.includes(tool));
   if (!Array.isArray(tools) || tools.some(tool => typeof tool !== 'string' || !ALL_TOOLS.includes(tool)) || new Set(tools).size !== tools.length) throw new Error('Invalid builtin tool selection');
   if (allowedTools && tools.some(tool => !allowedTools.includes(tool))) throw new Error('Explicit child tools exceed parent permissions');
   if (spec.preset === 'reader' && tools.some(tool => !READ_TOOLS.includes(tool))) throw new Error('Reader preset cannot grant write tools');
-  const timeout = spec.timeout ?? 3600000;
-  if (!Number.isInteger(timeout) || timeout < 10 || timeout > 3600000) throw new Error('Timeout must be 10–3600000 milliseconds');
+  const timeout = validateTimeout(spec.timeout, 'Timeout');
   if (spec.extensions !== undefined && (!Array.isArray(spec.extensions) || spec.extensions.length > 16)) throw new Error('Invalid extensions');
   const extensions: string[] = [];
   for (const path of spec.extensions ?? []) {
@@ -142,7 +148,7 @@ export class SubagentRegistry {
   async spawn(spec: TaskSpec, signal?: AbortSignal, owner: TaskResult['owner'] = 'parent'): Promise<TaskHandle> {
     signal?.throwIfAborted();
     if (this.closed) throw new Error('Registry is shut down');
-    const timeout = Number.isInteger(spec?.timeout) && spec.timeout! >= 10 && spec.timeout! <= 3600000 ? spec.timeout! : 3600000;
+    const timeout = Number.isInteger(spec?.timeout) && spec.timeout! >= TIMEOUT_BOUNDS.minimum && spec.timeout! <= TIMEOUT_BOUNDS.maximum ? spec.timeout! : TIMEOUT_BOUNDS.maximum;
     const deadlineAt = Date.now() + timeout;
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(new Error('Task admission deadline exceeded')), timeout);

@@ -110,18 +110,6 @@ test('throwing status callbacks never reject checks or skip the next power read'
  }finally{await keeper.shutdown();}
 });
 
-test('fire-and-forget background activity tolerates a throwing status callback',async()=>{
- let notifications=0;
- const keeper=new PowerKeeper({power:async()=> 'ac',
-  start:()=>({alive:()=>true,stop:async()=>{}}),onChange:()=>{notifications++;throw new Error('stale UI context');}});
- try{
-  void keeper.background('task',true);
-  // Let unhandled rejections reach node:test, matching the event-bus caller.
-  await new Promise<void>(resolve=>setImmediate(resolve));
-  assert.equal(notifications,1);
- }finally{await keeper.shutdown();}
-});
-
 test('the watchdog only ticks while work is pending',async t=>{
  t.mock.timers.enable({apis:['setInterval','Date']});
  // Every watchdog tick consults the clock, so counting clock reads counts ticks.

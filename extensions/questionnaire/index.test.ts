@@ -53,6 +53,12 @@ function host(onEmit?: (value: any) => void) {
     options: () => uiOptions,
   };
 }
+// Documented viewport height for 6..30 terminal rows (at least 3, at most 18, five rows left for Pi's footer), then taller terminals.
+const viewportRows: Record<number, number> = Object.fromEntries([
+  ...[3, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 18, 18, 18, 18, 18, 18, 18].map((limit, index) => [6 + index, limit]),
+  [40, 18], [48, 18],
+]);
+const viewport = (rows: number) => { const limit = viewportRows[rows]; assert.ok(limit, `no viewport literal for ${rows} rows`); return limit; };
 const question = (id: string) => ({
   id,
   prompt: `Choose ${id}`,
@@ -259,7 +265,7 @@ test("long option lists keep the selected answer inside a bounded viewport", asy
     options: Array.from({ length: 20 }, (_, i) => ({ value: String(i), label: `Option-${i}`, description: "x".repeat(100) })) }]);
   for (let i = 0; i < 20; i++) {
     const rows = h.render(80);
-    assert.ok(rows.length <= Math.max(3, Math.min(18, h.terminal.rows - 5)), `rendered ${rows.length} rows`);
+    assert.ok(rows.length <= viewport(h.terminal.rows), `rendered ${rows.length} rows`);
     assert.ok(rows.join("\n").includes(`❯ ${i + 1}. Option-${i}`));
     h.key("\x1b[B");
   }
@@ -272,7 +278,7 @@ test("questionnaire replaces the input area with subtle rules across widths and 
   const checkFrame = () => {
     for (const width of [1, 5, 6, 20, 80, 120]) {
       const rows = h.render(width);
-      assert.ok(rows.length <= Math.max(3, Math.min(18, h.terminal.rows - 5)));
+      assert.ok(rows.length <= viewport(h.terminal.rows));
       assert.ok(rows.every((row: string) => visibleWidth(row) <= width));
       if (width >= 6) {
         assert.equal(rows[0], "─".repeat(width));
@@ -385,7 +391,7 @@ test("long prompts use spare terminal rows and disclose remaining text", async (
     assert.match(rows.join("\n"), /prompt truncated/);
     assert.match(rows.join("\n"), /❯ 1. Yes/);
     assert.match(rows.join("\n"), /Esc cancel/);
-    assert.ok(rows.length <= Math.max(3, Math.min(18, h.terminal.rows - 5)));
+    assert.ok(rows.length <= viewport(h.terminal.rows));
     h.terminal.rows = 48;
     assert.equal(h.render(80).length, 18, "the viewport stops growing at 18 rows");
     assert.deepEqual(h.render(80), rows);
@@ -417,7 +423,7 @@ test("decoration never reduces visible choices as the terminal grows", async () 
       const count = rows.filter((line: string) => line.includes("Option-")).length;
       assert.ok(count >= previous, `Growing to ${height} rows hid choices`);
       previous = count;
-      assert.ok(rows.length <= Math.max(3, Math.min(18, height - 5)));
+      assert.ok(rows.length <= viewport(height));
       assert.match(rows.join("\n"), /Esc cancel/);
     }
   } finally {

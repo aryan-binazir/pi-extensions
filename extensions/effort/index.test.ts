@@ -249,7 +249,6 @@ test("repeated renders survive width, selection and model changes", async (t) =>
   assert.match(h.render(80), /renamed-model/);
   const first = h.lines(80);
   const second = h.lines(80);
-  assert.notEqual(first, second);
   assert.deepEqual(first, second);
   h.key("\u001b");
   await result;

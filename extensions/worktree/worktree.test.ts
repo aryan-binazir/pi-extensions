@@ -184,10 +184,12 @@ test('a checkout Herdr knows but has not opened is removed through Git', async (
   const { home, repo } = await repoFixture('pi-worktree-unopened-');
   try {
     const checkout = await new Worktrees(repo, { home, herdr: false }).open('unopened');
-    const herdr = `#!/bin/sh\nprintf '%s' '{"result":{"worktrees":[{"path":"${checkout.path}","open_workspace_id":null}]}}'\n`;
+    // Herdr lists the checkout without a workspace; any `remove` sent to it must fail loudly.
+    const herdr = `#!/bin/sh\n[ "$2" = remove ] && exit 2\nprintf '%s' '{"result":{"worktrees":[{"path":"${checkout.path}","open_workspace_id":null}]}}'\n`;
     await withFakeBin(home, 'herdr', herdr, async () => {
       const trees = new Worktrees(repo, { home, herdr: true });
       assert.equal((await trees.remove(checkout.path, { confirm: async () => true })).removed, true);
+      await assert.rejects(realpath(checkout.path), { code: 'ENOENT' });
     });
   } finally { await rm(home, { recursive: true, force: true }); }
 });

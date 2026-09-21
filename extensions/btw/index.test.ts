@@ -95,9 +95,9 @@ test("BTW fills its overlay from opening through the first answer and resize", a
   assert.equal(h.lines().length, 36);
   assert.match(h.render(), /Side answer/);
   assert.doesNotMatch(h.render(), /Enter a followup/);
-  for (const rows of [60, 20, 5, 1]) {
+  for (const [rows, height] of [[60, 54], [20, 18], [5, 4], [1, 1]]) {
     h.terminal.rows = rows;
-    assert.equal(h.lines(20).length, Math.max(1, Math.floor(rows * 0.9)));
+    assert.equal(h.lines(20).length, height, `${rows} terminal rows`);
   }
   h.key("\u001b");await result;
 });

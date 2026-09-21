@@ -315,7 +315,7 @@ test("huge counted motions stop at boundaries and repeated paste remains bounded
   assert.equal(e.getExpandedText(), "");
   e.setText("x".repeat(2000));
   keys(e, "ggyy9999p");
-  assert.ok(e.getExpandedText().length <= 1024 * 1024);
+  assert.equal(e.getExpandedText().length, 2000, "an oversized put is refused outright");
 });
 test("I inserts at the first non-blank character", () => {
   const e = editor();
@@ -644,7 +644,9 @@ test("confirming a slash completion submits the completed command", async () => 
     },
   });
   let sent = ""; e.onSubmit = text => { sent = text; };
-  keys(e, "/bt"); await new Promise(resolve => setTimeout(resolve, 60));
+  keys(e, "/bt");
+  const deadline = Date.now() + 3000;
+  while (!e.isShowingAutocomplete() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(e.isShowingAutocomplete(), true);
   e.handleInput("\r"); assert.equal(sent, "/btw");
 });

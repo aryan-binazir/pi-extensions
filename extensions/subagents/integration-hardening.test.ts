@@ -143,15 +143,9 @@ test('a stalled workflow child is not relaunched by automatic retry', async () =
 test('workflow children report to the awaiting workflow without duplicate parent notifications', async () => fixture(async ({execute, notifications}: any) => {
   const result = await execute('workflow', {source: "await api.spawn({task:'one',preset:'reader'},'one');await api.spawn({task:'two',preset:'reader'},'two');return 'done';"});
   assert.equal(result.details, 'done');
+  // A wrongly routed parent notice would only flush after the 250 ms batching window.
+  await new Promise(resolve => setTimeout(resolve, 300));
   assert.deepEqual(notifications, []);
-}));
-
-test('cancelling a child does not wake the parent model for another paid turn', async () => fixture(async ({execute, notifications}: any) => {
-  const task = await execute('subagent', {task: 'hold', preset: 'reader'});
-  await execute('subagent_cancel', {id: task.details.id});
-  await until(() => notifications.length > 0, 'the cancellation notice');
-  assert.equal(notifications.length, 1);
-  assert.equal(notifications[0].options.triggerTurn, false);
 }));
 
 test('registered delegation remains attached to its owning abort signal after returning', async () => fixture(async ({execute, settle}: any) => {

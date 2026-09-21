@@ -41,7 +41,7 @@ test('capabilities enforce read bounds, retries, checkpoints, and restricted glo
   try {await assert.rejects(runWorkflow({...base,source:`return await api.readFile(${JSON.stringify(outside)});`}),/escapes workflow cwd/);}
   finally {await rm(outside,{force:true});}
   await assert.rejects(runWorkflow({...base,source:'return Function("return process")();'}),/Code generation/);
-  await assert.rejects(runWorkflow({...base,source:'while (true) {}',timeout:500}),/timed out/);
+  await assert.rejects(runWorkflow({...base,source:'while (true) {}',timeout:20000}),/Script execution timed out after 100ms/);
  } finally {await rm(cwd,{recursive:true,force:true});}
 });
 

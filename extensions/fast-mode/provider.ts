@@ -39,26 +39,28 @@ export function withFastModels(original:Provider,view:Provider=original):Provide
   if(alias===undefined)aliasCache.set(model,alias=eligible.has(model.id)&&!model.id.endsWith(FAST_SUFFIX)&&supported(model)?{...model,id:model.id+FAST_SUFFIX,name:model.name+' (fast)'}:null);
   return alias;
  };
- const aliases=(models:readonly Model<Api>[])=>{const out:Model<Api>[]=[];for(const model of models){out.push(model);const alias=aliasOf(model);if(alias)out.push(alias);}return out;};
+ // Each base model is followed by its alias; `extras` are config-declared models
+ // absent from the base list, so only their aliases are appended.
+ const aliases=(models:readonly Model<Api>[],extras:readonly Model<Api>[]=[])=>{
+  const out:Model<Api>[]=[];
+  for(const model of models){out.push(model);const alias=aliasOf(model);if(alias)out.push(alias);}
+  for(const extra of extras)if(!models.some(base=>base.id===extra.id)){const alias=aliasOf(extra);if(alias)out.push(alias);}
+  return out;
+ };
  const resolve=(model:Model<Api>)=>{
   if(!model.id.endsWith(FAST_SUFFIX))return {model,fast:false};
   const baseId=model.id.slice(0,-FAST_SUFFIX.length);
-  const base=original.getModels().find(m=>m.id===baseId)??custom.find(model=>model.id===baseId);
+  const base=original.getModels().find(candidate=>candidate.id===baseId)??custom.find(candidate=>candidate.id===baseId);
   if(!base || !supported(base))throw new Error('Fast model no longer available');
   // Preserve auth-resolved request headers/base URL while restoring base pricing and id.
   return {model:{...model,id:base.id,cost:base.cost},fast:true};
  };
  const wrapped:Provider={
   ...original,
-  getModels:()=>{
-   const models=original.getModels();
-   const out=aliases(models);
-   for(const model of custom)if(!models.some(base=>base.id===model.id)){const alias=aliasOf(model);if(alias)out.push(alias);}
-   return out;
-  },
+  getModels:()=>aliases(original.getModels(),custom),
   filterModels:original.filterModels ? (models,credential)=>{
-   const bases=models.filter(m=>!m.id.endsWith(FAST_SUFFIX));
-   return aliases(original.filterModels!(bases,credential));
+   const withoutAliases=models.filter(model=>!model.id.endsWith(FAST_SUFFIX));
+   return aliases(original.filterModels!(withoutAliases,credential));
   }:undefined,
   stream(model,context,options){const resolved=resolve(model);return original.stream(resolved.model,context,resolved.fast?{...options,serviceTier:'priority'}:options);},
   streamSimple(model,context,options){

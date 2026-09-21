@@ -11,8 +11,7 @@ export interface PermissionConfig {
 export type ConfigLoader = () => PermissionConfig;
 
 /** Only inspect a package that actually registered the settings command. An
- * installed package or an enabled config alone does not establish that it loaded.
- * This adapter uses the pinned package's own validator, not a second policy parser. */
+ * installed package or an enabled config alone does not establish that it loaded. */
 export async function findConfigLoader(commands: ReturnType<ExtensionAPI['getCommands']>): Promise<ConfigLoader | undefined> {
   for (const command of commands) {
     if (command.source !== 'extension' || command.name.split(':')[0] !== 'auto-permissions') continue;

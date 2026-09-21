@@ -27,8 +27,6 @@ export function rightAligned(left: string, right: string, width: number): string
   return lhs + ' '.repeat(Math.max(0, width - leftWidth - rightWidth)) + rhs;
 }
 
-/** Uses public extension context only; does not fabricate an AgentSession or
- * reach into Pi's private footer internals. Other extensions keep their status row. */
 export function permissionFooter(
   context: () => ExtensionContext,
   theme: Theme,
@@ -97,11 +95,8 @@ export function permissionFooter(
       if (ctx.model && data.getAvailableProviderCount() > 1) model = `(${clean(ctx.model.provider)}) ${model}`;
       const pathRow = theme.fg('dim', path), autoRow = theme.fg('dim', auto);
       const statsRow = theme.fg('dim', stats.join(' ')), modelRow = theme.fg('dim', model);
-      let others: string | undefined;
-      if (statuses.size - (statuses.has(STATUS_KEY) ? 1 : 0) > 0) {
-        const other = [...statuses].filter(([key]) => key !== STATUS_KEY).sort(([a], [b]) => a.localeCompare(b));
-        others = other.map(([, text]) => clean(text)).join(' ');
-      }
+      const other = [...statuses].filter(([key]) => key !== STATUS_KEY).sort(([a], [b]) => a.localeCompare(b));
+      const others = other.length ? other.map(([, text]) => clean(text)).join(' ') : undefined;
       // Length-prefixed rather than separated: no themed string can forge a
       // boundary, and a missing status row is -1, which no length can be.
       const key = `${width}.${pathRow.length}.${autoRow.length}.${statsRow.length}`

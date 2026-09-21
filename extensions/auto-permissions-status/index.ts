@@ -3,7 +3,6 @@ import { findConfigLoader, statusText, type ConfigLoader } from './adapter.ts';
 
 import { permissionFooter, STATUS_KEY as KEY } from './footer.ts';
 
-/** Display only: never changes permission policy, tools or prompts. */
 export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -60,7 +59,9 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
     timer = setInterval(refresh, 1000);
     timer.unref();
   });
-  pi.on('model_select', (_event, ctx) => { if (context) { context = ctx; refresh(); } });
-  pi.on('agent_start', (_event, ctx) => { if (context) { context = ctx; refresh(); } });
+  // pi.on is overloaded per event name, so the shared body is named instead of looped.
+  const adopt = (_event: unknown, ctx: ExtensionContext) => { if (context) { context = ctx; refresh(); } };
+  pi.on('model_select', adopt);
+  pi.on('agent_start', adopt);
   pi.on('session_shutdown', stop);
 }

@@ -714,7 +714,7 @@ export class ViEditor extends CustomEditor {
       return;
     }
     if (this.prefix === "g" && data !== "g") {
-      this.prefix = ""; this.op = ""; this.count = "";
+      this.resetPending();
       return;
     }
     if ("rmq".includes(data)) {

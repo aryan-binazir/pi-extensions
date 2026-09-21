@@ -4,7 +4,7 @@ import { endianness } from 'node:os';
 // This client uses only protocols without file descriptors. All wire objects stay
 // session-local; wl_display.sync proves processing, not application-side success.
 const ints = (...values: number[]) => { const b = Buffer.alloc(values.length * 4); values.forEach((v, i) => b.writeUInt32LE(v >>> 0, i * 4)); return b; };
-const string = (value: string) => { const b = Buffer.alloc(Math.ceil((Buffer.byteLength(value) + 1) / 4) * 4); b.write(value); return Buffer.concat([ints(Buffer.byteLength(value) + 1), b]); };
+const waylandString = (value: string) => { const b = Buffer.alloc(Math.ceil((Buffer.byteLength(value) + 1) / 4) * 4); b.write(value); return Buffer.concat([ints(Buffer.byteLength(value) + 1), b]); };
 function readString(b: Buffer, offset: number) {
   if (offset + 4 > b.length) throw new Error('Invalid Wayland string');
   const size = b.readUInt32LE(offset); const end = offset + 4 + size;
@@ -77,10 +77,10 @@ export class WaylandPointer {
     for (const global of this.globals) {
       if (global.iface === 'zwlr_virtual_pointer_manager_v1') {
         this.manager = this.id++; this.managerVersion = Math.min(global.version, 2);
-        this.send(2, 0, Buffer.concat([ints(global.name), string(global.iface), ints(this.managerVersion, this.manager)]));
+        this.send(2, 0, Buffer.concat([ints(global.name), waylandString(global.iface), ints(this.managerVersion, this.manager)]));
       } else if (global.iface === 'wl_output' && global.version >= 4) {
         const id = this.id++; this.outputIds.set(id, '');
-        this.send(2, 0, Buffer.concat([ints(global.name), string(global.iface), ints(4, id)]));
+        this.send(2, 0, Buffer.concat([ints(global.name), waylandString(global.iface), ints(4, id)]));
       }
     }
     await this.sync();

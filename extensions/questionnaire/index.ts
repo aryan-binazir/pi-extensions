@@ -296,7 +296,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 const view = q ? bodyFor(tab) : undefined;
                 let header: string;
                 if (params.questions.length > 1) {
-                  const tabs = params.questions.map((item, i) => {
+                  const tabs = params.questions.map((_, i) => {
                     const label = tabLabel(i);
                     return theme.fg(tab === i ? "accent" : "muted", tab === i ? `[ ${label} ]` : label);
                   });

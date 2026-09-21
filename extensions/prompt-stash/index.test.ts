@@ -13,6 +13,8 @@ for (const EditorClass of [CustomEditor, ViEditor]) {
     h.e.handleInput("\x13");
     assert.equal(h.e.getExpandedText(), "");
     assert.match(h.status!, /stash/i);
+    // Reinstantiate the installed composing factory, as Pi does on replacement.
+    h.ctx.ui.setEditorComponent(h.ctx.ui.getEditorComponent());
     h.e.setText("second draft");
     h.e.handleInput("\x13");
     assert.equal(h.e.getExpandedText(), payload);

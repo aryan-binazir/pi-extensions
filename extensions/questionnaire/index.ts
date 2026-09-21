@@ -55,9 +55,8 @@ interface Result {
   reason?: string;
 }
 
-/** Independent questionnaire; waiting notifications are paired by toolCallId. */
+/** Waiting notifications are paired by toolCallId. */
 export default function questionnaire(pi: ExtensionAPI) {
-  // Only trusted local code declares its own bounded storage/UI effects.
   const active = new Set<() => void>();
   let inFlight = false;
   pi.on("session_shutdown", () => {
@@ -118,13 +117,13 @@ export default function questionnaire(pi: ExtensionAPI) {
             let settled = false;
             const answers = new Map<string, Answer>();
             // Sanitising and laying out question text is width-independent, so
-            // do it once per questionnaire instead of once per keystroke. Tab
-            // labels are always on screen; a question's body is only built when
-            // that question is first shown.
+            // do it once per questionnaire instead of once per keystroke.
             const cleanAnswers = new Map<string, string>();
             const labels = params.questions.map((item) =>
               clean(item.label || item.id),
             );
+            const tabLabel = (index: number) =>
+              `${answers.has(params.questions[index].id) ? "✓ " : ""}${labels[index]}`;
             const bodies: {
               prompt: string;
               optionRows: { suffix: string; description?: string }[];
@@ -250,8 +249,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                     )
                       submit(false);
                   } else {
-                    const count =
-                      q.options.length + (q.allowOther === false ? 0 : 1);
+                    const count = bodyFor(tab).optionRows.length;
                     if (matchesKey(data, "up"))
                       selected = Math.max(0, selected - 1);
                     if (matchesKey(data, "down"))
@@ -299,7 +297,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 let header: string;
                 if (params.questions.length > 1) {
                   const tabs = params.questions.map((item, i) => {
-                    const label = `${answers.has(item.id) ? "✓ " : ""}${labels[i]}`;
+                    const label = tabLabel(i);
                     return theme.fg(tab === i ? "accent" : "muted", tab === i ? `[ ${label} ]` : label);
                   });
                   tabs.push(theme.fg(q ? "muted" : "accent", q ? "Submit" : "[ Submit ]"));
@@ -311,7 +309,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 ) {
                   const position = `${tab + 1}/${params.questions.length + 1}`;
                   const suffix = q ? " · Submit" : "";
-                  const label = q ? `${answers.has(q.id) ? "✓ " : ""}${labels[tab]}` : "Submit";
+                  const label = q ? tabLabel(tab) : "Submit";
                   const labelWidth = w - position.length - suffix.length - 5;
                   const activeLabel = truncateToWidth(label, Math.max(1, labelWidth), "…");
                   header = labelWidth < 2

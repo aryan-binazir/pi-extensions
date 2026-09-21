@@ -24,13 +24,13 @@ function normalize(value: unknown): Todo[] {
 
 const clone = (snapshot: Snapshot): Snapshot => ({ version: 1, todos: snapshot.todos.map(item => ({ content: item.content, status: item.status })), staleTurns: snapshot.staleTurns });
 function parse(data: unknown): Snapshot {
-  const value = data as Snapshot;
-  if (value?.version !== 1 || !Number.isSafeInteger(value.staleTurns) || value.staleTurns < 0) throw new Error('Unsupported todo snapshot');
-  return { version: 1, todos: normalize(value.todos), staleTurns: value.staleTurns };
+  if (!data || typeof data !== 'object') throw new Error('Unsupported todo snapshot');
+  const { version, todos, staleTurns } = data as Record<keyof Snapshot, unknown>;
+  if (version !== 1 || typeof staleTurns !== 'number' || !Number.isSafeInteger(staleTurns) || staleTurns < 0) throw new Error('Unsupported todo snapshot');
+  return { version: 1, todos: normalize(todos), staleTurns };
 }
 
 export default function todo(pi: ExtensionAPI): void {
-  // Only trusted local code declares its own bounded storage/UI effects.
   let state: Snapshot = { version: 1, todos: [], staleTurns: 0 };
   const active = () => state.todos.some(item => item.status !== 'completed');
   const paint = (ctx: ExtensionContext) => {
@@ -42,11 +42,14 @@ export default function todo(pi: ExtensionAPI): void {
   let tip: object | undefined;
   let tipState: Snapshot | undefined;
   let tipSkipped = 0;
-  const valid = new WeakMap<object, boolean>();
-  const parses = (entry: object, data: unknown): boolean => {
-    let ok = valid.get(entry);
-    if (ok === undefined) { ok = true; try { parse(data); } catch { ok = false; } valid.set(entry, ok); }
-    return ok;
+  let tipReason = '';
+  const reason = (error: unknown) => error instanceof Error ? error.message : 'Unsupported todo snapshot';
+  // undefined means the entry has not been parsed yet; '' means it parsed.
+  const failure = new WeakMap<object, string>();
+  const parseFailure = (entry: object, data: unknown): string => {
+    let cached = failure.get(entry);
+    if (cached === undefined) { cached = ''; try { parse(data); } catch (error) { cached = reason(error); } failure.set(entry, cached); }
+    return cached;
   };
   const restore = (ctx: ExtensionContext) => {
     const branch = ctx.sessionManager.getBranch();
@@ -56,20 +59,25 @@ export default function todo(pi: ExtensionAPI): void {
       const entry = branch[index];
       if (entry.type === 'custom' && entry.customType === entryType) { newest = index; newestData = entry.data; break; }
     }
-    if (newest < 0) { tip = tipState = undefined; state = { version: 1, todos: [], staleTurns: 0 }; paint(ctx); return; }
+    if (newest < 0) { tip = tipState = undefined; tipSkipped = 0; tipReason = ''; state = { version: 1, todos: [], staleTurns: 0 }; paint(ctx); return; }
     if (branch[newest] !== tip) {
       let skipped = 0;
+      let why = '';
       for (let index = 0; index < newest; index++) {
         const entry = branch[index];
-        if (entry.type === 'custom' && entry.customType === entryType && !parses(entry, entry.data)) skipped++;
+        if (entry.type === 'custom' && entry.customType === entryType) {
+          const error = parseFailure(entry, entry.data);
+          if (error) { skipped++; why ||= error; }
+        }
       }
       let parsed: Snapshot | undefined;
-      try { parsed = parse(newestData); } catch { skipped++; }
-      valid.set(branch[newest], parsed !== undefined);
-      tip = branch[newest]; tipState = parsed; tipSkipped = skipped;
+      let tipError = '';
+      try { parsed = parse(newestData); } catch (error) { tipError = reason(error); skipped++; why ||= tipError; }
+      failure.set(branch[newest], tipError);
+      tip = branch[newest]; tipState = parsed; tipSkipped = skipped; tipReason = why;
     }
     state = tipState ?? { version: 1, todos: [], staleTurns: 0 };
-    if (ctx.hasUI) for (let index = 0; index < tipSkipped; index++) ctx.ui.notify('Skipped invalid or unsupported todo snapshot', 'warning');
+    if (ctx.hasUI && tipSkipped) ctx.ui.notify(`Skipped ${tipSkipped} invalid or unsupported todo snapshot${tipSkipped === 1 ? '' : 's'}: ${tipReason}`, 'warning');
     paint(ctx);
   };
   pi.on('session_start', (_event, ctx) => restore(ctx));
@@ -97,7 +105,7 @@ export default function todo(pi: ExtensionAPI): void {
   });
   pi.on('before_agent_start', (event, _ctx) => {
     if (!active()) return;
-    state = { ...state, staleTurns: Math.min(state.staleTurns + 1, 1_000_000) };
+    state = { ...state, staleTurns: state.staleTurns + 1 };
     pi.appendEntry(entryType, clone(state));
     const warning = state.staleTurns >= 6 ? 'STALE TODO: Before proceeding, reconcile this list with actual work; explain blockers or clear obsolete tasks. Do not mark tasks complete without evidence.' : state.staleTurns >= 3 ? 'This todo list has not changed for several turns. Update actual progress or explain the blocker.' : 'Keep the todo list current as work progresses.';
     return { systemPrompt: `${event.systemPrompt}\n\n${warning}\nPersisted todos are declared progress, not verified completion:\n${state.todos.map(item => `[${item.status}] ${item.content}`).join('\n')}` };

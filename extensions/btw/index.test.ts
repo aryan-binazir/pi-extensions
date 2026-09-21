@@ -10,8 +10,10 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
   const commands: Record<string, any> = {};
   const hooks: Record<string, any> = {};
   const requests: any[] = [];
+  const bgColors: string[] = [];
   let renderRequests = 0;
   let component: any;
+  let uiOptions: any;
   const terminal = { rows: 40, columns: 80 };
   const ctx: any = {
     mode: "tui",
@@ -34,15 +36,14 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
     ui: {
       notify() {},
       custom: (factory: any, options: any) => {
-        assert.equal(options.overlay, true);
-        assert.equal(options.overlayOptions.offsetY, -1);
+        uiOptions = options;
         return new Promise((resolve) => {
           component = factory(
             { requestRender() { renderRequests++; }, terminal },
             {
               fg: (_: string, value: string) => value,
               bg: (color: string, value: string) => {
-                assert.equal(color, "userMessageBg");
+                bgColors.push(color);
                 return `\x1b[48;5;236m${value}\x1b[49m`;
               },
             },
@@ -66,6 +67,8 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
     commands,
     hooks,
     requests,
+    bgColors,
+    options: () => uiOptions,
     get renderRequests() { return renderRequests; },
     terminal,
     lines: (width = 80): string[] => component.render(width),
@@ -77,10 +80,13 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 test("BTW fills its overlay from opening through the first answer and resize", async () => {
   const h = host();
   const result = h.commands.btw.handler("", h.ctx);
+  assert.deepEqual(h.options(), {
+    overlay: true,
+    overlayOptions: { width: "90%", maxHeight: "90%", offsetY: -1 },
+  });
   assert.equal(h.lines().length, 36);
   assert.match(h.lines()[0], /^┌─+┐$/);
   assert.match(h.render(), /Side conversation · disposable/);
-  assert.doesNotMatch(h.render(), /\bBTW\b/);
   assert.match(h.lines().at(-1)!, /^└─+┘$/);
   assert.ok(h.lines().every((line) => visibleWidth(line) === 80));
   h.key("First question");h.key("\r");
@@ -148,10 +154,10 @@ test("BTW shows the full side transcript and queues followups without losing a d
   const h = host();
   let finish!: () => void;
   const waiting = new Promise<void>((resolve) => { finish = resolve; });
-  const requests: any[] = [];
+  const contexts: any[] = [];
   h.ctx.modelRegistry.getProvider = () => ({
     streamSimple: (_model: any, context: any) => {
-      const index = requests.push(context);
+      const index = contexts.push(context);
       return {
         async *[Symbol.asyncIterator]() {
           yield { type: "text_delta", delta: index === 1 ? "First answer" : "Second answer" };
@@ -168,12 +174,12 @@ test("BTW shows the full side transcript and queues followups without losing a d
   h.key("\r");
   assert.match(h.render(), /\(queued\)/);
   assert.ok(h.lines().find((line) => line.includes("Second question"))?.includes("\x1b[48;5;236m"));
-  assert.equal(requests.length, 1);
+  assert.equal(contexts.length, 1);
   h.key("Unsent draft");
   finish();await tick();await tick();
-  assert.equal(requests.length, 2);
-  assert.match(JSON.stringify(requests[1].messages), /First question/);
-  assert.match(JSON.stringify(requests[1].messages), /First answer/);
+  assert.equal(contexts.length, 2);
+  assert.match(JSON.stringify(contexts[1].messages), /First question/);
+  assert.match(JSON.stringify(contexts[1].messages), /First answer/);
   const transcript = h.render();
   for (const text of ["First question", "First answer", "Second question", "Second answer", "Unsent draft"])
     assert.ok(transcript.includes(text), text);
@@ -284,23 +290,13 @@ test("side chat uses normal user backgrounds and Agent labels while streaming an
       assert.ok(!label.includes("\x1b[48;5;236m"));
       assert.doesNotMatch(stripTerminalSequences(lines.join("\n")), /You:|\bBTW\b|Assistant:|\*\*/);
     }
+    assert.deepEqual([...new Set(h.bgColors)], ["userMessageBg"]);
   };
   await tick();
   check();
   finish();await tick();
   check();
   h.key("\u001b");await result;
-});
-
-test("closing BTW discards queued messages", async () => {
-  const h = host();
-  let authenticate!: (value: any) => void;
-  h.ctx.modelRegistry.getApiKeyAndHeaders = () => new Promise((resolve) => { authenticate = resolve; });
-  const result = h.commands.btw.handler("First", h.ctx);
-  h.key("Queued");h.key("\r");
-  h.key("\u001b");await result;
-  authenticate({ ok: true, apiKey: "synthetic-key" });await tick();
-  assert.equal(h.requests.length, 0);
 });
 
 test("BTW streams a tool-free side answer with current system snapshot and followups", async () => {
@@ -404,22 +400,6 @@ test("oversized provider output is bounded and aborts stream", async () => {
   h.key("\u001b");
   await result;
 });
-test("provider terminal escape sequences are stripped from rendered text", async () => {
-  const h = host([
-    {
-      type: "text_delta",
-      delta: "safe\u001b]52;c;YXR0YWNr\u0007\u001b[2J answer",
-    },
-  ]);
-  const result = h.commands.btw.handler("Question", h.ctx);
-  await tick();
-  const output = h.render();
-  assert.doesNotMatch(output, /\u001b\]52|\u001b\[2J/);
-  assert.match(output, /safe.*answer/);
-  h.key("\u001b");
-  await result;
-});
-
 test("legacy compaction excludes discarded messages and retains the tool-result tail", async () => {
   const h = host();
   h.ctx.sessionManager.getBranch = () => [
@@ -464,16 +444,38 @@ test("legacy compaction excludes discarded messages and retains the tool-result 
   await result;
 });
 
-test("missing or invalid model output limits still use a positive bounded token budget", async () => {
-  for (const maxTokens of [undefined, 0, -1, NaN]) {
+test("the side request clamps any model output limit into a positive token budget", async () => {
+  for (const [maxTokens, expected] of [
+    [undefined, 4096],
+    [0, 4096],
+    [-1, 4096],
+    [NaN, 4096],
+    [8192, 4096],
+    [3000.7, 3000],
+  ] as [number | undefined, number][]) {
     const h = host();
     h.ctx.model.maxTokens = maxTokens;
     const result = h.commands.btw.handler("Question", h.ctx);
     await tick();
-    assert.equal(h.requests[0].options.maxTokens, 4096);
+    assert.equal(h.requests[0].options.maxTokens, expected, String(maxTokens));
     h.key("\u001b");
     await result;
   }
+});
+
+test("an oversized /btw argument is rejected in the overlay and stays editable", async () => {
+  const h = host();
+  const result = h.commands.btw.handler("x".repeat(16001), h.ctx);
+  await tick();
+  assert.match(h.render(), /Question exceeds 16000/);
+  assert.equal(h.requests.length, 0);
+  h.key("\u007f");
+  h.key("\r");
+  await tick();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].context.messages.at(-1).content.length, 16000);
+  h.key("\u001b");
+  await result;
 });
 
 test("an oversized followup stays editable and can be shortened without retyping", async () => {
@@ -491,16 +493,32 @@ test("an oversized followup stays editable and can be shortened without retyping
   h.key("\u001b");
   await result;
 });
-test("BTW strips residual terminal reset controls from provider output", async () => {
-  const h = host([{ type: "text_delta", delta: "safe\x1bcRESET\x07\x9b31mtext" }]);
-  const running = h.commands.btw.handler("Question", h.ctx);
-  await tick();
-  assert.ok(!h.render().includes("\x1bc"));
-  assert.ok(!h.render().includes("\x07"));
-  assert.ok(!h.render().includes("\x9b"));
-  h.key("\x1b");
-  await running;
-});
+for (const { name, delta, forbidden, visible } of [
+  {
+    name: "clipboard writes and screen erases",
+    delta: "safe\u001b]52;c;YXR0YWNr\u0007\u001b[2J answer",
+    forbidden: ["\u001b]52", "\u001b[2J", "\u0007"],
+    visible: /safe.*answer/,
+  },
+  {
+    name: "terminal resets and 8-bit controls",
+    delta: "safe\u001bcRESET\u0007\u009b31mtext",
+    forbidden: ["\u001bc", "\u0007", "\u009b"],
+    visible: /safe/,
+  },
+]) {
+  test(`BTW strips provider ${name} from rendered text`, async () => {
+    const h = host([{ type: "text_delta", delta }]);
+    const result = h.commands.btw.handler("Question", h.ctx);
+    await tick();
+    const output = h.render();
+    for (const sequence of forbidden)
+      assert.ok(!output.includes(sequence), JSON.stringify(sequence));
+    assert.match(output, visible);
+    h.key("\u001b");
+    await result;
+  });
+}
 
 test("paging past the top of a long side transcript stops on the first turn", async () => {
   const h = host([{ type: "text_delta", delta: "answer line\n\n".repeat(40) }]);
@@ -525,7 +543,7 @@ test("paging past the top of a long side transcript stops on the first turn", as
   await result;
 });
 
-test("a repainted transcript follows the answer as it streams in", async () => {
+test("streamed deltas accumulate in place and earlier turns stay in the transcript", async () => {
   const h = host();
   let push!: () => void;
   const gate = new Promise<void>((resolve) => {

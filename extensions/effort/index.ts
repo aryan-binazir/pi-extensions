@@ -31,8 +31,7 @@ export default function effort(pi: ExtensionAPI) {
   // Node's process event emitter survives extension module reloads. This one
   // namespaced transient event carries no saved defaults or retained requests.
   const events: EventEmitter = process;
-  const receiveHandoff = (data: Handoff) => {
-    const request = data as Handoff;
+  const receiveHandoff = (request: Handoff) => {
     if (
       !current ||
       current.sessionManager.getSessionFile() !== request.sessionFile
@@ -57,7 +56,6 @@ export default function effort(pi: ExtensionAPI) {
     );
   };
   events.on(HANDOFF, receiveHandoff);
-  const unsubscribe = () => events.off(HANDOFF, receiveHandoff);
   let closeSlider: (() => void) | undefined;
   pi.on("session_start", (_event, ctx) => {
     current = ctx;
@@ -65,7 +63,7 @@ export default function effort(pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     current = undefined;
     closeSlider?.();
-    unsubscribe();
+    events.off(HANDOFF, receiveHandoff);
   });
   pi.registerCommand("effort", {
     description:
@@ -120,11 +118,8 @@ export default function effort(pi: ExtensionAPI) {
                 clampThinkingLevel(model, pi.getThinkingLevel()),
               );
               closeSlider = () => done(undefined);
-              // Width-aware truncation dominates a render, so the output is
-              // memoised in two tiers: the border, header and footer depend
-              // only on the width, and each level row only on the selection,
-              // so a repaint or a cursor move repeats no measuring work.
-              // Both tiers are bounded by the supported level count.
+              // Width-aware truncation dominates a render, so memoise it in two
+              // tiers: the chrome by width, each level row by selection.
               let frameWidth = -1;
               let frameModel = "";
               let top = "";

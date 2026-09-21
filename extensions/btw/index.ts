@@ -25,7 +25,6 @@ const MAX_SNAPSHOT = 96000;
 const MAX_QUESTION = 16000;
 /** Control characters that must never reach the terminal, stripped on every repaint. */
 const CONTROL_CHARS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
-/** Ceiling on transcript lines kept painted between frames. */
 const MAX_PAINTED = 2048;
 /** Marks a queued question, so a block never reuses lines painted for another kind. */
 const QUEUED = Symbol("queued");
@@ -52,13 +51,6 @@ export default function btw(pi: ExtensionAPI) {
     if (ctx.mode !== "tui" || !ctx.model) {
       ctx.ui.notify(
         "Side conversation requires an interactive terminal and selected model",
-        "error",
-      );
-      return;
-    }
-    if (args.length > MAX_QUESTION) {
-      ctx.ui.notify(
-        `Side question exceeds ${MAX_QUESTION} characters`,
         "error",
       );
       return;
@@ -99,15 +91,12 @@ export default function btw(pi: ExtensionAPI) {
     } else {
       messages = buildSessionContext(branch).messages;
     }
-    // Serializing makes historical tool calls/results inert text. Pi handles both
-    // legacy compactions and retainedTail checkpoints before serialization.
-    // Each message serializes on its own and the parts are joined with a fixed
-    // separator, so serializing a run of messages yields exactly that stretch of
-    // the whole text. Walk backwards in doubling steps and stop once the tail
-    // overflows the snapshot budget: the snapshot is identical, but a long
-    // session is never rendered in full — and the slice below cannot pin that
-    // full rendering in memory for the life of the side conversation, which is
-    // how a V8 sliced string retains the string it was cut from.
+    // Serializing makes historical tool calls/results inert text. Each message
+    // serializes on its own and the parts join with a fixed separator, so
+    // serializing a run of messages yields exactly that stretch of the whole
+    // text: walk backwards in doubling steps and stop once the tail overflows
+    // the budget, so no slice here pins a full rendering of a long session the
+    // way a V8 sliced string retains the string it was cut from.
     let conversation = "";
     let cut = messages.length;
     while (cut > 0 && conversation.length <= MAX_SNAPSHOT) {
@@ -140,7 +129,7 @@ export default function btw(pi: ExtensionAPI) {
           let controller: AbortController | undefined;
           const turns: { question: string; answer: string; error?: string }[] = [];
           let painted = new Map<number, PaintedBlock>();
-          let asked: { w: number; palette: string; question: string; lines: string[] } | undefined;
+          let questionCache: { w: number; palette: string; question: string; lines: string[] } | undefined;
           const editor = new Editor(tui, {
             borderColor: (s) => theme.fg("accent", s),
             selectList: {
@@ -155,12 +144,6 @@ export default function btw(pi: ExtensionAPI) {
             if (closed) return;
             closed = true;
             controller?.abort();
-            turns.length = 0;
-            painted.clear();
-            asked = undefined;
-            pending.length = 0;
-            currentQuestion = "";
-            answer = "";
             snapshot = "";
             systemPrompt = "";
             editor.setText("");
@@ -243,6 +226,7 @@ export default function btw(pi: ExtensionAPI) {
                   sessionId: randomUUID(),
                 },
               );
+              let answering = true;
               status = "Answering…";
               tui.requestRender();
               for await (const event of stream) {
@@ -251,6 +235,7 @@ export default function btw(pi: ExtensionAPI) {
                   const remaining = MAX_ANSWER - answer.length;
                   answer += event.delta.slice(0, remaining);
                   if (answer.length >= MAX_ANSWER) {
+                    answering = false;
                     status = "Answer limit reached";
                     controller.abort();
                     break;
@@ -261,15 +246,14 @@ export default function btw(pi: ExtensionAPI) {
                   throw new Error(
                     event.error.errorMessage || "Provider request failed",
                   );
-                if (event.type === "done" && event.reason === "toolUse")
+                if (event.type === "done" && event.reason === "toolUse") {
+                  answering = false;
                   status = "Provider requested a tool; no tool was run";
+                }
               }
-              if (!closed) {
-                if (status === "Answering…")
-                  status = answer
-                    ? ""
-                    : "Provider returned no text";
-              }
+              // Nothing in the stream replaced the placeholder status.
+              if (!closed && answering)
+                status = answer ? "" : "Provider returned no text";
             } catch (error) {
               if (!closed)
                 status = failure = `Side request failed: ${error instanceof Error ? error.message.slice(0, 2000) : "Unknown provider error"}`;
@@ -321,14 +305,14 @@ export default function btw(pi: ExtensionAPI) {
               const userLines = (question: string) => {
                 // The question above a streaming answer is otherwise redrawn on
                 // every chunk even though only the answer below it is moving.
-                if (asked?.w === w && asked.palette === palette && asked.question === question)
-                  return asked.lines;
+                if (questionCache?.w === w && questionCache.palette === palette && questionCache.question === question)
+                  return questionCache.lines;
                 const box = new Box(padding, 1, (text) => theme.bg("userMessageBg", text));
                 box.addChild(new Markdown(clean(question), 0, 0, markdownTheme, {
                   color: (text) => theme.fg("userMessageText", text),
                 }, { preserveOrderedListMarkers: true, preserveBackslashEscapes: true }));
                 const lines = box.render(w);
-                asked = { w, palette, question, lines };
+                questionCache = { w, palette, question, lines };
                 return lines;
               };
               const turnLines = (question: string, reply: string) => [
@@ -347,11 +331,9 @@ export default function btw(pi: ExtensionAPI) {
                 w,
               ).slice(0, Math.max(0, innerHeight - footer.length - 1));
               const height = Math.max(0, innerHeight - header.length - footer.length);
-              // The transcript is a stack of blocks — completed turns, the turn in
-              // flight, then queued questions. Only the scrolled window is on screen,
-              // so lay the blocks out back to front and stop once it is covered:
-              // turns above the viewport are never re-rendered, which keeps a repaint
-              // proportional to the window instead of the whole side conversation.
+              // Lay the blocks out back to front and stop once the scrolled window
+              // is covered, so a repaint stays proportional to the window rather
+              // than to the whole side conversation.
               const blocks = turns.length + (busy ? 1 : 0) + pending.length;
               const blockAt = (index: number): Block => {
                 const turn = turns[index];
@@ -380,9 +362,6 @@ export default function btw(pi: ExtensionAPI) {
                   lines: () => userLines(`(queued)\n${queued}`),
                 };
               };
-              // Only the streaming turn changes between frames, so reuse the lines
-              // painted last frame while the block's own text holds still: a
-              // keystroke then never repaints a finished answer.
               const repainted = new Map<number, PaintedBlock>();
               const stack: string[][] = [];
               let first = blocks;
@@ -443,8 +422,6 @@ export default function btw(pi: ExtensionAPI) {
     } finally {
       close();
       open.delete(close);
-      snapshot = "";
-      systemPrompt = "";
     }
   };
   pi.registerCommand("btw", {

@@ -27,7 +27,7 @@ load; helpers and tests are not extensions.
      Hank Warren's Auto Permissions. This repo's status extension is only its
      display companion, not the approval engine.
 4. **Set up Guard**, if wanted: follow [Guard setup](#guard-setup-for-agents) to
-   copy the sample rules and link your local configuration. Installation alone
+   link the tracked rules file directly. Installation alone
    does not enable the rules.
 5. **Reload Pi.** Complete provider/server authentication where required.
 
@@ -73,7 +73,7 @@ reviewing [`extensions/guard/guard.json`](extensions/guard/guard.json):
 (
   set -eu
   repo=$(git rev-parse --show-toplevel)
-  local_rules="$repo/extensions/guard/guard.local.json"
+  rules="$repo/extensions/guard/guard.json"
   agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
   case "$agent_dir" in
     '~') agent_dir="$HOME" ;;
@@ -84,21 +84,19 @@ reviewing [`extensions/guard/guard.json`](extensions/guard/guard.json):
     printf 'Preserving existing config: %s — inspect before changing it.\n' "$target"
     exit 1
   fi
-  if [ ! -e "$local_rules" ] && [ ! -L "$local_rules" ]; then
-    # noclobber also protects against an intervening file creation.
-    (set -C; cat "$repo/extensions/guard/guard.json" > "$local_rules")
-  fi
+  test -f "$rules"
   mkdir -p "$agent_dir"
-  ln -s "$local_rules" "$target"
+  ln -s "$rules" "$target"
   ls -l "$target"
 )
 ```
 
-Completion: verify the link targets your local file, enable the extension, and
-ask the user to run `/reload`. If a config already exists, inspect it and agree
-on changes with the user; back it up before editing. Keep personal rules in the
-ignored `guard.local.json`, not the tracked sample. Setup is manual: the package
-never copies or links configuration automatically.
+Completion: verify the link targets this checkout's tracked
+`extensions/guard/guard.json`, enable the extension, and ask the user to run
+`/reload`. If a config already exists, inspect it and agree on changes with the
+user; back it up before editing. Edit the tracked file to change the rules;
+changes through the symlink also modify that file. Setup is manual: the package
+never links configuration automatically.
 
 Both sample booleans are required; set either to `false` to disable that rule:
 

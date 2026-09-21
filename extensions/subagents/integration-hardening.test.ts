@@ -6,6 +6,17 @@ import { join } from 'node:path';
 import test from 'node:test';
 import subagents from './index.ts';
 
+/** Poll a positive condition instead of sleeping for a guessed duration. */
+async function until<T>(probe: () => T | Promise<T>, what: string, budget = 4000): Promise<NonNullable<T>> {
+  const end = Date.now() + budget;
+  for (;;) {
+    const value = await probe();
+    if (value) return value as NonNullable<T>;
+    if (Date.now() >= end) throw new Error(`Timed out waiting for ${what}`);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
+
 async function fixture(run: (host: any) => Promise<void>) {
   const cwd = await mkdtemp(join(tmpdir(), 'subagent-integration-'));
   const oldPath = process.env.PATH, oldAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -23,15 +34,10 @@ async function fixture(run: (host: any) => Promise<void>) {
     subagents({events: {emit() {}}, getActiveTools: () => ['read','write','edit','bash'], registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: (name: string, command: any) => commands.set(name, command), on: (name: string, hook: any) => hooks.set(name, hook), sendMessage: (message: any, options: any) => notifications.push({type: message.customType, task: JSON.parse(message.content), options})} as any);
     await hooks.get('session_start')({}, ctx);
     const execute = (name: string, args: any = {}, signal?: AbortSignal) => tools.get(name).execute(name, args, signal, undefined, ctx);
-    const settle = async (id: string) => {
-      const end = Date.now() + 4000;
-      while (Date.now() < end) {
-        const task = (await execute('subagent_status')).details.find((task: any) => task.id === id);
-        if (task && !['queued','running'].includes(task.status)) return task;
-        await new Promise(resolve => setTimeout(resolve, 20));
-      }
-      throw new Error('Child did not settle');
-    };
+    const settle = (id: string) => until(async () => {
+      const task = (await execute('subagent_status')).details.find((task: any) => task.id === id);
+      return task && !['queued','running'].includes(task.status) ? task : undefined;
+    }, `child ${id} to settle`);
     await run({execute, settle, notifications, ctx, hooks, cwd, statuses, widgets, commands, uiNotices});
   } finally {
     await hooks.get('session_shutdown')?.();
@@ -44,9 +50,8 @@ async function fixture(run: (host: any) => Promise<void>) {
 test('batch re-clipping marks omitted output even when each original notice fitted', async () => fixture(async ({execute, settle, notifications}: any) => {
   const children = await Promise.all([1, 2].map(i => execute('subagent', {task: String(i) + 'x'.repeat(1700), preset: 'reader'})));
   await Promise.all(children.map(child => settle(child.details.id)));
-  await new Promise(resolve => setTimeout(resolve, 350));
-  const batch = notifications.find((notice: any) => notice.type === 'subagent-complete' && notice.task.tasks);
-  assert.equal(batch?.task.tasks.length, 2);
+  const batch = await until(() => notifications.find((notice: any) => notice.type === 'subagent-complete' && notice.task.tasks), 'the batched completion notice');
+  assert.equal(batch.task.tasks.length, 2);
   assert.ok(batch.task.tasks.every((task: any) => task.outputTruncated && task.output.length < task.outputLength));
 }));
 
@@ -143,12 +148,10 @@ test('direct children inherit the selected parent model and thinking level', asy
 
 test('near-simultaneous child completions produce one compact parent continuation', async () => fixture(async ({execute, notifications, cwd}: any) => {
   await Promise.all([execute('subagent', {task: 'batch', preset: 'reader'}), execute('subagent', {task: 'batch', preset: 'reader'})]);
-  const readyBy = Date.now() + 3000;
-  while ((await execute('subagent_status')).details.some((task: any) => task.output !== 'ready') && Date.now() < readyBy) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.ok((await execute('subagent_status')).details.every((task: any) => task.output === 'ready'));
+  await until(async () => (await execute('subagent_status')).details.every((task: any) => task.output === 'ready'), 'both batch children to report ready');
   await writeFile(join(cwd, 'release'), 'go');
-  const end = Date.now() + 3000;
-  while (notifications.length < 1 && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 20));
+  await until(() => notifications.length >= 1, 'the first completion notice');
+  // A second notice would arrive in its own 250 ms flush window.
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].task.tasks.length, 2);
@@ -159,9 +162,7 @@ test('status and completion delivery stay bounded when several children return l
   await Promise.all(children.map(task => settle(task.details.id)));
   const status = await execute('subagent_status');
   assert.ok(Buffer.byteLength(status.content[0].text, 'utf8') <= 32768);
-  const end = Date.now() + 3000;
-  while (!notifications.length && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.ok(notifications.length > 0);
+  await until(() => notifications.length > 0, 'a bounded completion notice');
   for (const notice of notifications) assert.ok(Buffer.byteLength(JSON.stringify(notice.task), 'utf8') <= 16384);
 }));
 
@@ -179,8 +180,7 @@ test('workflow children report to the awaiting workflow without duplicate parent
 test('cancelling a child does not wake the parent model for another paid turn', async () => fixture(async ({execute, notifications}: any) => {
   const task = await execute('subagent', {task: 'hold', preset: 'reader'});
   await execute('subagent_cancel', {id: task.details.id});
-  const end = Date.now() + 3000;
-  while (!notifications.length && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 20));
+  await until(() => notifications.length > 0, 'the cancellation notice');
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].options.triggerTurn, false);
 }));
@@ -203,8 +203,7 @@ test('registered direct and workflow children share native monitoring without re
   };
   // Start the workflow child first so the shared initial snapshot includes it.
   const workflow = execute('workflow', {source: "return await api.spawn({task:'hold',preset:'reader'},'tracking');"}).catch(() => undefined);
-  const end = Date.now() + 4000;
-  while (!calls.length && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
+  await until(() => calls.length > 0, 'the first shared tracker request');
   assert.equal(calls.length, 1); assert.match(calls[0][1].messages[0].content, /workflow/);
   assert.equal(widgets.get('interactive-tools:subagents')?.length, 2, 'workflow child appears in shared panel');
   await execute('subagent', {task: 'hold', preset: 'reader'});
@@ -217,8 +216,7 @@ test('registered direct and workflow children share native monitoring without re
   await execute('subagent_cancel', {id: 'all'}); await workflow;
   assert.equal(statuses.has('subagent-tracker'), false);
   const last = await execute('subagent', {task: 'batch', preset: 'reader'});
-  const restartedBy = Date.now() + 2000;
-  while (calls.length < 2 && Date.now() < restartedBy) await new Promise(resolve => setTimeout(resolve, 10));
+  await until(() => calls.length >= 2, 'the restarted tracker request', 2000);
   assert.equal(calls.length, 2); assert.match(calls[1][1].messages[0].content, /parent/);
   assert.equal((await execute('subagent_status')).details.length, 3);
   assert.equal(statuses.size, 1);
@@ -231,8 +229,10 @@ test('registered direct and workflow children share native monitoring without re
 
 test('missing tracker provider surfaces tracker failure in status while children remain usable', async () => fixture(async ({execute}: any) => {
   const child = await execute('subagent', {task: 'hold', preset: 'reader'});
-  await new Promise(resolve => setTimeout(resolve, 20));
-  const status = await execute('subagent_status', {id: child.details.id});
+  const status = await until(async () => {
+    const value = await execute('subagent_status', {id: child.details.id});
+    return /Luna tracker error:/.test(value.tracker) ? value : undefined;
+  }, 'the tracker failure to reach status');
   assert.match(status.tracker, /Luna tracker error:.*unavailable/);
   assert.equal(status.details.id, child.details.id);
   assert.match(status.content[1].text, /unavailable/);
@@ -250,8 +250,7 @@ test('shutdown aborts a pending tracker without delaying children and late repor
     })()}),
   };
   const waitForRequest = async (count: number) => {
-    const end = Date.now() + 2000;
-    while (requests.length < count && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
+    await until(() => requests.length >= count, `${count} tracker request(s)`, 2000);
     assert.equal(requests.length, count);
   };
   const first = await execute('subagent', {task: 'hold', preset: 'reader'}); await waitForRequest(1);
@@ -279,7 +278,7 @@ test('cancel-all suppresses a burst of child notifications at the registered bou
 test('ordinary cancellation bursts use a bounded batch without a paid wake', async () => fixture(async ({execute, notifications}: any) => {
   const children = await Promise.all(Array.from({length: 40}, () => execute('subagent', {task: 'hold', preset: 'writer'})));
   await Promise.all(children.map((child: any) => execute('subagent_cancel', {id: child.details.id})));
-  await new Promise(resolve => setTimeout(resolve, 350));
+  await until(() => notifications.length > 0, 'the batched cancellation notice');
   assert.equal(notifications.length, 1);
   const notice = notifications[0];
   assert.deepEqual(notice.options, {triggerTurn: false, deliverAs: 'nextTurn'});
@@ -313,8 +312,7 @@ test('tracker reports update one bounded footer status without entering chat or 
     })()}),
   };
   await execute('subagent', {task: 'hold', preset: 'reader'});
-  const end = Date.now() + 2000;
-  while (!statuses.has('subagent-tracker') && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
+  await until(() => statuses.has('subagent-tracker'), 'the tracker footer status', 2000);
   assert.deepEqual(notifications, []);
   assert.equal(statuses.size, 1);
   const status = statuses.get('subagent-tracker');
@@ -334,16 +332,11 @@ test('tracker reports update one bounded footer status without entering chat or 
 test('a real completion after cancellation overflow still requests a parent continuation', async () => fixture(async ({execute, notifications, cwd}: any) => {
   const children = await Promise.all(Array.from({length: 20}, () => execute('subagent', {task: 'hold', preset: 'writer'})));
   const completion = await execute('subagent', {task: 'batch', preset: 'reader'});
-  const readyBy = Date.now() + 3000;
-  while ((await execute('subagent_status', {id: completion.details.id})).details.output !== 'ready' && Date.now() < readyBy) {
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  assert.equal((await execute('subagent_status', {id: completion.details.id})).details.output, 'ready');
+  await until(async () => (await execute('subagent_status', {id: completion.details.id})).details.output === 'ready', 'the completing child to report ready');
   // Queued writers cancel synchronously and fill the retained notice slots first.
   await Promise.all(children.slice(1).map((child: any) => execute('subagent_cancel', {id: child.details.id})));
   await writeFile(join(cwd, 'release'), 'go');
-  const end = Date.now() + 3000;
-  while (!notifications.length && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 10));
+  await until(() => notifications.length > 0, 'the overflow continuation notice');
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].task.tasks.length + notifications[0].task.additionalCompletions, 20);
   assert.deepEqual(notifications[0].options, {triggerTurn: true, deliverAs: 'followUp'});

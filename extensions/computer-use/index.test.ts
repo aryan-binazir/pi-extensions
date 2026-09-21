@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import computerUse from './index.ts';
-import { pngResult, LinuxDesktop } from './native.ts';
+import { pngResult } from './native.ts';
 
 const register = () => {
   const handlers = new Map<string, () => Promise<void>>(); const tools: any[] = [];

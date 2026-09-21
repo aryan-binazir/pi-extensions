@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, realpath, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, mkdir, symlink, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -254,4 +254,80 @@ test('new branches use master or the remote default and require a base when neit
     git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk');
     assert.equal((await trees.open('from-remote')).branch, 'amb/from-remote');
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+
+/** The command handler builds its manager from the real home directory and Herdr environment; point both at the fixture. */
+async function withHome(home: string, body: () => Promise<void>): Promise<void> {
+  const previousHome = process.env.HOME, previousHerdr = process.env.HERDR_ENV;
+  process.env.HOME = home; delete process.env.HERDR_ENV;
+  try { await body(); } finally {
+    process.env.HOME = previousHome;
+    if (previousHerdr === undefined) delete process.env.HERDR_ENV; else process.env.HERDR_ENV = previousHerdr;
+  }
+}
+
+/** The extension registered against a recording context, with the session's routing cleared afterwards. */
+function commandHost(repo: string, sessionId: string, options: { confirm?: () => Promise<boolean> } = {}) {
+  const commands: Record<string, any> = {};
+  const entries: unknown[] = [];
+  const notices: string[] = [];
+  const ctx: any = {
+    cwd: repo, hasUI: true, isIdle: () => true,
+    sessionManager: { getSessionId: () => sessionId, getBranch: () => [] },
+    ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: options.confirm ?? (async () => true) },
+  };
+  worktree({ on() {}, registerTool() {}, appendEntry: (_type: string, data: unknown) => entries.push(data), registerCommand: (name: string, value: any) => commands[name] = value } as any);
+  return { ctx, entries, notices, run: (args: string) => commands.worktree.handler(args, ctx), release: () => setActiveCwd(repo, undefined, sessionId) };
+}
+
+test('/worktree <name> --branch creates the checkout, activates it and persists the switch', async () => {
+  const { home, repo } = await repoFixture('pi-worktree-command-');
+  const h = commandHost(repo, 'command-open');
+  try {
+    await withHome(home, async () => {
+      await h.run('feature --branch team/exact');
+      const path = join(home, 'repos/.worktrees/repo/feature');
+      assert.deepEqual({ entries: h.entries, active: getActiveCwd(repo, 'command-open'), notice: h.notices.at(-1) },
+        { entries: [{ version: 1, path }], active: path, notice: `Active worktree: ${path}. Pi session storage remains at ${repo}.` });
+      await h.run('feature --base');
+      assert.equal(h.notices.at(-1), 'Usage: /worktree <name> [--branch branch] [--base ref]');
+    });
+  } finally { h.release(); await rm(home, { recursive: true, force: true }); }
+});
+
+test('/worktree remove keeps quoted spaces in the path and reports an unconfirmed removal', async () => {
+  const { home, repo } = await repoFixture('pi worktree spaced ');
+  const h = commandHost(repo, 'command-spaces', { confirm: async () => false });
+  try {
+    await withHome(home, async () => {
+      const checkout = await new Worktrees(repo, { home, herdr: false }).open('task');
+      assert.match(checkout.path, / /);
+      await h.run(`remove "${checkout.path}" --force`);
+      assert.equal(h.notices.at(-1), `${checkout.path}: not confirmed`);
+      await h.run(`remove '${checkout.path}'`);
+      assert.equal(h.notices.at(-1), `${checkout.path}: not confirmed`);
+      await h.run('remove "unclosed');
+      assert.equal(h.notices.at(-1), 'Unclosed quote in worktree command');
+      assert.equal(await realpath(checkout.path), checkout.path);
+    });
+  } finally { h.release(); await rm(home, { recursive: true, force: true }); }
+});
+
+test('removing the active checkout through an alias resets routing before the directory disappears', async () => {
+  const { home, repo } = await repoFixture('pi-worktree-alias-');
+  const h = commandHost(repo, 'command-alias');
+  try {
+    await withHome(home, async () => {
+      const checkout = await new Worktrees(repo, { home, herdr: false }).open('task');
+      const alias = join(home, 'alias'); await symlink(checkout.path, alias);
+      setActiveCwd(repo, checkout.path, 'command-alias');
+      await h.run(`remove "${alias}"`);
+      assert.deepEqual({ active: getActiveCwd(repo, 'command-alias'), entries: h.entries, notice: h.notices.at(-1) },
+        { active: repo, entries: [{ version: 1, path: repo }], notice: `${checkout.path}: removed` });
+      await assert.rejects(realpath(checkout.path), { code: 'ENOENT' });
+      await h.run(`remove "${alias}"`);
+      assert.match(h.notices.at(-1) ?? '', /ENOENT/);
+    });
+  } finally { h.release(); await rm(home, { recursive: true, force: true }); }
 });

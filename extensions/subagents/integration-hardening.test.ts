@@ -313,3 +313,44 @@ test('shutdown suppresses pending batched cancellations and child completions', 
   await new Promise(resolve => setTimeout(resolve, 350));
   assert.deepEqual(notifications, []);
 }));
+
+test('/subagents cancel ID cancels one child and tells the user', async () => fixture(async ({execute, commands, ctx, uiNotices, settle}: any) => {
+  const child = await execute('subagent', {task: 'hold', preset: 'reader'});
+  await commands.get('subagents').handler(`cancel ${child.details.id}`, ctx);
+  assert.deepEqual({notice: uiNotices.at(-1), status: (await settle(child.details.id)).status}, {notice: 'Cancellation completed', status: 'cancelled'});
+}));
+
+test('/subagents cancel with an unknown id reports no active task', async () => fixture(async ({commands, ctx, uiNotices}: any) => {
+  await commands.get('subagents').handler('cancel nope', ctx);
+  assert.equal(uiNotices.at(-1), 'No active task with that ID');
+}));
+
+test('/subagents cancel all stops every running child', async () => fixture(async ({execute, commands, ctx, uiNotices}: any) => {
+  const children = await Promise.all([execute('subagent', {task: 'hold', preset: 'reader'}), execute('subagent', {task: 'hold', preset: 'reader'})]);
+  await commands.get('subagents').handler('cancel all', ctx);
+  const statuses = (await execute('subagent_status')).details.filter((task: any) => children.some(child => child.details.id === task.id)).map((task: any) => task.status);
+  assert.deepEqual({notice: uiNotices.at(-1), statuses}, {notice: 'Cancellation completed', statuses: ['cancelled', 'cancelled']});
+}));
+
+test('subagent_status pages summaries ten at a time with offset and limit', async () => fixture(async ({execute}: any) => {
+  const children: any[] = [];
+  for (let i = 0; i < 12; i++) children.push(await execute('subagent', {task: `page ${i}`, preset: 'reader'}));
+  // The shared `settle` reads the first summary page, which is exactly what this test bounds; wait by id instead.
+  for (const child of children) await until(async () => (await execute('subagent_status', {id: child.details.id})).details.status === 'succeeded', `child ${child.details.id} to succeed`);
+  const firstPage = (await execute('subagent_status')).details;
+  const secondPage = (await execute('subagent_status', {offset: 10})).details;
+  assert.deepEqual([firstPage.length, secondPage.length], [10, 2]);
+  // Retention orders by completion, so the pages must tile the set without overlap rather than match spawn order.
+  assert.deepEqual([...firstPage, ...secondPage].map((task: any) => task.id).sort(), children.map((child: any) => child.details.id).sort());
+}));
+
+test('a failed completion notification is recorded on the task instead of thrown from the flush timer', async () => fixture(async ({execute, settle, notifications}: any) => {
+  notifications.push = () => { throw new Error('UI gone'); };
+  const child = await execute('subagent', {task: 'note', preset: 'reader'});
+  await settle(child.details.id);
+  const detail = await until(async () => {
+    const view = (await execute('subagent_status', {id: child.details.id})).details;
+    return view.notificationError ? view : undefined;
+  }, 'the recorded notification failure');
+  assert.equal(detail.notificationError, 'Completion notification failed: Error: UI gone');
+}));

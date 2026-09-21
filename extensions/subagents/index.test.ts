@@ -129,3 +129,13 @@ test('standalone registered subagents and workflows inherit active builtins and 
     await assert.rejects(workflow('return await api.readFile("input");'), /outside parent permissions/);
   });
 });
+
+
+test('a child launches with discovery disabled and receives a dash-prefixed brief verbatim after --', async () =>
+  withHost({prefix: 'subagent-discovery-', pi: echoArgs, ctx: {hasUI: false}}, async ({execute, notifications}) => {
+    await execute('subagent', {task: '--version', preset: 'reader'});
+    const completion = await until(() => notifications[0], 'the completion notification', 5000);
+    const argv: string[] = JSON.parse(completion.task.output).args;
+    assert.deepEqual(argv.filter(arg => arg.startsWith('--no-') || arg === '--').concat(argv.at(-1)!),
+      ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--', '--version']);
+  }));

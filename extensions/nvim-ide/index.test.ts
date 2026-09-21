@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import nvimIde, { editorContext, statusText } from './index.ts';
 import { maxSelectionChars } from './link.ts';
 import { fakeIde, token, until } from './test-support.ts';
+import { setActiveCwd } from '../worktree/routing.ts';
 
 type Handler = (event: any, ctx: any) => any;
 
@@ -29,7 +30,7 @@ function fakePi() {
 function fakeCtx(cwd: string) {
   const status: (string | undefined)[] = [];
   const notices: string[] = [];
-  return { ctx: { cwd, hasUI: true, ui: { setStatus: (_key: string, text: string | undefined) => status.push(text), notify: (message: string) => notices.push(message) } }, status, notices };
+  return { ctx: { cwd, hasUI: true, sessionManager: { getSessionId: () => 'ide-session' }, ui: { setStatus: (_key: string, text: string | undefined) => status.push(text), notify: (message: string) => notices.push(message) } }, status, notices };
 }
 
 type Connected = { ide: ReturnType<typeof fakeIde>; project: string } & ReturnType<typeof fakePi> & ReturnType<typeof fakeCtx>;
@@ -181,4 +182,48 @@ test('status text shows connection, active file, cursor line or selected range',
   assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: '', filePath: '/w/math.ts', start: { line: 5, character: 0 }, end: { line: 5, character: 0 }, isEmpty: true } }), 'Neovim ✓ math.ts:6');
   assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'abc', filePath: '/w/math.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 1 }, isEmpty: false } }), 'Neovim ✓ math.ts:5-7 ▮');
   assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'ab', filePath: '/w/math.ts', start: { line: 4, character: 0 }, end: { line: 4, character: 2 }, isEmpty: false } }), 'Neovim ✓ math.ts:5 ▮');
+});
+
+
+test('follow after edit opens the file inside the active worktree, not the original directory', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    const routed = join(project, 'checkout'); await mkdir(routed);
+    setActiveCwd(project, routed, ctx.sessionManager.getSessionId());
+    try {
+      await fire('tool_execution_start', { toolCallId: 'w1', toolName: 'edit', args: { path: 'a.ts', edits: [] } }, ctx);
+      await fire('tool_execution_end', { toolCallId: 'w1', toolName: 'edit', isError: false, result: { details: { firstChangedLine: 2 } } }, ctx);
+      await until(() => ide.calls.length === 1);
+      assert.equal(ide.calls[0].arguments.filePath, join(routed, 'a.ts'));
+    } finally { setActiveCwd(project, undefined, ctx.sessionManager.getSessionId()); }
+  });
+});
+
+test('nvim_open resolves relative paths against the active worktree', async () => {
+  await withConnectedIde(async ({ ide, project, tools, ctx }) => {
+    const routed = join(project, 'checkout'); await mkdir(routed);
+    setActiveCwd(project, routed, ctx.sessionManager.getSessionId());
+    try {
+      await tools.get('nvim_open').execute('o1', { path: 'b.ts' }, undefined, undefined, ctx);
+      assert.equal(ide.calls[0].arguments.filePath, join(routed, 'b.ts'));
+    } finally { setActiveCwd(project, undefined, ctx.sessionManager.getSessionId()); }
+  });
+});
+
+test('/vim reconnect drops and re-establishes the link', async () => {
+  await withConnectedIde(async ({ commands, ctx, status }) => {
+    const before = status.length;
+    await commands.get('vim').handler('reconnect', ctx);
+    await until(() => status.length >= before + 2);
+    assert.deepEqual(status.slice(before), [undefined, 'Neovim ✓']);
+  });
+});
+
+test('a mention past the line cap is clipped in the body but keeps the requested range in its header', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    await writeFile(join(project, 'big.ts'), Array.from({ length: 2500 }, (_, i) => `L${i + 1}`).join('\n'));
+    ide.broadcast('at_mentioned', { filePath: join(project, 'big.ts'), lineStart: 1, lineEnd: 2500 });
+    await settle();
+    const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
+    assert.match(turn.systemPrompt, /User sent from editor: .*big\.ts lines 1-2500\n```\n(?:L\d+\n){1999}L2000\n```/);
+  });
 });

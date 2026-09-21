@@ -1,5 +1,13 @@
 # ADR 009: Active worktree routing inside the current Pi session
 
+## Context
+
+Working in a second checkout normally means a second Pi session, which loses the
+conversation. Pi's own cwd, session storage and loaded resources cannot be moved
+mid-session, so the extension has to route the tools that act on the filesystem —
+bash, user shell commands and relative file-tool paths — at a different checkout
+while the session itself stays put, and make that boundary visible.
+
 ## Decision
 
 `/worktree` retains the current conversation and persists its active checkout in a versioned session entry. A shared process registry keyed by original cwd and session ID, cleared when switching sessions and at shutdown, exposes `getActiveCwd(originalCwd, sessionId)` to delegation and permission enforcement. Built-in relative file arguments become absolute before execution, and the bash spawn hook and user shell operations select the active directory without rewriting shell commands. Absolute paths retain their meaning. A version-attributed path helper mirrors Pi 0.85.1 tool normalization (leading `@`, tilde, file URLs and Unicode spaces) before resolving, and policy checks share this interpretation. Switching is restricted to idle turns.

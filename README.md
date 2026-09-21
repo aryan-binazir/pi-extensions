@@ -56,8 +56,9 @@ Pi's model/thinking save bindings remain unchanged.
 
 ## Subagent configuration
 
-**Astra medium is the bundled implementation default.** Profiles choose model and
-thinking; `reader`/`writer` presets independently control tool permissions.
+Profiles choose model and thinking; `reader`/`writer` presets independently
+control tool permissions. Selection guidance — which profile to reach for, and
+the bundled default — lives in [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md).
 
 Overrides merge field by field:
 
@@ -69,17 +70,8 @@ bundled defaults
 ```
 
 `PI_CODING_AGENT_DIR` overrides the global agent directory. Missing files fall back.
-Reload after edits. See [profiles and override examples](docs/subagents.md#subagent-profiles).
-
-Inspect the effective catalog from a checkout with dependencies installed:
-
-```sh
-./extensions/subagents/show-config
-./extensions/subagents/show-config --cwd /path/to/project --json
-```
-
-The CLI and prompt hook share one resolver; the hook does not execute the script.
-The standalone CLI includes local overrides only for projects with saved Pi trust.
+Reload after edits. See [profiles, override examples and the `show-config`
+CLI](docs/subagents.md#subagent-profiles).
 
 ## Development
 
@@ -89,9 +81,8 @@ npm run check
 ```
 
 `check` runs TypeScript, ESLint, and tests. Individual commands are
-`npm run typecheck`, `npm run lint`, and `npm test`. CI covers Linux/macOS with
-Node 22/24 using fixtures, not live provider authentication or desktop permissions.
-Architecture decisions live in [docs/adr](docs/adr).
+`npm run typecheck`, `npm run lint`, and `npm test`. Verification is local; this
+repository has no CI. Architecture decisions live in [docs/adr](docs/adr).
 
 To try one extension from a checkout: `pi -e ./extensions/todo/index.ts`.
 This package does not change host launchers, shell aliases, or authentication.

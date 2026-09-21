@@ -7,15 +7,14 @@ repository no longer ships a general MCP client:
 pi install npm:pi-mcp-adapter@2.34.0
 ```
 
-Remove any explicit loading of the retired Harbor entrypoint and avoid loading
-multiple MCP clients. This is a Pi package install, not a repository dependency.
-Review upgrades before changing the pin.
+This is a Pi package install, not a repository dependency; review upgrades before
+changing the pin, and do not load a second MCP client alongside it.
 
 ## Configuration
 
 Merge this example into `~/.pi/agent/mcp.json` (or
 `$PI_CODING_AGENT_DIR/mcp.json`), the Pi-specific global override. Preserve unrelated
-settings and servers. Do not copy the old Harbor `servers`/`consent` format.
+settings and servers.
 
 ```json
 {
@@ -75,8 +74,7 @@ the browser cannot reach its localhost callback, follow the adapter's manual
 callback instructions. Authentication grants account access; the approval policy above separately
 allows Linear mutations without adapter prompts. Persistent OAuth uses the OS credential store by default and fails
 closed if it is unavailable. No credentials, authorization codes, callback URLs,
-or token files belong in this repository. The old Harbor credentials/config are
-not automatically migrated; authenticate through the adapter.
+or token files belong in this repository.
 
 Use `/mcp` for status and `/mcp reconnect linear` to refresh discovery. Lazy
 lifecycle connects on demand rather than at startup. The single `mcp` proxy is

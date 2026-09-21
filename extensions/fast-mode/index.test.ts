@@ -189,3 +189,38 @@ test('alias derivation tracks the live base model list rather than a stale snaps
  assert.deepEqual(provider.getModels().map(model=>model.id),[base.id,base.id+'~fast',other.id,other.id+'~fast']);
  assert.equal(provider.getModels().find(model=>model.id===base.id+'~fast')!.name,base.name+' (fast)');
 });
+
+const savedAlias=(onSelect:(model:any)=>void)=>{
+ const original=openaiProvider();const base=original.getModels().find(m=>m.id==='gpt-5.5')!;
+ let provider:any=original;let registrations=0;let startup:any;
+ const ctx:any={model:base,modelRegistry:{getRegisteredProviderConfig:()=>undefined,getRegisteredNativeProvider:(id:string)=>id==='openai'&&registrations?provider:undefined,getProvider:(id:string)=>id==='openai'?provider:undefined,find:(id:string,name:string)=>id==='openai'?provider.getModels().find((m:any)=>m.id===name):undefined},sessionManager:{getBranch:()=>[{type:'model_change',provider:'openai',modelId:'gpt-5.5~fast'}]},ui:{notify(){}}};
+ fastMode({registerProvider:(p:any)=>{registrations++;provider=p;},on:(name:string,fn:any)=>{if(name==='session_start')startup=fn;},registerCommand:()=>{},getThinkingLevel:()=>'high',setThinkingLevel:()=>{},setModel:async(value:any)=>{onSelect(value);ctx.model=value;return true;}} as any);
+ return {ctx,startup};
+};
+
+test('an explicit --model on the command line overrides the saved fast alias at startup',async()=>{
+ let selected='gpt-5.5';
+ const h=savedAlias(model=>{selected=model.id;});
+ const argv=process.argv;process.argv=[...argv,'--model','openai/gpt-5.5'];
+ try{await h.startup({reason:'startup'},h.ctx);}finally{process.argv=argv;}
+ assert.equal(selected,'gpt-5.5');
+});
+
+test('a resumed session restores the saved fast alias even when the command line named a model',async()=>{
+ let selected='gpt-5.5';
+ const h=savedAlias(model=>{selected=model.id;});
+ const argv=process.argv;process.argv=[...argv,'--model','openai/gpt-5.5'];
+ try{await h.startup({reason:'resume'},h.ctx);}finally{process.argv=argv;}
+ assert.equal(selected,'gpt-5.5~fast');
+});
+
+test('/fast on a model outside the OpenAI Responses paths reports unavailable and changes nothing',async()=>{
+ const runtime=await ModelRuntime.create({modelsPath:null,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
+ const registry=new ModelRegistry(runtime);
+ const base=registry.getAll().find(model=>model.provider==='anthropic')!;
+ let selections=0;const notices:[string,string][]=[];let command:any;
+ const ctx:any={model:base,modelRegistry:registry,ui:{notify:(message:string,level:string)=>notices.push([message,level])}};
+ fastMode({registerProvider:(provider:any)=>runtime.registerNativeProvider(provider),on(){},registerCommand:(_name:string,entry:any)=>{command=entry;},getThinkingLevel:()=>'low',setThinkingLevel(){},setModel:async()=>{selections++;return true;}} as any);
+ await command.handler('on',ctx);
+ assert.deepEqual({selections,notices},{selections:0,notices:[['Fast mode is unavailable for this provider path','error']]});
+});

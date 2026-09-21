@@ -507,3 +507,20 @@ test("frames depend only on state, not on earlier widths or selections", async (
     await Promise.all(running);
   }
 });
+
+test("the Submit tab does not accept a partially answered questionnaire", async () => {
+  const h = host();
+  const result = h.run([question("a"), question("b")]);
+  h.key("\r");
+  h.key("\t");
+  h.key("\r");
+  h.key("");
+  assert.equal((await result).details.cancelled, true);
+});
+
+test("the model receives the answers as JSON text", async () => {
+  const h = host();
+  const result = h.run([question("a")]);
+  h.key("\r");
+  assert.equal((await result).content[0].text, '{"cancelled":false,"answers":[{"id":"a","value":"yes","label":"Yes","wasCustom":false}]}');
+});

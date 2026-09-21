@@ -140,3 +140,12 @@ test("shutdown does not replace an editor installed by another extension", () =>
   assert.equal(h.ctx.ui.getEditorComponent(), other);
   assert.equal(h.editor, e); assert.equal(e.getText(), "other draft");
 });
+
+test("restoring the only draft into an empty editor clears the stash status", () => {
+  const h = stashHost();
+  h.editor.setText("draft"); h.editor.handleInput("\x13");
+  assert.match(h.status!, /stash/i);
+  h.editor.handleInput("\x13");
+  assert.equal(h.status, undefined);
+  h.emit("session_shutdown");
+});

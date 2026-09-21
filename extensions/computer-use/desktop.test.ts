@@ -14,7 +14,7 @@ test('desktop serializes operations and does not repeat mutations after transpor
   await session.close();
 });
 
-test('inspection reconnects once; timeout closes transport and releases queue', async () => {
+test('inspection reconnects once after a transport failure', async () => {
   let created = 0, closed = 0;
   const session = new DesktopSession(() => {
     const generation = ++created;
@@ -22,9 +22,14 @@ test('inspection reconnects once; timeout closes transport and releases queue', 
   });
   assert.deepEqual(await session.run({ action: 'accessibility' }), { available: true });
   assert.equal(created, 2); await session.close(); assert.equal(closed, 2);
-  const hanging = new DesktopSession(() => ({ run: () => new Promise(() => {}), close() { closed++; } }), 15);
+});
+
+test('a timed-out mutation closes its transport and releases the queue', async () => {
+  let closed = 0;
+  const hanging = new DesktopSession(() => ({ run: () => new Promise<never>(() => {}), close() { closed++; } }), 15);
   await assert.rejects(hanging.run({ action: 'type', text: 'one' }), /outcome may be partial/);
-  await hanging.close(); assert.equal(closed, 3);
+  assert.equal(closed, 1);
+  await hanging.close(); assert.equal(closed, 1);
 });
 
 test('invalid desktop commands never reach transport', async () => {
@@ -40,7 +45,7 @@ test('already cancelled calls do not create a native transport', async () => {
   let created = 0;
   const session = new DesktopSession(() => { created++; throw new Error('must not run'); });
   const abort = new AbortController(); abort.abort();
-  await assert.rejects(session.run({ action: 'type', text: 'never' }, abort.signal));
+  await assert.rejects(session.run({ action: 'type', text: 'never' }, abort.signal), /abort/i);
   assert.equal(created, 0); await session.close();
 });
 

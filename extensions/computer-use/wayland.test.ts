@@ -80,9 +80,14 @@ test('real Unix wire transport discovers output, binds pointer to it, clicks and
 
 test('invalid compositor frames fail promptly and close the socket', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-wayland-bad-')), path = join(dir, 'socket');
-  const server = createServer(socket => { socket.resume(); socket.write(ints(1, 4 << 16)); });
+  let onDisconnect!: () => void;
+  const disconnected = new Promise<void>(resolve => { onDisconnect = resolve; });
+  const server = createServer(socket => { socket.once('close', onDisconnect); socket.resume(); socket.write(ints(1, 4 << 16)); });
   await new Promise<void>(resolve => server.listen(path, resolve));
   const pointer = new WaylandPointer(path);
-  try { await assert.rejects(pointer.outputs(AbortSignal.timeout(1000)), /Invalid Wayland event frame/); }
+  try {
+    await assert.rejects(pointer.outputs(AbortSignal.timeout(1000)), /Invalid Wayland event frame/);
+    await Promise.race([disconnected, new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('socket stayed open')), 2000).unref())]);
+  }
   finally { pointer.close(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true }); }
 });

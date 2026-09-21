@@ -3,18 +3,34 @@ import assert from 'node:assert/strict';
 import computerUse from './index.ts';
 import { pngResult, LinuxDesktop } from './native.ts';
 
-test('all five Linux tools register with sequential execution and preserve screenshot intent', { skip: process.platform === 'darwin' }, () => {
-  const tools: any[] = [];
-  computerUse({ on() {}, registerTool(tool: any) { tools.push(tool); } } as any);
-  assert.deepEqual(tools.map(t => t.name), ['computer_screenshot', 'computer_accessibility', 'computer_click', 'computer_type', 'computer_scroll']);
-  assert.ok(tools.every(t => t.executionMode === 'sequential'));
-  assert.equal(tools[2].parameters.properties.x.maximum, 1);
+const register = () => {
+  const handlers = new Map<string, () => Promise<void>>(); const tools: any[] = [];
+  computerUse({ on(name: string, handler: any) { handlers.set(name, handler); }, registerTool(tool: any) { tools.push(tool); } } as any);
+  return { handlers, tools };
+};
+
+test('every registered desktop tool is sequential, uniquely named and closed to unknown parameters', () => {
+  const { tools } = register();
+  assert.ok(tools.length >= 5);
+  assert.ok(tools.every(tool => tool.executionMode === 'sequential'));
+  assert.ok(tools.every(tool => tool.parameters.additionalProperties === false));
+  assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
+  assert.ok(tools.every(tool => tool.name.startsWith('computer_')));
 });
 
-test('Linux accessibility reports unavailable without contacting desktop', async () => {
-  const backend = new LinuxDesktop({});
+test('Linux registers five desktop tools and keeps click coordinates normalized', { skip: process.platform === 'darwin' }, () => {
+  const { tools } = register();
+  assert.deepEqual(tools.map(tool => tool.name), ['computer_screenshot', 'computer_accessibility', 'computer_click', 'computer_type', 'computer_scroll']);
+  assert.equal(tools.find(tool => tool.name === 'computer_click').parameters.properties.x.maximum, 1);
+});
+
+test('Linux accessibility reports unavailable without contacting the desktop', async () => {
+  // Any contact attempt would reach this unusable socket or an empty PATH and reject.
+  const backend = new LinuxDesktop({ WAYLAND_DISPLAY: '/nonexistent/pi-wayland-socket', PATH: '/nonexistent' });
   const result = await backend.run({ action: 'accessibility' }, new AbortController().signal);
-  assert.equal(result.available, false); assert.equal(result.kind, 'accessibility'); backend.close();
+  assert.equal(result.available, false);
+  assert.match(String(result.reason), /screenshot/i);
+  backend.close();
 });
 
 test('screenshot rejects invalid output and retains PNG dimensions', () => {
@@ -23,13 +39,18 @@ test('screenshot rejects invalid output and retains PNG dimensions', () => {
   const result = pngResult(pixel, 'HEADLESS-1'); assert.equal(result.width, 1); assert.equal(result.height, 1); assert.equal(result.output, 'HEADLESS-1');
 });
 
-test('session shutdown blocks desktop use until a new session starts', { skip: process.platform === 'darwin' }, async () => {
-  const handlers = new Map<string, () => Promise<void>>(); const tools: any[] = [];
-  computerUse({ on(name: string, handler: any) { handlers.set(name, handler); }, registerTool(tool: any) { tools.push(tool); } } as any);
+test('session shutdown blocks further desktop use', async () => {
+  const { handlers, tools } = register();
   const accessibility = tools.find(tool => tool.name === 'computer_accessibility');
   await handlers.get('session_shutdown')!();
-  await assert.rejects(accessibility.execute('closed', {}), /session closed/);
+  await assert.rejects(accessibility.execute('closed', { app: 'fixture' }), /session closed/);
+});
+
+test('a new session restores desktop use after shutdown', { skip: process.platform !== 'linux' }, async () => {
+  const { handlers, tools } = register();
+  const accessibility = tools.find(tool => tool.name === 'computer_accessibility');
+  await handlers.get('session_shutdown')!();
   await handlers.get('session_start')!();
-  if (process.platform === 'linux') assert.equal((await accessibility.execute('new', {})).details.available, false);
+  assert.equal((await accessibility.execute('new', {})).details.available, false);
   await handlers.get('session_shutdown')!();
 });

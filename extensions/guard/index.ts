@@ -1,6 +1,6 @@
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { getAgentDir, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { getAgentDir, isToolCallEventType, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 // A static simple-command lexer, not a shell interpreter. Never executes input.
 function commands(source: string): string[][] {
@@ -57,7 +57,7 @@ function flags(args: string[], action: string): Set<string> {
         const flag = arg[j];
         if (shortValueFlags[action].includes(flag)) { if (j === arg.length - 1) i++; break; }
         const value = arg[j + 1] === '=' ? arg.slice(j + 2) : undefined;
-        record(action === 'create' && flag === 'd' ? '--draft' : `-${flag}`, value);
+        record(flag === 'h' ? '--help' : action === 'create' && flag === 'd' ? '--draft' : `-${flag}`, value);
         if (value !== undefined) break;
       }
     }
@@ -67,7 +67,7 @@ function flags(args: string[], action: string): Set<string> {
 
 export default function guard(pi: ExtensionAPI) {
   pi.on('tool_call', async event => {
-    if (event.toolName !== 'bash') return;
+    if (!isToolCallEventType('bash', event)) return;
     const path = join(getAgentDir(), 'guard.json');
     let config: { requireDraftPr: boolean; blockAdminMerge: boolean };
     try {
@@ -77,10 +77,18 @@ export default function guard(pi: ExtensionAPI) {
         throw new Error('Expected only boolean requireDraftPr and blockAdminMerge settings');
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        try {
+          if ((await lstat(path)).isSymbolicLink()) {
+            return { block: true, reason: `Fix ${path}: its symlink target is missing.` };
+          }
+        } catch (statError) {
+          if ((statError as NodeJS.ErrnoException).code === 'ENOENT') return;
+        }
+      }
       return { block: true, reason: `Fix ${path} before running Bash: ${error instanceof Error ? error.message : String(error)}` };
     }
-    for (const words of commands(event.input.command as string)) {
+    for (const words of commands(event.input.command)) {
       let start = 0;
       while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[start] ?? '')) start++;
       if (basename(words[start] ?? '') !== 'gh') continue;
@@ -99,6 +107,9 @@ export default function guard(pi: ExtensionAPI) {
       if (options.has('--help')) continue;
       if (action === 'merge' && config.blockAdminMerge && options.has('--admin')) {
         return { block: true, reason: 'Merge without --admin. Satisfy the repository review and check requirements instead of bypassing them.' };
+      }
+      if (action === 'create' && config.requireDraftPr && (options.has('--web') || options.has('-w'))) {
+        return { block: true, reason: 'gh cannot create drafts with --web. Drop --web/-w and pass --draft.' };
       }
       if (action === 'create' && config.requireDraftPr && !options.has('--draft')) {
         return { block: true, reason: 'Create PRs as drafts. Add --draft; mark ready with gh pr ready after review.' };

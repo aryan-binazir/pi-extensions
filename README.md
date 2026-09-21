@@ -84,7 +84,6 @@ reviewing [`extensions/guard/guard.json`](extensions/guard/guard.json):
     # noclobber also protects against an intervening file creation.
     (set -C; cat "$repo/extensions/guard/guard.json" > "$local_rules")
   fi
-  node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!c || typeof c.requireDraftPr!=="boolean" || typeof c.blockAdminMerge!=="boolean" || Object.keys(c).some(k=>!["requireDraftPr","blockAdminMerge"].includes(k))) process.exit(1)' "$local_rules"
   mkdir -p "$agent_dir"
   ln -s "$local_rules" "$target"
   ls -l "$target"
@@ -100,12 +99,14 @@ never copies or links configuration automatically.
 Both sample booleans are required; set either to `false` to disable that rule:
 
 - `requireDraftPr`: require an effective `--draft` or `-d` on `gh pr create`
-  (including `gh pr new`). `--draft=false` is not a draft. `--web` and `--dry-run`
-  receive the same check. `gh pr ready` remains allowed.
+  (including `gh pr new`). `--draft=false` is not a draft. `--dry-run` receives
+  the same check. `--web`/`-w` is blocked with instructions to drop it and pass
+  `--draft`: gh cannot create drafts with `--web`. `gh pr ready` remains allowed.
 - `blockAdminMerge`: reject an effective `--admin` on `gh pr merge`; instruct the
   agent to satisfy normal review/check requirements. `--admin=false` is allowed.
 
-Missing config means inactive. Invalid or unreadable config blocks Bash with a
+Missing config means inactive. Invalid/unreadable config or a broken config
+symlink blocks Bash with a
 repair message; other tools remain available to fix it. No model or approval
 popup is involved. A blocked Bash call is stopped in full before any of it runs.
 
@@ -114,8 +115,10 @@ popup is involved. A blocked Bash call is stopped in full before any of it runs.
 selection, quoting, comments, and simple `;`, `&&`, `||`, pipe/newline chains.
 It distinguishes flags from title/body values and understands short clusters and
 repeated boolean flags. Help requests are allowed. It does not interpret shell
-expansion, substitutions, heredocs, functions, aliases, redirections, scripts, or
-wrappers such as `env`/`bash -c`. Complex shell can evade checks or be misclassified;
+expansion, substitutions (including `url=$(gh pr create ...)`), heredocs,
+functions, aliases, redirections, scripts, grouping (`(...)`, `{ ...; }`),
+control flow (`if`, loops), `!`, `time`, or wrappers such as `command`, `env`, and
+`bash -c`. Complex shell can evade checks or be misclassified;
 use direct simple invocations for predictable results. `gh api`, MCP/API calls,
 user `!`/`!!` commands and subagent sessions without Guard loaded are not covered.
 This does not extend the separate Bash Auto Permissions reviewer to MCP.

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -91,6 +91,21 @@ test('repository selection, assignments, absolute gh paths and the new alias ret
     for (const command of ['gh -Rorg/repo pr create -d', 'gh pr create --help', 'gh pr merge --admin --help']) {
       assert.equal(await call(command), undefined, command);
     }
+  });
+});
+
+test('short help works, browser creation gives a usable correction, and broken config links block', async () => {
+  await withGuard(enabled, async (call, path) => {
+    assert.equal(await call('gh pr create -h'), undefined);
+    assert.equal(await call('gh pr merge --admin -h'), undefined);
+    for (const command of ['gh pr create --web', 'gh pr create -w --draft']) {
+      assert.deepEqual(await call(command), { block: true, reason: 'gh cannot create drafts with --web. Drop --web/-w and pass --draft.' });
+    }
+    await rm(path);
+    await symlink(join(path, '..', 'missing.json'), path);
+    const result = await call('gh pr create');
+    assert.equal(result?.block, true);
+    assert.match(result.reason, /guard.json.*symlink/);
   });
 });
 

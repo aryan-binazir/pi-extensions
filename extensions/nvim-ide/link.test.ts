@@ -1,38 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { WebSocketServer, type WebSocket } from 'ws';
+import { WebSocketServer } from 'ws';
 import { IdeLink, chooseLock, maxSelectionChars, readLocks, type Lock, type LinkState } from './link.ts';
-import { editorContext, statusText } from './index.ts';
+import { fakeIde, token, until } from './test-support.ts';
 
-const token = 'a3f1c2d4e5f60718293a4b5c6d7e8f90';
-/** Minimal stand-in for claudecode.nvim's server: token check, initialize, tools/call echo. */
-function fakeIde(onClient?: (socket: WebSocket) => void) {
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: (info: { req: { headers: Record<string, unknown> } }) => info.req.headers['x-claude-code-ide-authorization'] === token });
-  const calls: { name: string; arguments: unknown }[] = [];
-  server.on('connection', socket => {
-    onClient?.(socket);
-    socket.on('message', raw => {
-      const message = JSON.parse(raw.toString());
-      const reply = (result: unknown) => socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
-      if (message.method === 'initialize') reply({ protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'claudecode-neovim', version: '0.0.0' } });
-      else if (message.method === 'tools/call') {
-        calls.push(message.params);
-        if (message.params.name === 'boom') reply({ content: [{ type: 'text', text: 'nope' }], isError: true });
-        else if (message.params.name === 'slow') return;
-        else reply({ content: [{ type: 'text', text: `ok:${message.params.name}` }] });
-      }
-    });
-  });
-  const port = () => (server.address() as { port: number }).port;
-  const broadcast = (method: string, params: unknown) => { for (const client of server.clients) client.send(JSON.stringify({ jsonrpc: '2.0', method, params })); };
-  return { server, calls, port, broadcast, close: () => new Promise<void>(done => { for (const client of server.clients) client.terminate(); server.close(() => done()); }) };
-}
-const until = (check: () => boolean, ms = 3000) => new Promise<void>((resolve, reject) => { const start = Date.now(); const tick = () => check() ? resolve() : Date.now() - start > ms ? reject(new Error('timeout')) : setTimeout(tick, 10); tick(); });
-const lock = (overrides: Partial<Lock>): Lock => ({ port: 1, pid: 1, authToken: token, workspaceFolders: ['/w'], ideName: 'Neovim', mtimeMs: 0, ...overrides });
+const lockFile = (overrides: Record<string, unknown> = {}) => JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token, ...overrides });
 
 test('lock files: parse, skip dead pids and junk, choose by workspace then env', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
@@ -54,7 +30,8 @@ test('lock files: parse, skip dead pids and junk, choose by workspace then env',
 });
 
 test('newest lock wins among equal workspace matches', () => {
-  const locks = [lock({ port: 1, mtimeMs: 1 }), lock({ port: 2, mtimeMs: 5 }), lock({ port: 3, mtimeMs: 3 })];
+  const base: Lock = { port: 1, authToken: token, workspaceFolders: ['/w'], ideName: 'Neovim', mtimeMs: 0 };
+  const locks = [{ ...base, port: 1, mtimeMs: 1 }, { ...base, port: 2, mtimeMs: 5 }, { ...base, port: 3, mtimeMs: 3 }];
   assert.equal(chooseLock(locks, '/w', '')?.port, 2);
 });
 
@@ -68,7 +45,7 @@ test('connects with the token, tracks selection and mentions, calls tools, recon
     link.start();
     await new Promise(r => setTimeout(r, 60));
     assert.equal(link.connected, false, 'no lock file yet');
-    await writeFile(join(dir, `${ide.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: ['/w/project'], ideName: 'Neovim', authToken: token }));
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile({ pid: process.pid, workspaceFolders: ['/w/project'] }));
     await until(() => link.connected);
     assert.equal(link.state.ideName, 'Neovim');
     assert.equal(link.state.port, ide.port());
@@ -81,11 +58,13 @@ test('connects with the token, tracks selection and mentions, calls tools, recon
     ide.broadcast('selection_changed', { text: 'bad', filePath: 7 });
     ide.broadcast('at_mentioned', { filePath: '/w/project/c.ts', lineStart: 3, lineEnd: 9 });
     ide.broadcast('at_mentioned', { filePath: '/w/project', lineStart: null, lineEnd: null });
+    // The mentions arrive after the malformed selection on the same socket, so this also proves that one was ignored.
     await until(() => link.state.mentions === 2);
+    assert.equal(link.state.selection?.filePath, '/w/project/b.ts', 'a malformed selection_changed leaves the last good selection in place');
     assert.deepEqual(link.takeMentions(), [{ filePath: '/w/project/c.ts', lineStart: 3, lineEnd: 9 }, { filePath: '/w/project', lineStart: undefined, lineEnd: undefined }]);
     assert.equal(link.state.mentions, 0);
 
-    assert.equal(await link.call('getOpenEditors'), 'ok:getOpenEditors');
+    assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
     assert.deepEqual(ide.calls.at(-1), { name: 'getOpenEditors', arguments: {} });
     await assert.rejects(link.call('boom'), /nope/);
     await assert.rejects(link.call('slow'), /timed out/);
@@ -97,13 +76,13 @@ test('connects with the token, tracks selection and mentions, calls tools, recon
     for (const client of ide.server.clients) client.terminate();
     await until(() => !link.connected);
     await until(() => link.connected);
-    assert.equal(await link.call('getCurrentSelection'), 'ok:getCurrentSelection');
-    assert.equal(states.filter(s => s.connected).length >= 2, true);
+    assert.equal(await link.call('getCurrentSelection'), 'getCurrentSelection({})');
+    assert.ok(states.filter(s => s.connected).length >= 2, 'the reconnect reports connected a second time');
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
   await assert.rejects(link.call('getOpenEditors'), /not connected/);
 });
 
-test('a missing lock directory is polled until it can be watched', async () => {
+test('discovery survives a lock directory that does not exist yet', async () => {
   const ide = fakeIde();
   await once(ide.server, 'listening');
   const parent = await mkdtemp(join(tmpdir(), 'pi-ide-'));
@@ -113,7 +92,7 @@ test('a missing lock directory is polled until it can be watched', async () => {
     link.start();
     await new Promise(r => setTimeout(r, 150));
     await mkdir(dir);
-    await writeFile(join(dir, `${ide.port()}.lock`), JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token }));
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
     await until(() => link.connected, 2000);
   } finally { await link.stop(); await ide.close(); await rm(parent, { recursive: true, force: true }); }
 });
@@ -124,31 +103,11 @@ test('wrong token is refused and never reported as connected', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 200, alive: () => true });
   try {
-    await writeFile(join(dir, `${ide.port()}.lock`), JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: 'wrong-token-1234' }));
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile({ authToken: 'wrong-token-1234' }));
     link.start();
     await new Promise(r => setTimeout(r, 150));
     assert.equal(link.connected, false);
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
-});
-
-test('editor context renders selection, cursor and mentions, and nothing when disconnected', () => {
-  assert.equal(editorContext({ connected: false, mentions: 0 }, []), undefined);
-  const withSelection = editorContext({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'x'.repeat(maxSelectionChars + 1), filePath: '/f.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 2 }, isEmpty: false } }, []);
-  assert.match(withSelection!, /^# Editor context \(Neovim\)/);
-  assert.match(withSelection!, /Selected lines 5-7:/);
-  assert.match(withSelection!, /…\[truncated\]/);
-  const cursor = editorContext({ connected: true, mentions: 0, selection: { text: '', filePath: '/g.ts', start: { line: 0, character: 0 }, end: { line: 0, character: 0 }, isEmpty: true } }, [{ mention: { filePath: '/h.ts', lineStart: 2, lineEnd: 3 }, text: 'a\nb' }, { mention: { filePath: '/dir' } }]);
-  assert.match(cursor!, /Active file: \/g\.ts \(cursor at line 1\)/);
-  assert.match(cursor!, /User sent from editor: \/h\.ts lines 2-3\n```\na\nb\n```/);
-  assert.match(cursor!, /User sent from editor: \/dir$/);
-});
-
-test('status text shows connection, active file, cursor line or selected range', () => {
-  assert.equal(statusText({ connected: false, mentions: 0 }), undefined);
-  assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0 }), 'Neovim ✓');
-  assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: '', filePath: '/w/math.ts', start: { line: 5, character: 0 }, end: { line: 5, character: 0 }, isEmpty: true } }), 'Neovim ✓ math.ts:6');
-  assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'abc', filePath: '/w/math.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 1 }, isEmpty: false } }), 'Neovim ✓ math.ts:5-7 ▮');
-  assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'ab', filePath: '/w/math.ts', start: { line: 4, character: 0 }, end: { line: 4, character: 2 }, isEmpty: false } }), 'Neovim ✓ math.ts:5 ▮');
 });
 
 test('a lock file appearing wakes discovery through the directory watch, not the poll', async () => {
@@ -160,7 +119,7 @@ test('a lock file appearing wakes discovery through the directory watch, not the
     link.start();
     await new Promise(r => setTimeout(r, 50));
     const started = Date.now();
-    await writeFile(join(dir, `${ide.port()}.lock`), JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token }));
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
     await until(() => link.connected, 2000);
     assert.ok(Date.now() - started < 1500, 'connected well before the 60s poll');
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
@@ -171,10 +130,9 @@ test('editor restart: dropped connection then a new lock on a new port reconnect
   await once(first.server, 'listening');
   const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 60_000, alive: () => true });
-  const lockFor = () => JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token });
   try {
     link.start();
-    await writeFile(join(dir, `${first.port()}.lock`), lockFor());
+    await writeFile(join(dir, `${first.port()}.lock`), lockFile());
     await until(() => link.connected);
     // claudecode.nvim removes its lock before closing the socket
     await rm(join(dir, `${first.port()}.lock`));
@@ -184,12 +142,11 @@ test('editor restart: dropped connection then a new lock on a new port reconnect
     await once(second.server, 'listening');
     try {
       // atomic write like the plugin: temp file then rename
-      await writeFile(join(dir, `${second.port()}.lock.tmp.1.2`), lockFor());
-      const { rename } = await import('node:fs/promises');
+      await writeFile(join(dir, `${second.port()}.lock.tmp.1.2`), lockFile());
       await rename(join(dir, `${second.port()}.lock.tmp.1.2`), join(dir, `${second.port()}.lock`));
       await until(() => link.connected, 2000);
       assert.equal(link.state.port, second.port());
-      assert.equal(await link.call('getOpenEditors'), 'ok:getOpenEditors');
+      assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
     } finally { await second.close(); }
   } finally { await link.stop(); await rm(dir, { recursive: true, force: true }); }
 });
@@ -207,7 +164,7 @@ test('an editor that accepts the socket but never answers initialize is not conn
   const states: boolean[] = [];
   const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 100, requestTimeoutMs: 100, alive: () => true, onChange: s => states.push(s.connected) });
   try {
-    await writeFile(join(dir, `${port}.lock`), JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token }));
+    await writeFile(join(dir, `${port}.lock`), lockFile());
     link.start();
     await new Promise(r => setTimeout(r, 350));
     assert.equal(link.connected, false);
@@ -224,7 +181,7 @@ test('server-initiated requests: ping is answered, anything else gets method-not
   const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 100, alive: () => true });
   try {
-    await writeFile(join(dir, `${ide.port()}.lock`), JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token }));
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
     link.start();
     await until(() => link.connected);
     for (const client of ide.server.clients) {
@@ -242,7 +199,9 @@ test('server-initiated requests: ping is answered, anything else gets method-not
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
-test('stop during discovery and stop twice are clean, and start after stop is a no-op', async () => {
+test('stop during discovery and stop twice are clean, and start after stop resumes discovery', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
   const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 100, alive: () => true });
   try {
@@ -251,5 +210,9 @@ test('stop during discovery and stop twice are clean, and start after stop is a 
     await link.stop();
     assert.equal(link.connected, false);
     await assert.rejects(link.call('getOpenEditors'), /not connected/);
-  } finally { await rm(dir, { recursive: true, force: true }); }
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected, 2000);
+    assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
+  } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
 });

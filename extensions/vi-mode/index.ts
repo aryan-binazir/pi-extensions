@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { installEditorHandoff, readPastes, writePastes, retainRawText, placeCursor } from "./adapter.ts";
+import { installEditorHandoff, readPastes, restoreRawDraft } from "./adapter.ts";
 import { ViEditor } from "./editor.ts";
 export default function viMode(pi: ExtensionAPI): void {
   let active: ViEditor | undefined;
@@ -10,11 +10,7 @@ export default function viMode(pi: ExtensionAPI): void {
     const draft = active.getText(), payloads = readPastes(active);
     (request as { restore?: () => boolean }).restore = () => {
       if (!active) return false;
-      active.setText("");
-      retainRawText(active, draft);
-      writePastes(active, payloads);
-      placeCursor(active, draft.length);
-      active.onChange?.(draft);
+      restoreRawDraft(active, draft, payloads);
       return true;
     };
   };

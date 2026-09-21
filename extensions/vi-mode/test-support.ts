@@ -1,14 +1,13 @@
 import { KeybindingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 import { type TUI, type Terminal } from "@earendil-works/pi-tui";
-import type { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { ViEditor } from "./editor.ts";
-export function editor<T extends CustomEditor = ViEditor>(
-  EditorClass: new (
-    ...args: ConstructorParameters<typeof ViEditor>
-  ) => T = ViEditor as unknown as new (
-    ...args: ConstructorParameters<typeof ViEditor>
-  ) => T,
-) {
+type EditorConstructor<T extends CustomEditor> = new (
+  ...args: ConstructorParameters<typeof CustomEditor>
+) => T;
+export function editor(): ViEditor;
+export function editor<T extends CustomEditor>(EditorClass: EditorConstructor<T>): T;
+export function editor(EditorClass: EditorConstructor<CustomEditor> = ViEditor): CustomEditor {
   const terminal = {
     rows: 30,
     columns: 80,
@@ -39,4 +38,8 @@ export function editor<T extends CustomEditor = ViEditor>(
     theme,
     new KeybindingsManager(),
   );
+}
+/** Feed an editor one key at a time, the way a terminal delivers typing. */
+export function keys(e: { handleInput(data: string): void }, input: string): void {
+  for (const key of input) e.handleInput(key);
 }

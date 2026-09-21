@@ -20,6 +20,17 @@ export default function promptStash(pi: ExtensionAPI): void {
   let previous: EditorFactory | undefined;
   let enabled = false;
 
+  /**
+   * Bracketed paste keeps stock paste collapsing, but it strips control bytes
+   * and a reduced UI adapter need not offer it, so those drafts go in directly.
+   */
+  const setText = (ctx: ExtensionContext, text: string) => {
+    if (text && ctx.ui.pasteToEditor && !CONTROL_BYTES.test(text)) {
+      ctx.ui.setEditorText("");
+      ctx.ui.pasteToEditor(text);
+    } else ctx.ui.setEditorText(text);
+  };
+
   const toggle = (ctx: ExtensionContext) => {
     // Pi 0.85.1 getEditorText calls getExpandedText, including collapsed paste payloads.
     const current = ctx.ui.getEditorText();
@@ -27,14 +38,7 @@ export default function promptStash(pi: ExtensionAPI): void {
     const captured: { text: string; restore?: () => boolean } = { text: current };
     // Optional vi integration retains which spans were pasted versus hand typed.
     pi.events?.emit("pi-interactive:stash-capture", captured);
-    if (!slot?.restore?.()) {
-      // Bracketed paste strips control bytes; reduced UI adapters may lack it.
-      const hasControlBytes = slot && CONTROL_BYTES.test(slot.text);
-      if (slot && ctx.ui.pasteToEditor && !hasControlBytes) {
-        ctx.ui.setEditorText("");
-        ctx.ui.pasteToEditor(slot.text);
-      } else ctx.ui.setEditorText(slot?.text ?? "");
-    }
+    if (!slot?.restore?.()) setText(ctx, slot?.text ?? "");
     slot = current === "" ? undefined : captured;
     ctx.ui.setStatus(
       "prompt-stash",
@@ -47,13 +51,7 @@ export default function promptStash(pi: ExtensionAPI): void {
   const replace = (ctx: ExtensionContext, factory: EditorFactory | undefined) => {
     const text = ctx.ui.getEditorText();
     ctx.ui.setEditorComponent(factory);
-    if (ctx.ui.getEditorText() !== text) {
-      if (CONTROL_BYTES.test(text)) ctx.ui.setEditorText(text);
-      else {
-        ctx.ui.setEditorText("");
-        ctx.ui.pasteToEditor(text);
-      }
-    }
+    if (ctx.ui.getEditorText() !== text) setText(ctx, text);
   };
 
   pi.on("session_start", (_event, ctx) => {
@@ -82,16 +80,12 @@ export default function promptStash(pi: ExtensionAPI): void {
         if (opened >= 0) pasting = true;
         else if (closed >= 0) pasting = false;
         boundary = "";
-        // Vi accepts paste delimiters split across terminal input chunks. Every
-        // partial delimiter opens with ESC, so one must sit in the last four bytes.
-        const end = chunk.length;
-        if (chunk.charCodeAt(end - 2) === ESC || chunk.charCodeAt(end - 3) === ESC ||
-          chunk.charCodeAt(end - 4) === ESC || chunk.charCodeAt(end - 5) === ESC) {
-          for (let size = 2; size < 6; size++) {
-            const tail = chunk.slice(-size);
-            if (tail.length === size && (PASTE_START.startsWith(tail) || PASTE_END.startsWith(tail)))
-              boundary = tail;
-          }
+        // Vi accepts paste delimiters split across terminal input chunks, so a
+        // chunk ending in part of one holds that tail back for the next chunk.
+        for (let size = 2; size < 6; size++) {
+          const tail = chunk.slice(-size);
+          if (tail.length === size && (PASTE_START.startsWith(tail) || PASTE_END.startsWith(tail)))
+            boundary = tail;
         }
         // Ctrl+S is the raw byte or a CSI sequence naming its codepoint; ruling
         // the rest out keeps ordinary typing off the costly key parser.

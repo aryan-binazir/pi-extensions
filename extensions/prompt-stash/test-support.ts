@@ -39,5 +39,5 @@ export function stashHost(EditorClass = CustomEditor) {
   } as unknown as ExtensionAPI);
   const emit = (name: string) => hooks.get(name)?.({}, ctx);
   emit("session_start"); emit("resources_discover");
-  return { ctx, emit, get e() { return e; }, get status() { return status; }, get installs() { return installs; } };
+  return { ctx, emit, get editor() { return e; }, get status() { return status; }, get installs() { return installs; } };
 }

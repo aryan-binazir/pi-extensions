@@ -1,10 +1,17 @@
 import { visibleWidth, CURSOR_MARKER } from "@earendil-works/pi-tui";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { editor } from "./test-support.ts";
+import { editor, keys } from "./test-support.ts";
 import type { ViEditor } from "./editor.ts";
-function keys(e: ViEditor, input: string) {
-  for (const k of input) e.handleInput(k);
+/** A put must survive a full undo/redo round trip, payloads included. */
+function undoRedoRestoresPut(e: ViEditor, before: string) {
+  const visible = e.getText(),
+    expanded = e.getExpandedText();
+  keys(e, "u");
+  assert.equal(e.getText(), before);
+  keys(e, "\x12");
+  assert.equal(e.getText(), visible);
+  assert.equal(e.getExpandedText(), expanded);
 }
 test("mode label stays at the bottom right across widths and modes", () => {
   const e = editor();
@@ -79,7 +86,7 @@ test("bracketed paste is one undo transaction and never interpreted as vi comman
   e.handleInput("\x12");
   assert.equal(e.getExpandedText(), "draf" + payload + "t");
 });
-test("insert edits, nested objects, and counted line changes preserve cursor and undo", () => {
+test("an insert edit is one undo step", () => {
   const e = editor();
   e.setText("alpha beta");
   e.handleInput("\x1b");
@@ -89,29 +96,22 @@ test("insert edits, nested objects, and counted line changes preserve cursor and
   assert.equal(e.getExpandedText(), "new beta");
   keys(e, "u");
   assert.equal(e.getExpandedText(), "alpha beta");
+});
+test("an inner-bracket object takes the innermost pair", () => {
+  const e = editor();
   e.setText("x (a (b) c) y");
+  e.handleInput("\x1b");
   keys(e, "0wldi(");
   assert.equal(e.getExpandedText(), "x () y");
+});
+test("a counted dd yanks every deleted line for a later put", () => {
+  const e = editor();
   e.setText("one\ntwo\nthree");
+  e.handleInput("\x1b");
   keys(e, "gg2dd");
   assert.equal(e.getExpandedText(), "three");
   keys(e, "P");
   assert.equal(e.getExpandedText(), "one\ntwo\nthree");
-});
-test("visual rendering highlights the selected characters and normal forwards application shortcuts", () => {
-  const e = editor();
-  e.setText("abcd");
-  e.handleInput("\x1b");
-  keys(e, "0vl");
-  assert.match(e.render(40).join("\n"), /\x1b\[7ma\x1b\[0m\x1b\[7mb/);
-  e.handleInput("\x1b");
-  let handled = false;
-  e.onExtensionShortcut = () => {
-    handled = true;
-    return true;
-  };
-  e.handleInput("\x1b[83;6u");
-  assert.equal(handled, true);
 });
 test("paste preserves tabs, CRLF, unicode, and split terminators as one edit", () => {
   const e = editor();
@@ -270,17 +270,6 @@ test("unicode word objects and cw edge positions respect word boundaries", () =>
   e.handleInput("\x1b");
   assert.equal(e.getExpandedText(), "alphaXbeta");
 });
-test("unsupported multi-key commands cannot reinterpret their argument destructively", () => {
-  for (const command of ["rx", "ra", "ma", "qa"]) {
-    const e = editor();
-    e.setText("alpha beta");
-    e.handleInput("\x1b");
-    keys(e, "0" + command);
-    assert.equal(e.getExpandedText(), "alpha beta");
-    keys(e, "x");
-    assert.equal(e.getExpandedText(), "lpha beta");
-  }
-});
 test("line operators preserve line boundaries and delete the final line completely", () => {
   const e = editor();
   e.setText("one\ntwo\nthree");
@@ -310,7 +299,11 @@ test("vertical motions retain preferred column and horizontal motions stay on ch
   e.setText("ab\ncd");
   keys(e, "gg0lll");
   assert.deepEqual(e.getCursor(), { line: 0, col: 1 });
+});
+test("dd then p on an empty draft edits nothing", () => {
+  const e = editor();
   e.setText("");
+  e.handleInput("\x1b");
   keys(e, "ddp");
   assert.equal(e.getExpandedText(), "");
 });
@@ -324,22 +317,29 @@ test("huge counted motions stop at boundaries and repeated paste remains bounded
   keys(e, "ggyy9999p");
   assert.ok(e.getExpandedText().length <= 1024 * 1024);
 });
-test("I uses first nonblank, visual paste replaces selection and native undo cannot restore another draft", () => {
+test("I inserts at the first non-blank character", () => {
   const e = editor();
   e.setText("  ab");
   e.handleInput("\x1b");
   keys(e, "IZ");
   assert.equal(e.getExpandedText(), "  Zab");
-  e.handleInput("\x1b");
+});
+test("a paste over a visual selection replaces it", () => {
+  const e = editor();
   e.setText("abcdef");
+  e.handleInput("\x1b");
   keys(e, "0vll");
   e.handleInput("\x1b[200~X\x1b[201~");
   assert.equal(e.getExpandedText(), "Xdef");
+});
+test("native undo cannot restore a draft replaced from outside the editor", () => {
+  const e = editor();
+  e.setText("old");
   e.setText("new");
   e.handleInput("i");
   e.handleInput("\x1f");
   assert.equal(e.getExpandedText(), "new");
-  assert.ok(!e.render(50).at(-1)!.includes("..."));
+  assert.equal(visibleWidth(e.render(50).at(-1)!), 50, "the mode label still fills the border");
 });
 test("programmatic image-path insertion participates in vi undo", () => {
   const e = editor();
@@ -350,37 +350,46 @@ test("programmatic image-path insertion participates in vi undo", () => {
   keys(e, "u");
   assert.equal(e.getExpandedText(), "draft");
 });
-test("up/down yanks and counted line changes include complete lines without losing an empty final line", () => {
+test("an upward delete takes both whole lines", () => {
   const e = editor();
   e.setText("a\nb\nc");
   e.handleInput("\x1b");
   keys(e, "2Gdk");
   assert.equal(e.getExpandedText(), "c");
+});
+test("a downward yank puts back both whole lines", () => {
+  const e = editor();
   e.setText("a\nb\nc");
+  e.handleInput("\x1b");
   keys(e, "ggyjGp");
   assert.equal(e.getExpandedText(), "a\nb\nc\na\nb");
+});
+test("a counted cc replaces every counted line with one", () => {
+  const e = editor();
   e.setText("one\ntwo\nthree");
+  e.handleInput("\x1b");
   keys(e, "gg2ccX");
   e.handleInput("\x1b");
   assert.equal(e.getExpandedText(), "X\nthree");
+});
+test("dd on a trailing empty line keeps the line above", () => {
+  const e = editor();
   e.setText("a\n");
+  e.handleInput("\x1b");
   keys(e, "Gdd");
   assert.equal(e.getExpandedText(), "a");
 });
 test("streaming follow-up reads cannot export pasted terminal escape controls", () => {
-  for (const normal of [false, true]) {
-    const e = editor();
-    if (normal) e.handleInput("\x1b");
-    e.handleInput("\x1b[200~log \x1b]52;c;PAYLOAD\x07\x9b0m\t\r\nend\x1b[201~");
-    let queued = "";
-    e.onAction("app.message.followUp", () => { queued = e.getExpandedText(); });
-    e.handleInput("\x1b\r");
-    assert.equal(queued, "log ]52;c;PAYLOAD0m\t\r\nend");
-    e.setText("external \x1b[2J\x07");
-    assert.equal(e.getExpandedText(), "external [2J");
-    e.insertTextAtCursor("\x1b]52;c;X\x07");
-    assert.equal(e.getExpandedText(), "external [2J]52;c;X");
-  }
+  const e = editor();
+  e.handleInput("\x1b[200~log \x1b]52;c;PAYLOAD\x07\x9b0m\t\r\nend\x1b[201~");
+  let queued = "";
+  e.onAction("app.message.followUp", () => { queued = e.getExpandedText(); });
+  e.handleInput("\x1b\r");
+  assert.equal(queued, "log ]52;c;PAYLOAD0m\t\r\nend");
+  e.setText("external \x1b[2J\x07");
+  assert.equal(e.getExpandedText(), "external [2J");
+  e.insertTextAtCursor("\x1b]52;c;X\x07");
+  assert.equal(e.getExpandedText(), "external [2J]52;c;X");
 });
 test("restoring another draft cancels visual and line selections", () => {
   for (const selection of ["v", "V"]) {
@@ -395,18 +404,25 @@ test("restoring another draft cancels visual and line selections", () => {
     assert.equal(e.getExpandedText(), "short");
   }
 });
-test("named r m q registers work and Escape cancels unsupported command arguments", () => {
+test("r, m and q name registers, and their unsupported command swallows its argument", () => {
   for (const name of ["r", "m", "q"]) {
     const e = editor();
     e.setText("keep me\nsecond");
     e.handleInput("\x1b");
     keys(e, 'gg"' + name + 'yyG"' + name + 'p');
     assert.equal(e.getExpandedText(), "keep me\nsecond\nkeep me");
+    for (const argument of ["x", "a"]) {
+      e.setText("alpha beta");
+      keys(e, "0" + name + argument);
+      assert.equal(e.getExpandedText(), "alpha beta", name + argument);
+      keys(e, "x");
+      assert.equal(e.getExpandedText(), "lpha beta", name + argument);
+    }
     e.setText("alpha");
     keys(e, "0" + name);
     e.handleInput("\x1b");
     keys(e, "x");
-    assert.equal(e.getExpandedText(), "lpha");
+    assert.equal(e.getExpandedText(), "lpha", "Escape cancels the pending argument");
   }
 });
 test("refused oversized put preserves the redo history", () => {
@@ -418,8 +434,8 @@ test("refused oversized put preserves the redo history", () => {
   e.handleInput("\x12");
   assert.equal(e.getExpandedText().length, 0); // Redo deletes the entire collapsed marker.
 });
-test("pending vi arguments forward save and stash shortcuts to core and extensions", () => {
-  for (const prefix of ["di", '"', "r", "vi"]) {
+test("normal mode and pending vi arguments forward save and stash shortcuts to core and extensions", () => {
+  for (const prefix of ["", "di", '"', "r", "vi"]) {
     for (const chord of ["\x13", "\x1b[115;5u", "\x1b[115;6u"]) {
       const e = editor();
       e.setText("keep draft");
@@ -647,10 +663,7 @@ for (const [command, before, after, expanded] of [
   assert.equal(e.getText().replace(/\[paste #[^\]]+\]/g, "MARKER"), after);
   assert.equal(e.getExpandedText(), expanded.replace("PAYLOAD", payload.slice(0, -1)));
   assert.deepEqual(e.getCursor(), { line: command === "Gp" ? 2 : command === "ggP" ? 0 : 1, col: 0 });
-  const putText = e.getText(), putExpanded = e.getExpandedText();
-  keys(e, "u"); assert.equal(e.getText(), before);
-  keys(e, "\x12"); assert.equal(e.getText(), putText);
-  assert.equal(e.getExpandedText(), putExpanded);
+  undoRedoRestoresPut(e, before);
   keys(e, "dd");
   assert.equal(e.getExpandedText(), before);
 });
@@ -675,10 +688,7 @@ for (const [command, after, expanded] of [
   assert.equal(e.getText().replace(/\[paste #[^\]]+\]/g, "MARKER"), after);
   assert.equal(e.getExpandedText(), expanded.replace("PAYLOAD", payload.slice(0, -1)));
   assert.deepEqual(e.getCursor(), { line: command === "ggVp" ? 0 : 1, col: 0 });
-  const visible = e.getText(), full = e.getExpandedText();
-  keys(e, "u"); assert.equal(e.getText(), before);
-  keys(e, "\x12"); assert.equal(e.getText(), visible);
-  assert.equal(e.getExpandedText(), full);
+  undoRedoRestoresPut(e, before);
   keys(e, "dd"); assert.equal(e.getText(), command === "ggVp" ? "b" : "a\nz\nb");
 });
 

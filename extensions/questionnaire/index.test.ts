@@ -4,55 +4,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import questionnaire from "./index.ts";
 
-test("questionnaire single option returns a typed answer and clears waiting", async () => {
-  let tool: any;
-  const events: any[] = [];
-  questionnaire({
-    registerTool: (t: any) => {
-      tool = t;
-    },
-    on() {},
-    events: { on: () => () => {}, emit: (...args: any[]) => events.push(args) },
-  } as any);
-  const ctx = {
-    mode: "tui",
-    ui: {
-      custom: async (factory: any) =>
-        new Promise((resolve) => {
-          const component = factory(
-            { requestRender() {} },
-            { fg: (_: string, s: string) => s },
-            {},
-            resolve,
-          );
-          component.handleInput("\r");
-        }),
-    },
-  };
-  const result = await tool.execute(
-    "call-1",
-    {
-      questions: [
-        {
-          id: "scope",
-          prompt: "Scope?",
-          options: [{ value: "one", label: "One" }],
-        },
-      ],
-    },
-    undefined,
-    undefined,
-    ctx,
-  );
-  assert.deepEqual(result.details.answers, [
-    { id: "scope", value: "one", label: "One", wasCustom: false },
-  ]);
-  assert.deepEqual(
-    events.map((e) => e[1].waiting),
-    [true, false],
-  );
-});
-
 function host(onEmit?: (value: any) => void) {
   let tool: any;
   let component: any;
@@ -156,10 +107,18 @@ test("UI exception releases waiting; noninteractive and invalid questions never 
   );
   h.ctx.mode = "rpc";
   assert.equal((await h.run([question("a")])).details.cancelled, true);
+  assert.deepEqual(
+    h.events.map((e) => e.waiting),
+    [true, false],
+  );
   h.ctx.mode = "tui";
   assert.equal(
     (await h.run([question("a"), question("a")])).details.cancelled,
     true,
+  );
+  assert.deepEqual(
+    h.events.map((e) => e.waiting),
+    [true, false],
   );
 });
 
@@ -167,13 +126,16 @@ test("concurrent calls cannot replace the active questionnaire and cancellation 
   const h = host();
   const first = h.run([question("a")]);
   try {
-    const second = await Promise.race([
-      h.run([question("b")]),
-      new Promise<undefined>((resolve) => setTimeout(resolve, 30)),
-    ]);
+    let second: any;
+    const rejected = h.run([question("b")]);
+    void rejected.then((value: any) => {
+      second = value;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
     assert.ok(second, "A second caller must be rejected immediately");
     assert.equal(second.details.cancelled, true);
     assert.match(second.details.reason, /already active/);
+    await rejected;
     h.key("\u001b");
     h.key("\u001b");
     assert.equal((await first).details.cancelled, true);
@@ -212,6 +174,10 @@ test("a failed waiting notification does not wedge later questionnaires", async 
 test("free-only questions retain rejected long input for editing", async () => {
   const h = host();
   const pending = h.run([{ id: "free", prompt: "Write", options: [] }]);
+  let result: any;
+  void pending.then((value: any) => {
+    result = value;
+  });
   try {
     h.key("\r");
     h.key("\u001b[200~" + "x".repeat(16001) + "\u001b[201~");
@@ -219,10 +185,7 @@ test("free-only questions retain rejected long input for editing", async () => {
     assert.equal(h.events.length, 1, "An oversized answer must not submit");
     h.key("\u007f");
     h.key("\r");
-    const result = await Promise.race([
-      pending,
-      new Promise<undefined>((resolve) => setTimeout(resolve, 30)),
-    ]);
+    await new Promise((resolve) => setImmediate(resolve));
     assert.ok(result, "Rejected text should remain available to shorten");
     assert.equal(result.details.answers[0].value.length, 16000);
     assert.equal(result.details.answers[0].wasCustom, true);
@@ -237,6 +200,9 @@ test("option-only navigation clamps and never opens free text", async () => {
   h.key("\u001b[A");
   h.key("\u001b[B");
   h.key("\u001b[B");
+  const rows = h.render().join("\n");
+  assert.doesNotMatch(rows, /Type something else/);
+  assert.match(rows, /❯ 1\. Yes/);
   h.key("\r");
   assert.deepEqual((await pending).details.answers, [
     { id: "a", value: "yes", label: "Yes", wasCustom: false },
@@ -293,7 +259,7 @@ test("long option lists keep the selected answer inside a bounded viewport", asy
     options: Array.from({ length: 20 }, (_, i) => ({ value: String(i), label: `Option-${i}`, description: "x".repeat(100) })) }]);
   for (let i = 0; i < 20; i++) {
     const rows = h.render(80);
-    assert.ok(rows.length <= 24, `rendered ${rows.length} rows`);
+    assert.ok(rows.length <= Math.max(3, Math.min(18, h.terminal.rows - 5)), `rendered ${rows.length} rows`);
     assert.ok(rows.join("\n").includes(`❯ ${i + 1}. Option-${i}`));
     h.key("\x1b[B");
   }
@@ -303,11 +269,10 @@ test("long option lists keep the selected answer inside a bounded viewport", asy
 test("questionnaire replaces the input area with subtle rules across widths and input modes", async () => {
   const h = host();
   const running = h.run([question("a"), question("b")]);
-  assert.deepEqual(h.options(), { overlay: false });
   const checkFrame = () => {
     for (const width of [1, 5, 6, 20, 80, 120]) {
       const rows = h.render(width);
-      assert.ok(rows.length <= 24);
+      assert.ok(rows.length <= Math.max(3, Math.min(18, h.terminal.rows - 5)));
       assert.ok(rows.every((row: string) => visibleWidth(row) <= width));
       if (width >= 6) {
         assert.equal(rows[0], "─".repeat(width));
@@ -326,6 +291,14 @@ test("questionnaire replaces the input area with subtle rules across widths and 
   checkFrame();
   h.key("\r");
   assert.equal((await running).details.cancelled, false);
+});
+
+test("the questionnaire renders inline rather than as an overlay", async () => {
+  const h = host();
+  const running = h.run([question("a")]);
+  assert.deepEqual(h.options(), { overlay: false });
+  h.key("\x1b");
+  await running;
 });
 
 test("questionnaire strips residual terminal controls from model-provided labels", async () => {
@@ -360,7 +333,6 @@ test("long tabs keep every active question and Submit visible", async () => {
     await running;
   }
 });
-
 
 test("six-row terminals retain prompt, selection, editor and cancellation controls", async () => {
   const h = host();
@@ -413,11 +385,10 @@ test("long prompts use spare terminal rows and disclose remaining text", async (
     assert.match(rows.join("\n"), /prompt truncated/);
     assert.match(rows.join("\n"), /❯ 1. Yes/);
     assert.match(rows.join("\n"), /Esc cancel/);
-    assert.ok(rows.length <= 24);
+    assert.ok(rows.length <= Math.max(3, Math.min(18, h.terminal.rows - 5)));
     h.terminal.rows = 48;
-    const expanded = h.render(80).join("\n");
-    assert.match(expanded, /Prompt line 4/);
-    assert.match(expanded, /prompt truncated/);
+    assert.equal(h.render(80).length, 18, "the viewport stops growing at 18 rows");
+    assert.deepEqual(h.render(80), rows);
     h.terminal.rows = 6;
     const compact = h.render(80);
     assert.ok(compact.length <= 3);
@@ -432,7 +403,6 @@ test("long prompts use spare terminal rows and disclose remaining text", async (
     await running;
   }
 });
-
 
 test("decoration never reduces visible choices as the terminal grows", async () => {
   const h = host();

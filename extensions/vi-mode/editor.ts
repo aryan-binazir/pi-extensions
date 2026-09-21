@@ -334,6 +334,11 @@ export class ViEditor extends CustomEditor {
     }
     setCursorPosition(this, low, end - starts[low]);
   }
+  /** Normal mode rests on a grapheme, never on the newline or end of a nonempty line. */
+  private onGrapheme(p: number): number {
+    const end = this.lineEnd(p);
+    return p >= end ? Math.max(this.lineStart(p), this.previous(end)) : p;
+  }
   private move(p: number): void {
     const clamped = Math.max(0, Math.min(p, this.text().length));
     const i = this.boundaryIndex(clamped);
@@ -464,7 +469,7 @@ export class ViEditor extends CustomEditor {
         a--;
       this.writeText(text.slice(0, a) + replacement + text.slice(b));
     }
-    this.move(a);
+    this.move(op === "c" ? a : this.onGrapheme(a));
     this.mode = op === "c" ? "insert" : "normal";
     this.resetPending();
     this.cursorShape();
@@ -820,7 +825,7 @@ export class ViEditor extends CustomEditor {
               : Math.max(this.pos(), p),
           ),
         );
-      } else this.move(p);
+      } else this.move(this.mode === "normal" ? this.onGrapheme(p) : p);
       return;
     }
     if (data === "v" || data === "V") {

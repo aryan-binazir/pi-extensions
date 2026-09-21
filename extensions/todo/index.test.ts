@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import todo from './index.js';
 
+interface Snapshot { version: 1; todos: { content: string; status: string }[]; staleTurns: number }
+
 function runtime(initial: any[] = []) {
   let tool: ToolDefinition;
   let branch = initial;
@@ -17,7 +19,7 @@ function runtime(initial: any[] = []) {
 test('todo replacement normalizes list, enforces one active task and restores selected branch', async () => {
   const app = runtime(); await app.hook('session_start');
   const result = await app.call([{ content: '  Implement   feature  ', status: 'in_progress' }, { content: 'Verify', status: 'pending' }]);
-  assert.equal(result.details.todos[0].content, 'Implement feature');
+  assert.equal((result.details as Snapshot).todos[0].content, 'Implement feature');
   assert.match(app.widget()!.join('\n'), /Implement feature/);
   await assert.rejects(app.call([{ content: 'A', status: 'in_progress' }, { content: 'B', status: 'in_progress' }]), /one/);
   const saved = app.branch();

@@ -3,17 +3,27 @@ import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { getActiveCwd, resolveToolPath, setActiveCwd } from './routing.ts';
 const entryType = 'agent-workflows:worktree';
-// Hoisted out of the per-tool-call handler: membership tests only, never mutated.
 const routedTools = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls']);
 const directoryTools = new Set(['grep', 'find', 'ls']);
+const activeCwd = (ctx: ExtensionContext): string => getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId());
+// Appended to the agent's system prompt; joined with single spaces so the wrapping here never reaches the model.
+const activeWorktreeNotice = (active: string, original: string): string => [
+  `Active worktree directory: ${active}.`,
+  'Built-in bash, user shell, and relative file tools use this directory.',
+  'Absolute paths are unchanged.',
+  `Pi's original session directory remains ${original};`,
+  'session storage, loaded context/resources, and arbitrary extension internals are not relocated.',
+  'Subagents resolve defaults against the active worktree.',
+  'Inspect this checkout\'s instructions before editing.',
+].join(' ');
 export default function worktree(pi: ExtensionAPI): void {
-  const paint = (ctx: ExtensionContext) => { if (ctx.hasUI) { const active = getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()); ctx.ui.setStatus(entryType, active === ctx.cwd ? undefined : `Worktree: ${active}`); } };
+  const paint = (ctx: ExtensionContext) => { if (ctx.hasUI) { const active = activeCwd(ctx); ctx.ui.setStatus(entryType, active === ctx.cwd ? undefined : `Worktree: ${active}`); } };
   let previousSession: { cwd: string; id: string } | undefined;
   const restore = async (ctx: ExtensionContext) => {
     const id = ctx.sessionManager.getSessionId();
     if (previousSession && (previousSession.cwd !== ctx.cwd || previousSession.id !== id)) setActiveCwd(previousSession.cwd, undefined, previousSession.id);
     previousSession = { cwd: ctx.cwd, id };
-    setActiveCwd(ctx.cwd, undefined, ctx.sessionManager.getSessionId());
+    setActiveCwd(ctx.cwd, undefined, id);
     let path: unknown;
     // Only the last matching entry wins, so scan back and stop at it instead of
     // walking the whole branch on every session_start/session_tree.
@@ -44,18 +54,23 @@ export default function worktree(pi: ExtensionAPI): void {
   pi.on('tool_call', (event, ctx) => {
     if (!routedTools.has(event.toolName)) return;
     const input = event.input as { path?: unknown };
-    if (typeof input.path === 'string') input.path = resolveToolPath(input.path, getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()));
-    else if (input.path === undefined && directoryTools.has(event.toolName)) input.path = getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId());
+    if (typeof input.path === 'string') input.path = resolveToolPath(input.path, activeCwd(ctx));
+    else if (input.path === undefined && directoryTools.has(event.toolName)) input.path = activeCwd(ctx);
   });
+  // Only execute() depends on the active directory; the rest of the definition is metadata.
+  const bashMetadata = createBashToolDefinition(process.cwd());
   pi.registerTool({
-    ...createBashToolDefinition(process.cwd()),
-    execute(id, params, signal, onUpdate, ctx) { return createBashToolDefinition(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), { spawnHook: context => ({ ...context, cwd: getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()) }) }).execute(id, params, signal, onUpdate, ctx); },
+    ...bashMetadata,
+    execute(id, params, signal, onUpdate, ctx) {
+      const cwd = activeCwd(ctx);
+      return createBashToolDefinition(cwd, { spawnHook: context => ({ ...context, cwd }) }).execute(id, params, signal, onUpdate, ctx);
+    },
   });
   pi.on('user_bash', (_event, ctx) => {
     const local = createLocalBashOperations();
-    return { operations: { exec: (command, _cwd, options) => local.exec(command, getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), options) } };
+    return { operations: { exec: (command, _cwd, options) => local.exec(command, activeCwd(ctx), options) } };
   });
-  pi.on('before_agent_start', (event, ctx) => ({ systemPrompt: `${event.systemPrompt}\n\nActive worktree directory: ${getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId())}. Built-in bash, user shell, and relative file tools use this directory. Absolute paths are unchanged. Pi's original session directory remains ${ctx.cwd}; session storage, loaded context/resources, and arbitrary extension internals are not relocated. Subagents resolve defaults against the active worktree. Inspect this checkout's instructions before editing.` }));
+  pi.on('before_agent_start', (event, ctx) => ({ systemPrompt: `${event.systemPrompt}\n\n${activeWorktreeNotice(activeCwd(ctx), ctx.cwd)}` }));
   pi.registerCommand('worktree', {
     description: 'Worktree: <name> [--branch branch] [--base ref], list, original, remove <path> [--force], cleanup [--force]',
     async handler(args, ctx) {
@@ -75,9 +90,9 @@ export default function worktree(pi: ExtensionAPI): void {
           const paths = words.filter(word => word !== '--force');
           if (command === 'remove' && (paths.length !== 1 || !paths[0])) throw new Error('Usage: /worktree remove <path> [--force]');
           const confirm = (message: string) => ctx.ui.confirm('Remove worktree', message);
-          const path = command === 'remove' ? await realpath(resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), paths[0])) : undefined;
+          const path = command === 'remove' ? await realpath(resolve(activeCwd(ctx), paths[0])) : undefined;
           const results = command === 'cleanup' ? await trees.cleanup({ force, confirm }) : [{ path: path!, ...await trees.remove(path!, { force, confirm }) }];
-          if (results.some(result => result.removed && resolve(result.path) === resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId())))) activate(ctx, ctx.cwd);
+          if (results.some(result => result.removed && resolve(result.path) === resolve(activeCwd(ctx)))) activate(ctx, ctx.cwd);
           ctx.ui.notify(results.map(result => `${result.path}: ${result.removed ? 'removed' : result.reason}`).join('\n') || 'No worktrees to clean', 'info');
           return;
         }

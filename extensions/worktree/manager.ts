@@ -1,11 +1,13 @@
 import { execFile } from 'node:child_process';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 const execute = promisify(execFile);
 export interface Checkout { path: string; branch: string; primary: boolean }
 interface Options { home?: string; herdr?: boolean }
+interface Removal { removed: boolean; reason?: string }
+interface CheckoutRemoval extends Removal { path: string }
 export class Worktrees {
   constructor(readonly cwd: string, private readonly options: Options = {}) {}
   private async run(command: string, args: string[]) {
@@ -19,7 +21,8 @@ export class Worktrees {
       return { path: fields.find(line => line.startsWith('worktree '))!.slice(9), branch: fields.find(line => line.startsWith('branch '))?.slice(7).replace(/^refs\/heads\//, '') ?? '', primary: index === 0 };
     });
   }
-  private async herdrState(): Promise<unknown | undefined> {
+  /** `undefined` means Herdr is not in play; any other value is the parsed `herdr worktree list` payload. */
+  private async herdrState(): Promise<unknown> {
     if (!(this.options.herdr ?? process.env.HERDR_ENV === '1')) return;
     try { return JSON.parse(await this.run('herdr', ['worktree', 'list', '--cwd', this.cwd])); }
     catch (error) {
@@ -32,7 +35,7 @@ export class Worktrees {
   private async defaultBase(): Promise<string> {
     try { return await this.run('git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']); } catch { /* Local-only repositories may have no remote default. */ }
     for (const branch of ['main', 'master']) {
-      try { await this.run('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]); return branch; } catch { /* Try the next conventional default. */ }
+      try { await this.run('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]); return branch; } catch { continue; }
     }
     throw new Error('Cannot determine the default branch; specify --base <ref>');
   }
@@ -71,7 +74,7 @@ export class Worktrees {
     if (!checkout) throw new Error('Worktree command did not create the requested checkout');
     return checkout;
   }
-  async remove(path: string, options: { force?: boolean; confirm: (message: string) => Promise<boolean> }): Promise<{ removed: boolean; reason?: string }> {
+  async remove(path: string, options: { force?: boolean; confirm: (message: string) => Promise<boolean> }): Promise<Removal> {
     const canonical = await realpath(path);
     const checkout = (await this.list()).find(item => resolve(item.path) === canonical);
     if (!checkout || checkout.primary) throw new Error('Refusing to remove an unknown or primary checkout');
@@ -93,8 +96,8 @@ export class Worktrees {
     } else await this.run('git', ['worktree', 'remove', ...(options.force ? ['--force'] : []), '--', checkout.path]);
     return { removed: true };
   }
-  async cleanup(options: { force?: boolean; confirm: (message: string) => Promise<boolean> }): Promise<Array<{ path: string; removed: boolean; reason?: string }>> {
-    const results = [];
+  async cleanup(options: { force?: boolean; confirm: (message: string) => Promise<boolean> }): Promise<CheckoutRemoval[]> {
+    const results: CheckoutRemoval[] = [];
     for (const checkout of await this.list()) {
       if (checkout.primary || !checkout.branch) continue;
       try {
@@ -116,8 +119,9 @@ export class Worktrees {
 }
 function within(root: string, path: string): boolean {
   const suffix = relative(root, path);
-  return suffix === '' || (!suffix.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && suffix !== '..' && !isAbsolute(suffix));
+  return suffix === '' || (!suffix.startsWith(`..${sep}`) && suffix !== '..' && !isAbsolute(suffix));
 }
+/** Tri-state: a workspace id, `null` for a known-but-unopened worktree, `undefined` when this path is not in the payload at all. */
 async function findWorkspace(value: unknown, path: string): Promise<string | null | undefined> {
   if (!value || typeof value !== 'object') return;
   if (Array.isArray(value)) {

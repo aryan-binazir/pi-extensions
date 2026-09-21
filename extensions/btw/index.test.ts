@@ -95,9 +95,9 @@ test("BTW fills its overlay from opening through the first answer and resize", a
   assert.equal(h.lines().length, 36);
   assert.match(h.render(), /Side answer/);
   assert.doesNotMatch(h.render(), /Enter a followup/);
-  for (const rows of [60, 20, 5, 1]) {
+  for (const [rows, height] of [[60, 54], [20, 18], [5, 4], [1, 1]]) {
     h.terminal.rows = rows;
-    assert.equal(h.lines(20).length, Math.max(1, Math.floor(rows * 0.9)));
+    assert.equal(h.lines(20).length, height, `${rows} terminal rows`);
   }
   h.key("\u001b");await result;
 });
@@ -572,5 +572,62 @@ test("streamed deltas accumulate in place and earlier turns stay in the transcri
   assert.match(transcript, /alpha omega/);
   assert.match(transcript, /Second question/);
   h.key("\x1b");
+  await result;
+});
+
+test("turns after the latest compaction reach the snapshot in order", async () => {
+  const h = host();
+  h.ctx.sessionManager.getBranch = () => [
+    { id: "old", parentId: null, type: "message", timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "FORGOTTEN ORIGINAL", timestamp: 1 } },
+    { id: "compact", parentId: "old", type: "compaction", timestamp: "2026-01-01T00:00:01Z", summary: "COMPACT SUMMARY", tokensBefore: 5000, firstKeptEntryId: "old",
+      retainedTail: [{ role: "user", content: "TAIL", timestamp: 2 }] },
+    { id: "after", parentId: "compact", type: "message", timestamp: "2026-01-01T00:00:02Z", message: { role: "user", content: "AFTER COMPACTION", timestamp: 3 } },
+  ];
+  const result = h.commands.btw.handler("Explain", h.ctx);
+  await tick();
+  assert.equal(h.requests[0].context.messages[0].content,
+    "Conversation snapshot:\n[User]: The conversation history before this point was compacted into the following summary:\n\n<summary>\nCOMPACT SUMMARY\n</summary>\n\n[User]: TAIL\n\n[User]: AFTER COMPACTION");
+  h.key("");
+  await result;
+});
+
+test("the snapshot cap keeps the newest turns and marks what was dropped", async () => {
+  const h = host();
+  h.ctx.sessionManager.getBranch = () => Array.from({ length: 30 }, (_, i) => ({
+    id: `m${i}`, parentId: i ? `m${i - 1}` : null, type: "message", timestamp: "2026-01-01T00:00:00Z",
+    message: { role: "user", content: `MSG-${String(i).padStart(2, "0")} ` + "x".repeat(5000), timestamp: i },
+  }));
+  const result = h.commands.btw.handler("Q", h.ctx);
+  await tick();
+  const snapshot: string = h.requests[0].context.messages[0].content;
+  assert.deepEqual(
+    [snapshot.startsWith("Conversation snapshot:\n[Earlier snapshot text omitted to fit side context]\n"), snapshot.includes("MSG-29"), snapshot.includes("MSG-11"), snapshot.includes("MSG-10"), snapshot.indexOf("MSG-28") < snapshot.indexOf("MSG-29")],
+    [true, true, true, false, true],
+  );
+  h.key("");
+  await result;
+});
+
+test("a provider tool request is reported and never executed", async () => {
+  const h = host([{ type: "text_delta", delta: "Checking" }, { type: "done", reason: "toolUse" }]);
+  const result = h.commands.btw.handler("Question", h.ctx);
+  await tick();
+  assert.deepEqual([h.requests.length, /Provider requested a tool; no tool was run/.test(h.render())], [1, true]);
+  h.key("");
+  await result;
+});
+
+test("reopening after Esc starts a fresh side conversation", async () => {
+  const h = host();
+  let result = h.commands.btw.handler("FIRST Q", h.ctx);
+  await tick();
+  h.key("");
+  await result;
+  result = h.commands.btw.handler("", h.ctx);
+  h.key("SECOND Q");
+  h.key("\r");
+  await tick();
+  assert.deepEqual(h.requests[1].context.messages.map((m: any) => m.content), ["Conversation snapshot:\n", "SECOND Q"]);
+  h.key("");
   await result;
 });

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -133,4 +133,12 @@ test('resolution uses real Pi ModelRegistry find/getAvailable snapshots and cust
   const task = resolveProfile({task: 'work', cwd, model: 'fixture-provider/local:8b'}, load(), {modelRegistry: registry, model: undefined, thinkingLevel: 'low'});
   assert.equal(task.model, 'fixture-provider/local:8b'); assert.equal(task.thinking, 'medium');
   assert.throws(() => resolveProfile({task: 'work', cwd, model: 'fixture-provider/unknown'}, load(), {modelRegistry: registry, model: undefined, thinkingLevel: 'low'}), /unavailable/);
+}));
+
+test('symlinked or non-regular settings files are rejected rather than followed', async () => fixture(async ({load, global, root, put}) => {
+  await put(join(root, 'real.json'), {profiles: {implement: {thinking: 'high'}}});
+  await symlink(join(root, 'real.json'), global);
+  assert.throws(load, /subagents\.json.*ELOOP.*Fix settings and \/reload/);
+  await rm(global); await mkdir(global);
+  assert.throws(load, /expected a regular file/);
 }));

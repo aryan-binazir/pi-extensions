@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { test } from 'node:test';
 import { createAgentSession, ModelRuntime, SessionManager, DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { setActiveCwd } from '../extensions/worktree/routing.ts';
 
 const root = resolve(import.meta.dirname, '..');
 // Declaration order is the manifest order every assertion below compares against.
@@ -92,3 +93,45 @@ test('todo and questionnaire execute in a real headless session behind no tool g
     await runner.emit({type: 'session_shutdown', reason: 'quit'});
   } finally {session?.dispose(); await rm(temp, {recursive: true, force: true});}
 });
+
+
+/** A real headless Pi session over the whole package, with the environment guard and worktree routing read. */
+async function packageSession(run: (h: { session: any; runner: any; temp: string; agentDir: string }) => Promise<void>): Promise<void> {
+  const temp = await mkdtemp(join(tmpdir(), 'pi-package-session-'));
+  const agentDir = join(temp, 'agent');
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    const settingsManager = SettingsManager.inMemory({packages: [root]});
+    const resourceLoader = new DefaultResourceLoader({cwd: temp, agentDir, settingsManager, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true});
+    await resourceLoader.reload();
+    const modelRuntime = await ModelRuntime.create({authPath: join(agentDir, 'auth.json'), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false});
+    ({session} = await createAgentSession({cwd: temp, agentDir, settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(temp), modelRuntime}));
+    await session.bindExtensions({});
+    await run({session, runner: session.extensionRunner!, temp, agentDir});
+    await session.extensionRunner!.emit({type: 'session_shutdown', reason: 'quit'});
+  } finally {
+    session?.dispose();
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(temp, {recursive: true, force: true});
+  }
+}
+
+test('todo, subagents and worktree each append to the same system prompt in manifest order', async () => packageSession(async ({session, runner, temp}) => {
+  await session.getToolDefinition('todo_write')!.execute('t1', {todos: [{content: 'Composed task', status: 'pending'}]}, undefined, undefined, runner.createContext());
+  const checkout = join(temp, 'checkout'); await mkdir(checkout);
+  const sessionId = session.sessionManager.getSessionId();
+  setActiveCwd(temp, checkout, sessionId);
+  try {
+    const result = await runner.emitBeforeAgentStart('hi', undefined, 'BASE_PROMPT', {});
+    assert.match(result!.systemPrompt!, /^BASE_PROMPT\n\n[\s\S]*\[pending\] Composed task[\s\S]*Default profile \(used when profile is omitted\): implement[\s\S]*Active worktree directory: /);
+  } finally { setActiveCwd(temp, undefined, sessionId); }
+}));
+
+test('the guard blocks a non-draft PR through the bash tool that worktree supplies in a real session', async () => packageSession(async ({runner, agentDir}) => {
+  await mkdir(agentDir, {recursive: true});
+  await writeFile(join(agentDir, 'guard.json'), JSON.stringify({requireDraftPr: true, blockAdminMerge: true}));
+  const decision = await runner.emitToolCall({type: 'tool_call', toolName: 'bash', toolCallId: 'g', input: {command: 'gh pr create --title x'}});
+  assert.deepEqual(decision, {block: true, reason: 'Create PRs as drafts. Add --draft; mark ready with gh pr ready after review.'});
+}));

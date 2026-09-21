@@ -109,3 +109,20 @@ test('repeated branch switches restore each branch and still warn once per inval
   // staleTurns travels with the restored snapshot, not with a neighbouring cached one.
   assert.match((await app.hook('before_agent_start')).systemPrompt, /not changed for several turns[\s\S]*Gamma/);
 });
+
+test('changing the declared list resets the stale reminder', async () => {
+  const app = runtime();
+  await app.call([{ content: 'Unfinished work', status: 'in_progress' }]);
+  for (let turn = 0; turn < 6; turn++) await app.hook('before_agent_start');
+  assert.match((await app.hook('before_agent_start')).systemPrompt, /STALE TODO/);
+  await app.call([{ content: 'Unfinished work', status: 'in_progress' }, { content: 'Next step', status: 'pending' }]);
+  assert.equal((await app.hook('before_agent_start')).systemPrompt, 'You are a coding assistant.\nPreserve the user instructions.\n\nKeep the todo list current as work progresses.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work\n[pending] Next step');
+});
+
+test('the reminder strengthens on exactly the third unchanged turn', async () => {
+  const app = runtime();
+  await app.call([{ content: 'Unfinished work', status: 'in_progress' }]);
+  await app.hook('before_agent_start');
+  assert.match((await app.hook('before_agent_start')).systemPrompt, /Keep the todo list current/);
+  assert.equal((await app.hook('before_agent_start')).systemPrompt, 'You are a coding assistant.\nPreserve the user instructions.\n\nThis todo list has not changed for several turns. Update actual progress or explain the blocker.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
+});

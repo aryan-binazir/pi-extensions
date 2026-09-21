@@ -11,6 +11,7 @@ import viMode from '../extensions/vi-mode/index.ts';
 import stash from '../extensions/prompt-stash/index.ts';
 import questionnaire from '../extensions/questionnaire/index.ts';
 import effort from '../extensions/effort/index.ts';
+import btw from '../extensions/btw/index.ts';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { ThinkingSelectorComponent } from '../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/thinking-selector.js';
@@ -180,5 +181,16 @@ test('focused Pi thinking selector keeps Ctrl+S save; main editor alone stashes'
   assert.equal(h.app.editor.getText(), 'draft behind selector');
   h.app.editor.handleInput('\x13'); assert.equal(h.app.editor.getText(), '');
   h.app.editor.handleInput('\x13'); assert.equal(h.app.editor.getText(), 'draft behind selector');
+  h.emit('session_shutdown');
+});
+
+
+test('real btw overlay through InteractiveMode.showExtensionCustom preserves the pasted draft', async () => {
+  const h = host(); paste(h.app.editor); const visible = h.app.editor.getText();
+  Object.assign(h.ctx, {sessionManager: {getBranch: () => []}, getSystemPrompt: () => '', modelRegistry: {getApiKeyAndHeaders: async () => ({ok: false, error: 'synthetic'})}});
+  btw(h.api);
+  const pending = h.commands.get('btw').handler('', h.ctx);
+  await new Promise(r => setTimeout(r, 0)); h.closeDialog(); await pending;
+  assert.equal(h.app.editor.getExpandedText(), payload); assert.equal(h.app.editor.getText(), visible);
   h.emit('session_shutdown');
 });

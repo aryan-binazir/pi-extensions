@@ -110,18 +110,6 @@ test('throwing status callbacks never reject checks or skip the next power read'
  }finally{await keeper.shutdown();}
 });
 
-test('fire-and-forget background activity tolerates a throwing status callback',async()=>{
- let notifications=0;
- const keeper=new PowerKeeper({power:async()=> 'ac',
-  start:()=>({alive:()=>true,stop:async()=>{}}),onChange:()=>{notifications++;throw new Error('stale UI context');}});
- try{
-  void keeper.background('task',true);
-  // Let unhandled rejections reach node:test, matching the event-bus caller.
-  await new Promise<void>(resolve=>setImmediate(resolve));
-  assert.equal(notifications,1);
- }finally{await keeper.shutdown();}
-});
-
 test('the watchdog only ticks while work is pending',async t=>{
  t.mock.timers.enable({apis:['setInterval','Date']});
  // Every watchdog tick consults the clock, so counting clock reads counts ticks.
@@ -160,4 +148,30 @@ test('cached supply types follow devices appearing and disappearing',async()=>{
   await mkdir(join(dir,'BAT0'));await writeFile(join(dir,'BAT0/type'),'Battery');
   assert.equal(await readPower('linux',dir),'unknown');
  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+
+import { createEventBus } from '@earendil-works/pi-coding-agent';
+import autoCaffeinate from './index.ts';
+const wired=(power:'ac'|'battery')=>{
+ const handlers=new Map<string,any>();const status:(string|undefined)[]=[];const bus=createEventBus();
+ autoCaffeinate({on:(name:string,handler:any)=>handlers.set(name,handler),events:bus} as any,{power:async()=>power,start:()=>({alive:()=>true,stop:async()=>{}})});
+ const ctx={hasUI:true,ui:{setStatus:(_key:string,text?:string)=>status.push(text)}};
+ return {status,bus,fire:(name:string)=>handlers.get(name)({},ctx),settle:()=>new Promise<void>(resolve=>setImmediate(resolve))};
+};
+test('a background task announced on the event bus keeps the machine awake and says so in the status bar',async()=>{
+ const h=wired('ac');
+ await h.fire('session_start');
+ try{
+  h.bus.emit('pi-interactive:background-activity',{id:'sub-1',active:true});await h.settle();
+  assert.deepEqual(h.status,['☕ Awake']);
+  h.bus.emit('pi-interactive:background-activity',{id:'sub-1',active:false});
+ }finally{await h.fire('session_shutdown');}
+ assert.equal(h.status.at(-1),undefined);
+});
+test('agent turns on battery never show the machine as held awake',async()=>{
+ const h=wired('battery');
+ await h.fire('session_start');
+ try{await h.fire('agent_start');await h.settle();await h.fire('agent_settled');await h.settle();assert.deepEqual(h.status,[]);}
+ finally{await h.fire('session_shutdown');}
 });

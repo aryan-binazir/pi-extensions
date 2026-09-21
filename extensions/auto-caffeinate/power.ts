@@ -60,7 +60,7 @@ export function startInhibitor(platform:NodeJS.Platform=process.platform,launch=
   if(timer)clearTimeout(timer);
  }};
 }
-interface KeeperOptions {power?:()=>Promise<Power>;start?:()=>Inhibitor|undefined;now?:()=>number;lingerMs?:number;checkMs?:number;powerCacheMs?:number;onChange?:(awake:boolean)=>void}
+export interface KeeperOptions {power?:()=>Promise<Power>;start?:()=>Inhibitor|undefined;now?:()=>number;lingerMs?:number;checkMs?:number;powerCacheMs?:number;onChange?:(awake:boolean)=>void}
 export class PowerKeeper {
  private agent=false;private tasks=new Set<string>();private until=0;private stopped=false;private inhibitor?:Inhibitor;
  private cachedPower:Power='unknown';private checkedAt=-Infinity;private retryAt=0;

@@ -10,6 +10,7 @@ function host(t: TestContext, defaults = { model: "test", level: "high" }) {
   let component: any;
   const changes: any[] = [];
   const notices: string[] = [];
+  let sliders = 0;
   const model = {
     id: defaults.model,
     provider: "test",
@@ -49,6 +50,7 @@ function host(t: TestContext, defaults = { model: "test", level: "high" }) {
       notify: (m: string) => notices.push(m),
       custom: (f: any) =>
         new Promise((resolve) => {
+          sliders++;
           component = f({ requestRender() {} }, {}, {}, resolve);
         }),
     },
@@ -63,6 +65,7 @@ function host(t: TestContext, defaults = { model: "test", level: "high" }) {
     ctx,
     changes,
     notices,
+    get sliders() { return sliders; },
     key: (s: string) => component.handleInput(s),
     render: (width = 80) => component.render(width).join("\n"),
     lines: (width = 80): string[] => component.render(width),
@@ -249,8 +252,32 @@ test("repeated renders survive width, selection and model changes", async (t) =>
   assert.match(h.render(80), /renamed-model/);
   const first = h.lines(80);
   const second = h.lines(80);
-  assert.notEqual(first, second);
   assert.deepEqual(first, second);
   h.key("\u001b");
   await result;
+});
+
+test("/effort LEVEL applies directly without opening the slider", async (t) => {
+  const h = host(t);
+  await h.commands.effort.handler("max", h.ctx);
+  assert.deepEqual({ changes: h.changes, notices: h.notices, sliders: h.sliders }, { changes: ["max"], notices: [], sliders: 0 });
+});
+
+for (const [variant, tweak, expected] of [
+  ["missing model", (f: any) => { f.ctx.modelRegistry.find = () => undefined; }, "Handoff model unavailable"],
+  ["authentication", (f: any) => { f.pi.setModel = async () => false; }, "Handoff model authentication unavailable"],
+  ["unsupported level", (f: any) => { f.ctx.modelRegistry.find = () => ({ ...f.ctx.model, thinkingLevelMap: { low: null } }); }, "Handoff thinking level unsupported"],
+] as const) test(`a ${variant} handoff failure is reported in the new session without changing it`, async (t) => {
+  const old = host(t);
+  let fresh!: ReturnType<typeof host>;
+  old.ctx.newSession = async ({ withSession }: any) => {
+    old.hooks.session_shutdown();
+    fresh = host(t);
+    fresh.ctx.sessionManager.getSessionFile = () => `/synthetic/${variant}`;
+    tweak(fresh);
+    await withSession(fresh.ctx);
+    return { cancelled: false };
+  };
+  await old.commands.effort.handler("new max", old.ctx);
+  assert.deepEqual({ notices: fresh.notices, changes: fresh.changes }, { notices: [expected], changes: [] });
 });

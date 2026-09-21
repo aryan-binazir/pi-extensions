@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import guard from './index.ts';
 
@@ -138,5 +138,15 @@ test('non-draft PR creation is blocked with a corrective instruction', async () 
     assert.deepEqual(await call('gh pr create --title "Fix" --body "Details"'), {
       block: true, reason: 'Create PRs as drafts. Add --draft; mark ready with gh pr ready after review.',
     });
+  });
+});
+
+test('the tracked guard.json, linked as the README documents, parses and enables both rules', async () => {
+  await withGuard(undefined, async (call, path) => {
+    await symlink(resolve(import.meta.dirname, 'guard.json'), path);
+    assert.deepEqual(
+      [await call('git status'), (await call('gh pr create'))?.block, (await call('gh pr merge --admin'))?.block],
+      [undefined, true, true],
+    );
   });
 });

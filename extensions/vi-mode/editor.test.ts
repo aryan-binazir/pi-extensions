@@ -315,7 +315,7 @@ test("huge counted motions stop at boundaries and repeated paste remains bounded
   assert.equal(e.getExpandedText(), "");
   e.setText("x".repeat(2000));
   keys(e, "ggyy9999p");
-  assert.ok(e.getExpandedText().length <= 1024 * 1024);
+  assert.equal(e.getExpandedText().length, 2000, "an oversized put is refused outright");
 });
 test("I inserts at the first non-blank character", () => {
   const e = editor();
@@ -644,7 +644,9 @@ test("confirming a slash completion submits the completed command", async () => 
     },
   });
   let sent = ""; e.onSubmit = text => { sent = text; };
-  keys(e, "/bt"); await new Promise(resolve => setTimeout(resolve, 60));
+  keys(e, "/bt");
+  const deadline = Date.now() + 3000;
+  while (!e.isShowingAutocomplete() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(e.isShowingAutocomplete(), true);
   e.handleInput("\r"); assert.equal(sent, "/btw");
 });
@@ -866,4 +868,63 @@ test("paste markers stay atomic for operators and backspace", () => {
   keys(e, "A");
   e.handleInput("\x7f");
   assert.equal(e.getText(), "", "backspace at the marker end removes the whole marker");
+});
+
+// Normal mode keeps the cursor on a grapheme, so a follow-up command after an
+// end-of-line delete acts on the new last character instead of nothing.
+test("deleting the last character leaves the cursor on the new last character", () => {
+  const e = editor(); e.setText("abc"); keys(e, "\x1b$xx");
+  assert.equal(e.getText(), "a");
+});
+test("D leaves the cursor on the last remaining character", () => {
+  const e = editor(); e.setText("hello world"); keys(e, "\x1b0wDx");
+  assert.equal(e.getText(), "hello");
+});
+test("e stops on the last character of the buffer", () => {
+  const e = editor(); e.setText("ab"); keys(e, "\x1b0eex");
+  assert.equal(e.getText(), "a");
+});
+test("xp swaps two characters", () => {
+  const e = editor(); e.setText("abc"); keys(e, "\x1b0xp");
+  assert.equal(e.getText(), "bac");
+});
+test("o opens a line below and O above", () => {
+  const e = editor(); e.setText("one\ntwo"); keys(e, "\x1bggoX\x1bGOY\x1b");
+  assert.equal(e.getText(), "one\nX\nY\ntwo");
+});
+test("undo after O removes the opened line with its typed text", () => {
+  const e = editor(); e.setText("one\ntwo"); keys(e, "\x1bGOX\x1bu");
+  assert.equal(e.getText(), "one\ntwo");
+});
+test("da( removes the parentheses with their contents", () => {
+  const e = editor(); e.setText("say (hello world) now"); keys(e, "\x1b0wlda(");
+  assert.equal(e.getText(), "say  now");
+});
+test("daw removes the word and its trailing space", () => {
+  const e = editor(); e.setText("say hello now"); keys(e, "\x1b0wdaw");
+  assert.equal(e.getText(), "say now");
+});
+test("diW deletes a hyphenated word as one WORD", () => {
+  const e = editor(); e.setText("a foo-bar b"); keys(e, "\x1b0wwdiW");
+  assert.equal(e.getText(), "a  b");
+});
+test("de deletes through the end of the word inclusively", () => {
+  const e = editor(); e.setText("hello world"); keys(e, "\x1b0de");
+  assert.equal(e.getText(), " world");
+});
+test("db deletes back to the start of the word", () => {
+  const e = editor(); e.setText("hello world"); keys(e, "\x1b$db");
+  assert.equal(e.getText(), "hello d");
+});
+test("D yanks the deleted tail for a later put", () => {
+  const e = editor(); e.setText("hello world"); keys(e, "\x1b0wD0p");
+  assert.equal(e.getText(), "hworldello ");
+});
+test("3x deletes three characters", () => {
+  const e = editor(); e.setText("abcdef"); keys(e, "\x1b03x");
+  assert.equal(e.getText(), "def");
+});
+test("yy2p puts the line twice", () => {
+  const e = editor(); e.setText("a\nb"); keys(e, "\x1bggyy2p");
+  assert.equal(e.getText(), "a\na\na\nb");
 });

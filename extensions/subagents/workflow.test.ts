@@ -41,7 +41,7 @@ test('capabilities enforce read bounds, retries, checkpoints, and restricted glo
   try {await assert.rejects(runWorkflow({...base,source:`return await api.readFile(${JSON.stringify(outside)});`}),/escapes workflow cwd/);}
   finally {await rm(outside,{force:true});}
   await assert.rejects(runWorkflow({...base,source:'return Function("return process")();'}),/Code generation/);
-  await assert.rejects(runWorkflow({...base,source:'while (true) {}',timeout:500}),/timed out/);
+  await assert.rejects(runWorkflow({...base,source:'while (true) {}',timeout:20000}),/Script execution timed out after 100ms/);
  } finally {await rm(cwd,{recursive:true,force:true});}
 });
 
@@ -130,3 +130,28 @@ test('FIFO capability, timeout and registered shutdown settle in a bounded subpr
   const {stdout} = await promisify(execFile)(process.execPath, ['--import', 'tsx', fixture], {timeout: 15000, killSignal: 'SIGKILL'});
   assert.match(stdout, /FIFO_REGRESSION_PASS/);
 });
+
+
+const bounded = async (run: (options: any) => Promise<unknown>): Promise<void> => {
+  const cwd = await mkdtemp(join(tmpdir(), 'workflow-bounds-'));
+  try { await run({cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'bounds', approve: async () => true, approveReplay: async () => true}); }
+  finally { await rm(cwd, {recursive: true, force: true}); }
+};
+
+for (const [label, source, error] of [
+  ['a spawn without an explicit stage label', "return await api.spawn({task:'x'});", /explicit stable stage label/],
+  ['parallel with more than 16 functions', "return await api.parallel(Array.from({length:17},(_,i)=>()=>api.spawn({task:'x'},'s'+i)));", /at most 16 functions/],
+  ['retry with more than 5 attempts', "return await api.retry(6,()=>api.spawn({task:'x'},'r'));", /attempts must be 1–5/],
+] as const) test(`${label} is rejected before any child launches`, async () => bounded(async base => {
+  let launches = 0;
+  await assert.rejects(runWorkflow({...base, source, spawn: async () => { launches++; return 'x'; }}), error);
+  assert.equal(launches, 0);
+}));
+
+test('a stage label cannot replay the cached result of a different task', async () => bounded(async base => {
+  await writeFile(join(base.cwd, 'input'), 'hello');
+  const options = {...base, source: "const n = await api.readFile('input', 5); return await api.spawn({task: n}, 'stage');", spawn: async (task: any) => 'ran:' + task.task};
+  assert.equal(await runWorkflow(options), 'ran:hello');
+  await writeFile(join(base.cwd, 'input'), 'world');
+  await assert.rejects(runWorkflow(options), /reused for a different task/);
+}));

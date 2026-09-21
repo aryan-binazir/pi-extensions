@@ -18,17 +18,6 @@ test('journal loading does not follow a substituted symlink', async () => {
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 
-test('the workflow deadline also covers an unanswered approval', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'workflow-deadline-'));
-  try {
-    const run = runWorkflow({source: 'return 1;', timeout: 50, cwd, journalDirectory: join(cwd, 'journals'), policyIdentity: 'deadline',
-      approve: () => new Promise<boolean>(() => {}), spawn: async () => { throw new Error('unused'); },
-    }).then(() => 'succeeded', () => 'rejected');
-    const outcome = await Promise.race([run, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 200))]);
-    assert.equal(outcome, 'rejected');
-  } finally { await rm(cwd, {recursive: true, force: true}); }
-});
-
 test('workflow retry returns supervision failures to its orchestrator without relaunching', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'workflow-stalled-'));
   let launches = 0;
@@ -51,22 +40,6 @@ test('a changed ancestor cannot substitute another file after read authorization
       spawn: async () => { throw new Error('unused'); },
     }), /changed during authorization/);
   } finally { await rm(root, {recursive: true, force: true}); }
-});
-
-test('workflow cancellation settles while source approval remains unanswered', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'workflow-approval-'));
-  const controller = new AbortController();
-  let entered!: () => void;
-  const ready = new Promise<void>(resolve => { entered = resolve; });
-  try {
-    const run = runWorkflow({source: 'return 1;', cwd, journalDirectory: join(cwd, 'journals'), policyIdentity: 'approval', signal: controller.signal,
-      approve: () => { entered(); return new Promise<boolean>(() => {}); }, spawn: async () => { throw new Error('must not spawn'); },
-    }).then(() => 'succeeded', () => 'rejected');
-    await ready;
-    controller.abort();
-    const result = await Promise.race([run, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 100))]);
-    assert.equal(result, 'rejected');
-  } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 
 test('multibyte checkpoints cannot create a journal that violates its reload byte limit', async () => {

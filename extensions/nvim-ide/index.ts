@@ -73,7 +73,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
     return block ? { systemPrompt: `${event.systemPrompt}\n\n${block}` } : undefined;
   });
 
-  // "Show, don't gate": after pi changes a file, the editor jumps to the change.
+  // After pi changes a file, the editor jumps to the change.
   pi.on('tool_execution_start', (event, context) => {
     if (event.toolName !== 'edit' && event.toolName !== 'write') return;
     const path = (event.args as { path?: unknown })?.path;

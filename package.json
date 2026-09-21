@@ -11,6 +11,7 @@
   "files": [
     "extensions",
     "docs",
+    "APPEND_SYSTEM.md",
     "README.md"
   ],
   "pi": {
@@ -43,7 +44,8 @@
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "typebox": "*",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.85.1",
@@ -53,13 +55,10 @@
     "eslint": "^9.39.0",
     "tsx": "^4.20.0",
     "typebox": "1.3.7",
-    "typescript-eslint": "^8.46.0",
-    "ws": "^8.21.3"
+    "typescript-eslint": "^8.46.0"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "*",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "typescript": "~5.9.3",
-    "zod": "^4.6.2"
+    "typescript": "~5.9.3"
   }
 }

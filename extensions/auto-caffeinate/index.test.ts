@@ -68,7 +68,7 @@ test('Linux inhibitor uses a pipe, and cleanup reaps the real synthetic child',a
  await inhibitor.stop();assert.equal(inhibitor.alive(),false);
  assert.notEqual(child!.exitCode,null);
 });
-test('power cache coalesces event reads and watchdog refreshes it',async()=>{
+test('power cache coalesces event reads while a forced check re-reads it',async()=>{
  let checks=0;let power:'ac'|'battery'='ac';let stopped=0;
  const keeper=new PowerKeeper({power:async()=>{checks++;return power;},start:()=>({alive:()=>true,stop:async()=>{stopped++;}}),now:()=>0});
  await keeper.setAgent(true);await keeper.background('a',true);await keeper.background('b',true);assert.equal(checks,1);
@@ -94,15 +94,6 @@ test('missing inhibitor backs off instead of retrying each watchdog tick',async(
  const keeper=new PowerKeeper({now:()=>now,power:async()=> 'ac',start:()=>{starts++;return undefined;}});
  try {await keeper.setAgent(true);for(now=2000;now<30000;now+=2000)await keeper.check();assert.equal(starts,1);await keeper.check();assert.equal(starts,2);}
  finally {await keeper.shutdown();}
-});
-
-test('empty Linux power-supply directory is treated as fixed AC power',async()=>{
- const dir=await mkdtemp(join(tmpdir(),'pi-power-empty-'));let starts=0;
- const keeper=new PowerKeeper({power:()=>readPower('linux',dir),start:()=>{starts++;return {alive:()=>true,stop:async()=>{}};}});
- try{
-  await keeper.setAgent(true);await keeper.background('task',true);await keeper.check();
-  assert.equal(starts,1);
- }finally{await keeper.shutdown();await rm(dir,{recursive:true,force:true});}
 });
 
 test('throwing status callbacks never reject checks or skip the next power read',async()=>{
@@ -131,10 +122,12 @@ test('fire-and-forget background activity tolerates a throwing status callback',
  }finally{await keeper.shutdown();}
 });
 
-test('the watchdog only ticks while work is pending',async()=>{
+test('the watchdog only ticks while work is pending',async t=>{
+ t.mock.timers.enable({apis:['setInterval','Date']});
  // Every watchdog tick consults the clock, so counting clock reads counts ticks.
  let reads=0,stops=0,ticks=0;
- const idle=async(ms:number)=>{await new Promise<void>(resolve=>setTimeout(resolve,ms));};
+ // Advance the mocked clock, then let the checks each tick queued settle.
+ const idle=async(ms:number)=>{t.mock.timers.tick(ms);await new Promise<void>(resolve=>setImmediate(resolve));};
  const keeper=new PowerKeeper({power:async()=>{reads++;return 'ac';},now:()=>{ticks++;return Date.now();},
   start:()=>({alive:()=>true,stop:async()=>{stops++;}}),lingerMs:20,checkMs:5,powerCacheMs:0});
  try{

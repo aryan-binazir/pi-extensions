@@ -2,6 +2,8 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import type { Provider as ModelProvider } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { FAST_SUFFIX, withFastModels } from './provider.ts';
+type BranchEntry=ReturnType<ExtensionContext['sessionManager']['getBranch']>[number];
+type ModelChange=Extract<BranchEntry,{type:'model_change'}>;
 export default function fastMode(pi:ExtensionAPI):void {
  const install=(ctx:ExtensionContext)=>{
   for(const id of ['openai','openai-codex']) {
@@ -20,8 +22,8 @@ export default function fastMode(pi:ExtensionAPI):void {
   if(!['resume','startup'].includes(event.reason))return;
   // Explicit CLI selection takes precedence over the stored alias on startup.
   if(event.reason==='startup'&&process.argv.some(arg=>/^--(?:model|provider)(?:=|$)/.test(arg)))return;
-  const previous=[...ctx.sessionManager.getBranch()].reverse().find(entry=>entry.type==='model_change');
-  if(previous?.type!=='model_change'||!previous.modelId.endsWith(FAST_SUFFIX))return;
+  const previous=[...ctx.sessionManager.getBranch()].reverse().find((entry):entry is ModelChange=>entry.type==='model_change');
+  if(!previous||!previous.modelId.endsWith(FAST_SUFFIX))return;
   const restored=ctx.modelRegistry.find(previous.provider,previous.modelId);
   if(!restored)return;
   const effort=pi.getThinkingLevel();

@@ -4,11 +4,13 @@ import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { getSupportedThinkingLevels, type ThinkingLevel } from '@earendil-works/pi-ai';
 import { withFastModels } from './provider.ts';
 
+// Priority tier bills at this multiple of the model's standard rate.
+const priorityRate=(model:{id:string})=>model.id==='gpt-5.5'?2.5:2;
+
 test('fast aliases preserve auth and pricing metadata and send priority through real provider',async()=>{
  const original=openaiProvider(); const provider=withFastModels(original);
  assert.equal(provider.auth,original.auth);
  const base=original.getModels().find(m=>m.id==='gpt-5.5')!;
- assert.ok(base);
  const alias=provider.getModels().find(m=>m.id===base.id+'~fast')!;
  assert.deepEqual(alias.cost,base.cost);
  for(const reasoning of getSupportedThinkingLevels(base)) {
@@ -23,7 +25,7 @@ test('fast aliases preserve auth and pricing metadata and send priority through 
   assert.equal(payload.model,base.id);assert.equal(payload.service_tier,'priority');
   assert.equal(headers!.get('authorization'),'Bearer fixture-key');
   assert.equal(payload.reasoning.effort,reasoning==='off'?'none':base.thinkingLevelMap?.[reasoning]??reasoning);
-  assert.equal(output.usage.cost.input,base.cost.input*0.001*2.5);
+  assert.equal(output.usage.cost.input,base.cost.input*0.001*priorityRate(base));
  }
  assert.equal(withFastModels(provider),provider,'reload must not wrap twice');
 });
@@ -51,7 +53,7 @@ test('Codex fast sends priority using existing subscription auth and reasoning',
  const output=await provider.streamSimple(alias,{messages:[]},{apiKey:token,reasoning:'low',fetch,transport:'sse',maxRetries:0}).result();
  assert.equal(output.stopReason,'stop',output.errorMessage);assert.equal(payload.model,base.id);assert.equal(payload.service_tier,'priority');
  assert.equal(payload.reasoning.effort,'low');assert.equal(headers!.get('chatgpt-account-id'),'fixture-account');assert.equal(headers!.get('authorization'),'Bearer '+token);
- assert.equal(output.usage.cost.input,base.cost.input*0.001*(base.id==='gpt-5.5'?2.5:2));assert.equal(provider.auth,original.auth);
+ assert.equal(output.usage.cost.input,base.cost.input*0.001*priorityRate(base));assert.equal(provider.auth,original.auth);
 });
 
 import { mkdtemp,writeFile,rm } from 'node:fs/promises';
@@ -82,7 +84,6 @@ test('fast installation preserves unique models and reflects models.json refresh
    assert.equal(ctx.model.id,i%2===0?'gpt-5.5~fast':'gpt-5.5');
   }
   assert.equal(registrations,installed,'Composed providers must not accumulate wrapper layers');
-  // Refresh the initial configuration before changing the config file.
   await ctx.modelRegistry.refresh({allowNetwork:false});
   await writeFile(modelsPath,JSON.stringify({providers:{}}));
   await ctx.modelRegistry.refresh({allowNetwork:false});
@@ -99,30 +100,30 @@ test('fast installation preserves unique models and reflects models.json refresh
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
-for(const [name,config] of [
- ['provider proxy',{baseUrl:'https://proxy.example/v1'}],
- ['per-model proxy',{models:[{id:'gpt-5.5',baseUrl:'https://proxy.example/v1'}]}],
-] as const) {
- test(`fast installation respects ${name} eligibility`,async()=>{
-  const dir=await mkdtemp(join(tmpdir(),'pi-fast-proxy-'));
-  try {
-   const modelsPath=join(dir,'models.json');
-   await writeFile(modelsPath,JSON.stringify({providers:{openai:config}}));
-   const runtime=await ModelRuntime.create({modelsPath,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
-   let startup:any;
-   fastMode({registerProvider:(provider:any)=>runtime.registerNativeProvider(provider),on:(_name:string,handler:any)=>{startup=handler;},registerCommand:()=>{}} as any);
-   const registry=new ModelRegistry(runtime);
-   await startup({reason:'new'},{modelRegistry:registry});
-   await registry.refresh({allowNetwork:false});
-   const aliases=runtime.getModels('openai').filter(model=>model.id.endsWith('~fast'));
-   if(name==='provider proxy')assert.equal(aliases.length,0);
-   else {
-    assert.ok(aliases.length>0,'Other direct models remain eligible');
-    assert.ok(!aliases.some(model=>model.id==='gpt-5.5~fast'));
-   }
-  }finally{await rm(dir,{recursive:true,force:true});}
- });
-}
+const aliasesUnderConfig=async(config:unknown)=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-fast-proxy-'));
+ try {
+  const modelsPath=join(dir,'models.json');
+  await writeFile(modelsPath,JSON.stringify({providers:{openai:config}}));
+  const runtime=await ModelRuntime.create({modelsPath,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
+  let startup:any;
+  fastMode({registerProvider:(provider:any)=>runtime.registerNativeProvider(provider),on:(_name:string,handler:any)=>{startup=handler;},registerCommand:()=>{}} as any);
+  const registry=new ModelRegistry(runtime);
+  await startup({reason:'new'},{modelRegistry:registry});
+  await registry.refresh({allowNetwork:false});
+  return runtime.getModels('openai').filter(model=>model.id.endsWith('~fast'));
+ }finally{await rm(dir,{recursive:true,force:true});}
+};
+
+test('a provider-wide proxy leaves no model eligible for fast',async()=>{
+ assert.deepEqual(await aliasesUnderConfig({baseUrl:'https://proxy.example/v1'}),[]);
+});
+
+test('a per-model proxy withdraws only that model from fast',async()=>{
+ const aliases=await aliasesUnderConfig({models:[{id:'gpt-5.5',baseUrl:'https://proxy.example/v1'}]});
+ assert.ok(aliases.length>0,'Other direct models remain eligible');
+ assert.ok(!aliases.some(model=>model.id==='gpt-5.5~fast'));
+});
 
 test('config-declared direct models retain usable fast aliases',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'pi-fast-custom-'));
@@ -184,7 +185,6 @@ test('alias derivation tracks the live base model list rather than a stale snaps
  const refreshed=provider.getModels();
  assert.deepEqual(refreshed.map(model=>model.id),[base.id,base.id+'~fast',other.id]);
  assert.equal(refreshed.find(model=>model.id===base.id+'~fast')!.name,'Renamed (fast)');
- // Returning to the original objects restores the original aliases.
  current=[base,other];
  assert.deepEqual(provider.getModels().map(model=>model.id),[base.id,base.id+'~fast',other.id,other.id+'~fast']);
  assert.equal(provider.getModels().find(model=>model.id===base.id+'~fast')!.name,base.name+' (fast)');

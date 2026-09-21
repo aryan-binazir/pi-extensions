@@ -6,9 +6,25 @@ import { test } from 'node:test';
 import { createAgentSession, ModelRuntime, SessionManager, DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
 
 const root = resolve(import.meta.dirname, '..');
-const intended = ['questionnaire', 'todo', 'effort', 'btw', 'vi-mode', 'prompt-stash', 'subagents', 'worktree', 'computer-use', 'fast-mode', 'auto-caffeinate', 'auto-permissions-status', 'nvim-ide'];
+// Declaration order is the manifest order every assertion below compares against.
+const expected: Record<string, { tools: string[]; commands: string[]; shortcuts: string[] }> = {
+  questionnaire: {tools: ['questionnaire'], commands: [], shortcuts: []},
+  todo: {tools: ['todo_write'], commands: [], shortcuts: []},
+  effort: {tools: [], commands: ['effort'], shortcuts: []},
+  btw: {tools: [], commands: ['btw', 'side'], shortcuts: []},
+  'vi-mode': {tools: [], commands: [], shortcuts: []},
+  'prompt-stash': {tools: [], commands: [], shortcuts: []},
+  subagents: {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []},
+  worktree: {tools: ['bash'], commands: ['worktree'], shortcuts: []},
+  'computer-use': {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []},
+  'fast-mode': {tools: [], commands: ['fast'], shortcuts: []},
+  'auto-caffeinate': {tools: [], commands: [], shortcuts: []},
+  'auto-permissions-status': {tools: [], commands: [], shortcuts: []},
+  'nvim-ide': {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['vim'], shortcuts: []},
+};
+const intended = Object.keys(expected);
 
-test('Pi package discovers exactly thirteen entrypoints and independently loads each', async () => {
+test('Pi package discovers every declared entrypoint and independently loads each', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-package-test-'));
   try {
     const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -25,21 +41,6 @@ test('Pi package discovers exactly thirteen entrypoints and independently loads 
       assert.equal(loaded.extensions.length, 1, entry.path);
       const extension = loaded.extensions[0];
       const feature = entry.path.split('/').at(-2)!;
-      const expected: Record<string, { tools: string[]; commands: string[]; shortcuts: string[] }> = {
-        questionnaire: {tools: ['questionnaire'], commands: [], shortcuts: []},
-        todo: {tools: ['todo_write'], commands: [], shortcuts: []},
-        effort: {tools: [], commands: ['effort'], shortcuts: []},
-        btw: {tools: [], commands: ['btw', 'side'], shortcuts: []},
-        'vi-mode': {tools: [], commands: [], shortcuts: []},
-        'prompt-stash': {tools: [], commands: [], shortcuts: []},
-        subagents: {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []},
-        worktree: {tools: ['bash'], commands: ['worktree'], shortcuts: []},
-        'computer-use': {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []},
-        'fast-mode': {tools: [], commands: ['fast'], shortcuts: []},
-        'auto-caffeinate': {tools: [], commands: [], shortcuts: []},
-        'auto-permissions-status': {tools: [], commands: [], shortcuts: []},
-        'nvim-ide': {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['vim'], shortcuts: []},
-      };
       assert.deepEqual([...extension.tools.keys()].sort(), expected[feature].tools, feature);
       assert.deepEqual([...extension.commands.keys()].sort(), expected[feature].commands, feature);
       assert.deepEqual([...extension.shortcuts.keys()].sort(), expected[feature].shortcuts, feature);
@@ -61,7 +62,7 @@ test('Pi package discovers exactly thirteen entrypoints and independently loads 
 });
 
 
-test('bundled tools work together in a real headless session', async () => {
+test('todo and questionnaire execute in a real headless session behind no tool gate', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-managed-tools-'));
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
@@ -80,12 +81,12 @@ test('bundled tools work together in a real headless session', async () => {
       ['questionnaire', {questions: [{id: 'test', prompt: 'Test?', options: [], allowOther: true}]}],
     ] as const) {
       const decision = await runner.emitToolCall({type: 'tool_call', toolName, toolCallId: `managed-${toolName}`, input});
-      assert.notEqual(decision?.block, true, `${toolName}: ${decision?.reason}`);
+      assert.equal(decision, undefined, `${toolName}: ${decision?.reason}`);
       const tool = session.getToolDefinition(toolName)!;
       await tool.execute(`managed-${toolName}`, input, undefined, undefined, runner.createContext());
     }
     const unknown = await runner.emitToolCall({type: 'tool_call', toolName: 'untrusted_remote_tool', toolCallId: 'unknown', input: {}});
-    assert.notEqual(unknown?.block, true, 'no global auto-mode tool gate is installed');
+    assert.equal(unknown, undefined, 'no global auto-mode tool gate is installed');
     assert.deepEqual(errors, []);
     await runner.emit({type: 'session_shutdown', reason: 'quit'});
   } finally {session?.dispose(); await rm(temp, {recursive: true, force: true});}

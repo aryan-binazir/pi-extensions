@@ -82,9 +82,8 @@ export function validateTimeout(timeout: number | undefined, what: string): numb
 }
 const FAST_ALIAS = new RegExp(`^(openai(?:-codex)?\\/.+)~fast(?=:${thinkingPattern}$|$)`);
 
-/** Overlay variables on an environment instead of copying it: node's spawn walks
- * the prototype chain when it builds the child environment, so the child gets the
- * same variables for one traversal of the host's intercepted process.env. */
+/** Overlay variables instead of copying: node's spawn walks the prototype chain,
+ * so the child gets the same environment for one pass over intercepted process.env. */
 function childEnv(base: NodeJS.ProcessEnv, overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.assign(Object.create(base) as NodeJS.ProcessEnv, overrides);
 }

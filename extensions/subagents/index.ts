@@ -21,7 +21,6 @@ const taskSchema = Type.Object({
 const completionGuidance = 'After calling subagent, do independent work or end your turn. Completion results are pushed automatically and resume the parent without polling. Do not call subagent_status or run sleep/wait loops just to await completion.';
 const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }], details: value });
 
-
 export default function subagents(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let shuttingDown = false;

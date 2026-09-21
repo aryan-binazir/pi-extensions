@@ -75,6 +75,10 @@ reviewing [`extensions/guard/guard.json`](extensions/guard/guard.json):
   repo=$(git rev-parse --show-toplevel)
   local_rules="$repo/extensions/guard/guard.local.json"
   agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+  case "$agent_dir" in
+    '~') agent_dir="$HOME" ;;
+    '~/'*) agent_dir="$HOME/${agent_dir#\~/}" ;;
+  esac
   target="$agent_dir/guard.json"
   if [ -e "$target" ] || [ -L "$target" ]; then
     printf 'Preserving existing config: %s — inspect before changing it.\n' "$target"

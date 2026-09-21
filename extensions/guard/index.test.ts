@@ -109,6 +109,21 @@ test('short help works, browser creation gives a usable correction, and broken c
   });
 });
 
+test('inherited help flags, mixed web aliases, and literal Bash whitespace keep their semantics', async () => {
+  await withGuard(enabled, async call => {
+    for (const command of [
+      'gh --help=false pr merge --admin', 'gh pr --help=false merge --admin',
+      'gh --help=false pr create', 'gh pr --help=false create',
+      'gh --help pr create --help=false',
+      'gh pr create --title=Fix\u00a0--draft --body=Details',
+    ]) assert.equal((await call(command))?.block, true, command);
+    for (const command of [
+      'gh --help pr create', 'gh pr -h merge --admin',
+      'gh pr create -w --web=false --draft', 'gh pr create --web -w=false --draft',
+    ]) assert.equal(await call(command), undefined, command);
+  });
+});
+
 test('administrator merges are blocked without blocking normal merges', async () => {
   await withGuard(enabled, async call => {
     assert.deepEqual(await call('gh pr merge 42 --admin'), {

@@ -23,7 +23,7 @@ function commands(source: string): string[][] {
       flushCommand();
     } else if (';|&\n'.includes(char)) {
       flushCommand();
-    } else if (/\s/.test(char)) {
+    } else if (char === ' ' || char === '\t') {
       flushWord();
     } else {
       word += char; started = true;
@@ -57,7 +57,8 @@ function flags(args: string[], action: string): Set<string> {
         const flag = arg[j];
         if (shortValueFlags[action].includes(flag)) { if (j === arg.length - 1) i++; break; }
         const value = arg[j + 1] === '=' ? arg.slice(j + 2) : undefined;
-        record(flag === 'h' ? '--help' : action === 'create' && flag === 'd' ? '--draft' : `-${flag}`, value);
+        const name = flag === 'h' ? '--help' : action === 'create' && flag === 'd' ? '--draft' : action === 'create' && flag === 'w' ? '--web' : `-${flag}`;
+        record(name, value);
         if (value !== undefined) break;
       }
     }
@@ -92,9 +93,11 @@ export default function guard(pi: ExtensionAPI) {
       let start = 0;
       while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[start] ?? '')) start++;
       if (basename(words[start] ?? '') !== 'gh') continue;
-      // Repository selection is inherited and can precede either subcommand.
-      const args: string[] = [];
+      // Inherited flags can precede either subcommand. Keep help in encounter
+      // order so a later --help=false does not accidentally bypass a rule.
+      const args: string[] = [], inherited: string[] = [];
       for (let i = start + 1; i < words.length; i++) {
+        if (/^(--help|-h)(=.*)?$/.test(words[i])) { inherited.push(words[i]); continue; }
         if (words[i] === '-R' || words[i] === '--repo') { i++; continue; }
         if (words[i].startsWith('--repo=') || /^-R.+/.test(words[i])) continue;
         args.push(words[i]);
@@ -103,12 +106,12 @@ export default function guard(pi: ExtensionAPI) {
       if (args[0] !== 'pr') continue;
       const action = args[1] === 'new' ? 'create' : args[1];
       if (action !== 'create' && action !== 'merge') continue;
-      const options = flags(args.slice(2), action);
+      const options = flags([...inherited, ...args.slice(2)], action);
       if (options.has('--help')) continue;
       if (action === 'merge' && config.blockAdminMerge && options.has('--admin')) {
         return { block: true, reason: 'Merge without --admin. Satisfy the repository review and check requirements instead of bypassing them.' };
       }
-      if (action === 'create' && config.requireDraftPr && (options.has('--web') || options.has('-w'))) {
+      if (action === 'create' && config.requireDraftPr && options.has('--web')) {
         return { block: true, reason: 'gh cannot create drafts with --web. Drop --web/-w and pass --draft.' };
       }
       if (action === 'create' && config.requireDraftPr && !options.has('--draft')) {

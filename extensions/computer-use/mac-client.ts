@@ -73,12 +73,8 @@ export async function approve(params: ElicitRequest['params'], ctx: ExtensionCon
 }
 const pngMagic = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 /**
- * True exactly when `text` is the canonical base64 of `image`, which is what
- * `image.toString('base64') === text` decided before. Canonical output only ever
- * contains `[A-Za-z0-9+/=]` in a length divisible by four, so this also subsumes
- * the separate charset and padding scans. Comparing 192KiB at a time keeps the
- * transient encode buffer off the heap: a whole-screenshot re-encode allocated a
- * second copy of every base64 string the service sent.
+ * True exactly when `text` is the canonical base64 of `image`, which also subsumes
+ * charset and padding checks. Comparing 192KiB at a time keeps the encode off the heap.
  */
 function canonicalBase64(image: Buffer, text: string): boolean {
   if (Math.ceil(image.length / 3) * 4 !== text.length) return false;
@@ -90,9 +86,9 @@ function canonicalBase64(image: Buffer, text: string): boolean {
   return true;
 }
 export function macResult(result: CallToolResult, omitImages = false) {
-  if (result.isError) throw new Error(boundedText(result.content.filter(c => c.type === 'text').map(c => c.text).join('\n') || 'Codex computer-use service error'));
-  const content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[] = [];
   const text = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+  if (result.isError) throw new Error(boundedText(text || 'Codex computer-use service error'));
+  const content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[] = [];
   if (text) content.push({ type: 'text', text: boundedText(text) });
   let bytes = 0;
   for (const item of result.content) {
@@ -115,14 +111,14 @@ const allowed = new Set(['list_apps', 'get_app_state', 'click', 'type_text', 'sc
 export class MacSession {
   private client?: Client;
   private tools: Tool[] = [];
-  private tail: Promise<unknown> = Promise.resolve();
+  private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
   private active?: AbortController;
   private current?: { ctx: ExtensionContext; signal: AbortSignal };
   constructor(private launch: () => StdioServerParameters = macLaunch, private timeout = 30_000) {}
   private async disconnect() { const client = this.client; this.client = undefined; this.tools = []; await client?.close(); }
   run(name: string, args: Record<string, unknown>, ctx: ExtensionContext, signal?: AbortSignal, omitImages = false) {
-    const work = this.tail.then(async () => {
+    const work = this.queue.then(async () => {
       if (this.closed) throw new Error('Mac session closed');
       if (!allowed.has(name)) throw new Error(`Tool ${name} not allowed`);
       signal?.throwIfAborted();
@@ -136,8 +132,9 @@ export class MacSession {
       const cancelled = new Promise<never>((_resolve, reject) => { onAbort = () => reject(control.signal.reason); control.signal.addEventListener('abort', onAbort, { once: true }); });
       const operation = (async () => {
         const { Client, StdioClientTransport, ElicitRequestSchema, validator } = await loadMacSdk();
-        if (!this.client) {
-          const client = new Client({ name: 'pi-computer-use', version: '1' }, { capabilities: { elicitation: { form: {} } } });
+        let client = this.client;
+        if (!client) {
+          client = new Client({ name: 'pi-computer-use', version: '1' }, { capabilities: { elicitation: { form: {} } } });
           this.client = client;
           client.setRequestHandler(ElicitRequestSchema, (request, extra) => this.current ? approve(request.params, this.current.ctx, AbortSignal.any([this.current.signal, extra.signal])) : Promise.resolve({ action: 'decline' as const }));
           const transport = new StdioClientTransport(this.launch()); transport.stderr?.on('data', () => {});
@@ -148,7 +145,7 @@ export class MacSession {
         const tool = this.tools.find(tool => tool.name === name);
         if (!tool || !validator(tool.inputSchema)(args).valid) throw new Error(`Arguments do not match official ${name} schema`);
         sent = true;
-        return macResult(await this.client!.callTool({ name, arguments: args }, undefined, { signal: control.signal }) as CallToolResult, omitImages);
+        return macResult(await client.callTool({ name, arguments: args }, undefined, { signal: control.signal }) as CallToolResult, omitImages);
       })();
       try { return await Promise.race([operation, cancelled]); }
       catch (error) {
@@ -158,7 +155,7 @@ export class MacSession {
         throw new Error(message + (sent && name !== 'list_apps' && name !== 'get_app_state' ? '\nMutation outcome unknown or partial. Inspect before acting; never automatically retry.' : ''));
       } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); control.signal.removeEventListener('abort', onAbort); this.active = undefined; this.current = undefined; }
     });
-    this.tail = work.catch(() => {}); return work;
+    this.queue = work.catch(() => {}); return work;
   }
-  async close() { this.closed = true; this.active?.abort(new Error('Mac session closed')); await this.tail; await this.disconnect(); }
+  async close() { this.closed = true; this.active?.abort(new Error('Mac session closed')); await this.queue; await this.disconnect(); }
 }

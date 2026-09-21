@@ -16,7 +16,7 @@ Seven app-targeted tools are registered on macOS:
 | `computer_scroll(app, element_index, direction, pages)` | Scroll the named element. |
 | `computer_key(app, key)` | Key/chord (`press_key`). |
 
-Coordinates are **app/window-targeted screenshot pixels**, not normalized whole-desktop coordinates. Use identifiers and indices from fresh service observations. Each request is checked against the official `tools/list` input schema. No arbitrary code execution tool is exposed.
+Coordinates are app/window-targeted screenshot pixels, not normalized whole-desktop coordinates. Use identifiers and indices from fresh service observations. Each request is checked against the official `tools/list` input schema. No arbitrary code execution tool is exposed.
 
 Install/enable computer use through the official Codex application. The client must exist at:
 
@@ -30,7 +30,7 @@ Grant the official computer-use apps the macOS permissions they request (Accessi
 
 Service approval requests go to an actual Pi confirmation dialog showing the message and untrusted risk/subtitle metadata. Only an explicit yes accepts that request. Headless sessions, URL forms and forms requesting fields are denied. Cancellation closes the dialog. The extension never fabricates an “always” grant or sends persistence metadata, even if the service offers `persist: ['always']`; existing service-owned grants remain service-owned.
 
-Connection is lazy and serialized, with a 30-second deadline including discovery and approval. Cancellation/timeout closes the SDK client and owned relay before queued work reconnects. The relay watches its parent and terminates only its owned client, with bounded TERM→KILL escalation. **The shared Sky computer-use service is not owned or killed by this extension.** Closing/reloading a session closes only this connection. No mutation is retried automatically.
+Connection is lazy and serialized, with a 30-second deadline including discovery and approval. Cancellation/timeout closes the SDK client and owned relay before queued work reconnects. The relay watches its parent and terminates only its owned client, with bounded TERM→KILL escalation. The shared Sky computer-use service is not owned or killed by this extension. Closing/reloading a session closes only this connection.
 
 Results mark their service source and untrusted content; text is bounded to 64 KiB aggregate. Unneeded structured content and metadata are not copied into results. Genuine PNG/JPEG/WebP images are MIME/magic/base64 checked and bounded to 16 MiB aggregate decoded bytes. Accessibility-only requests suppress returned images, not the underlying state capture.
 
@@ -50,4 +50,4 @@ No installed Linux accessibility service is assumed. Element-tree queries explic
 
 ## Verification and limits
 
-Regression tests use an SDK MCP fixture, synthetic Unix sockets and harmless broker fixtures. They cover discovery, explicit approval/cancellation, schemas, content limits and session teardown without contacting a desktop or model. Linux also has a disposable headless Sway/GTK harness. Portable tests do not prove macOS permissions or service availability. No actual user-desktop interaction is required by `npm run check`. Separately, an explicitly authorized live smoke test captured a Helium window and opened a new tab through the official service, including its app-approval handshake.
+Portable tests do not prove macOS permissions or service availability.

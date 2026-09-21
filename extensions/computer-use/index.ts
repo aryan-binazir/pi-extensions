@@ -7,13 +7,15 @@ import { registerMacTools } from './mac-tools.ts';
 
 export default function computerUse(pi: ExtensionAPI) {
   if (process.platform === 'darwin') return registerMacTools(pi);
-  let session = new DesktopSession(nativeDesktop, 15_000);
-  pi.on('session_start', async () => { await session.close(); session = new DesktopSession(nativeDesktop, 15_000); });
+  const fresh = () => new DesktopSession(nativeDesktop, 15_000);
+  let session = fresh();
+  pi.on('session_start', async () => { await session.close(); session = fresh(); });
   pi.on('session_shutdown', async () => { await session.close(); });
   const output = Type.String({ pattern: '^[A-Za-z0-9_.:-]{1,128}$', description: 'Exact output name returned by computer_screenshot' });
   const result = (value: DesktopResult) => {
     const { image, mimeType: _mimeType, ...details } = value;
-    return { content: image ? [{ type: 'image' as const, data: image, mimeType: 'image/png' }, { type: 'text' as const, text: JSON.stringify(details) }] : [{ type: 'text' as const, text: JSON.stringify(details) }], details };
+    const text = { type: 'text' as const, text: JSON.stringify(details) };
+    return { content: image ? [{ type: 'image' as const, data: image, mimeType: 'image/png' }, text] : [text], details };
   };
   pi.registerTool({
     name: 'computer_screenshot', label: 'Computer screenshot', executionMode: 'sequential',

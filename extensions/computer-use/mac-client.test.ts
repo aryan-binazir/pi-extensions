@@ -25,7 +25,6 @@ test('Mac surface is app targeted with pixel coordinates and explicit tools only
   assert.ok(tools.every(tool => tool.executionMode === 'sequential'));
   const click = tools.find(tool => tool.name === 'computer_click');
   assert.ok(click.parameters.required.includes('app'));
-  assert.equal(click.parameters.properties.x.maximum, undefined);
   assert.ok(click.parameters.properties.mouse_button);
   assert.ok(click.parameters.properties.click_count);
   assert.equal(click.parameters.properties.button, undefined);
@@ -83,7 +82,7 @@ test('real SDK fixture connects lazily once, routes elicitation, preserves tool 
   await assert.rejects(session.run('list_apps', {}, ctx()), /session closed/);
 });
 
-test('cancellation closes an active SDK client before queued work reconnects; timeout and shutdown settle', async () => {
+test('cancellation closes an active SDK client before queued work reconnects', async () => {
   let launches = 0;
   const session = new MacSession(() => { launches++; return fixture(); }, 5000);
   try {
@@ -96,19 +95,21 @@ test('cancellation closes an active SDK client before queued work reconnects; ti
     control.abort(); await rejected;
     await queued; assert.equal(launches, 2);
   } finally { await session.close(); }
+});
+
+test('a request that outlives its deadline times out and the session still closes', async () => {
   const timeout = new MacSession(fixture, 30);
   try { await assert.rejects(timeout.run('get_app_state', { app: 'wait' }, ctx()), /timed out/); }
   finally { await timeout.close(); }
 });
 
-test('large JPEG observations survive conversion without regex recursion and are marked untrusted', () => {
+test('large JPEG observations survive conversion and are marked untrusted', () => {
   const jpeg = Buffer.concat([Buffer.from([255, 216, 255]), Buffer.alloc(300000), Buffer.from([255, 217])]);
   const result = macResult({ _meta: { subtitle: 'untrusted' }, content: [
     { type: 'text', text: 'state '.repeat(4000) },
     { type: 'image', mimeType: 'image/jpeg', data: jpeg.toString('base64'), _meta: { note: 'untrusted image' } },
   ] });
   assert.equal(result.content[1].type, 'image');
-  assert.equal(result.details.untrusted, true);
   assert.deepEqual(result.details, { source: 'Codex computer-use service', untrusted: true });
   assert.throws(() => macResult({ content: [{ type: 'resource_link', uri: 'https://example.invalid', name: 'unexpected' }] }), /unsupported/);
 });

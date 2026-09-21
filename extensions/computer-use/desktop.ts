@@ -7,7 +7,7 @@ export type DesktopAction =
 export interface DesktopResult { [key: string]: unknown; image?: string; mimeType?: 'image/png' }
 export interface DesktopBackend { run(action: DesktopAction, signal: AbortSignal): Promise<DesktopResult>; close(): void | Promise<void> }
 
-export function validateAction(value: unknown): asserts value is DesktopAction {
+function validateAction(value: unknown): asserts value is DesktopAction {
   const invalid = () => { throw new Error('Invalid desktop command'); };
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid();
   const a = value as Record<string, unknown>;
@@ -58,9 +58,11 @@ export class DesktopSession {
         })]);
       } catch (error) {
         this.backend = undefined;
-        try { await backend.close(); } catch (closeError) { if (inspect) throw closeError; }
+        let closeFailure: unknown;
+        try { await backend.close(); } catch (failure) { closeFailure = failure; }
         if (!inspect) throw new Error(`Desktop mutation failed or was cancelled; outcome may be partial or unknown. Inspect before deciding whether to repeat. ${error instanceof Error ? error.message.slice(0, 500) : 'Transport failure'}`, { cause: error });
-        if (attempt || signal.aborted) throw error;
+        // A failing close never cancels the one reconnect; it only renames the error once no attempt is left.
+        if (attempt || signal.aborted) throw closeFailure === undefined ? error : new Error(closeFailure instanceof Error ? closeFailure.message : 'Desktop transport close failed', { cause: error });
       } finally { if (abort) signal.removeEventListener('abort', abort); }
     }
   }

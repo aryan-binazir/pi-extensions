@@ -44,6 +44,34 @@ test('already cancelled calls do not create a native transport', async () => {
   assert.equal(created, 0); await session.close();
 });
 
+test('inspection still reconnects when closing the failed transport also rejects', async () => {
+  let created = 0;
+  const session = new DesktopSession(() => {
+    const generation = ++created;
+    return { async run() { if (generation === 1) throw new Error('stale socket'); return { available: true }; }, async close() { throw new Error('Close failed'); } };
+  });
+  assert.deepEqual(await session.run({ action: 'accessibility' }), { available: true });
+  assert.equal(created, 2);
+  await assert.rejects(session.close(), /Close failed/);
+});
+
+test('inspection that cannot be retried keeps its originating failure as the cause of a close failure', async () => {
+  const failures = [new Error('first stale socket'), new Error('second stale socket')];
+  let created = 0;
+  const session = new DesktopSession(() => {
+    const generation = ++created;
+    return { async run(): Promise<never> { throw failures[generation - 1]; }, async close() { throw new Error('Close failed'); } };
+  });
+  await assert.rejects(session.run({ action: 'accessibility' }), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /Close failed/);
+    assert.equal(error.cause, failures[1]);
+    return true;
+  });
+  assert.equal(created, 2);
+  await session.close();
+});
+
 test('failed mutation retains its unknown-outcome warning when transport close rejects', async () => {
   const failure = new Error('Disconnected during typing');
   const session = new DesktopSession(() => ({

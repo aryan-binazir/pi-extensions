@@ -131,6 +131,7 @@ test('real Pi loader discovers command provenance and dynamically loads the opti
     for (const hook of extension.handlers.get('session_start') ?? []) await hook({type: 'session_start', reason: 'startup'}, ctx);
     assert.equal(statuses.at(-1), 'Auto: on · Luna low');
     await stop();
+    stop = undefined;
     assert.equal(statuses.at(-1), undefined);
   } finally { await stop?.(); session?.dispose(); await f.close(); }
 });

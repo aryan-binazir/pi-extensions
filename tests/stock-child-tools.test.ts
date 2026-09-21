@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 
-test('stock Pi active permissions support default and preset children and workflow replay across turns', async () => {
+test('stock Pi permissions gate preset children and workflow replay', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'stock-child-'));
   const oldPath = process.env.PATH, oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
@@ -25,8 +25,8 @@ test('stock Pi active permissions support default and preset children and workfl
     const runner = session.extensionRunner!;
     assert.ok(!session.getActiveToolNames().includes('grep'));
     assert.notEqual((await runner.emitToolCall({type: 'tool_call', toolName: 'read', toolCallId: 'init', input: {path: join(cwd, 'pi')}}))?.block, true);
-    const ctx = {...runner.createContext()};
-    Object.assign(ctx, {model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', modelRegistry: fixtureModelRegistry()});
+    const ctx = Object.assign({...runner.createContext()},
+      {model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', modelRegistry: fixtureModelRegistry()});
     const execute = async (name: string, params: any) => await session!.getToolDefinition(name)!.execute(name, params, undefined, undefined, ctx) as any;
     const expectedTools = new Map<string, string[]>();
     for (const preset of [undefined, 'reader', 'writer']) {
@@ -38,7 +38,7 @@ test('stock Pi active permissions support default and preset children and workfl
     const deadline = Date.now() + 5000;
     let tasks = (await execute('subagent_status', {})).details;
     while (tasks.some((task: any) => !['succeeded', 'failed'].includes(task.status)) && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await new Promise(done => setTimeout(done, 20));
       tasks = (await execute('subagent_status', {})).details;
     }
     assert.equal(tasks.length, 3);

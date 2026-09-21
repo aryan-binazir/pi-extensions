@@ -281,12 +281,12 @@ export class ViEditor extends CustomEditor {
   private next(p: number): number {
     const i = this.boundaryIndex(p);
     if (this.boundaryStep) return Math.min(this.boundaryLength, i + 1);
-    return this.boundaries[Math.min(this.boundaries.length - 1, i + 1)] ?? p;
+    return this.boundaries[Math.min(this.boundaries.length - 1, i + 1)];
   }
   private previous(p: number): number {
     const index = this.boundaryIndex(p);
     if (this.boundaryStep) return Math.max(0, index - 1);
-    return this.boundaries[Math.max(0, index - 1)] ?? 0;
+    return this.boundaries[Math.max(0, index - 1)];
   }
   private pos(): number {
     const c = this.getCursor();
@@ -303,7 +303,6 @@ export class ViEditor extends CustomEditor {
   }
   private restore(s: Snapshot): void {
     writePastes(this, s.payloads);
-    this.boundaryText = "";
     this.writeText(s.text);
     this.cursorTo(s.pos);
   }
@@ -663,7 +662,7 @@ export class ViEditor extends CustomEditor {
       this.prefix = ""; this.op = ""; this.count = "";
       return;
     }
-    if (["r", "m", "q"].includes(data)) {
+    if ("rmq".includes(data)) {
       this.discardArgument = true;
       this.op = "";
       this.prefix = "";
@@ -687,11 +686,7 @@ export class ViEditor extends CustomEditor {
       this.prefix = data;
       return;
     }
-    if (
-      "dcyx".includes(data) &&
-      data.length === 1 &&
-      (this.mode === "visual" || this.mode === "line")
-    ) {
+    if ("dcyx".includes(data) && (this.mode === "visual" || this.mode === "line")) {
       this.apply(
         data === "x" ? "d" : data,
         ...this.range(),
@@ -700,7 +695,7 @@ export class ViEditor extends CustomEditor {
       this.cursorShape();
       return;
     }
-    if ("dcy".includes(data) && data.length === 1) {
+    if ("dcy".includes(data)) {
       if (this.op === data) {
         let b = this.pos();
         for (
@@ -719,8 +714,9 @@ export class ViEditor extends CustomEditor {
     let p: number | undefined;
     if (data === "g" || data === "G") this.preferredColumn = undefined;
     if (this.prefix === "g") {
+      // Only `gg` reaches here; every other `g` argument was discarded above.
       this.prefix = "";
-      if (data === "g") p = this.lineTarget(this.prefixCount);
+      p = this.lineTarget(this.prefixCount);
     } else if (data === "g") {
       this.prefix = "g";
       this.prefixCount = n;
@@ -836,7 +832,7 @@ export class ViEditor extends CustomEditor {
       }
       return;
     }
-    if ("iaIAoO".includes(data) && data.length === 1) {
+    if ("iaIAoO".includes(data)) {
       if (data === "a")
         this.move(Math.min(this.lineEnd(), this.next(this.pos())));
       if (data === "I") this.move(this.lineTarget(this.getCursor().line + 1));
@@ -853,7 +849,6 @@ export class ViEditor extends CustomEditor {
       return;
     }
     this.op = "";
-    if (data.length !== 1 || data.charCodeAt(0) < 32) this.baseInput(data);
   }
   private cursorShape(): void {
     this.tui.terminal.write(

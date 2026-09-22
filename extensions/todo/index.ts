@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { StringEnum } from '@earendil-works/pi-ai';
 
@@ -34,7 +35,21 @@ export default function todo(pi: ExtensionAPI): void {
   let state: Snapshot = { version: 1, todos: [], staleTurns: 0 };
   const active = () => state.todos.some(item => item.status !== 'completed');
   const paint = (ctx: ExtensionContext) => {
-    if (ctx.hasUI) ctx.ui.setWidget('interactive-tools:todo', active() ? ['Todo — declared progress', ...state.todos.map(item => `${item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○'} ${item.content}`)] : undefined);
+    if (!ctx.hasUI) return;
+    if (!active()) { ctx.ui.setWidget('interactive-tools:todo', undefined); return; }
+    const lines = ['Todo — declared progress', ...state.todos.map(item => `${item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○'} ${item.content}`)];
+    ctx.ui.setWidget('interactive-tools:todo', (_tui, theme) => ({
+      invalidate() {},
+      render(width: number) {
+        const inner = Math.max(1, width - 4);
+        const border = (text: string) => theme.fg('borderMuted', text);
+        return [
+          border(`┌${'─'.repeat(inner + 2)}┐`),
+          ...lines.flatMap(line => wrapTextWithAnsi(line, inner)).map(line => `${border('│')} ${line}${' '.repeat(Math.max(0, inner - visibleWidth(line)))} ${border('│')}`),
+          border(`└${'─'.repeat(inner + 2)}┘`),
+        ];
+      },
+    }));
   };
   // A branch is the fixed path from its tip back to the root, so both the restored state and the
   // number of warnings its superseded snapshots produce are pure functions of the newest todo

@@ -12,7 +12,8 @@ function runtime(initial: any[] = []) {
   const warnings: string[] = [];
   const hooks = new Map<string, (event: any, ctx: any) => any>();
   todo({ registerTool: (value: ToolDefinition) => { tool = value; }, on: (name: string, callback: any) => hooks.set(name, callback), appendEntry: (customType: string, data: unknown) => branch.push({ type: 'custom', customType, data }) } as unknown as ExtensionAPI);
-  const ctx = { hasUI: true, sessionManager: { getBranch: () => branch }, ui: { setWidget: (_key: string, value: string[] | undefined) => { widget = value; }, notify: (message: string) => { warnings.push(message); } } } as unknown as ExtensionContext;
+  const theme = { fg: (_color: string, text: string) => text };
+  const ctx = { hasUI: true, sessionManager: { getBranch: () => branch }, ui: { setWidget: (_key: string, value: ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined) => { widget = value?.(undefined, theme).render(40); }, notify: (message: string) => { warnings.push(message); } } } as unknown as ExtensionContext;
   return { call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, ctx), hook: (name: string) => hooks.get(name)!({ systemPrompt: 'You are a coding assistant.\nPreserve the user instructions.' }, ctx), branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
 }
 
@@ -26,6 +27,7 @@ test('todo replacement normalizes list, enforces one active task and restores se
   await app.call([{ content: 'Different branch', status: 'pending' }]);
   app.switchTo(saved); await app.hook('session_tree');
   assert.match(app.widget()!.join('\n'), /Implement feature/);
+  assert.ok(app.widget()!.every(line => line.length === 40), 'border spans the render width');
   assert.doesNotMatch(app.widget()!.join('\n'), /Different/);
   app.switchTo([]); await app.hook('session_start'); assert.equal(app.widget(), undefined);
   const resumed = runtime(saved); await resumed.hook('session_start'); assert.match(resumed.widget()!.join('\n'), /Implement feature/);
@@ -98,11 +100,11 @@ test('repeated branch switches restore each branch and still warn once per inval
   const second = [broken, snapshot('Alpha', 2), snapshot('Gamma', 3)];
   for (let pass = 0; pass < 3; pass++) {
     app.switchTo(first); await app.hook('session_tree');
-    assert.deepEqual(app.widget(), ['Todo — declared progress', '○ Beta']);
+    assert.deepEqual(app.widget(), ['┌──────────────────────────────────────┐', '│ Todo — declared progress             │', '│ ○ Beta                               │', '└──────────────────────────────────────┘']);
     assert.equal(app.warnings().length, pass * 2 + 1);
     assert.equal(app.warnings().at(-1), 'Skipped 2 invalid or unsupported todo snapshots: Unsupported todo snapshot');
     app.switchTo(second); await app.hook('session_tree');
-    assert.deepEqual(app.widget(), ['Todo — declared progress', '○ Gamma']);
+    assert.deepEqual(app.widget(), ['┌──────────────────────────────────────┐', '│ Todo — declared progress             │', '│ ○ Gamma                              │', '└──────────────────────────────────────┘']);
     assert.equal(app.warnings().length, pass * 2 + 2);
     assert.equal(app.warnings().at(-1), 'Skipped 1 invalid or unsupported todo snapshot: Unsupported todo snapshot');
   }

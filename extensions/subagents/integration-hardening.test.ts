@@ -29,12 +29,14 @@ test('one active panel shows silent running and queued children, promotes rows, 
   const second = await execute('subagent', {task: 'hold', preset: 'writer'});
   const key = 'interactive-tools:subagents';
   assert.equal(widgets.size, 1);
-  assert.equal(widgets.get(key)?.length, 3);
-  assert.match(widgets.get(key)[1], new RegExp(`${first.details.id.slice(0, 8)}.*running.*hold`));
-  assert.match(widgets.get(key)[2], new RegExp(`${second.details.id.slice(0, 8)}.*queued.*hold`));
+  assert.equal(widgets.get(key)?.length, 5, 'header and two rows inside a top and bottom border');
+  assert.match(widgets.get(key)[0], /^╭─+╮$/);
+  assert.match(widgets.get(key)[2], new RegExp(`^│ ${first.details.id.slice(0, 8)}.*running.*hold *│$`));
+  assert.match(widgets.get(key)[3], new RegExp(`^│ ${second.details.id.slice(0, 8)}.*queued.*hold *│$`));
+  assert.match(widgets.get(key)[4], /^╰─+╯$/);
   await execute('subagent_cancel', {id: first.details.id});
-  assert.equal(widgets.get(key)?.length, 2);
-  assert.match(widgets.get(key)[1], new RegExp(`${second.details.id.slice(0, 8)}.*running`));
+  assert.equal(widgets.get(key)?.length, 4);
+  assert.match(widgets.get(key)[2], new RegExp(`${second.details.id.slice(0, 8)}.*running`));
   assert.ok(!widgets.get(key).join(' ').includes(first.details.id.slice(0, 8)));
   await execute('subagent_cancel', {id: second.details.id});
   assert.equal(widgets.size, 0);
@@ -168,7 +170,7 @@ test('registered direct and workflow children share native monitoring without re
   const workflow = execute('workflow', {source: "return await api.spawn({task:'hold',preset:'reader'},'tracking');"}).catch(() => undefined);
   await until(() => calls.length > 0, 'the first shared tracker request');
   assert.equal(calls.length, 1); assert.match(calls[0][1].messages[0].content, /workflow/);
-  assert.equal(widgets.get('interactive-tools:subagents')?.length, 2, 'workflow child appears in shared panel');
+  assert.equal(widgets.get('interactive-tools:subagents')?.length, 4, 'workflow child appears in shared panel');
   await execute('subagent', {task: 'hold', preset: 'reader'});
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(calls.length, 1);

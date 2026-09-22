@@ -100,11 +100,11 @@ test('repeated branch switches restore each branch and still warn once per inval
   const second = [broken, snapshot('Alpha', 2), snapshot('Gamma', 3)];
   for (let pass = 0; pass < 3; pass++) {
     app.switchTo(first); await app.hook('session_tree');
-    assert.deepEqual(app.widget(), ['┌──────────────────────────────────────┐', '│ Todo — declared progress             │', '│ ○ Beta                               │', '└──────────────────────────────────────┘']);
+    assert.deepEqual(app.widget(), ['╭──────────────────────────────────────╮', '│ Todo — declared progress             │', '│ ○ Beta                               │', '╰──────────────────────────────────────╯']);
     assert.equal(app.warnings().length, pass * 2 + 1);
     assert.equal(app.warnings().at(-1), 'Skipped 2 invalid or unsupported todo snapshots: Unsupported todo snapshot');
     app.switchTo(second); await app.hook('session_tree');
-    assert.deepEqual(app.widget(), ['┌──────────────────────────────────────┐', '│ Todo — declared progress             │', '│ ○ Gamma                              │', '└──────────────────────────────────────┘']);
+    assert.deepEqual(app.widget(), ['╭──────────────────────────────────────╮', '│ Todo — declared progress             │', '│ ○ Gamma                              │', '╰──────────────────────────────────────╯']);
     assert.equal(app.warnings().length, pass * 2 + 2);
     assert.equal(app.warnings().at(-1), 'Skipped 1 invalid or unsupported todo snapshot: Unsupported todo snapshot');
   }

@@ -78,7 +78,7 @@ export async function withHost(options: HostOptions, run: (host: Host) => Promis
     ui: {
       notify: (text: string) => uiNotices.push(text),
       setStatus: (key: string, value?: string) => { if (value === undefined) statuses.delete(key); else statuses.set(key, value); },
-      setWidget: (key: string, value?: string[]) => { if (value === undefined) widgets.delete(key); else widgets.set(key, value); },
+      setWidget: (key: string, value?: (tui: unknown, theme: unknown) => {render(width: number): string[]}) => { if (value === undefined) widgets.delete(key); else widgets.set(key, value(undefined, {fg: (_color: string, text: string) => text}).render(80)); },
       editor: async (_title: string, source: string) => source,
       confirm: async () => true,
     },

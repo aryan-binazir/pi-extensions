@@ -410,9 +410,9 @@ export default function btw(pi: ExtensionAPI) {
               if (!framed) return content;
               const border = (text: string) => theme.fg("borderAccent", text);
               return [
-                border(`┌${"─".repeat(w)}┐`),
+                border(`╭${"─".repeat(w)}╮`),
                 ...content.map((line) => `${border("│")}${line}${" ".repeat(Math.max(0, w - visibleWidth(line)))}${border("│")}`),
-                border(`└${"─".repeat(w)}┘`),
+                border(`╰${"─".repeat(w)}╯`),
               ];
             },
           };

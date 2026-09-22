@@ -272,7 +272,7 @@ test("long option lists keep the selected answer inside a bounded viewport", asy
   h.key("\r");
   assert.equal((await running).details.answers[0].value, "19");
 });
-test("questionnaire replaces the input area with subtle rules across widths and input modes", async () => {
+test("questionnaire replaces the input area with a rounded box across widths and input modes", async () => {
   const h = host();
   const running = h.run([question("a"), question("b")]);
   const checkFrame = () => {
@@ -281,9 +281,9 @@ test("questionnaire replaces the input area with subtle rules across widths and 
       assert.ok(rows.length <= viewport(h.terminal.rows));
       assert.ok(rows.every((row: string) => visibleWidth(row) <= width));
       if (width >= 6) {
-        assert.equal(rows[0], "─".repeat(width));
-        assert.equal(rows.at(-1), "─".repeat(width));
-        assert.ok(rows.every((row: string) => !/[│╭╯]/.test(row)));
+        assert.equal(rows[0], `╭${"─".repeat(width - 2)}╮`);
+        assert.equal(rows.at(-1), `╰${"─".repeat(width - 2)}╯`);
+        assert.ok(rows.slice(1, -1).every((row: string) => row.startsWith("│ ") && row.endsWith(" │") && visibleWidth(row) === width));
       }
     }
   };

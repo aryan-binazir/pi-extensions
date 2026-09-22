@@ -37,19 +37,21 @@ export default function todo(pi: ExtensionAPI): void {
   const paint = (ctx: ExtensionContext) => {
     if (!ctx.hasUI) return;
     if (!active()) { ctx.ui.setWidget('interactive-tools:todo', undefined); return; }
-    const lines = ['Todo — declared progress', ...state.todos.map(item => `${item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○'} ${item.content}`)];
-    ctx.ui.setWidget('interactive-tools:todo', (_tui, theme) => ({
-      invalidate() {},
-      render(width: number) {
-        const inner = Math.max(1, width - 4);
-        const border = (text: string) => theme.fg('borderMuted', text);
-        return [
-          border(`┌${'─'.repeat(inner + 2)}┐`),
-          ...lines.flatMap(line => wrapTextWithAnsi(line, inner)).map(line => `${border('│')} ${line}${' '.repeat(Math.max(0, inner - visibleWidth(line)))} ${border('│')}`),
-          border(`└${'─'.repeat(inner + 2)}┘`),
-        ];
-      },
-    }));
+    ctx.ui.setWidget('interactive-tools:todo', (_tui, theme) => {
+      const blue = (text: string) => theme.fg('border', text);
+      const lines = ['Todo — declared progress', ...state.todos.map(item => `${blue(item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○')} ${item.content}`)];
+      return {
+        invalidate() {},
+        render(width: number) {
+          const inner = Math.max(1, width - 4);
+          return [
+            blue(`╭${'─'.repeat(inner + 2)}╮`),
+            ...lines.flatMap(line => wrapTextWithAnsi(line, inner)).map(line => `${blue('│')} ${line}${' '.repeat(Math.max(0, inner - visibleWidth(line)))} ${blue('│')}`),
+            blue(`╰${'─'.repeat(inner + 2)}╯`),
+          ];
+        },
+      };
+    });
   };
   // A branch is the fixed path from its tip back to the root, so both the restored state and the
   // number of warnings its superseded snapshots produce are pure functions of the newest todo

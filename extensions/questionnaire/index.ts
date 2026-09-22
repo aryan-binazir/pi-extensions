@@ -4,6 +4,7 @@ import {
   matchesKey,
   stripTerminalSequences,
   truncateToWidth,
+  visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -167,7 +168,7 @@ export default function questionnaire(pi: ExtensionAPI) {
             signal?.addEventListener("abort", cancel, { once: true });
             if (signal?.aborted) cancel();
             const editor = new Editor(tui, {
-              borderColor: (s) => theme.fg("accent", s),
+              borderColor: (s) => theme.fg("border", s),
               selectList: {
                 selectedPrefix: (s) => s,
                 selectedText: (s) => s,
@@ -272,7 +273,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 tui.requestRender();
               },
               render(width: number) {
-                const w = Math.max(1, width - 2);
+                const w = Math.max(1, width - 4);
                 const rows = tui.terminal?.rows ?? 24;
                 // Leave room for Pi's dock/footer and avoid dominating fullscreen widgets.
                 const height = Math.max(3, Math.min(18, rows - 5));
@@ -302,7 +303,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                   });
                   tabs.push(theme.fg(q ? "muted" : "accent", q ? "Submit" : "[ Submit ]"));
                   header = tabs.join("   ");
-                } else header = theme.fg("accent", "Question");
+                } else header = theme.fg("border", "Question");
                 if (
                   params.questions.length > 1 &&
                   memo(headerCache, header, () => truncateToWidth(header, w)) !== header
@@ -313,8 +314,8 @@ export default function questionnaire(pi: ExtensionAPI) {
                   const labelWidth = w - position.length - suffix.length - 5;
                   const activeLabel = truncateToWidth(label, Math.max(1, labelWidth), "…");
                   header = labelWidth < 2
-                    ? theme.fg("accent", `${position} Submit`)
-                    : `${position} ${theme.fg("accent", `[ ${activeLabel} ]`)}${suffix}`;
+                    ? theme.fg("border", `${position} Submit`)
+                    : `${position} ${theme.fg("border", `[ ${activeLabel} ]`)}${suffix}`;
                 }
                 const promptPrefix = !showHeader && params.questions.length > 1
                   ? (q ? `${tab + 1}/${params.questions.length + 1} ${w >= 28 ? "Submit" : "S"} | ` : "[ Submit ] ") : "";
@@ -328,7 +329,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                   for (let i = 0; i < optionRows.length; i++) {
                     const option = optionRows[i];
                     if (selected === i) focusRow = content.length;
-                    const color = selected === i ? "accent" : "text";
+                    const color = selected === i ? "border" : "text";
                     content.push(...wrap(
                       theme.fg(color, `${selected === i ? "❯" : " "}${option.suffix}`),
                     ));
@@ -344,7 +345,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                   for (let i = 0; i < params.questions.length; i++) content.push(...wrap(
                     `${labels[i]}: ${cleanAnswers.get(params.questions[i].id) ?? "(unanswered)"}`,
                   ));
-                  content.push(theme.fg("accent", answers.size === params.questions.length
+                  content.push(theme.fg("border", answers.size === params.questions.length
                     ? "Enter to submit all answers" : "Answer every question before submitting"));
                   focusRow = content.length - 1;
                 }
@@ -370,19 +371,28 @@ export default function questionnaire(pi: ExtensionAPI) {
                 const hint = editing
                   ? "Ctrl+C cancel · Esc back · Enter save"
                   : `Esc cancel · ↑↓ choose · Enter select${params.questions.length > 1 ? " · Tab next" : ""}`;
-                const rule = decorationRows >= 1
-                  ? theme.fg("borderMuted", "─".repeat(Math.max(0, width)))
-                  : "";
+                // A full box needs both a top and a bottom row; with room for only one
+                // decoration row a single rule keeps the body budget intact.
+                const framed = decorationRows >= 2;
+                const blue = (text: string) => theme.fg("border", text);
+                const edge = (left: string, right: string) => blue(`${left}${"─".repeat(Math.max(0, width - 2))}${right}`);
+                const frame = (line: string) => {
+                  if (!framed) return fit(` ${line}`);
+                  const clipped = truncateToWidth(line, w);
+                  return fit(`${blue("│")} ${clipped}${" ".repeat(Math.max(0, w - visibleWidth(clipped)))} ${blue("│")}`);
+                };
                 return [
-                  ...(decorationRows >= 1 ? [rule] : []),
-                  ...(showHeader ? [` ${header}`] : []),
-                  ...(decorationRows >= 3 ? [""] : []),
-                  ...promptRows.map((line) => ` ${line}`),
-                  ...(decorationRows >= 4 ? [""] : []),
-                  ...body.map((line) => ` ${line}`),
-                  ` ${theme.fg("dim", hint)}`,
-                  ...(decorationRows >= 2 ? [rule] : []),
-                ].map(fit);
+                  ...(framed ? [fit(edge("╭", "╮"))] : decorationRows >= 1 ? [fit(theme.fg("borderMuted", "─".repeat(width)))] : []),
+                  ...[
+                    ...(showHeader ? [header] : []),
+                    ...(decorationRows >= 3 ? [""] : []),
+                    ...promptRows,
+                    ...(decorationRows >= 4 ? [""] : []),
+                    ...body,
+                    theme.fg("dim", hint),
+                  ].map(frame),
+                  ...(framed ? [fit(edge("╰", "╯"))] : []),
+                ];
               },
             };
           },

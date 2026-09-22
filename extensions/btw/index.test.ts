@@ -85,9 +85,9 @@ test("BTW fills its overlay from opening through the first answer and resize", a
     overlayOptions: { width: "90%", maxHeight: "90%", offsetY: -1 },
   });
   assert.equal(h.lines().length, 36);
-  assert.match(h.lines()[0], /^┌─+┐$/);
+  assert.match(h.lines()[0], /^╭─+╮$/);
   assert.match(h.render(), /Side conversation · disposable/);
-  assert.match(h.lines().at(-1)!, /^└─+┘$/);
+  assert.match(h.lines().at(-1)!, /^╰─+╯$/);
   assert.ok(h.lines().every((line) => visibleWidth(line) === 80));
   h.key("First question");h.key("\r");
   assert.equal(h.lines().length, 36);

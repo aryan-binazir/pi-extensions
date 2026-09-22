@@ -1,5 +1,6 @@
 import { join, resolve } from 'node:path';
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { assertChildTask, delegationScope, assertWorkflowRead } from './scope.ts';
 import { getActiveCwd } from '../worktree/routing.ts';
@@ -66,14 +67,25 @@ export default function subagents(pi: ExtensionAPI): void {
   const renderActiveAgents = () => {
     if (!context?.hasUI) return;
     const active = shuttingDown ? [] : registry.activeTasks();
-    const lines = active.length ? [
-      `Subagents · ${active.length} active`,
-      ...active.map(task => `${task.id.slice(0, 8)} · ${task.status} · ${brief(task.id, task.task)}`),
-    ] : undefined;
-    const rendered = lines?.join('\n');
+    const rows = active.map(task => [task.id.slice(0, 8), task.status, brief(task.id, task.task)]);
+    const rendered = active.length ? JSON.stringify(rows) : undefined;
     if (rendered === painted) return;
     painted = rendered;
-    context.ui.setWidget('interactive-tools:subagents', lines);
+    context.ui.setWidget('interactive-tools:subagents', rendered === undefined ? undefined : (_tui, theme) => {
+      const blue = (text: string) => theme.fg('border', text);
+      const lines = [`Subagents · ${rows.length} active`, ...rows.map(([id, status, task]) => `${id} · ${blue(status)} · ${task}`)];
+      return {
+        invalidate() {},
+        render(width: number) {
+          const inner = Math.max(1, width - 4);
+          return [
+            blue(`╭${'─'.repeat(inner + 2)}╮`),
+            ...lines.flatMap(line => wrapTextWithAnsi(line, inner)).map(line => `${blue('│')} ${line}${' '.repeat(Math.max(0, inner - visibleWidth(line)))} ${blue('│')}`),
+            blue(`╰${'─'.repeat(inner + 2)}╯`),
+          ];
+        },
+      };
+    });
   };
   const createRegistry = () => new SubagentRegistry({
     allowedTools: () => delegationScope(parent()).tools,

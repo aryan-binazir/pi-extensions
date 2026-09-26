@@ -53,20 +53,19 @@ export default function todo(pi: ExtensionAPI): void {
       };
     });
   };
-  // A branch is the fixed path from its tip back to the root, so both the restored state and the
-  // number of warnings its superseded snapshots produce are pure functions of the newest todo
-  // entry. Remembering those keeps repeated session tree navigation off the full-branch reparse.
   let tip: object | undefined;
   let tipState: Snapshot | undefined;
   let tipSkipped = 0;
   let tipReason = '';
   const reason = (error: unknown) => error instanceof Error ? error.message : 'Unsupported todo snapshot';
-  // undefined means the entry has not been parsed yet; '' means it parsed.
   const failure = new WeakMap<object, string>();
   const parseFailure = (entry: object, data: unknown): string => {
-    let cached = failure.get(entry);
-    if (cached === undefined) { cached = ''; try { parse(data); } catch (error) { cached = reason(error); } failure.set(entry, cached); }
-    return cached;
+    const cached = failure.get(entry);
+    if (cached !== undefined) return cached;
+    let error = '';
+    try { parse(data); } catch (caught) { error = reason(caught); }
+    failure.set(entry, error);
+    return error;
   };
   const restore = (ctx: ExtensionContext) => {
     const branch = ctx.sessionManager.getBranch();
@@ -110,7 +109,6 @@ export default function todo(pi: ExtensionAPI): void {
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
       const todos = normalize(params.todos);
-      // Repeating the same declaration does not reset a stale-progress reminder.
       const previous = state.todos;
       const changed = todos.length !== previous.length || todos.some((item, index) => item.content !== previous[index].content || item.status !== previous[index].status);
       const next: Snapshot = { version: 1, todos, staleTurns: changed ? 0 : state.staleTurns };

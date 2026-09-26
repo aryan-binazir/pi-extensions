@@ -7,24 +7,23 @@ import { createAgentSession, ModelRuntime, SessionManager, DefaultPackageManager
 import { setActiveCwd } from '../extensions/worktree/routing.ts';
 
 const root = resolve(import.meta.dirname, '..');
-// Declaration order is the manifest order every assertion below compares against.
-const expected: Record<string, { tools: string[]; commands: string[]; shortcuts: string[] }> = {
-  questionnaire: {tools: ['questionnaire'], commands: [], shortcuts: []},
-  todo: {tools: ['todo_write'], commands: [], shortcuts: []},
-  effort: {tools: [], commands: ['effort'], shortcuts: []},
-  btw: {tools: [], commands: ['btw', 'side'], shortcuts: []},
-  'vi-mode': {tools: [], commands: [], shortcuts: []},
-  'prompt-stash': {tools: [], commands: [], shortcuts: []},
-  subagents: {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []},
-  worktree: {tools: ['bash'], commands: ['worktree'], shortcuts: []},
-  'computer-use': {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []},
-  'fast-mode': {tools: [], commands: ['fast'], shortcuts: []},
-  'auto-caffeinate': {tools: [], commands: [], shortcuts: []},
-  'auto-permissions-status': {tools: [], commands: [], shortcuts: []},
-  'nvim-ide': {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['vim'], shortcuts: []},
-  guard: {tools: [], commands: [], shortcuts: []},
-};
-const intended = Object.keys(expected);
+const expected = new Map<string, { tools: string[]; commands: string[]; shortcuts: string[] }>([
+  ['questionnaire', {tools: ['questionnaire'], commands: [], shortcuts: []}],
+  ['todo', {tools: ['todo_write'], commands: [], shortcuts: []}],
+  ['effort', {tools: [], commands: ['effort'], shortcuts: []}],
+  ['btw', {tools: [], commands: ['btw', 'side'], shortcuts: []}],
+  ['vi-mode', {tools: [], commands: [], shortcuts: []}],
+  ['prompt-stash', {tools: [], commands: [], shortcuts: []}],
+  ['subagents', {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []}],
+  ['worktree', {tools: ['bash'], commands: ['worktree'], shortcuts: []}],
+  ['computer-use', {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []}],
+  ['fast-mode', {tools: [], commands: ['fast'], shortcuts: []}],
+  ['auto-caffeinate', {tools: [], commands: [], shortcuts: []}],
+  ['auto-permissions-status', {tools: [], commands: [], shortcuts: []}],
+  ['nvim-ide', {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['vim'], shortcuts: []}],
+  ['guard', {tools: [], commands: [], shortcuts: []}],
+]);
+const intended = [...expected.keys()];
 
 test('Pi package discovers every declared entrypoint and independently loads each', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'pi-package-test-'));
@@ -43,9 +42,10 @@ test('Pi package discovers every declared entrypoint and independently loads eac
       assert.equal(loaded.extensions.length, 1, entry.path);
       const extension = loaded.extensions[0];
       const feature = entry.path.split('/').at(-2)!;
-      assert.deepEqual([...extension.tools.keys()].sort(), expected[feature].tools, feature);
-      assert.deepEqual([...extension.commands.keys()].sort(), expected[feature].commands, feature);
-      assert.deepEqual([...extension.shortcuts.keys()].sort(), expected[feature].shortcuts, feature);
+      const featureContract = expected.get(feature)!;
+      assert.deepEqual([...extension.tools.keys()].sort(), featureContract.tools, feature);
+      assert.deepEqual([...extension.commands.keys()].sort(), featureContract.commands, feature);
+      assert.deepEqual([...extension.shortcuts.keys()].sort(), featureContract.shortcuts, feature);
       if (feature === 'auto-caffeinate') for (const event of ['agent_start', 'agent_settled', 'session_shutdown']) assert.ok(extension.handlers.has(event));
       if (feature === 'vi-mode') {
         const installed: unknown[] = [];
@@ -95,7 +95,6 @@ test('todo and questionnaire execute in a real headless session behind no tool g
 });
 
 
-/** A real headless Pi session over the whole package, with the environment guard and worktree routing read. */
 async function packageSession(run: (h: { session: any; runner: any; temp: string; agentDir: string }) => Promise<void>): Promise<void> {
   const temp = await mkdtemp(join(tmpdir(), 'pi-package-session-'));
   const agentDir = join(temp, 'agent');

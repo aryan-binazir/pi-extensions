@@ -132,8 +132,6 @@ test('split UTF-8 stdout and stderr retain non-ASCII text', async () => {
 });
 
 test('streamed deltas and stderr keep only the last 64 KiB, mid-stream and at completion', async () => {
-  // The retained tail is collapsed lazily, so assert the observable window
-  // both while the child streams and once it has closed.
   const script = `
     const line = text => JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:text}});
     for (let i = 0; i < 4000; i++) { console.log(line(String(i % 10).repeat(40))); process.stderr.write(String(i % 10).repeat(40)); }
@@ -148,7 +146,6 @@ test('streamed deltas and stderr keep only the last 64 KiB, mid-stream and at co
     assert.equal(result.output.length, 64 * 1024);
     assert.equal(result.output, expected.slice(-64 * 1024));
     assert.equal(result.stderr, expected.slice(-64 * 1024));
-    // Every mid-stream observation is a bounded window of the same stream.
     assert.ok(updates.length >= 1);
     for (const update of updates) {
       assert.ok(update.length <= 64 * 1024);

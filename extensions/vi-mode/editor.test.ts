@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { editor, keys } from "./test-support.ts";
 import type { ViEditor } from "./editor.ts";
-/** A put must survive a full undo/redo round trip, payloads included. */
 function undoRedoRestoresPut(e: ViEditor, before: string) {
   const visible = e.getText(),
     expanded = e.getExpandedText();
@@ -454,7 +453,7 @@ test("refused oversized put preserves the redo history", () => {
   keys(e, 'gg"ayyxu"a9999p');
   assert.equal(e.getExpandedText().length, 2000);
   e.handleInput("\x12");
-  assert.equal(e.getExpandedText().length, 0); // Redo deletes the entire collapsed marker.
+  assert.equal(e.getExpandedText().length, 0);
 });
 test("normal mode and pending vi arguments forward save and stash shortcuts to core and extensions", () => {
   for (const prefix of ["", "di", '"', "r", "vi"]) {
@@ -591,8 +590,8 @@ test("native forward delete and visual objects cannot split collapsed markers", 
   const e = editor();
   e.handleInput(`\x1b[200~${first}\x1b[201~`);
   e.handleInput(`\x1b[200~${second}\x1b[201~`);
-  e.handleInput("\x1b[H"); // Native Home reaches the first marker boundary.
-  e.handleInput("\x1b[3~"); // Native Delete uses Pi's marker-aware segmenter.
+  e.handleInput("\x1b[H");
+  e.handleInput("\x1b[3~");
   assert.equal(e.getExpandedText(), second);
   e.handleInput("\x1b");
   keys(e, "u");
@@ -801,8 +800,6 @@ test("word motions give every ASCII character the unicode rules' class", () => {
   for (let code = 33; code < 127; code++) {
     const c = String.fromCharCode(code);
     const e = editor();
-    // In "a<c>a b" the first w lands on c when c is punctuation and on b when
-    // c keeps the run a word, which reads the class straight off the cursor.
     e.setText(`a${c}a b`);
     keys(e, "\x1b0w");
     assert.equal(e.getCursor().col, word.test(c) ? 4 : 1, `w over ${JSON.stringify(c)}`);
@@ -817,7 +814,6 @@ test("word motions give every ASCII character the unicode rules' class", () => {
 
 test("cursor placement stays exact across a long multi-line draft", () => {
   const e = editor();
-  // insertTextAtCursor keeps the draft raw where setText would collapse it.
   const draft = Array.from({ length: 40 }, (_, i) => `line ${i} ${"x".repeat(i)}`).join("\n");
   e.insertTextAtCursor(draft);
   keys(e, "\x1bgg");
@@ -892,8 +888,6 @@ test("paste markers stay atomic for operators and backspace", () => {
   assert.equal(e.getText(), "", "backspace at the marker end removes the whole marker");
 });
 
-// Normal mode keeps the cursor on a grapheme, so a follow-up command after an
-// end-of-line delete acts on the new last character instead of nothing.
 test("deleting the last character leaves the cursor on the new last character", () => {
   const e = editor(); e.setText("abc"); keys(e, "\x1b$xx");
   assert.equal(e.getText(), "a");

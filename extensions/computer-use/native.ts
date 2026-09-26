@@ -32,7 +32,6 @@ export class LinuxDesktop implements DesktopBackend {
       const abort = () => { failure = new Error('Desktop command aborted'); child.kill('SIGKILL'); };
       signal.addEventListener('abort', abort, { once: true });
       child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > maxBytes) { failure = new Error('Desktop command output exceeded limit'); child.kill('SIGKILL'); } else chunks.push(chunk); });
-      // Tool stderr can contain desktop text. Never copy it into logs or errors.
       child.stderr.resume(); child.stdin.on('error', () => {});
       child.on('error', error => { failure = new Error(`Desktop runtime ${command} unavailable; install its documented prerequisite`, { cause: error }); });
       child.on('close', code => { this.children.delete(child); signal.removeEventListener('abort', abort); if (failure) reject(failure); else if (code !== 0) reject(new Error(`Desktop runtime ${command} failed (${code}); check compositor support and session permissions`)); else resolve(Buffer.concat(chunks)); });

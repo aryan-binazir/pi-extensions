@@ -31,9 +31,6 @@ const parameters = Type.Object({
 const CONTROL_CHARS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 const clean = (text: string) =>
   stripTerminalSequences(text).replace(CONTROL_CHARS, "");
-/** Rendered-text caches are keyed by fully styled strings, so a theme or width
- * change produces new keys rather than stale frames. Bounded so a questionnaire
- * walked across many tabs cannot retain more than a few screens of text. */
 const CACHE_LIMIT = 64;
 const memo = <T>(cache: Map<string, T>, key: string, build: () => T): T => {
   const hit = cache.get(key);
@@ -56,7 +53,6 @@ interface Result {
   reason?: string;
 }
 
-/** Waiting notifications are paired by toolCallId. */
 export default function questionnaire(pi: ExtensionAPI) {
   const active = new Set<() => void>();
   let inFlight = false;
@@ -117,8 +113,6 @@ export default function questionnaire(pi: ExtensionAPI) {
             let editing = false;
             let settled = false;
             const answers = new Map<string, Answer>();
-            // Sanitising and laying out question text is width-independent, so
-            // do it once per questionnaire instead of once per keystroke.
             const cleanAnswers = new Map<string, string>();
             const labels = params.questions.map((item) =>
               clean(item.label || item.id),
@@ -275,10 +269,11 @@ export default function questionnaire(pi: ExtensionAPI) {
               render(width: number) {
                 const w = Math.max(1, width - 4);
                 const rows = tui.terminal?.rows ?? 24;
-                // Leave room for Pi's dock/footer and avoid dominating fullscreen widgets.
-                const height = Math.max(3, Math.min(18, rows - 5));
+                const minViewportRows = 3;
+                const maxViewportRows = 18;
+                const reservedDockRows = 5;
+                const height = Math.max(minViewportRows, Math.min(maxViewportRows, rows - reservedDockRows));
                 const showHeader = height >= 4;
-                // Add decoration one row at a time so resizing never shrinks the body budget.
                 const decorationRows = Math.min(4, Math.max(0, height - 9));
                 const budget = height - 1 - (showHeader ? 1 : 0) - decorationRows;
                 if (cachedWidth !== width) {
@@ -287,8 +282,6 @@ export default function questionnaire(pi: ExtensionAPI) {
                   truncCache.clear();
                   headerCache.clear();
                 }
-                // Wrapping and width-fitting dominate a render; both are pure in
-                // (styled text, width), and callers only read the results.
                 const wrap = (text: string) =>
                   memo(wrapCache, text, () => wrapTextWithAnsi(text, w));
                 const fit = (line: string) =>
@@ -336,9 +329,6 @@ export default function questionnaire(pi: ExtensionAPI) {
                     if (option.description) content.push(...wrap(
                       theme.fg("muted", option.description),
                     ));
-                    // Once the viewport is provably full below the selected row,
-                    // further options cannot appear or shift the layout: the scroll
-                    // start pins to focusRow and promptLimit saturates at budget/2.
                     if (i >= selected && content.length >= focusRow + budget) break;
                   }
                 } else if (!view) {
@@ -356,23 +346,19 @@ export default function questionnaire(pi: ExtensionAPI) {
                   const last = promptRows.length - 1;
                   promptRows[last] = `${truncateToWidth(promptRows[last], Math.max(0, w - indicator.length), "")}${indicator}`;
                 }
-                // Keep the question and controls stationary while long options scroll.
                 const available = Math.max(1, budget - promptRows.length);
                 const start = Math.max(0, Math.min(focusRow, content.length - available));
                 let body = content.slice(start, start + available);
                 if (editing) {
                   const editorBody = editorRows.length > available ? editorRows.slice(1, -1) : editorRows;
-                  // Pi renders the active cursor in reverse video. Keep its row
-                  // visible even when the editor itself exceeds our body budget.
-                  const cursorRow = Math.max(0, editorBody.findIndex((line) => line.includes("\x1b[7m")));
+                  const reverseVideoCursor = "\x1b[7m";
+                  const cursorRow = Math.max(0, editorBody.findIndex((line) => line.includes(reverseVideoCursor)));
                   const editorStart = Math.max(0, Math.min(cursorRow, editorBody.length - available));
                   body = editorBody.slice(editorStart, editorStart + available);
                 }
                 const hint = editing
                   ? "Ctrl+C cancel · Esc back · Enter save"
                   : `Esc cancel · ↑↓ choose · Enter select${params.questions.length > 1 ? " · Tab next" : ""}`;
-                // A full box needs both a top and a bottom row; with room for only one
-                // decoration row a single rule keeps the body budget intact.
                 const framed = decorationRows >= 2;
                 const blue = (text: string) => theme.fg("border", text);
                 const edge = (left: string, right: string) => blue(`${left}${"─".repeat(Math.max(0, width - 2))}${right}`);

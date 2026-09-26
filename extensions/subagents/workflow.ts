@@ -40,8 +40,6 @@ const runningIdentities = new Set<string>();
 const CAP = 1024 * 1024;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const execFileAsync = promisify(execFile);
-// The TypeScript compiler is ~1.3s and ~12MB of startup this extension only
-// needs when an approved workflow is actually compiled.
 let compiler: Promise<typeof ts> | undefined;
 const typescript = () => (compiler ??= import('typescript').then(module => module.default));
 // Pi may itself be a Bun executable. Probe Node independently and use the
@@ -70,8 +68,6 @@ async function workflowRuntime(signal?: AbortSignal) {
     throw new Error('Workflow requires an absolute Node executable path');
   const permissionFlag = major >= 24 ? '--permission' : '--experimental-permission';
   try {
-    // Check the actual permission model, including denied filesystem/process
-    // capabilities, before sending any approved workflow to this executable.
     const { stdout } = await execFileAsync(runtime.execPath, [permissionFlag, '--input-type=module', '-e', `
  import { readFileSync } from 'node:fs';
  import { spawnSync } from 'node:child_process';
@@ -89,11 +85,8 @@ async function workflowRuntime(signal?: AbortSignal) {
   }
   return { ...runtime, permissionFlag };
 }
-/** Body of async function workflow(api), compiled only after exact source approval. */
 export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
   const timeout = validateTimeout(options.timeout, 'Workflow timeout');
-  // Load the compiler before the run's deadline starts, exactly as an eager
-  // module-level import did; the caller's timeout budget is for the workflow.
   await typescript();
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), timeout);
@@ -202,7 +195,7 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
         try {
           process.kill(-worker.pid, 'SIGKILL');
         }
-        catch { /* Already gone. */ }
+        catch {}
     };
     controller.signal.addEventListener('abort', stop, { once: true });
     const timer = setTimeout(() => controller.abort(), options.timeout);
@@ -228,7 +221,6 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
           assertTaskFields(input);
           if (input.cwd !== undefined && typeof input.cwd !== 'string')
             throw new Error('Invalid child cwd');
-          // validateTask checks every task field at this untrusted IPC boundary.
           const inherited = {...options.defaultTask, ...input, cwd: input.cwd ? resolve(cwd, input.cwd) : cwd};
           if (input.thinking === undefined && typeof input.model === 'string') inherited.thinking = thinkingSuffix.exec(input.model)?.[1] ?? options.defaultTask?.thinking;
           const task = await validateTask(options.normalizeTask ? options.normalizeTask({...input, cwd: inherited.cwd} as unknown as TaskSpec) : inherited as unknown as TaskSpec, options.allowedTools?.());

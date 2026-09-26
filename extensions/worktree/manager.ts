@@ -21,7 +21,6 @@ export class Worktrees {
       return { path: fields.find(line => line.startsWith('worktree '))!.slice(9), branch: fields.find(line => line.startsWith('branch '))?.slice(7).replace(/^refs\/heads\//, '') ?? '', primary: index === 0 };
     });
   }
-  /** Confirm that a listed path still leads to its registered Git checkout. */
   async matches(checkout: Checkout): Promise<boolean> {
     try {
       if (!(await stat(checkout.path)).isDirectory()) return false;
@@ -38,19 +37,18 @@ export class Worktrees {
       return resolve(gitdir, (await readFile(join(gitdir, 'gitdir'), 'utf8')).trim()) === resolve(checkout.path, '.git');
     } catch { return false; }
   }
-  /** `undefined` means Herdr is not in play; any other value is the parsed `herdr worktree list` payload. */
   private async herdrState(): Promise<unknown> {
     if (!(this.options.herdr ?? process.env.HERDR_ENV === '1')) return;
     try { return JSON.parse(await this.run('herdr', ['worktree', 'list', '--cwd', this.cwd])); }
     catch (error) {
       const failure = error as { code?: string | number; stderr?: string };
       if (failure.code === 'ENOENT') return;
-      try { if (JSON.parse(failure.stderr ?? '{}')?.error?.code === 'server_not_running') return; } catch { /* Unknown failure must not trigger a fallback mutation. */ }
+      try { if (JSON.parse(failure.stderr ?? '{}')?.error?.code === 'server_not_running') return; } catch { throw error; }
       throw error;
     }
   }
   private async defaultBase(): Promise<string> {
-    try { return await this.run('git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']); } catch { /* Local-only repositories may have no remote default. */ }
+    try { return await this.run('git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']); } catch {}
     for (const branch of ['main', 'master']) {
       try { await this.run('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]); return branch; } catch { continue; }
     }
@@ -95,16 +93,16 @@ export class Worktrees {
     const layout = await realpath(join(this.options.home ?? homedir(), 'repos', '.worktrees'));
     if (!within(layout, canonical)) throw new Error('Refusing to remove a checkout outside the managed worktree directory');
     const herdr = await this.herdrState();
-    const workspace = herdr === undefined ? undefined : await findWorkspace(herdr, canonical);
-    if (herdr !== undefined && workspace === undefined) throw new Error('Cannot identify the Herdr worktree; removal blocked');
-    if (workspace && workspace === process.env.HERDR_WORKSPACE_ID) throw new Error('Refusing to close the active Herdr workspace');
+    const listed = herdr === undefined ? undefined : await findWorkspace(herdr, canonical);
+    if (herdr !== undefined && listed === undefined) throw new Error('Cannot identify the Herdr worktree; removal blocked');
+    const openWorkspaceId = listed?.openWorkspaceId;
+    if (openWorkspaceId && openWorkspaceId === process.env.HERDR_WORKSPACE_ID) throw new Error('Refusing to close the active Herdr workspace');
     const dirty = await this.run('git', ['-C', checkout.path, 'status', '--porcelain']);
     if (dirty && !options.force) return { removed: false, reason: 'dirty' };
     if (!await options.confirm(`Remove ${checkout.path}${dirty ? ' including uncommitted files (--force)' : ''}?`)) return { removed: false, reason: 'not confirmed' };
-    // Recheck after the dialog: another process may have edited the checkout.
     if (!options.force && await this.run('git', ['-C', checkout.path, 'status', '--porcelain'])) return { removed: false, reason: 'dirty' };
-    if (workspace) {
-      await this.run('herdr', ['worktree', 'remove', '--workspace', workspace, ...(options.force ? ['--force'] : [])]);
+    if (openWorkspaceId) {
+      await this.run('herdr', ['worktree', 'remove', '--workspace', openWorkspaceId, ...(options.force ? ['--force'] : [])]);
     } else await this.run('git', ['worktree', 'remove', ...(options.force ? ['--force'] : []), '--', checkout.path]);
     return { removed: true };
   }
@@ -133,8 +131,9 @@ function within(root: string, path: string): boolean {
   const suffix = relative(root, path);
   return suffix === '' || (!suffix.startsWith(`..${sep}`) && suffix !== '..' && !isAbsolute(suffix));
 }
-/** Tri-state: a workspace id, `null` for a known-but-unopened worktree, `undefined` when this path is not in the payload at all. */
-async function findWorkspace(value: unknown, path: string): Promise<string | null | undefined> {
+type ListedWorktree = { openWorkspaceId: string | null };
+
+async function findWorkspace(value: unknown, path: string): Promise<ListedWorktree | undefined> {
   if (!value || typeof value !== 'object') return;
   if (Array.isArray(value)) {
     for (const item of value) { const found = await findWorkspace(item, path); if (found !== undefined) return found; }
@@ -144,7 +143,8 @@ async function findWorkspace(value: unknown, path: string): Promise<string | nul
   if (typeof record.path === 'string' && Object.hasOwn(record, 'open_workspace_id')) {
     try {
       if (await realpath(record.path) === path) {
-        if (record.open_workspace_id === null || typeof record.open_workspace_id === 'string') return record.open_workspace_id;
+        const openWorkspaceId = record.open_workspace_id;
+        if (openWorkspaceId === null || typeof openWorkspaceId === 'string') return { openWorkspaceId };
         throw new Error('Invalid Herdr workspace identifier');
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }

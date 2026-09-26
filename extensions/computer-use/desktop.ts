@@ -22,7 +22,6 @@ function validateAction(value: unknown): asserts value is DesktopAction {
   if (a.action === 'type' && (typeof a.text !== 'string' || a.text.length > 10000 || a.text.includes('\0'))) invalid();
 }
 
-/** One session owns its transports. A failed mutation has an unknown outcome. */
 export class DesktopSession {
   private backend?: DesktopBackend;
   private queue: Promise<unknown> = Promise.resolve();
@@ -61,8 +60,8 @@ export class DesktopSession {
         let closeFailure: unknown;
         try { await backend.close(); } catch (failure) { closeFailure = failure; }
         if (!inspect) throw new Error(`Desktop mutation failed or was cancelled; outcome may be partial or unknown. Inspect before deciding whether to repeat. ${error instanceof Error ? error.message.slice(0, 500) : 'Transport failure'}`, { cause: error });
-        // A failing close never cancels the one reconnect; it only renames the error once no attempt is left.
-        if (attempt || signal.aborted) throw closeFailure === undefined ? error : new Error(closeFailure instanceof Error ? closeFailure.message : 'Desktop transport close failed', { cause: error });
+        if (attempt === 0 && !signal.aborted) continue;
+        throw closeFailure === undefined ? error : new Error(closeFailure instanceof Error ? closeFailure.message : 'Desktop transport close failed', { cause: error });
       } finally { if (abort) signal.removeEventListener('abort', abort); }
     }
   }

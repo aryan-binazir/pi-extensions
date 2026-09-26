@@ -55,11 +55,9 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
     }
     refresh();
     // The settings menu writes config without emitting a public change event.
-    // A single session-owned timer also catches external edits while idle.
     timer = setInterval(refresh, 1000);
     timer.unref();
   });
-  // pi.on is overloaded per event name, so the shared body is named instead of looped.
   const adopt = (_event: unknown, ctx: ExtensionContext) => { if (context) { context = ctx; refresh(); } };
   pi.on('model_select', adopt);
   pi.on('agent_start', adopt);

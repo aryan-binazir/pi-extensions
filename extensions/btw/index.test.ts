@@ -535,8 +535,6 @@ test("paging past the top of a long side transcript stops on the first turn", as
   assert.match(top, /First question/);
   assert.doesNotMatch(top, /Fourth question/);
   assert.equal(h.lines().length, 36);
-  // Paging back down only lands on the newest lines if the run past the top was
-  // clamped to the real transcript height rather than left to run away.
   for (let i = 0; i < 40; i++) h.key("\x1b[6~");
   assert.equal(h.render(), bottom);
   h.key("\x1b");

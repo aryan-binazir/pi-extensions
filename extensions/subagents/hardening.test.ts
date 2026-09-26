@@ -231,7 +231,6 @@ test('a recovered provider failure does not turn completed work into a failed ta
   } finally { await registry.shutdown(); }
 });
 
-// Pi AgentEvent puts arguments on start only; end carries the result and call ID.
 function toolCall(toolCallId: string, toolName: string, args: object, isError: boolean) {
   return [
     {type: 'tool_execution_start', toolCallId, toolName, args},

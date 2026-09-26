@@ -16,6 +16,9 @@ function fixture(run: (host: any) => Promise<void>) {
   });
 }
 
+const noticeFlushWindowMs = 250;
+const afterNoticeFlushWindow = () => new Promise<void>(resolve => setTimeout(resolve, noticeFlushWindowMs + 50));
+
 test('batch re-clipping marks omitted output even when each original notice fitted', async () => fixture(async ({execute, settle, notifications}: any) => {
   const children = await Promise.all([1, 2].map(i => execute('subagent', {task: String(i) + 'x'.repeat(1700), preset: 'reader'})));
   await Promise.all(children.map(child => settle(child.details.id)));
@@ -162,8 +165,7 @@ test('near-simultaneous child completions produce one compact parent continuatio
   await until(async () => (await execute('subagent_status')).details.every((task: any) => task.output === 'ready'), 'both batch children to report ready');
   await writeFile(join(cwd, 'release'), 'go');
   await until(() => notifications.length >= 1, 'the first completion notice');
-  // A second notice would arrive in its own 250 ms flush window.
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await afterNoticeFlushWindow();
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].task.tasks.length, 2);
 }));
@@ -185,8 +187,7 @@ test('a stalled workflow child is not relaunched by automatic retry', async () =
 test('workflow children report to the awaiting workflow without duplicate parent notifications', async () => fixture(async ({execute, notifications}: any) => {
   const result = await execute('workflow', {source: "await api.spawn({task:'one',preset:'reader'},'one');await api.spawn({task:'two',preset:'reader'},'two');return 'done';"});
   assert.equal(result.details, 'done');
-  // A wrongly routed parent notice would only flush after the 250 ms batching window.
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await afterNoticeFlushWindow();
   assert.deepEqual(notifications, []);
 }));
 
@@ -206,7 +207,6 @@ test('registered direct and workflow children share native monitoring without re
     getApiKeyAndHeaders: async () => ({ok: true, apiKey: 'fake'}),
     getProvider: () => ({streamSimple: (...args: any[]) => {calls.push(args); return (async function* () {yield {type: 'text_delta', delta: 'Observed children'}; yield {type: 'done', reason: 'stop'};})();}}),
   };
-  // Start the workflow child first so the shared initial snapshot includes it.
   const workflow = execute('workflow', {source: "return await api.spawn({task:'hold',preset:'reader'},'tracking');"}).catch(() => undefined);
   await until(() => calls.length > 0, 'the first shared tracker request');
   assert.equal(calls.length, 1); assert.match(calls[0][1].messages[0].content, /workflow/);
@@ -338,8 +338,8 @@ test('a real completion after cancellation overflow still requests a parent cont
   const children = await Promise.all(Array.from({length: 20}, () => execute('subagent', {task: 'hold', preset: 'writer'})));
   const completion = await execute('subagent', {task: 'batch', preset: 'reader'});
   await until(async () => (await execute('subagent_status', {id: completion.details.id})).details.output === 'ready', 'the completing child to report ready');
-  // Queued writers cancel synchronously and fill the retained notice slots first.
-  await Promise.all(children.slice(1).map((child: any) => execute('subagent_cancel', {id: child.details.id})));
+  const queuedWriters = children.slice(1);
+  await Promise.all(queuedWriters.map((child: any) => execute('subagent_cancel', {id: child.details.id})));
   await writeFile(join(cwd, 'release'), 'go');
   await until(() => notifications.length > 0, 'the overflow continuation notice');
   assert.equal(notifications.length, 1);
@@ -377,12 +377,10 @@ test('/subagents cancel all stops every running child', async () => fixture(asyn
 test('subagent_status pages summaries ten at a time with offset and limit', async () => fixture(async ({execute}: any) => {
   const children: any[] = [];
   for (let i = 0; i < 12; i++) children.push(await execute('subagent', {task: `page ${i}`, preset: 'reader'}));
-  // The shared `settle` reads the first summary page, which is exactly what this test bounds; wait by id instead.
   for (const child of children) await until(async () => (await execute('subagent_status', {id: child.details.id})).details.status === 'succeeded', `child ${child.details.id} to succeed`);
   const firstPage = (await execute('subagent_status')).details;
   const secondPage = (await execute('subagent_status', {offset: 10})).details;
   assert.deepEqual([firstPage.length, secondPage.length], [10, 2]);
-  // Retention orders by completion, so the pages must tile the set without overlap rather than match spawn order.
   assert.deepEqual([...firstPage, ...secondPage].map((task: any) => task.id).sort(), children.map((child: any) => child.details.id).sort());
 }));
 

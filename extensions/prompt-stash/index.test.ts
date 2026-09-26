@@ -13,7 +13,6 @@ for (const EditorClass of [CustomEditor, ViEditor]) {
     h.editor.handleInput("\x13");
     assert.equal(h.editor.getExpandedText(), "");
     assert.match(h.status!, /stash/i);
-    // Reinstantiate the installed composing factory, as Pi does on replacement.
     h.ctx.ui.setEditorComponent(h.ctx.ui.getEditorComponent());
     h.editor.setText("second draft");
     h.editor.handleInput("\x13");
@@ -73,12 +72,10 @@ test("Ctrl+S inside a paste split between chunks is payload, not a stash command
 
 test("the last delimiter in a chunk decides whether Ctrl+S is paste content", () => {
   const h = stashHost(ViEditor);
-  // Several delimiters in one chunk, ending inside a paste: Ctrl+S is payload.
   h.editor.handleInput("\x1b[200~one\x1b[201~two\x1b[200~three");
   h.editor.handleInput("\x13");
   assert.equal(h.status, undefined);
   h.editor.handleInput("\x1b[201~");
-  // The same chunk ending on a close delimiter leaves Ctrl+S a stash command.
   h.editor.setText("draft");
   h.editor.handleInput("\x1b[200~four\x1b[200~five\x1b[201~");
   h.editor.handleInput("\x13");

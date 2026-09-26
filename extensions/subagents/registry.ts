@@ -55,7 +55,7 @@ interface Entry {
   supervised?: boolean;
   timer?: NodeJS.Timeout;
   killTimer?: NodeJS.Timeout;
-  groupKilled?: boolean;
+  sigkillAttempted?: boolean;
   writer: boolean;
   finished: boolean;
   detachSignal?: () => void;
@@ -73,7 +73,6 @@ const RETAINED = 50;
 const ACTIVE_STATUS = new Set<TaskResult['status']>(['queued', 'running']);
 const SUPERVISOR = fileURLToPath(new URL('./process-supervisor.mjs', import.meta.url));
 export const TIMEOUT_BOUNDS = {minimum: 10, maximum: 3600000};
-/** One bound for every child and workflow deadline. */
 export function validateTimeout(timeout: number | undefined, what: string): number {
   const value = timeout ?? TIMEOUT_BOUNDS.maximum;
   if (!Number.isInteger(value) || value < TIMEOUT_BOUNDS.minimum || value > TIMEOUT_BOUNDS.maximum)
@@ -81,6 +80,9 @@ export function validateTimeout(timeout: number | undefined, what: string): numb
   return value;
 }
 const FAST_ALIAS = new RegExp(`^(openai(?:-codex)?\\/.+)~fast(?=:${thinkingPattern}$|$)`);
+function withoutFastAlias(model: string): string {
+  return model.replace(FAST_ALIAS, '$1');
+}
 
 /** Overlay variables instead of copying: node's spawn walks the prototype chain,
  * so the child gets the same environment for one pass over intercepted process.env. */
@@ -88,7 +90,6 @@ function childEnv(base: NodeJS.ProcessEnv, overrides: NodeJS.ProcessEnv): NodeJS
   return Object.assign(Object.create(base) as NodeJS.ProcessEnv, overrides);
 }
 
-/** Snapshot a record without structuredClone, which re-copies retained output. */
 function cloneResult(result: TaskResult): TaskResult {
   const {usage} = result;
   const snapshot: TaskResult = {
@@ -109,9 +110,7 @@ export async function validateTask(spec: TaskSpec, allowedTools?: string[]): Pro
   if (typeof spec.cwd !== 'string' || !isAbsolute(spec.cwd)) throw new Error('Task cwd must be absolute');
   const cwd = await realpath(spec.cwd);
   if (!(await stat(cwd)).isDirectory()) throw new Error('Task cwd must be a directory');
-  // Fast aliases belong to the parent's extension; discovery-free children use
-  // the real base model, preserving any explicit thinking suffix.
-  const model = typeof spec.model === 'string' ? spec.model.replace(FAST_ALIAS, '$1') : spec.model;
+  const model = typeof spec.model === 'string' ? withoutFastAlias(spec.model) : spec.model;
   if (model !== undefined && (typeof model !== 'string' || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:/-]+$/.test(model))) throw new Error('Model must be provider/model');
   if (spec.thinking !== undefined && !thinkingLevel.test(spec.thinking)) throw new Error('Invalid thinking level');
   if (spec.preset !== undefined && !['reader', 'writer'].includes(spec.preset)) throw new Error('Unknown preset');
@@ -131,7 +130,6 @@ export async function validateTask(spec: TaskSpec, allowedTools?: string[]): Pro
   return { ...spec, model, cwd, tools: [...tools], extensions, timeout };
 }
 
-/** Separate context windows, not an OS sandbox. All children share host permissions. */
 export class SubagentRegistry {
   private entries = new Map<string, Entry>();
   private running = 0;
@@ -193,7 +191,6 @@ export class SubagentRegistry {
     }
     return page;
   }
-  /** Ordered live view of unfinished work, without cloning retained output. */
   activeTasks(): {id: string; status: TaskResult['status']; task: string}[] {
     const active: {id: string; status: TaskResult['status']; task: string}[] = [];
     for (const {result} of this.entries.values())
@@ -218,9 +215,8 @@ export class SubagentRegistry {
     entry.result.status = timeout ? (entry.result.status === 'queued' ? 'expired-in-queue' : 'timed-out') : 'cancelled';
     if (!entry.process) this.finish(entry);
     else {
-      // The adapter broadcasts SIGTERM once on owner-pipe EOF. Broadcasting
-      // here as well would deliver two signals to Pi and its descendants.
-      if (entry.supervised) entry.process.stdio[3]?.destroy();
+      const ownerPipe = entry.process.stdio[3];
+      if (entry.supervised) ownerPipe?.destroy();
       else this.signal(entry, 'SIGTERM');
       entry.killTimer ??= setTimeout(() => this.signal(entry, 'SIGKILL'), 2500);
     }
@@ -243,9 +239,8 @@ export class SubagentRegistry {
     await Promise.all([...this.entries.values()].map(e => e.done));
   }
   private signal(entry: Entry, signal: NodeJS.Signals) {
-    if (!entry.process?.pid || entry.groupKilled) return;
-    // A SIGKILL attempt is final: the pid and process group may be recycled afterwards.
-    if (signal === 'SIGKILL') entry.groupKilled = true;
+    if (!entry.process?.pid || entry.sigkillAttempted) return;
+    if (signal === 'SIGKILL') entry.sigkillAttempted = true;
     try { process.kill(-entry.process.pid, signal); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') entry.process.kill(signal); }
   }
   private pump() {
@@ -261,10 +256,6 @@ export class SubagentRegistry {
     this.running++;
     if (entry.writer) this.writers.add(entry.spec.cwd);
     entry.result.status = 'running';
-    // Streamed text arrives in many small pieces. Truncating the whole retained
-    // tail on every piece copies CAP characters per delta, so let the tail run
-    // over budget and collapse it lazily: repeated tail-truncation and a single
-    // one at read time yield the same last-CAP characters.
     const tail = (field: 'output' | 'stderr') => {
       let buffer = entry.result[field];
       const trim = () => buffer.length > CAP ? (buffer = buffer.slice(-CAP)) : buffer;
@@ -289,7 +280,6 @@ export class SubagentRegistry {
         if (event.type === 'tool_execution_start' && typeof event.toolCallId === 'string' && event.toolCallId.length <= 256) {
           toolCalls.delete(event.toolCallId);
           if (event.args !== undefined) {
-            // Retain only bounded fingerprints, never the potentially large arguments.
             toolCalls.set(event.toolCallId, createHash('sha256').update(JSON.stringify([event.toolName, event.args])).digest('hex'));
             if (toolCalls.size > 1024) toolCalls.delete(toolCalls.keys().next().value!);
           }
@@ -331,7 +321,7 @@ export class SubagentRegistry {
           lastUpdateAt = Date.now();
           this.options.onUpdate(cloneResult(entry.result));
         }
-      } catch { /* Non-JSON diagnostic output is retained separately by stderr. */ }
+      } catch {}
     };
     try {
       const allowed = this.options.allowedTools?.();
@@ -385,12 +375,8 @@ export class SubagentRegistry {
           if (entry.result.status === 'failed' && !entry.result.error) entry.result.error = `Child exited with code ${code}`;
         }
         this.finish(entry);
-        // Stream bookkeeping is dead once the child is closed, but the retained
-        // entry keeps these listeners alive; the tool-call fingerprints alone
-        // hold 1024 digests per retained child.
         toolCalls.clear(); pending = ''; pendingBytes = 0; control = '';
       });
-      // Reap descendants even when they inherited pipes from an exited parent.
       entry.process.on('exit', () => {
         this.signal(entry, 'SIGKILL');
         clearTimeout(entry.timer); clearTimeout(entry.killTimer);
@@ -399,16 +385,18 @@ export class SubagentRegistry {
       entry.result.status = 'failed'; entry.result.error = String(error); this.finish(entry);
     }
   }
+  private reinsertAtEnd(entry: Entry) {
+    this.entries.delete(entry.result.id);
+    this.entries.set(entry.result.id, entry);
+  }
   private finish(entry: Entry) {
     if (entry.finished) return;
     entry.finished = true;
-    // Keep outstanding insertion order but put terminal records in completion order.
-    this.entries.delete(entry.result.id);
-    this.entries.set(entry.result.id, entry);
+    this.reinsertAtEnd(entry);
     entry.detachSignal?.();
     clearTimeout(entry.timer); clearTimeout(entry.killTimer);
-    // Queued cancellation does not hold a process slot.
-    if (entry.process || entry.result.status === 'failed') { this.running--; if (entry.writer) this.writers.delete(entry.spec.cwd); }
+    const heldRunSlot = Boolean(entry.process) || entry.result.status === 'failed';
+    if (heldRunSlot) { this.running--; if (entry.writer) this.writers.delete(entry.spec.cwd); }
     const snapshot = cloneResult(entry.result);
     try { this.options.onComplete?.(snapshot); } catch (error) { entry.result.notificationError = `Completion notification failed: ${String(error).slice(0,1000)}`; }
     finally {

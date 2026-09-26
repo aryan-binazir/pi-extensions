@@ -4,12 +4,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 export type Power='ac'|'battery'|'unknown';
 const MAINS=new Set(['Mains','USB','USB_C','USB_PD','USB_PD_DRP','Wireless']);
-// A device's `type` is fixed for as long as the device exists, so the directory
-// listing itself is a sound invalidation key: re-read every `type` only when a
-// supply appears or disappears. The watchdog polls twice a minute or faster and
-// those reads are the bulk of its cost -- `online` is the only volatile file.
 let mainsRoot:string|undefined,mainsKey='',mainsOnline:string[]=[];
-// One incomplete or unreadable supply must not hide another working AC source.
 const readTrimmed=async(path:string):Promise<string|undefined>=>{
  try{return (await readFile(path,'utf8')).trim();}catch{return undefined;}
 };
@@ -21,8 +16,7 @@ export async function readPower(platform=process.platform,root='/sys/class/power
   }
   if(platform!=='linux')return 'unknown';
   const entries=await readdir(root);
-  // Fixed-power desktops commonly expose no power-supply devices at all; a
-  // missing or unreadable directory stays unknown via the caller's catch.
+  // Fixed-power desktops commonly expose no power-supply devices at all.
   if(entries.length===0)return 'ac';
   const key=entries.join('\0');
   let online=mainsOnline;
@@ -66,14 +60,11 @@ export class PowerKeeper {
  private cachedPower:Power='unknown';private checkedAt=-Infinity;private retryAt=0;
  private timer?:ReturnType<typeof setInterval>;private queue:Promise<void>=Promise.resolve();
  private awake=false;private watching=false;
- private publish(){const awake=!!this.inhibitor?.alive();if(awake!==this.awake){this.awake=awake;try{this.options.onChange(awake);}catch{/* A synchronous status callback failure must not interrupt power checks or cleanup. */}}}
+ private publish(){const awake=!!this.inhibitor?.alive();if(awake!==this.awake){this.awake=awake;try{this.options.onChange(awake);}catch{return;}}}
  private readonly options:Required<KeeperOptions>;
  constructor(options:KeeperOptions={}){this.options={power:readPower,start:startInhibitor,now:Date.now,lingerMs:5000,checkMs:2000,powerCacheMs:1000,onChange:()=>{},...options};}
  private active(){return this.agent||this.tasks.size>0;}
  start(){if(!this.stopped){this.watching=true;this.arm();}}
- // Armed on demand: an idle session would otherwise wake the event loop every
- // checkMs forever to reach the same no-op. Every transition in or out of
- // `needed` runs through check(), which re-arms here.
  private arm(){
   const needed=this.watching&&!this.stopped&&(this.active()||this.until>this.options.now());
   if(needed){if(!this.timer){this.timer=setInterval(()=>{void this.check(false);},this.options.checkMs);this.timer.unref();}}
@@ -97,9 +88,7 @@ export class PowerKeeper {
    if(this.stopped)return;
    if(!needed||power!=='ac'){await this.release();return;}
    if(this.inhibitor&&!this.inhibitor.alive()){this.inhibitor=undefined;this.retryAt=this.options.now()+30000;}
-   if(!this.inhibitor&&this.options.now()>=this.retryAt){try{this.inhibitor=this.options.start();}catch{/* Unsupported/missing OS service: no-op. */}if(!this.inhibitor)this.retryAt=this.options.now()+30000;}
-  // Fail safe: any error in the queued check (including a rejected power read)
-  // releases the inhibitor rather than leaving the machine pinned awake.
+   if(!this.inhibitor&&this.options.now()>=this.retryAt){try{this.inhibitor=this.options.start();}catch{this.inhibitor=undefined;}if(!this.inhibitor)this.retryAt=this.options.now()+30000;}
   }).catch(async(_error:unknown)=>{await this.release();}).finally(()=>{this.publish();this.arm();});return this.queue;
  }
  private async release(){const current=this.inhibitor;this.inhibitor=undefined;try{await current?.stop();}finally{this.publish();}}

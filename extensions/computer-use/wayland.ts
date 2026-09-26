@@ -1,8 +1,6 @@
 import { createConnection, type Socket } from 'node:net';
 import { endianness } from 'node:os';
 
-// This client uses only protocols without file descriptors. All wire objects stay
-// session-local; wl_display.sync proves processing, not application-side success.
 const ints = (...values: number[]) => { const b = Buffer.alloc(values.length * 4); values.forEach((v, i) => b.writeUInt32LE(v >>> 0, i * 4)); return b; };
 const waylandString = (value: string) => { const b = Buffer.alloc(Math.ceil((Buffer.byteLength(value) + 1) / 4) * 4); b.write(value); return Buffer.concat([ints(Buffer.byteLength(value) + 1), b]); };
 function readString(b: Buffer, offset: number) {
@@ -54,7 +52,6 @@ export class WaylandPointer {
           this.globals.push({ name, iface: iface.value, version: body.readUInt32LE(iface.end) });
           if (this.globals.length > 1000) throw new Error('Wayland registry limit');
         } else if (object === 2 && opcode === 1) {
-          // Hotplug invalidates the coordinate map. Never silently choose another output.
           const name = body.readUInt32LE(0), index = this.globals.findIndex(global => global.name === name);
           const removed = index < 0 ? undefined : this.globals.splice(index, 1)[0];
           if (removed?.iface === 'wl_output') {
@@ -103,19 +100,19 @@ export class WaylandPointer {
     const id = [...this.outputIds].find(([, name]) => name === output)?.[0];
     if (!id) throw new Error('Unknown or removed Wayland output; take a new screenshot');
     const pointer = this.id++; this.send(this.manager, 2, ints(0, id, pointer)); this.pointers.set(output, pointer);
-    // Creating the first device announces wl_seat pointer capability. Let the
-    // compositor process that before sending events to its clients.
     await this.sync(); return pointer;
+  }
+  private pressAndRelease(pointer: number, time: number, code: number) {
+    this.send(pointer, 2, ints(time, code, 1)); this.send(pointer, 4);
+    this.send(pointer, 2, ints(time, code, 0)); this.send(pointer, 4);
   }
   click(output: string, x: number, y: number, button: 'left'|'right'|'middle', signal: AbortSignal) {
     return this.withSignal(signal, async () => {
       const pointer = await this.pointer(output), time = Date.now() >>> 0, code = { left: 272, right: 273, middle: 274 }[button];
-      // Send down/up together; cancellation must never leave a deliberately held button.
       this.send(pointer, 1, ints(time, Math.min(999_999, Math.round(x * 1_000_000)), Math.min(999_999, Math.round(y * 1_000_000)), 1_000_000, 1_000_000));
       this.send(pointer, 4); await this.sync();
       signal.throwIfAborted();
-      this.send(pointer, 2, ints(time, code, 1)); this.send(pointer, 4);
-      this.send(pointer, 2, ints(time, code, 0)); this.send(pointer, 4); await this.sync();
+      this.pressAndRelease(pointer, time, code); await this.sync();
     });
   }
   scroll(output: string, dx: number, dy: number, signal: AbortSignal) {

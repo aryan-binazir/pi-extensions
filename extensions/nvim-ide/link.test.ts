@@ -100,7 +100,6 @@ test('connects with the token, tracks selection and mentions, calls tools, recon
     ide.broadcast('selection_changed', { text: 'bad', filePath: 7 });
     ide.broadcast('at_mentioned', { filePath: '/w/project/c.ts', lineStart: 3, lineEnd: 9 });
     ide.broadcast('at_mentioned', { filePath: '/w/project', lineStart: null, lineEnd: null });
-    // The mentions arrive after the malformed selection on the same socket, so this also proves that one was ignored.
     await until(() => link.state.mentions === 2);
     assert.equal(link.state.selection?.filePath, '/w/project/b.ts', 'a malformed selection_changed leaves the last good selection in place');
     assert.deepEqual(link.takeMentions(), [{ filePath: '/w/project/c.ts', lineStart: 3, lineEnd: 9 }, { filePath: '/w/project', lineStart: undefined, lineEnd: undefined }]);
@@ -198,14 +197,12 @@ test('editor restart: dropped connection then a new lock on a new port reconnect
     link.start();
     await writeFile(join(dir, `${first.port()}.lock`), lockFile());
     await until(() => link.connected);
-    // claudecode.nvim removes its lock before closing the socket
     await rm(join(dir, `${first.port()}.lock`));
     await first.close();
     await until(() => !link.connected);
     const second = fakeIde();
     await once(second.server, 'listening');
     try {
-      // atomic write like the plugin: temp file then rename
       await writeFile(join(dir, `${second.port()}.lock.tmp.1.2`), lockFile());
       await rename(join(dir, `${second.port()}.lock.tmp.1.2`), join(dir, `${second.port()}.lock`));
       await until(() => link.connected, 2000);

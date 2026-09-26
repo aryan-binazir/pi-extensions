@@ -5,14 +5,12 @@ import { fileURLToPath } from 'node:url';
 const key = Symbol.for('pi.agent-workflows.active-cwd.v1');
 const registry = globalThis as unknown as Record<symbol, Map<string, string>>;
 const paths = registry[key] ??= new Map<string, string>();
-// Every routed tool call re-derives the same identity; path.resolve plus
-// JSON.stringify dominate that. Memoize the last pair, which is the only one a
-// live session asks for, and only when `resolve` cannot depend on process.cwd().
 let memoCwd: string | undefined, memoSession: string | undefined, memoKey = '';
 const identity = (cwd: string, sessionId?: string) => {
   if (cwd === memoCwd && sessionId === memoSession) return memoKey;
   const computed = JSON.stringify([resolve(cwd), sessionId ?? 'default']);
-  if (isAbsolute(cwd)) { memoCwd = cwd; memoSession = sessionId; memoKey = computed; }
+  const resolveIgnoresProcessCwd = isAbsolute(cwd);
+  if (resolveIgnoresProcessCwd) { memoCwd = cwd; memoSession = sessionId; memoKey = computed; }
   return computed;
 };
 export function getActiveCwd(originalCwd: string, sessionId?: string): string { return paths.get(identity(originalCwd, sessionId)) ?? originalCwd; }
@@ -28,18 +26,16 @@ const unnormalizedAbsolute = /\/(?:\.\.?)?(?:\/|$)/;
 const unnormalizedRelative = /(?:^|\/)(?:\.\.?)?(?:\/|$)/;
 const posix = process.platform !== 'win32';
 const windowsDrive = /^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i;
-// The active directory is the same string on every routed call; scan it once.
 let scannedCwd = '\0';
 function joinable(cwd: string): boolean {
   if (cwd === scannedCwd) return true;
-  if (cwd.length < 2 || cwd.charCodeAt(0) !== 47 /* / */ || unnormalizedAbsolute.test(cwd)) return false;
+  if (cwd.length < 2 || cwd[0] !== '/' || unnormalizedAbsolute.test(cwd)) return false;
   scannedCwd = cwd;
   return true;
 }
 
 /** Pi 0.85.1 utils/paths normalizePath + tools/path-utils resolveToCwd semantics.
- * The SDK does not publicly export these helpers. Keep routing and permission
- * checks on the same interpretation before handing a path to the built-in tool.
+ * The SDK does not publicly export these helpers.
  */
 export function resolveToolPath(raw: string, cwd: string): string {
   let path = raw.replace(unicodeSpaces, ' ');

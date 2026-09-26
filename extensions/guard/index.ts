@@ -2,7 +2,6 @@ import { lstat, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { getAgentDir, isToolCallEventType, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
-// A static simple-command lexer, not a shell interpreter. Never executes input.
 function commands(source: string): string[][] {
   const result: string[][] = [];
   let words: string[] = [], word = '', quote = '', started = false;
@@ -93,8 +92,6 @@ export default function guard(pi: ExtensionAPI) {
       let start = 0;
       while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[start] ?? '')) start++;
       if (basename(words[start] ?? '') !== 'gh') continue;
-      // Inherited flags can precede either subcommand. Keep help in encounter
-      // order so a later --help=false does not accidentally bypass a rule.
       const args: string[] = [], inherited: string[] = [];
       for (let i = start + 1; i < words.length; i++) {
         if (/^(--help|-h)(=.*)?$/.test(words[i])) { inherited.push(words[i]); continue; }

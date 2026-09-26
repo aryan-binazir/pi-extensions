@@ -53,7 +53,6 @@ function host(onEmit?: (value: any) => void) {
     options: () => uiOptions,
   };
 }
-// Documented viewport height for 6..30 terminal rows (at least 3, at most 18, five rows left for Pi's footer), then taller terminals.
 const viewportRows: Record<number, number> = Object.fromEntries([
   ...[3, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 18, 18, 18, 18, 18, 18, 18].map((limit, index) => [6 + index, limit]),
   [40, 18], [48, 18],
@@ -236,14 +235,12 @@ test("Pi's real custom UI bridge tolerates abort before the factory returns", as
     ui: terminal,
     keybindings: {},
   };
-  // Exercise the installed Pi UI boundary with a synthetic terminal. The private
-  // bridge is used only by this compatibility regression, never by extensions.
   const bridge = (InteractiveMode.prototype as any).showExtensionCustom;
   h.ctx.ui.custom = (factory: any) =>
     bridge.call(bridgeHost, (...args: any[]) => {
       controller.abort();
       const component = factory(...args);
-      h.hooks.session_shutdown(); // A second close cannot change the first result.
+      h.hooks.session_shutdown();
       return component;
     });
   const result = await h.run([question("a")], controller.signal);
@@ -486,8 +483,6 @@ test("frames depend only on state, not on earlier widths or selections", async (
     },
     question("second"),
   ];
-  // One component sees every width; each reference component only ever sees one,
-  // so any layout reused across widths or selections shows up as a mismatch.
   const mixed = host();
   const references = widths.map(() => host());
   const running = [mixed, ...references].map((h) => h.run(structuredClone(questions)));

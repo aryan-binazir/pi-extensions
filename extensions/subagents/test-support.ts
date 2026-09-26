@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import subagents from './index.ts';
 
-// Synthetic catalog; no authentication files or provider requests in fixtures.
 export function fixtureModelRegistry() {
   const models = ['test/fixture', 'test/selected', 'test/different', 'openai-codex/gpt-6-astra', 'openai-codex/gpt-5.6-luna'].map(value => {
     const [provider, id] = value.split('/'); return {provider, id, reasoning: true};
@@ -15,7 +14,6 @@ export function fixtureModelRegistry() {
   };
 }
 
-/** Poll a positive condition instead of sleeping for a guessed duration. */
 export async function until<T>(probe: () => T | Promise<T>, what: string, budget = 4000): Promise<NonNullable<T>> {
   const end = Date.now() + budget;
   for (;;) {
@@ -33,7 +31,6 @@ export interface Host {
   tools: Map<string, any>;
   hooks: Map<string, any>;
   commands: Map<string, any>;
-  /** One entry per pi.sendMessage: the raw message, its parsed content and the delivery options. */
   notifications: {type: string; task: any; message: any; options: any}[];
   activity: {id: string; active: boolean}[];
   widgets: Map<string, string[]>;
@@ -59,11 +56,6 @@ export interface HostOptions {
   before?: (host: Host) => Promise<void>;
 }
 
-/**
- * Register the subagents extension against a disposable workspace: a fake `pi`
- * on PATH, a private agent directory, and recording doubles for every host
- * surface the extension writes to. Callers supply only the fake-pi script.
- */
 export async function withHost(options: HostOptions, run: (host: Host) => Promise<void>): Promise<void> {
   const cwd = await mkdtemp(join(tmpdir(), options.prefix));
   const agentDir = join(cwd, 'agent');

@@ -112,9 +112,7 @@ test('throwing status callbacks never reject checks or skip the next power read'
 
 test('the watchdog only ticks while work is pending',async t=>{
  t.mock.timers.enable({apis:['setInterval','Date']});
- // Every watchdog tick consults the clock, so counting clock reads counts ticks.
  let reads=0,stops=0,ticks=0;
- // Advance the mocked clock, then let the checks each tick queued settle.
  const idle=async(ms:number)=>{t.mock.timers.tick(ms);await new Promise<void>(resolve=>setImmediate(resolve));};
  const keeper=new PowerKeeper({power:async()=>{reads++;return 'ac';},now:()=>{ticks++;return Date.now();},
   start:()=>({alive:()=>true,stop:async()=>{stops++;}}),lingerMs:20,checkMs:5,powerCacheMs:0});

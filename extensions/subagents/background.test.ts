@@ -6,7 +6,6 @@ const pi = `const task=process.argv.at(-1);if(task==='fail'){process.exit(2);}el
 
 function fixture(run: (host: Host & {closed: () => Promise<void>}) => Promise<void>) {
   return withHost({prefix: 'pi-background-preflight-', pi}, async host => {
-    // Exactly one active interval per child: opened on spawn, closed on settle.
     const closed = async () => {
       await until(() => host.activity.some(entry => !entry.active), 'the active interval to close');
       assert.equal(host.activity.length, 2);

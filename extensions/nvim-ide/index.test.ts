@@ -11,10 +11,8 @@ import { setActiveCwd } from '../worktree/routing.ts';
 
 type Handler = (event: any, ctx: any) => any;
 
-/** Absence has no positive signal to wait on; give in-flight socket traffic a beat before asserting nothing happened. */
 const settle = () => new Promise(resolve => setTimeout(resolve, 50));
 
-/** Enough of Pi's ExtensionAPI to drive the adapter: handlers, tools and commands are captured. */
 function fakePi() {
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, any>();
@@ -35,7 +33,6 @@ function fakeCtx(cwd: string) {
 
 type Connected = { ide: ReturnType<typeof fakeIde>; project: string } & ReturnType<typeof fakePi> & ReturnType<typeof fakeCtx>;
 
-/** A running fake editor, a project with `a.ts`, its lock file, and the adapter already through session_start. */
 async function withConnectedIde(body: (harness: Connected) => Promise<void>): Promise<void> {
   const ide = fakeIde();
   await once(ide.server, 'listening');
@@ -67,7 +64,6 @@ test('a connected editor registers its tools and reports the selection in the st
     assert.deepEqual([...tools.keys()].sort(), ['nvim_context', 'nvim_diagnostics', 'nvim_open']);
     assert.deepEqual([...commands.keys()], ['vim']);
 
-    // Ambient selection reaches the status bar and the system prompt; repaints only on change.
     ide.broadcast('selection_changed', { text: 'line2\nline3', filePath: join(project, 'a.ts'), selection: { start: { line: 1, character: 0 }, end: { line: 2, character: 5 }, isEmpty: false } });
     await until(() => status.at(-1) === 'Neovim ✓ a.ts:2-3 ▮');
     const paints = status.length;

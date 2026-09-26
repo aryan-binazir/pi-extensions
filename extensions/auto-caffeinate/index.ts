@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { PowerKeeper, type KeeperOptions } from './power.ts';
-/** `keeperOptions` replaces the power and inhibitor adapters; Pi passes none, tests pass fakes. */
 export default function autoCaffeinate(pi:ExtensionAPI,keeperOptions:Pick<KeeperOptions,'power'|'start'>={}):void {
  let ctx:ExtensionContext|undefined;
  const keeper=new PowerKeeper({...keeperOptions,onChange:awake=>{

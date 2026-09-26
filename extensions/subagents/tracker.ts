@@ -4,7 +4,6 @@ import type { TaskResult } from './registry.ts';
 import { abortable } from './cancellation.ts';
 import { clipJson } from './presentation.ts';
 
-/** Observes registry state only. No agent runtime, conversation history, or tools. */
 export class SubagentTracker {
   status = 'Luna tracker idle';
   private timer?: NodeJS.Timeout;
@@ -54,9 +53,6 @@ export class SubagentTracker {
     const current = () => generation === this.generation;
     try {
       const tasks = this.tasks();
-      // Compare meaningful task state, not elapsed time, token/cost churn, or
-      // model wording. Hash full observations so clipped output and queue
-      // identity changes still count, without retaining another output copy.
       const state = createHash('sha256');
       for (const task of [...tasks].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
         state.update(JSON.stringify([task.id, task.owner, task.status, task.task, task.output, task.error]));
@@ -88,7 +84,6 @@ export class SubagentTracker {
       }, {apiKey: auth.apiKey, headers: auth.headers, env: auth.env, reasoning: 'medium', signal: controller.signal, maxTokens: 1024, cacheRetention: 'none'});
       let report = '', done = false;
       const iterator = stream[Symbol.asyncIterator]();
-      // Race each read: even a broken provider ignoring abort cannot publish late.
       while (true) {
         const next = await abortable(iterator.next(), controller.signal);
         if (next.done) break;
@@ -104,8 +99,6 @@ export class SubagentTracker {
       if (!done || !report.trim()) throw new Error('Provider returned no complete tracking report');
       if (current()) {
         this.publish(report);
-        // Only successful publication acknowledges this exact observation.
-        // Failures retry, and an invalidated generation cannot seed dedup.
         if (current()) { this.reportedState = fingerprint; this.status = 'Luna tracker report available'; }
       }
     } catch (error) {

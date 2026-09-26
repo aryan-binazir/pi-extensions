@@ -39,7 +39,6 @@ export function editor(EditorClass: EditorConstructor<CustomEditor> = ViEditor):
     new KeybindingsManager(),
   );
 }
-/** Feed an editor one key at a time, the way a terminal delivers typing. */
 export function keys(e: { handleInput(data: string): void }, input: string): void {
   for (const key of input) e.handleInput(key);
 }

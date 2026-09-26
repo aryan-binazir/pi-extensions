@@ -20,7 +20,6 @@ async function checkoutFixture(prefix: string) {
   return { home, original, active };
 }
 
-/** Enough of Pi's ExtensionContext to drive the extension, with the UI calls it makes recorded. */
 function fakeCtx(options: { cwd: string; sessionId: string; branch?: string; hasUI?: boolean }) {
   const status: Array<string | undefined> = [];
   const notices: string[] = [];
@@ -69,7 +68,6 @@ test('restored active checkout routes shell and relative files while preserving 
       `base\n\nActive worktree directory: ${active}. Built-in bash, user shell, and relative file tools use this directory. Absolute paths are unchanged. Pi's original session directory remains ${original}; session storage, loaded context/resources, and arbitrary extension internals are not relocated. Subagents resolve defaults against the active worktree. Inspect this checkout's instructions before editing.`,
     );
     await handlers.session_shutdown({}, ctx); assert.equal(getActiveCwd(original, 'synthetic'), original);
-    // Pi switches/new/forks tear down the old runtime and then emit session_start.
     ctx.sessionManager.getBranch = () => [];
     await handlers.session_start({ reason: 'new' }, ctx);
     assert.equal(getActiveCwd(original, 'synthetic'), original);
@@ -154,7 +152,6 @@ test('routing identities stay distinct as sessions and directories interleave', 
   try {
     for (const [cwd, session] of pairs) setActiveCwd(cwd, `/target${cwd}-${session}`, session);
     for (const [cwd, session] of pairs) assert.equal(getActiveCwd(cwd, session), `/target${cwd}-${session}`, `${cwd} ${session}`);
-    // Unnormalized spellings of one directory share a single identity.
     assert.equal(getActiveCwd('/one/', 'a'), '/target/one-a');
     assert.equal(getActiveCwd('/two/./', 'a'), '/target/two-a');
     setActiveCwd('/one', undefined, 'a');

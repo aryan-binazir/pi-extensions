@@ -1,10 +1,8 @@
 import { lstatSync, readdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
-/** A session that this resolver itself rejected, as opposed to an incidental filesystem failure. */
 class WaylandSessionError extends Error {}
 
-/** Resolve once per backend; never change the parent process environment. */
 export function linuxSessionEnvironment(env: NodeJS.ProcessEnv, uid = process.getuid?.()): NodeJS.ProcessEnv {
   if (env.WAYLAND_DISPLAY && (isAbsolute(env.WAYLAND_DISPLAY) || env.XDG_RUNTIME_DIR)) return { ...env };
   const runtime = env.XDG_RUNTIME_DIR || (uid === undefined ? undefined : `/run/user/${uid}`);
@@ -13,7 +11,6 @@ export function linuxSessionEnvironment(env: NodeJS.ProcessEnv, uid = process.ge
   try {
     const directory = lstatSync(runtime);
     if (!directory.isDirectory() || directory.uid !== uid || (directory.mode & 0o077) !== 0) throw unavailable();
-    // An explicit display is authoritative, even if stale. Never silently retarget it.
     if (env.WAYLAND_DISPLAY) return { ...env, XDG_RUNTIME_DIR: runtime };
     const sockets = readdirSync(runtime).filter(name => {
       if (!/^wayland-[A-Za-z0-9_.-]+$/.test(name)) return false;

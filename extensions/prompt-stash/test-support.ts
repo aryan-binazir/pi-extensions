@@ -10,7 +10,6 @@ export function stashHost(EditorClass = CustomEditor) {
   let e = editor(EditorClass);
   let status: string | undefined;
   let installs = 0;
-  // Feed the same real editor constructor arguments to arbitrary factories.
   const make = (f: Factory) => editor(class extends CustomEditor {
     constructor(...args: ConstructorParameters<typeof CustomEditor>) {
       super(...args);

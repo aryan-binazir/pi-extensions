@@ -6,7 +6,6 @@ const entryType = 'agent-workflows:worktree';
 const routedTools = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls']);
 const directoryTools = new Set(['grep', 'find', 'ls']);
 const activeCwd = (ctx: ExtensionContext): string => getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId());
-// Appended to the agent's system prompt; joined with single spaces so the wrapping here never reaches the model.
 const activeWorktreeNotice = (active: string, original: string): string => [
   `Active worktree directory: ${active}.`,
   'Built-in bash, user shell, and relative file tools use this directory.',
@@ -25,8 +24,6 @@ export default function worktree(pi: ExtensionAPI): void {
     previousSession = { cwd: ctx.cwd, id };
     setActiveCwd(ctx.cwd, undefined, id);
     let path: unknown;
-    // Only the last matching entry wins, so scan back and stop at it instead of
-    // walking the whole branch on every session_start/session_tree.
     const branch = ctx.sessionManager.getBranch();
     for (let index = branch.length - 1; index >= 0; index--) {
       const entry = branch[index];
@@ -40,7 +37,6 @@ export default function worktree(pi: ExtensionAPI): void {
       try {
         const canonical = await realpath(path);
         if (canonical !== await realpath(ctx.cwd)) {
-          // Saved paths are untrusted until Git still recognizes the checkout.
           const { Worktrees } = await import('./manager.ts');
           const trees = new Worktrees(ctx.cwd);
           const checkout = (await trees.list()).find(item => resolve(item.path) === resolve(path) || item.path === canonical);
@@ -62,7 +58,6 @@ export default function worktree(pi: ExtensionAPI): void {
     if (typeof input.path === 'string') input.path = resolveToolPath(input.path, activeCwd(ctx));
     else if (input.path === undefined && directoryTools.has(event.toolName)) input.path = activeCwd(ctx);
   });
-  // Only execute() depends on the active directory; the rest of the definition is metadata.
   const bashMetadata = createBashToolDefinition(process.cwd());
   pi.registerTool({
     ...bashMetadata,
@@ -84,8 +79,6 @@ export default function worktree(pi: ExtensionAPI): void {
         const words = commandWords(args);
         const command = words.shift() ?? 'list';
         if (command === 'original') { activate(ctx, ctx.cwd); return; }
-        // Git plumbing is only reachable from this command; keep it off the
-        // extension's import path so registration does not pay for it.
         const { Worktrees } = await import('./manager.ts');
         const trees = new Worktrees(ctx.cwd);
         if (command === 'list') { if (ctx.hasUI) ctx.ui.notify((await trees.list()).map(item => `${item.branch || '(detached)'} ${item.path}`).join('\n'), 'info'); return; }
@@ -114,7 +107,6 @@ export default function worktree(pi: ExtensionAPI): void {
   });
 }
 
-// Split command arguments without changing spaces inside quoted paths.
 function commandWords(args: string): string[] {
   const words: string[] = [];
   let word = '', quote = '', started = false;

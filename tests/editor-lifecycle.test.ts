@@ -1,4 +1,3 @@
-// Real Pi lifecycle methods with synthetic terminal transport and drafts.
 import test from "node:test";
 import assert from 'node:assert/strict';
 import { CustomEditor, createEventBus } from '@earendil-works/pi-coding-agent';
@@ -74,7 +73,7 @@ function host(stashFirst = false) {
 }
 test('real InteractiveMode editor swap preserves visible marker and raw payload', () => {
   const h = host(); paste(h.app.editor); const visible = h.app.editor.getText();
-  h.app.setCustomEditorComponent(undefined); // exact first editor-swap call from resetExtensionUI, before shutdown
+  h.app.setCustomEditorComponent(undefined);
   assert.equal(h.app.editor.getExpandedText(), payload);
   assert.equal(h.app.editor.getText(), visible);
   h.emit('session_shutdown'); h.emit('session_start');
@@ -149,7 +148,8 @@ for (const stashFirst of [false, true]) test(`stash composes with vi in load ord
   assert.equal(h.shortcuts.size, 0);
   paste(h.app.editor);
   const visible = h.app.editor.getText();
-  h.app.editor.handleInput('\x1b'); // normal mode
+  const enterNormalMode = () => h.app.editor.handleInput('\x1b');
+  enterNormalMode();
   h.app.editor.handleInput('\x13'); assert.equal(h.app.editor.getText(), '');
   h.app.editor.handleInput('\x13'); assert.equal(h.app.editor.getText(), visible);
   assert.equal(h.app.editor.getExpandedText(), payload);

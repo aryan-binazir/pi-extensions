@@ -20,7 +20,6 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'pi-auto-status-'));
   await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@hank-warren/pi-auto-permissions', version: '0.16.2', type: 'module' }));
   const file = join(root, 'config.json');
-  // A synthetic versioned package, so tests never need an npm install or credentials.
   await writeFile(join(root, 'config.ts'), `import {readFileSync} from 'node:fs';
 export function loadAutoPermissionsConfig() { return JSON.parse(readFileSync(${JSON.stringify(file)}, 'utf8')); }`);
   await writeFile(file, JSON.stringify(config));

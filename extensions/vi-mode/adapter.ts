@@ -1,12 +1,7 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import type { Editor } from "@earendil-works/pi-tui";
-/**
- * Editors that cache `getText()` publish this hook so the adapter can drop the
- * cache when it writes `state.lines` behind the editor's back.
- */
 export const invalidateTextCache = Symbol("pi-interactive:vi-text-cache");
 
-// Pi 0.85.1 has public cursor reads but no cursor setter. Keep this coupling here.
 export function setCursorPosition(editor: Editor, line: number, col: number): void {
   const internal = editor as unknown as {
     state: {
@@ -23,11 +18,10 @@ export function setCursorPosition(editor: Editor, line: number, col: number): vo
   internal.preferredVisualCol = null;
   internal.snappedFromCursorCol = null;
 }
-/** Clamp a draft offset into range; `|| 0` also turns a NaN offset into the start. */
 export function clampOffset(offset: number, length: number): number {
-  return Math.min(length, Math.max(0, offset) || 0);
+  const offsetOrZero = Number.isNaN(offset) ? 0 : offset;
+  return Math.min(length, Math.max(0, offsetOrZero));
 }
-/** Counting newlines beats slicing and splitting a draft on every cursor move. */
 export function placeCursor(editor: Editor, offset: number, text = editor.getText()): void {
   const end = clampOffset(offset, text.length);
   let line = 0,
@@ -38,7 +32,6 @@ export function placeCursor(editor: Editor, offset: number, text = editor.getTex
   }
   setCursorPosition(editor, line, end - start);
 }
-/** Preserve raw pasted bytes that public setText otherwise normalizes. */
 export function retainRawText(editor: Editor, text: string): void {
   const internal = editor as unknown as {
     state: {
@@ -52,10 +45,8 @@ export function retainRawText(editor: Editor, text: string): void {
   internal[invalidateTextCache]?.();
 }
 
-/** Characters `projectDisplay` rewrites; anything else projects to itself. */
 export const NEEDS_PROJECTION = /[\x00-\x09\x0b-\x1f\x7f-\x9f]/;
 
-/** Safe terminal text and a UTF-16 offset map back to the unchanged raw draft. */
 export function projectDisplay(text: string): {
   text: string;
   offsets: number[];
@@ -75,11 +66,6 @@ export function projectDisplay(text: string): {
   return { text: display, offsets };
 }
 
-/**
- * Editor rendering assumes normalized display text. Project only for this
- * synchronous render, then restore the byte-preserving draft in finally.
- * Keeping Pi's renderer retains completion lists, scrolling, and cursor markers.
- */
 export function renderProjected(
   editor: Editor,
   render: () => string[],
@@ -150,30 +136,28 @@ export function pasteMarkers(editor: Editor, text = editor.getText()): RegExpExe
   if (pastes.size === 0) return [];
   return [...text.matchAll(MARKER)].filter((match) => pastes.has(Number(match[1])));
 }
-/** Replace once so marker-shaped text inside a payload remains literal. */
 export function expandPastes(editor: Editor, text: string): string {
   const { pastes } = pasteInternal(editor);
   if (pastes.size === 0) return text;
   return text.replace(MARKER,
     (marker, id: string) => pastes.get(Number(id)) ?? marker);
 }
-/** Stock Pi thresholds/marker format with safe whitespace-preserving payloads. */
+const STOCK_PASTE_LINE_LIMIT = 10;
+const STOCK_PASTE_CHAR_LIMIT = 1000;
 export function collapsePaste(editor: Editor, text: string): string {
   let lines = 1;
   for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) lines++;
-  if (lines <= 10 && text.length <= 1000) return text;
+  if (lines <= STOCK_PASTE_LINE_LIMIT && text.length <= STOCK_PASTE_CHAR_LIMIT) return text;
   const internal = pasteInternal(editor);
   let id = internal.pasteCounter + 1;
   const reserved = editor.getText() + text;
   while (internal.pastes.has(id) || reserved.includes(`[paste #${id}`)) id++;
   internal.pasteCounter = id;
   internal.pastes.set(id, text);
-  return lines > 10 ? `[paste #${id} +${lines} lines]` : `[paste #${id} ${text.length} chars]`;
+  return lines > STOCK_PASTE_LINE_LIMIT ? `[paste #${id} +${lines} lines]` : `[paste #${id} ${text.length} chars]`;
 }
 
-/** Restore a draft byte for byte, with its payloads, cursor and change event. */
 export function restoreRawDraft(editor: Editor, text: string, payloads: PasteState): void {
-  // setText resets the destination's history; then restore the exact visible draft.
   editor.setText("");
   retainRawText(editor, text);
   writePastes(editor, payloads);
@@ -183,7 +167,6 @@ export function restoreRawDraft(editor: Editor, text: string, payloads: PasteSta
 
 const viEditor = Symbol.for("pi-interactive:vi-editor");
 const handoffInstalled = Symbol.for("pi-interactive:editor-handoff");
-/** Claim an editor as vi's, so the handoff restores its raw draft rather than a normalized one. */
 export function markViEditor(editor: Editor): void {
   Object.defineProperty(editor, viEditor, { value: true });
   // Stock submission expands recursively; use the same single pass as draft reads.
@@ -192,7 +175,6 @@ export function markViEditor(editor: Editor): void {
   });
 }
 // Pi 0.85.1 copies getText() without its paste registry before extension shutdown.
-// Keep this compatibility fix at that exact runtime boundary, including /reload.
 export function installEditorHandoff(): void {
   const prototype = InteractiveMode.prototype as unknown as {
     [handoffInstalled]?: boolean;
@@ -236,7 +218,6 @@ export function installEditorHandoff(): void {
     try {
       return await showCustom.call(this, factory, options);
     } finally {
-      // Do not resurrect a draft after a session/editor replacement.
       if (this.editor === source && source.getText() === text) {
         writePastes(source, payloads);
         source.onChange?.(text);

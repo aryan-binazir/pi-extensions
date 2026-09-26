@@ -5,13 +5,11 @@ export const READ_TOOLS = ['read', 'grep', 'find', 'ls'];
 export const ALL_TOOLS = [...READ_TOOLS, 'write', 'edit', 'bash'];
 interface DelegationScope { cwd: string; tools: string[] }
 
-/** True when `path` is `root` or below it. Both must already be canonical. */
-export function insideRoot(root: string, path: string): boolean {
-  const rel = relative(root, path);
+export function insideRoot(canonicalRoot: string, canonicalPath: string): boolean {
+  const rel = relative(canonicalRoot, canonicalPath);
   return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
-/** Launch-time scope only: child builtins and trusted extensions are not sandboxed. */
 export function delegationScope(parent: DelegationScope) {
   const tools = ALL_TOOLS.filter(tool => parent.tools.includes(tool));
   return { tools, replayIdentity: JSON.stringify({ version: 1, cwd: parent.cwd, tools }) };

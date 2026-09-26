@@ -50,11 +50,14 @@ test('repository control data and credential files are rejected inside the root'
     await writeFile(join(root, name), 'x');
     await assert.rejects(assertWorkspacePath(root, join(root, name)), /sensitive or repository control data/);
   }
-  // A sensitive component anywhere in the relative path is rejected, not only the leaf.
-  await writeFile(join(root, '.git', 'config'), 'x');
-  await assert.rejects(assertWorkspacePath(root, join(root, '.git', 'config')), /sensitive or repository control data/);
   await writeFile(join(root, 'environment'), 'x');
   await assertWorkspacePath(root, join(root, 'environment'));
+}));
+
+test('a sensitive component anywhere in the relative path is rejected, not only the leaf', async () => workspace(async ({root}) => {
+  await mkdir(join(root, '.git'));
+  await writeFile(join(root, '.git', 'config'), 'x');
+  await assert.rejects(assertWorkspacePath(root, join(root, '.git', 'config')), /sensitive or repository control data/);
 }));
 
 test('child tasks may not exceed the parent workspace or its tools', async () => workspace(async ({root, inside, outside}) => {

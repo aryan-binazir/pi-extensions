@@ -52,7 +52,6 @@ function readSettings(path: string): unknown | undefined {
     return JSON.parse(bytes.subarray(0, length).toString('utf8'));
   } finally { closeSync(fd); }
 }
-/** No ancestor discovery; the caller must establish trust for this exact cwd. */
 export function loadProfiles(cwd: string, trusted: boolean, agentDir = getAgentDir()): ProfileConfig {
   const profiles: Record<string, Profile> = Object.create(null);
   const provenance: Record<string, string> = Object.create(null);
@@ -95,7 +94,6 @@ export function loadProfiles(cwd: string, trusted: boolean, agentDir = getAgentD
 }
 
 function baseModel(model: string): string { return model.replace(/^(openai(?:-codex)?\/.+)~fast$/, '$1'); }
-/** Use the synchronous Pi registry snapshot; never fuzzy-match or pick a fallback. */
 export function availableModel(model: string, registry: ExtensionContext['modelRegistry'], profile?: string) {
   const slash = model.indexOf('/');
   const found = registry?.find(model.slice(0, slash), model.slice(slash + 1));
@@ -136,7 +134,6 @@ export function profileGuidance(config: ProfileConfig, parent?: Pick<ExtensionCo
     ...Object.entries(config.profiles).map(([name, profile]) => `${name}: ${selection(profile)} — ${profile.description}${profile.useWhen ? `; ${profile.useWhen}` : ''}`),
   ].join('\n');
 }
-/** Routed worktrees do not inherit the original session's trust decision. */
 export function profileLocation(ctx: ExtensionContext, activeCwd: string) {
   const cwd = realpathSync(activeCwd);
   return {cwd, trusted: cwd === realpathSync(ctx.cwd) && ctx.isProjectTrusted?.() === true};

@@ -24,7 +24,6 @@ export function registerMacTools(pi: ExtensionAPI) {
     pi.registerTool({
       name: definition.name, label: definition.name, executionMode: 'sequential', description: definition.description + guidance, parameters,
       async execute(_id, params, signal, _update, ctx) {
-        // Pi validates the declared primitive schema; direct callers get the same checks.
         if (!(await loadMacSdk()).validator(parameters)(params).valid) throw new Error(`Invalid ${definition.name} parameters`);
         if (definition.remote === 'click') {
           const p = params as Record<string, unknown>;

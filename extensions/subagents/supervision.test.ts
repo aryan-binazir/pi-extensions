@@ -47,8 +47,6 @@ test('a normally completed supervised child releases its owner pipe and settles'
     await chmod(join(cwd, 'pi'), 0o700);
     process.env.PATH = `${cwd}:${previousPath ?? ''}`;
     const task = await registry.spawn({task: 'synthetic completion', cwd});
-    // A child still holding its owner pipe would never settle, failing on the
-    // test timeout rather than on a wall-clock guess that parallel load breaks.
     const value = await task.done;
     assert.equal(value.status, 'succeeded');
     assert.equal(value.output, 'done');
@@ -84,7 +82,9 @@ test('a supervised child stops when its owning process is abruptly killed', {tim
     assert.equal(await alive(grandchildPid), false, 'ordinary descendants ignoring SIGTERM must also stop');
   } finally {
     owner?.kill('SIGKILL');
-    for (const pid of [childPid, grandchildPid]) if (pid && await alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* Already exited. */ } }
+    for (const pid of [childPid, grandchildPid]) if (pid && await alive(pid)) {
+      try { process.kill(pid, 'SIGKILL'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+    }
     await rm(cwd, {recursive: true, force: true});
   }
 });

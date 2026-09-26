@@ -1,6 +1,5 @@
 import type { TaskResult } from './registry.ts';
 
-/** Bound the serialized string, including JSON escaping and multi-byte text. */
 export function clipJson(text: string, bytes: number, tail = false): string {
   // Every UTF-16 unit serializes to 1–6 bytes plus the two quotes, so both
   // bounds decide most probes outright. Keeping the probe count and search

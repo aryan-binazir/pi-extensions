@@ -15,7 +15,6 @@ import {
   writePastes,
 } from "./adapter.ts";
 
-/** Large enough for the stock line threshold, and raw enough that setText would rewrite it. */
 const PAYLOAD = "\tpasted line\r\n".repeat(20);
 
 function pasted() {

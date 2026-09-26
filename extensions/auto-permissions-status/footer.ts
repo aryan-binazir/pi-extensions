@@ -13,12 +13,8 @@ const clean = (text: string) => suspect.test(text)
 const tokens = (n: number) => n < 1000 ? String(n) : n < 10000 ? `${(n / 1000).toFixed(1)}k`
   : n < 1000000 ? `${Math.round(n / 1000)}k` : `${(n / 1000000).toFixed(1)}M`;
 
-/** Give the right-hand status priority; truncate the path, never wrap a row. */
 export function rightAligned(left: string, right: string, width: number): string {
   width = Math.max(0, Math.floor(width));
-  // truncateToWidth returns its input unchanged once it fits, and it walks
-  // grapheme clusters to find that out. visibleWidth memoises per string, and
-  // both sides need their width anyway, so measure first and only cut on overflow.
   let rightWidth = visibleWidth(right), rhs = right;
   if (width <= 0 || rightWidth > width) { rhs = truncateToWidth(right, width, ''); rightWidth = visibleWidth(rhs); }
   const room = Math.max(0, width - rightWidth - 2);
@@ -35,9 +31,6 @@ export function permissionFooter(
 ) {
   const unsubscribe = data.onBranchChange(requestRender);
   let disposed = false;
-  // The TUI re-renders every child on each keystroke and streamed chunk, but the
-  // footer's inputs only move on session events. Key the finished rows on the
-  // themed strings that produce them and skip the width maths when nothing moved.
   let cacheKey: string | undefined;
   let cacheLines: string[] = [];
   const home = process.env.HOME || process.env.USERPROFILE;
@@ -49,7 +42,6 @@ export function permissionFooter(
       const ctx = context();
       const raw = ctx.sessionManager.getCwd();
       if (raw !== rawCwd) {
-        // The cwd moves at most once a session; the path maths need not repeat.
         let cwd = raw;
         if (home) {
           const rel = relative(home, cwd);
@@ -69,7 +61,6 @@ export function permissionFooter(
         totals.cacheRead += usage.cacheRead; totals.cacheWrite += usage.cacheWrite;
         totals.cost += usage.cost.total;
       };
-      // Match Pi's accounting scope: all entries, including tool and summary usage.
       for (const entry of ctx.sessionManager.getEntries()) {
         if (entry.type === 'message' && entry.message.role === 'assistant') {
           const usage = entry.message.usage;
@@ -97,8 +88,6 @@ export function permissionFooter(
       const statsRow = theme.fg('dim', stats.join(' ')), modelRow = theme.fg('dim', model);
       const other = [...statuses].filter(([key]) => key !== STATUS_KEY).sort(([a], [b]) => a.localeCompare(b));
       const others = other.length ? other.map(([, text]) => clean(text)).join(' ') : undefined;
-      // Length-prefixed rather than separated: no themed string can forge a
-      // boundary, and a missing status row is -1, which no length can be.
       const key = `${width}.${pathRow.length}.${autoRow.length}.${statsRow.length}`
         + `.${modelRow.length}.${others?.length ?? -1}|`
         + pathRow + autoRow + statsRow + modelRow + (others ?? '');

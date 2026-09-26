@@ -28,8 +28,7 @@ interface Handoff {
 export default function effort(pi: ExtensionAPI) {
   let current: ExtensionContext | undefined;
   // Pi's own event facade is session-bound and becomes stale on replacement.
-  // Node's process event emitter survives extension module reloads. This one
-  // namespaced transient event carries no saved defaults or retained requests.
+  // Node's process event emitter survives extension module reloads.
   const events: EventEmitter = process;
   const receiveHandoff = (request: Handoff) => {
     if (
@@ -118,8 +117,6 @@ export default function effort(pi: ExtensionAPI) {
                 clampThinkingLevel(model, pi.getThinkingLevel()),
               );
               closeSlider = () => done(undefined);
-              // Width-aware truncation dominates a render, so memoise it in two
-              // tiers: the chrome by width, each level row by selection.
               let frameWidth = -1;
               let frameModel = "";
               let top = "";
@@ -220,7 +217,7 @@ export default function effort(pi: ExtensionAPI) {
         parentSession: ctx.sessionManager.getSessionFile(),
         async withSession(replacement) {
           const error = await new Promise<string | undefined>((resolve) => {
-            const timer = setTimeout(
+            const receiptDeadline = setTimeout(
               () =>
                 resolve("Effort extension did not acknowledge the new session"),
               5000,
@@ -230,10 +227,9 @@ export default function effort(pi: ExtensionAPI) {
               model: modelId,
               level: selectedLevel,
               sessionFile: replacement.sessionManager.getSessionFile(),
-              // The deadline covers receipt, not the asynchronous model change.
-              acknowledge: () => clearTimeout(timer),
+              acknowledge: () => clearTimeout(receiptDeadline),
               complete: (message?: string) => {
-                clearTimeout(timer);
+                clearTimeout(receiptDeadline);
                 resolve(message);
               },
             } satisfies Handoff);

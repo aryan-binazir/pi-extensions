@@ -123,7 +123,6 @@ test("new-session handoff applies only on replacement runtime and leaves default
   fresh!.hooks.session_shutdown();
   assert.equal(fresh!.ctx.model.id, "test");
   assert.equal(fresh!.pi.getThinkingLevel(), "max");
-  // Unrelated new/resumed sessions have no pending global handoff.
   const later = host(t, defaults);
   assert.equal(later.ctx.model.id, "saved-model");
   assert.equal(later.pi.getThinkingLevel(), "high");

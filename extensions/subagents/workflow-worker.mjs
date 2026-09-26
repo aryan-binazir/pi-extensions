@@ -1,6 +1,3 @@
-// No host objects or functions cross into the context. IPC carries JSON values.
-// vm is defense in depth; approved source and the subprocess permission model
-// remain necessary. This is not an OS sandbox.
 import vm from 'node:vm';
 
 const context = vm.createContext(Object.create(null), {codeGeneration:{strings:false,wasm:false},microtaskMode:'afterEvaluate'});

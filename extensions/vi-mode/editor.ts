@@ -17,18 +17,12 @@ import {
   type PasteState, installEditorHandoff, markViEditor, invalidateTextCache, NEEDS_PROJECTION,
 } from "./adapter.ts";
 let graphemes: Intl.Segmenter | undefined;
-/** Constructing a segmenter costs milliseconds; plain ASCII drafts never need one. */
 function segmenter(): Intl.Segmenter {
   return (graphemes ??= new Intl.Segmenter(undefined, { granularity: "grapheme" }));
 }
-/**
- * Text made only of these units has one grapheme cluster per code unit, each one
- * cell wide, so boundary and layout scans can skip segmentation entirely.
- */
 const NEEDS_SEGMENTING = /[^\x20-\x7e\n\t]/;
 const SPACE = /\s/u;
 const WORD = /[\p{L}\p{N}\p{M}_]/u;
-/** The word classes of ASCII, derived from the same regexes on first use. */
 let asciiClasses: Uint8Array | undefined;
 function buildAsciiClasses(): Uint8Array {
   const table = new Uint8Array(128);
@@ -53,14 +47,10 @@ const CLOSING: Record<string, string> = {
 };
 const OPENING: Record<string, string> = { ")": "(", "]": "[", "}": "{", ">": "<" };
 const MAX_DRAFT = 1024 * 1024;
-/**
- * The draft keeps `\r` so a pasted payload survives byte for byte; submission
- * strips it too, because a prompt must not carry bare carriage returns.
- */
-const DRAFT_CONTROLS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
-const SUBMIT_CONTROLS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+const CONTROLS_EXCEPT_TAB_LF_CR = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
+const CONTROLS_EXCEPT_TAB_LF = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 function safeDraft(text: string): string {
-  return text.replace(DRAFT_CONTROLS, "");
+  return text.replace(CONTROLS_EXCEPT_TAB_LF_CR, "");
 }
 type Snapshot = {
   text: string;
@@ -95,8 +85,7 @@ export class ViEditor extends CustomEditor {
   private visualScroll = 0;
   private boundaryText = "";
   private boundaries = [0];
-  /** Set when every boundary is a code-unit index, so `boundaries` stays unbuilt. */
-  private boundaryStep = true;
+  private codeUnitBoundaries = true;
   private boundaryLength = 0;
   private markerText: string | undefined;
   private markerList: ReturnType<typeof pasteMarkers> = [];
@@ -114,32 +103,18 @@ export class ViEditor extends CustomEditor {
     this.tui.setShowHardwareCursor(true);
     this.cursorShape();
   }
-  /**
-   * Abandon a half-typed command: its operator, object prefix and count. A
-   * register already named with `"x` outlives this, as it does in vi.
-   */
   private resetPending(): void {
     this.op = "";
     this.prefix = "";
     this.count = "";
     this.registerPending = false;
   }
-  /**
-   * `getText()` joins the line array on every call and vi consults the draft
-   * dozens of times per keystroke. Cache it and drop the cache at the few places
-   * that write `state.lines`: this class's `writeText`/`baseInput` and the
-   * adapter's `retainRawText`.
-   */
   private text(): string {
     return (this.draft ??= super.getText());
   }
   [invalidateTextCache](): void {
     this.draft = undefined;
   }
-  /**
-   * Whether the draft needs display projection and grapheme segmentation: both
-   * scan the whole draft and every render asks, so answer once per draft.
-   */
   private scan(): { project: boolean; segment: boolean } {
     const text = this.text();
     if (this.scanText !== text) {
@@ -151,7 +126,6 @@ export class ViEditor extends CustomEditor {
     }
     return this.scanned;
   }
-  /** Offset of the first character of each line, rebuilt once per draft. */
   private starts(): number[] {
     const text = this.text();
     if (this.lineStartsText !== text) {
@@ -201,13 +175,13 @@ export class ViEditor extends CustomEditor {
     const history = this.undoHistory;
     this.onSubmit = (expanded) => {
       this.setText("");
-      submit?.(expanded.trim().replace(SUBMIT_CONTROLS, ""));
+      submit?.(expanded.trim().replace(CONTROLS_EXCEPT_TAB_LF, ""));
     };
     try {
       super.handleInput(data);
       this.draft = undefined;
-      // Public replacement/submission replaces the history array and must stay a reset.
-      if (before && history === this.undoHistory && before.text !== this.text())
+      const historyReset = history !== this.undoHistory;
+      if (before && !historyReset && before.text !== this.text())
         this.checkpoint(before);
     } finally {
       this.draft = undefined;
@@ -263,10 +237,8 @@ export class ViEditor extends CustomEditor {
     this.boundaryText = text;
     this.boundaryLength = text.length;
     const markers = this.markers();
-    // Plain ASCII without paste markers breaks on every code unit, so the index
-    // array would just be 0..length and is never materialized.
-    this.boundaryStep = markers.length === 0 && !this.scan().segment;
-    if (this.boundaryStep) return;
+    this.codeUnitBoundaries = markers.length === 0 && !this.scan().segment;
+    if (this.codeUnitBoundaries) return;
     const boundaries: number[] = [];
     let m = 0;
     for (const { index } of segmenter().segment(text)) {
@@ -282,7 +254,7 @@ export class ViEditor extends CustomEditor {
   private boundaryIndex(p: number): number {
     const text = this.text();
     if (this.boundaryText !== text) this.rebuildBoundaries(text);
-    if (this.boundaryStep)
+    if (this.codeUnitBoundaries)
       return p < 0 ? 0 : p > this.boundaryLength ? this.boundaryLength + 1 : p;
     let low = 0,
       high = this.boundaries.length;
@@ -295,12 +267,12 @@ export class ViEditor extends CustomEditor {
   }
   private next(p: number): number {
     const i = this.boundaryIndex(p);
-    if (this.boundaryStep) return Math.min(this.boundaryLength, i + 1);
+    if (this.codeUnitBoundaries) return Math.min(this.boundaryLength, i + 1);
     return this.boundaries[Math.min(this.boundaries.length - 1, i + 1)];
   }
   private previous(p: number): number {
     const index = this.boundaryIndex(p);
-    if (this.boundaryStep) return Math.max(0, index - 1);
+    if (this.codeUnitBoundaries) return Math.max(0, index - 1);
     return this.boundaries[Math.max(0, index - 1)];
   }
   private pos(): number {
@@ -321,7 +293,6 @@ export class ViEditor extends CustomEditor {
     this.writeText(s.text);
     this.cursorTo(s.pos);
   }
-  /** Binary search, so a motion never rescans the draft. */
   private cursorTo(offset: number): void {
     const starts = this.starts();
     const end = clampOffset(offset, this.text().length);
@@ -334,7 +305,6 @@ export class ViEditor extends CustomEditor {
     }
     setCursorPosition(this, low, end - starts[low]);
   }
-  /** Normal mode rests on a grapheme, never on the newline or end of a nonempty line. */
   private onGrapheme(p: number): number {
     const end = this.lineEnd(p);
     return p >= end ? Math.max(this.lineStart(p), this.previous(end)) : p;
@@ -343,7 +313,7 @@ export class ViEditor extends CustomEditor {
     const clamped = Math.max(0, Math.min(p, this.text().length));
     const i = this.boundaryIndex(clamped);
     this.cursorTo(
-      this.boundaryStep || this.boundaries[i] === clamped
+      this.codeUnitBoundaries || this.boundaries[i] === clamped
         ? clamped
         : this.boundaries[Math.max(0, i - 1)],
     );
@@ -474,10 +444,6 @@ export class ViEditor extends CustomEditor {
     this.resetPending();
     this.cursorShape();
   }
-  /**
-   * `p`/`P`, replacing a visual selection or inserting at the cursor. Both
-   * forms decide a span and a linewise padding, then write the same edit.
-   */
   private put(key: string, n: number): void {
     const r = this.registers.get(this.register);
     this.register = '"';
@@ -551,8 +517,6 @@ export class ViEditor extends CustomEditor {
       a = t.lastIndexOf(open, p);
       b = t.indexOf(close, a + 1);
     } else {
-      // Character codes rather than single-character strings: these scans can
-      // cover the whole draft.
       const openCode = open.charCodeAt(0),
         closeCode = close.charCodeAt(0);
       let depth = 0;
@@ -611,7 +575,6 @@ export class ViEditor extends CustomEditor {
         }
       }
     }
-    // Buffer a bracketed paste across input chunks before interpreting any vi keys.
     if (this.paste !== undefined || data.startsWith("\x1b[200~")) {
       if (this.paste === undefined) {
         this.paste = "";
@@ -787,7 +750,6 @@ export class ViEditor extends CustomEditor {
     let p: number | undefined;
     if (data === "g" || data === "G") this.preferredColumn = undefined;
     if (this.prefix === "g") {
-      // Only `gg` reaches here; every other `g` argument was discarded above.
       this.prefix = "";
       p = this.lineTarget(this.prefixCount);
     } else if (data === "g") {
@@ -903,8 +865,6 @@ export class ViEditor extends CustomEditor {
         ? renderProjected(this, () => super.render(width), this.text())
         : super.render(width);
       if (this.mode !== "insert" || !this.focused) return lines;
-      // Keep the hardware cursor marker, but remove the base editor's fake
-      // reverse-video cursor so the terminal's insert-mode beam is visible.
       return lines.map((line) => {
         const start = line.indexOf(CURSOR_MARKER + "\x1b[7m");
         if (start < 0) return line;
@@ -917,7 +877,6 @@ export class ViEditor extends CustomEditor {
     }
     const [rawStart, rawEnd] = this.range();
     const raw = this.text();
-    // A draft with nothing to escape projects to itself under an identity map.
     const projection = this.scan().project ? projectDisplay(raw) : undefined;
     const display = (offset: number) => (projection ? projection.offsets[offset] : offset);
     const a = display(rawStart),
@@ -959,8 +918,6 @@ export class ViEditor extends CustomEditor {
         cols += w;
       }
     } else {
-      // Every code unit is one cell wide here, so rows break at arithmetic
-      // positions and unselected stretches copy straight out of the draft.
       for (let i = 0; i < text.length; ) {
         if (text.charCodeAt(i) === 10) {
           if (i === cursor) {
@@ -982,7 +939,6 @@ export class ViEditor extends CustomEditor {
           cursorRow = rows.length;
           row += mark;
         }
-        // Stop the run at the next row break, cursor or selection edge.
         let limit = Math.min(text.length, i + layoutWidth - cols);
         const line = text.indexOf("\n", i);
         if (line >= 0 && line < limit) limit = line;

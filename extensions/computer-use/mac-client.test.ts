@@ -74,9 +74,9 @@ test('real SDK fixture connects lazily once, routes elicitation, preserves tool 
     assert.equal(launches, 1);
     await assert.rejects(session.run('execute_code', {}, ctx()), /not allowed/);
     await assert.rejects(session.run('click', { app: 'error' }, ctx()), /Real fixture policy denial.*\nMutation outcome/s);
-    assert.equal(launches, 1); // No automatic mutation retry.
+    assert.equal(launches, 1, 'failed mutation does not relaunch');
     await session.run('list_apps', {}, ctx());
-    assert.equal(launches, 2); // A subsequent explicit inspection reconnects.
+    assert.equal(launches, 2, 'later inspection reconnects');
     await assert.rejects(session.run('click', { invented: true }, ctx()), /official click schema/);
   } finally { await session.close(); }
   await assert.rejects(session.run('list_apps', {}, ctx()), /session closed/);
@@ -130,11 +130,12 @@ test('image base64 is accepted exactly when it is the canonical encoding of its 
   for (const data of [encoded, '', 'AAAA', 'AAA=', 'AB==', 'AQ==', 'A===', '====', 'QQ==QQ==', 'A'.repeat(5), '****', encoded + 'A', encoded.slice(0, -1), encoded + '==', encoded.slice(0, 8) + '*' + encoded.slice(9), encoded.slice(0, 8) + '=' + encoded.slice(9)]) {
     assert.equal(accepts(data), canonical(data), JSON.stringify(data.slice(0, 16)));
   }
-  // The comparison runs 192KiB at a time; a corruption straddling a chunk edge must still be caught.
-  const wide = Buffer.alloc(3 * 65536 * 2 + 9);
+  const bytesPerChunk = 3 * 65536;
+  const charsPerChunk = (bytesPerChunk / 3) * 4;
+  const wide = Buffer.alloc(bytesPerChunk * 2 + 9);
   for (let i = 0; i < wide.length; i += 3) wide[i] = i & 255;
   const big = wide.toString('base64');
-  for (const at of [0, 262143, 262144, 262145, big.length - 2]) {
+  for (const at of [0, charsPerChunk - 1, charsPerChunk, charsPerChunk + 1, big.length - 2]) {
     const broken = big.slice(0, at) + (big[at] === 'A' ? 'B' : 'A') + big.slice(at + 1);
     assert.equal(accepts(broken), canonical(broken), 'boundary ' + at);
   }

@@ -20,7 +20,6 @@ export default function viMode(pi: ExtensionAPI): void {
       unsubscribe = pi.events?.on("pi-interactive:stash-capture", capture);
       ctx.ui.setEditorComponent(
         (tui, theme, keybindings) => {
-          // A composing extension can invoke this factory again after startup.
           active?.dispose();
           return (active = new ViEditor(tui, theme, keybindings));
         },

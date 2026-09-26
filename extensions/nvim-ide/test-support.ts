@@ -2,11 +2,6 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 export const token = 'a3f1c2d4e5f60718293a4b5c6d7e8f90';
 
-/**
- * Minimal stand-in for claudecode.nvim's server: token check, initialize, and a
- * `tools/call` echo of `name(arguments)`. Two names are special: `boom` answers
- * with an error result and `slow` never answers at all.
- */
 export function fakeIde(onClient?: (socket: WebSocket) => void) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: (info: { req: { headers: Record<string, unknown> } }) => info.req.headers['x-claude-code-ide-authorization'] === token });
   const calls: { name: string; arguments: any }[] = [];
@@ -29,7 +24,6 @@ export function fakeIde(onClient?: (socket: WebSocket) => void) {
   return { server, calls, port, broadcast, close: () => new Promise<void>(done => { for (const client of server.clients) client.terminate(); server.close(() => done()); }) };
 }
 
-/** Poll `check` until it holds, rather than sleeping for a guessed duration. */
 export const until = (check: () => boolean, ms = 3000) => new Promise<void>((resolve, reject) => {
   const start = Date.now();
   const tick = () => check() ? resolve() : Date.now() - start > ms ? reject(new Error('timeout')) : setTimeout(tick, 10);

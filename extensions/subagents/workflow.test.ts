@@ -69,8 +69,6 @@ test('workflow retry stops after child extension approval is denied', async () =
 test('abort cancels outstanding children and unfinished workflow calls cannot report success', async () => {
  const cwd=await mkdtemp(join(tmpdir(),'workflow-abort-'));
  let cancelled=0;
- // Aborting once the child is actually running is deterministic; a wall-clock
- // deadline here would have to cover the Node probe and worker spawn as well.
  let onSpawn:(()=>void)|undefined;
  const base={cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'same',approve:async()=>true,approveReplay:async()=>true,spawn:async(_task:unknown,signal:AbortSignal)=>await new Promise((_,reject)=>{const abort=()=>{cancelled++;reject(new Error('cancelled'));};signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();onSpawn?.();})};
  try {

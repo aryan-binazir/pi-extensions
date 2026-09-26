@@ -108,7 +108,6 @@ test('repeated branch switches restore each branch and still warn once per inval
     assert.equal(app.warnings().length, pass * 2 + 2);
     assert.equal(app.warnings().at(-1), 'Skipped 1 invalid or unsupported todo snapshot: Unsupported todo snapshot');
   }
-  // staleTurns travels with the restored snapshot, not with a neighbouring cached one.
   assert.match((await app.hook('before_agent_start')).systemPrompt, /not changed for several turns[\s\S]*Gamma/);
 });
 

@@ -23,13 +23,10 @@ const MAX_ANSWER = 32000;
 const MAX_HISTORY = 64000;
 const MAX_SNAPSHOT = 96000;
 const MAX_QUESTION = 16000;
-/** Control characters that must never reach the terminal, stripped on every repaint. */
 const CONTROL_CHARS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 const MAX_PAINTED = 2048;
-/** Marks a queued question, so a block never reuses lines painted for another kind. */
 const QUEUED = Symbol("queued");
 
-/** One transcript block, plus the identities that decide whether its lines are stale. */
 type Block = {
   source: unknown;
   revision: unknown;
@@ -41,7 +38,6 @@ type PaintedBlock = Omit<Block, "lines"> & {
   lines: string[];
 };
 
-/** A disposable side conversation: never invokes agent tools or appends messages. */
 export default function btw(pi: ExtensionAPI) {
   const open = new Set<() => void>();
   pi.on("session_shutdown", () => {
@@ -74,8 +70,6 @@ export default function btw(pi: ExtensionAPI) {
       "retainedTail" in checkpoint &&
       Array.isArray(checkpoint.retainedTail)
     ) {
-      // The checkpoint supersedes everything before it, so walking the whole
-      // branch to build a context that is about to be replaced is wasted work.
       messages = [
         {
           role: "compactionSummary",
@@ -91,12 +85,6 @@ export default function btw(pi: ExtensionAPI) {
     } else {
       messages = buildSessionContext(branch).messages;
     }
-    // Serializing makes historical tool calls/results inert text. Each message
-    // serializes on its own and the parts join with a fixed separator, so
-    // serializing a run of messages yields exactly that stretch of the whole
-    // text: walk backwards in doubling steps and stop once the tail overflows
-    // the budget, so no slice here pins a full rendering of a long session the
-    // way a V8 sliced string retains the string it was cut from.
     let conversation = "";
     let cut = messages.length;
     while (cut > 0 && conversation.length <= MAX_SNAPSHOT) {
@@ -193,8 +181,6 @@ export default function btw(pi: ExtensionAPI) {
                   timestamp: Date.now(),
                 },
               ];
-              // All prior side turns are also text: no model-generated tool calls
-              // can enter a followup request as executable provider messages.
               const history = turns.filter((turn) => !turn.error);
               if (history.length)
                 messages.push({
@@ -250,8 +236,7 @@ export default function btw(pi: ExtensionAPI) {
                   answering = false;
                   status = "Provider requested a tool; no tool was run";
                 }
-              }
-              // Nothing in the stream replaced the placeholder status.
+                }
               if (!closed && answering)
                 status = answer ? "" : "Provider returned no text";
             } catch (error) {
@@ -297,14 +282,10 @@ export default function btw(pi: ExtensionAPI) {
               const clean = (text: string) => stripTerminalSequences(text).replace(CONTROL_CHARS, "");
               const padding = w >= 3 ? 1 : 0;
               const markdownTheme = getMarkdownTheme();
-              // A repaint is dominated by markdown rendering, so lines are reused
-              // whenever the width, the palette and the text are all unchanged.
               // getMarkdownTheme() hands back fresh closures every call, so probe
               // the palette for a value that moves only when the theme does.
               const palette = `${theme.fg("mdHeading", "")}${theme.bg("userMessageBg", "")}`;
               const userLines = (question: string) => {
-                // The question above a streaming answer is otherwise redrawn on
-                // every chunk even though only the answer below it is moving.
                 if (questionCache?.w === w && questionCache.palette === palette && questionCache.question === question)
                   return questionCache.lines;
                 const box = new Box(padding, 1, (text) => theme.bg("userMessageBg", text));
@@ -331,9 +312,6 @@ export default function btw(pi: ExtensionAPI) {
                 w,
               ).slice(0, Math.max(0, innerHeight - footer.length - 1));
               const height = Math.max(0, innerHeight - header.length - footer.length);
-              // Lay the blocks out back to front and stop once the scrolled window
-              // is covered, so a repaint stays proportional to the window rather
-              // than to the whole side conversation.
               const blocks = turns.length + (busy ? 1 : 0) + pending.length;
               const blockAt = (index: number): Block => {
                 const turn = turns[index];
@@ -377,8 +355,6 @@ export default function btw(pi: ExtensionAPI) {
                   cached.revision === block.revision
                     ? cached.lines
                     : block.lines();
-                // Keep only what the bottom of the transcript needs: an unbounded
-                // cache would grow with a scrolled-back side conversation.
                 if (laid <= MAX_PAINTED)
                   repainted.set(first, {
                     w,
@@ -393,8 +369,6 @@ export default function btw(pi: ExtensionAPI) {
               painted = repainted;
               let lines = stack.reverse().flat();
               if (first === 0) {
-                // Every block is laid out, so the true total is known: clamp a scroll
-                // that ran past the top, and fall back to the empty-transcript hint.
                 if (!lines.length)
                   lines = wrapTextWithAnsi("Ask a side question below.", w);
                 scroll = Math.min(scroll, Math.max(0, lines.length - height));

@@ -4,7 +4,6 @@ import { appendFileSync, watch, type FSWatcher } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import type WebSocket from 'ws';
 
-/** `ws` costs ~17 ms and ~12 MB; load it only once an editor is actually there. */
 let wsModule: Promise<typeof WebSocket> | undefined;
 const loadWs = () => (wsModule ??= import('ws').then(m => m.default));
 const OPEN = 1, CLOSED = 3;
@@ -15,11 +14,9 @@ export interface Mention { filePath: string; lineStart?: number; lineEnd?: numbe
 export interface Lock { port: number; authToken: string; workspaceFolders: string[]; ideName: string; mtimeMs: number }
 export interface LinkState { connected: boolean; ideName?: string; port?: number; selection?: Selection; mentions: number }
 
-/** Selection text kept in memory and sent to the model is capped here; nvim sends the whole visual range. */
 export const maxSelectionChars = 50_000;
-/** `NVIM_IDE_TRACE=/path` appends link state transitions to that file; off otherwise. */
 const traceFile = process.env.NVIM_IDE_TRACE;
-const trace = traceFile ? (message: string) => { try { appendFileSync(traceFile, `${new Date().toISOString()} ${message}\n`); } catch { /* tracing must never break the link */ } } : undefined;
+const trace = traceFile ? (message: string) => { try { appendFileSync(traceFile, `${new Date().toISOString()} ${message}\n`); } catch {} } : undefined;
 const defaultLockDir = (): string => join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'ide');
 const pidAlive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } };
 const trimSep = (path: string): string => path.length > 1 && path.endsWith(sep) ? path.slice(0, -1) : path;
@@ -35,17 +32,15 @@ export async function readLocks(dir: string, alive: (pid: number) => boolean = p
     try {
       const file = join(dir, name);
       const [raw, info] = await Promise.all([readFile(file, 'utf8'), stat(file)]);
-      // `pid` and `transport` are read from the file to validate it, but neither is worth keeping on the Lock.
       const data = JSON.parse(raw) as Partial<Lock> & { transport?: string; pid?: number };
       if (data.transport !== 'ws' || typeof data.authToken !== 'string' || !Number.isInteger(data.pid) || !Array.isArray(data.workspaceFolders)) continue;
       if (!alive(data.pid as number)) continue;
       locks.push({ port, authToken: data.authToken, workspaceFolders: data.workspaceFolders.filter((f): f is string => typeof f === 'string').map(f => trimSep(resolve(f))), ideName: typeof data.ideName === 'string' ? data.ideName : 'IDE', mtimeMs: info.mtimeMs });
-    } catch { /* unreadable or partial lock file: skip it */ }
+    } catch {}
   }
   return locks;
 }
 
-/** Same rule Claude Code uses: an env-selected port wins, else the live lock whose workspace contains cwd, longest match then newest. */
 export function chooseLock(locks: Lock[], cwd: string, envPort = process.env.CLAUDE_CODE_SSE_PORT): Lock | undefined {
   const port = Number(envPort);
   if (Number.isInteger(port)) { const hit = locks.find(lock => lock.port === port); if (hit) return hit; }
@@ -70,7 +65,6 @@ interface LinkOptions {
   alive?: (pid: number) => boolean;
 }
 
-/** One client connection to an IDE's Claude Code server; reconnects on its own while started. */
 export class IdeLink {
   private socket?: WebSocket;
   private lock?: Lock;
@@ -106,7 +100,6 @@ export class IdeLink {
   reconnect(): void { const socket = this.socket; this.drop(new Error('reconnecting')); socket?.terminate(); void this.attempt(); }
   takeMentions(): Mention[] { const taken = this.mentions; this.mentions = []; if (taken.length) this.emit(); return taken; }
 
-  /** Call an IDE tool; returns the text content or throws the IDE's error text. */
   async call(name: string, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<string> {
     const result = await this.request('tools/call', { name, arguments: args }, signal) as { content?: Content; isError?: boolean } | undefined;
     const text = (result?.content ?? []).filter(item => item.type === 'text' && typeof item.text === 'string').map(item => item.text as string).join('\n');
@@ -135,7 +128,6 @@ export class IdeLink {
     this.socket = socket;
     socket.on('message', data => this.receive(data.toString()));
     socket.on('error', error => trace?.(`socket error ${error.message}`));
-    // The lock may outlive a dropped connection (editor restart, socket error), so a disconnect always polls.
     socket.on('close', (code, reason) => { trace?.(`close ${code} ${reason} current=${this.socket === socket}`); if (this.socket === socket) { this.drop(new Error('IDE disconnected')); this.schedule(this.options.retryMs ?? 15000); } });
     socket.once('open', () => {
       trace?.('open');
@@ -166,9 +158,8 @@ export class IdeLink {
         watcher.close(); this.parentWatcher = undefined;
         this.schedule();
       });
-    } catch { /* parent missing or unwatchable: schedule() polls until it can be watched */ }
+    } catch {}
   }
-  /** Discovery is woken by the lock directory watch; schedule() polls while either required watch is unavailable. */
   private watchLocks(): void {
     if (this.watcher) return;
     try {
@@ -180,7 +171,7 @@ export class IdeLink {
         watcher.close(); this.watcher = undefined;
         this.schedule();
       });
-    } catch { /* directory missing: the poll handles it and a later attempt retries the watch */ }
+    } catch {}
   }
   private schedule(delay?: number): void {
     trace?.(`schedule ${delay ?? 'default'} timer=${!!this.timer} watcher=${!!this.watcher}`);

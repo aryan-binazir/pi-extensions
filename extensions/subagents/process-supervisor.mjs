@@ -1,18 +1,22 @@
-// This adapter, not the model, owns child liveness. fd 3 is the owner pipe;
-// fd 4 reports the real child exit before the adapter kills its entire group.
 import { spawn } from 'node:child_process';
 import { fstatSync, writeSync } from 'node:fs';
 import { Socket } from 'node:net';
 
+const ownerPipeFd = 3;
+const childExitReportFd = 4;
+
+function requireProcessGroupLeader() {
+  process.kill(-process.pid, 0);
+}
+
 let owner;
 try {
-  for (const fd of [3, 4]) {
+  for (const fd of [ownerPipeFd, childExitReportFd]) {
     const descriptor = fstatSync(fd);
     if (!descriptor.isFIFO() && !descriptor.isSocket()) throw new Error('Invalid supervision pipe');
   }
-  process.kill(-process.pid, 0); // Registry must launch us as a process-group leader.
-  // A Socket uses cancellable event-loop reads; fs streams may block shutdown.
-  owner = new Socket({fd: 3, readable: true, writable: false});
+  requireProcessGroupLeader();
+  owner = new Socket({fd: ownerPipeFd, readable: true, writable: false});
 } catch {
   console.error('Subagent supervision requires inherited pipes and a dedicated process group');
   process.exit(1);
@@ -29,11 +33,9 @@ const finish = code => {
   clearTimeout(deadline);
   clearTimeout(escalation);
   owner.destroy();
-  // Only the adapter inherits this control descriptor, not Pi. A successful
-  // report does not replace Pi's required final assistant stop event.
   const kill = () => {
-    try { writeSync(4, `${stopping ? 143 : code}\n`); } catch { /* Owner already gone. */ }
-    signalGroup('SIGKILL'); // Includes stubborn descendants even without an owner.
+    try { writeSync(childExitReportFd, `${stopping ? 143 : code}\n`); } catch {}
+    signalGroup('SIGKILL');
     process.exit(stopping ? 143 : code);
   };
   const flushDeadline = setTimeout(kill, 2000);
@@ -74,7 +76,6 @@ child.on('exit', code => {
   exited = true;
   childCode = code ?? 1;
   signalGroup('SIGTERM');
-  // Descendants may retain Pi's stdout/stderr after Pi itself has exited.
   escalation ??= setTimeout(() => finish(childCode), 2000);
 });
 child.on('close', code => finish(code ?? childCode ?? 1));

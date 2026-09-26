@@ -1,5 +1,3 @@
-// Keep the authentic bundled Node runtime as the client's direct parent.
-// Only this child is owned here: never signal the shared Sky service.
 import { spawn } from 'node:child_process';
 const parent = process.ppid;
 const child = spawn(process.argv[2], ['mcp'], { stdio: 'inherit' });

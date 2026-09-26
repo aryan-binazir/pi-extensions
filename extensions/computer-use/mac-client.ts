@@ -7,8 +7,6 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { ElicitRequest, ElicitResult, CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 
-// The SDK graph (zod, ajv) costs ~350ms and ~13MB to load and is unreachable
-// until a Mac tool actually runs. Keep it out of extension startup.
 let sdk: Promise<{
   Client: typeof import('@modelcontextprotocol/sdk/client/index.js').Client;
   StdioClientTransport: typeof import('@modelcontextprotocol/sdk/client/stdio.js').StdioClientTransport;
@@ -22,8 +20,6 @@ export function loadMacSdk() {
     import('@modelcontextprotocol/sdk/types.js'),
     import('@modelcontextprotocol/sdk/validation/ajv'),
   ]).then(([client, stdio, types, ajv]) => {
-    // One Ajv instance, and one compiled validator per schema: compiling is
-    // code generation and used to happen on every single tool call.
     const instance = new ajv.AjvJsonSchemaValidator();
     const compiled = new WeakMap<object, (value: unknown) => { valid: boolean }>();
     return {
@@ -41,12 +37,11 @@ export function loadMacSdk() {
 }
 
 export function boundedText(text: string): string {
-  // UTF-8 spends 1..3 bytes per UTF-16 unit, so both ends of the range are decided
-  // from the length alone and nothing is copied unless it is really truncated.
-  if (text.length <= 16384) return text;
-  if (text.length <= 65536 && Buffer.byteLength(text) <= 65536) return text;
+  const maxBytes = 65_536;
+  if (text.length <= maxBytes / 4) return text;
+  if (text.length <= maxBytes && Buffer.byteLength(text) <= maxBytes) return text;
   const bytes = Buffer.from(text), suffix = '\n[truncated]';
-  let end = 65536 - Buffer.byteLength(suffix);
+  let end = maxBytes - Buffer.byteLength(suffix);
   while ((bytes[end] & 0xc0) === 0x80) end--;
   return bytes.subarray(0, end).toString('utf8') + suffix;
 }
@@ -72,15 +67,11 @@ export async function approve(params: ElicitRequest['params'], ctx: ExtensionCon
   finally { signal.removeEventListener('abort', abort); controller.abort(); }
 }
 const pngMagic = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-/**
- * True exactly when `text` is the canonical base64 of `image`, which also subsumes
- * charset and padding checks. Comparing 192KiB at a time keeps the encode off the heap.
- */
 function canonicalBase64(image: Buffer, text: string): boolean {
   if (Math.ceil(image.length / 3) * 4 !== text.length) return false;
-  const step = 3 * 65536;
-  for (let offset = 0, cursor = 0; offset < image.length; offset += step, cursor += (step / 3) * 4) {
-    const piece = image.toString('base64', offset, Math.min(offset + step, image.length));
+  const bytesPerChunk = 3 * 65536;
+  for (let offset = 0, cursor = 0; offset < image.length; offset += bytesPerChunk, cursor += (bytesPerChunk / 3) * 4) {
+    const piece = image.toString('base64', offset, Math.min(offset + bytesPerChunk, image.length));
     if (piece !== text.substring(cursor, cursor + piece.length)) return false;
   }
   return true;

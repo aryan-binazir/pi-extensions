@@ -49,28 +49,26 @@ export default function subagents(pi: ExtensionAPI): void {
     catch (error) { registry.notificationFailed(pending.map(task => task.id), error); }
   };
   const parent = () => ({ cwd: getActiveCwd(context?.cwd ?? process.cwd(), context?.sessionManager.getSessionId()), tools: pi.getActiveTools() });
-  // A brief never changes for an id, so its collapsed form is derived once
-  // rather than on every repaint of a panel that updates ten times a second.
-  const briefs = new Map<string, string>();
+  const collapsedBriefById = new Map<string, string>();
   const brief = (id: string, task: string) => {
-    let label = briefs.get(id);
+    let label = collapsedBriefById.get(id);
     if (label === undefined) {
-      if (briefs.size > 1024) briefs.clear();
+      if (collapsedBriefById.size > 1024) collapsedBriefById.clear();
       label = task.replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
-      briefs.set(id, label);
+      collapsedBriefById.set(id, label);
     }
     return label;
   };
-  // null until the panel's on-screen state is known; an unchanged panel is not
-  // repainted, so a silently streaming child costs nothing here.
-  let painted: string | undefined | null = null;
+  let paintedPanel: string | undefined;
+  let panelPaintKnown = false;
   const renderActiveAgents = () => {
     if (!context?.hasUI) return;
     const active = shuttingDown ? [] : registry.activeTasks();
     const rows = active.map(task => [task.id.slice(0, 8), task.status, brief(task.id, task.task)]);
     const rendered = active.length ? JSON.stringify(rows) : undefined;
-    if (rendered === painted) return;
-    painted = rendered;
+    if (panelPaintKnown && rendered === paintedPanel) return;
+    panelPaintKnown = true;
+    paintedPanel = rendered;
     context.ui.setWidget('interactive-tools:subagents', rendered === undefined ? undefined : (_tui, theme) => {
       const blue = (text: string) => theme.fg('border', text);
       const lines = [`Subagents · ${rows.length} active`, ...rows.map(([id, status, task]) => `${id} · ${blue(status)} · ${task}`)];
@@ -111,10 +109,6 @@ export default function subagents(pi: ExtensionAPI): void {
   let latestReport: string | undefined;
   const tracker = new SubagentTracker(() => context, () => registry.list(), report => {
     latestReport = sanitizeTrackerReport(report);
-    // Observations are transient UI, never new conversation/model messages.
-    // One stable footer slot replaces earlier reports, even when they change.
-    // setStatus has no width callback; use the terminal width when available,
-    // without replacing Pi's footer or interfering with other status slots.
     if (context?.hasUI) context.ui.setStatus('subagent-tracker', trackerFooter(report, process.stdout.columns));
   });
   const trackedSpawn = async (task: TaskSpec, signal?: AbortSignal, owner: 'parent' | 'workflow' = 'parent') => {
@@ -165,13 +159,12 @@ export default function subagents(pi: ExtensionAPI): void {
   pi.on('session_start', (_event, ctx) => {
     context = ctx;
     try { configFor(ctx, true); } catch (error) { if (ctx.hasUI) ctx.ui.notify(String(error), 'error'); }
-    painted = null;
+    panelPaintKnown = false;
     if (shuttingDown) {
       registry = createRegistry();
       shuttingDown = false;
     }
   });
-  /** Drop the tracker footer and any completion notices batched for the parent. */
   const stopReporting = () => {
     tracker.stop();
     if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
@@ -194,10 +187,9 @@ export default function subagents(pi: ExtensionAPI): void {
       const runs = [...workflowRuns];
       const activeWorkflows = [...workflows].filter(controller => !controller.signal.aborted);
       try {
-        // Count workflow children in the registry before aborting their parent workflow.
-        const cancellation = registry.cancelAll();
+        const cancelChildren = registry.cancelAll();
         for (const controller of activeWorkflows) controller.abort();
-        const count = await cancellation;
+        const count = await cancelChildren;
         await Promise.allSettled(runs);
         return {cancelled: count > 0 || activeWorkflows.length > 0, count};
       } finally {

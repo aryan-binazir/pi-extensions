@@ -10,7 +10,6 @@ import { getActiveCwd, setActiveCwd } from './routing.ts';
 
 type Git = (...args: string[]) => string;
 
-/** A throwaway `<tmp>/repo` with one empty commit, plus its home directory for the `~/repos/.worktrees` layout. */
 async function repoFixture(prefix: string, options: { branch?: string } = {}): Promise<{ home: string; repo: string; git: Git }> {
   const home = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   try {
@@ -23,7 +22,6 @@ async function repoFixture(prefix: string, options: { branch?: string } = {}): P
   } catch (error) { await rm(home, { recursive: true, force: true }); throw error; }
 }
 
-/** Put an executable stand-in for `name` first on PATH for the duration of `body`, which receives the directory holding it. */
 async function withFakeBin(home: string, name: string, source: string, body: (bin: string) => Promise<void>): Promise<void> {
   const bin = join(home, 'bin');
   await mkdir(bin, { recursive: true });
@@ -206,7 +204,6 @@ test('active Herdr uses create/open and resolves an opaque workspace for removal
   try {
     const log = join(home, 'calls.jsonl');
     const checkoutPath = join(home, 'repos/.worktrees/repo/task');
-    // Records every invocation, then performs the Git side of create/remove itself and answers `list` with one opaque workspace.
     const herdr = `#!/usr/bin/env node
 const fs = require('node:fs'), cp = require('node:child_process');
 const a = process.argv.slice(2);
@@ -241,7 +238,6 @@ test('a checkout Herdr knows but has not opened is removed through Git', async (
   const { home, repo } = await repoFixture('pi-worktree-unopened-');
   try {
     const checkout = await new Worktrees(repo, { home, herdr: false }).open('unopened');
-    // Herdr lists the checkout without a workspace; any `remove` sent to it must fail loudly.
     const herdr = `#!/bin/sh\n[ "$2" = remove ] && exit 2\nprintf '%s' '{"result":{"worktrees":[{"path":"${checkout.path}","open_workspace_id":null}]}}'\n`;
     await withFakeBin(home, 'herdr', herdr, async () => {
       const trees = new Worktrees(repo, { home, herdr: true });
@@ -314,7 +310,6 @@ test('new branches use master or the remote default and require a base when neit
 });
 
 
-/** The command handler builds its manager from the real home directory and Herdr environment; point both at the fixture. */
 async function withHome(home: string, body: () => Promise<void>): Promise<void> {
   const previousHome = process.env.HOME, previousHerdr = process.env.HERDR_ENV;
   process.env.HOME = home; delete process.env.HERDR_ENV;
@@ -324,7 +319,6 @@ async function withHome(home: string, body: () => Promise<void>): Promise<void> 
   }
 }
 
-/** The extension registered against a recording context, with the session's routing cleared afterwards. */
 function commandHost(repo: string, sessionId: string, options: { confirm?: () => Promise<boolean> } = {}) {
   const commands: Record<string, any> = {};
   const entries: unknown[] = [];

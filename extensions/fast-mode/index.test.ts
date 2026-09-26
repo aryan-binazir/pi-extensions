@@ -4,7 +4,6 @@ import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { getSupportedThinkingLevels, type ThinkingLevel } from '@earendil-works/pi-ai';
 import { withFastModels } from './provider.ts';
 
-// Priority tier bills at this multiple of the model's standard rate.
 const priorityRate=(model:{id:string})=>model.id==='gpt-5.5'?2.5:2;
 
 test('fast aliases preserve auth and pricing metadata and send priority through real provider',async()=>{
@@ -179,8 +178,7 @@ test('alias derivation tracks the live base model list rather than a stale snaps
  let current:any[]=[base,other];
  const mutable:any={...original,getModels:()=>current};
  const provider=withFastModels(mutable);
- assert.deepEqual(provider.getModels().map(model=>model.id),[base.id,base.id+'~fast',other.id,other.id+'~fast']);
- // A refreshed catalog hands back fresh model objects; aliases must follow them.
+  assert.deepEqual(provider.getModels().map(model=>model.id),[base.id,base.id+'~fast',other.id,other.id+'~fast']);
  current=[{...base,name:'Renamed'},{...other,baseUrl:'https://proxy.example/v1'}];
  const refreshed=provider.getModels();
  assert.deepEqual(refreshed.map(model=>model.id),[base.id,base.id+'~fast',other.id]);

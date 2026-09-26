@@ -192,11 +192,14 @@ export default function subagents(pi: ExtensionAPI): void {
       cancellingAll = true;
       stopReporting();
       const runs = [...workflowRuns];
-      for (const controller of workflows) controller.abort();
+      const activeWorkflows = [...workflows].filter(controller => !controller.signal.aborted);
       try {
-        const count = await registry.cancelAll();
+        // Count workflow children in the registry before aborting their parent workflow.
+        const cancellation = registry.cancelAll();
+        for (const controller of activeWorkflows) controller.abort();
+        const count = await cancellation;
         await Promise.allSettled(runs);
-        return {cancelled: count > 0, count};
+        return {cancelled: count > 0 || activeWorkflows.length > 0, count};
       } finally {
         cancellingAll = false;
         if (!shuttingDown) tracker.update();

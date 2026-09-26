@@ -148,6 +148,28 @@ test("split opening marker and lifecycle disposal do not leak an unfinished past
   e.handleInput("!");
   assert.equal(e.getExpandedText(), "next!");
 });
+test("a split paste opener after ordinary text preserves the text and hides terminal escapes", () => {
+  const whole = editor();
+  whole.handleInput("foo\x1b[200~bar\x1b[201~");
+  assert.equal(whole.getExpandedText(), "foobar");
+
+  const split = editor();
+  split.handleInput("foo\x1b[20");
+  assert.equal(split.getText(), "foo");
+  assert.equal(split.getExpandedText(), "foo");
+  split.handleInput("0~bar\x1b[201~");
+  assert.equal(split.getText(), whole.getText());
+  assert.equal(split.getExpandedText(), whole.getExpandedText());
+  assert.ok(!split.getText().includes("\x1b"));
+  split.handleInput("\x1b");
+  keys(split, "u");
+  assert.equal(split.getExpandedText(), "foo");
+
+  const withSuffix = editor();
+  withSuffix.handleInput("foo\x1b[20");
+  withSuffix.handleInput("0~bar\x1b[201~!");
+  assert.equal(withSuffix.getExpandedText(), "foobar!");
+});
 test("raw tabs and carriage returns render safely in insert, normal and wrapped visual selection", () => {
   const e = editor();
   const payload = "abc\t😀\rZ";

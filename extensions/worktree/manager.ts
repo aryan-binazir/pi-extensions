@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { mkdir, realpath, stat } from 'node:fs/promises';
+import { mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 const execute = promisify(execFile);
 export interface Checkout { path: string; branch: string; primary: boolean }
@@ -20,6 +20,23 @@ export class Worktrees {
       const fields = record.split('\0');
       return { path: fields.find(line => line.startsWith('worktree '))!.slice(9), branch: fields.find(line => line.startsWith('branch '))?.slice(7).replace(/^refs\/heads\//, '') ?? '', primary: index === 0 };
     });
+  }
+  /** Confirm that a listed path still leads to its registered Git checkout. */
+  async matches(checkout: Checkout): Promise<boolean> {
+    try {
+      if (!(await stat(checkout.path)).isDirectory()) return false;
+      const path = await realpath(checkout.path);
+      const root = await realpath(await this.run('git', ['-C', checkout.path, 'rev-parse', '--show-toplevel']));
+      if (root !== path) return false;
+      const common = await realpath(await this.run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']));
+      const checkoutCommon = await realpath(await this.run('git', ['-C', checkout.path, 'rev-parse', '--path-format=absolute', '--git-common-dir']));
+      if (checkoutCommon !== common) return false;
+      if (await this.run('git', ['-C', checkout.path, 'rev-parse', '--abbrev-ref', 'HEAD']) !== (checkout.branch || 'HEAD')) return false;
+      const gitdir = await realpath(await this.run('git', ['-C', checkout.path, 'rev-parse', '--absolute-git-dir']));
+      if (checkout.primary) return gitdir === common && await realpath(join(checkout.path, '.git')) === common;
+      if (dirname(gitdir) !== join(common, 'worktrees')) return false;
+      return resolve(gitdir, (await readFile(join(gitdir, 'gitdir'), 'utf8')).trim()) === resolve(checkout.path, '.git');
+    } catch { return false; }
   }
   /** `undefined` means Herdr is not in play; any other value is the parsed `herdr worktree list` payload. */
   private async herdrState(): Promise<unknown> {
@@ -48,12 +65,7 @@ export class Worktrees {
     const herdr = await this.herdrState();
     const reused = existing.find(item => item.branch === branch);
     if (reused) {
-      let directory = false;
-      try { directory = (await stat(reused.path)).isDirectory(); }
-      catch (error) {
-        if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-      }
-      if (!directory) throw new Error(`Worktree directory is unavailable: ${reused.path}. Restore it or remove its stale Git worktree entry before retrying.`);
+      if (!await this.matches(reused)) throw new Error(`Worktree directory is unavailable or no longer matches its Git checkout: ${reused.path}. Restore it or remove its stale Git worktree entry before retrying.`);
       if (herdr !== undefined) await this.run('herdr', ['worktree', 'open', '--cwd', this.cwd, '--path', reused.path, '--no-focus']);
       return reused;
     }

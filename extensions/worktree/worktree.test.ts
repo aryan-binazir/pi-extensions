@@ -88,6 +88,63 @@ test('refuses a deleted checkout and allows reopening after explicit Git recover
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
+test('reuse rejects a checkout path replaced by an unrelated directory', async () => {
+  const { home, repo } = await repoFixture('pi-worktree-replaced-');
+  try {
+    const trees = new Worktrees(repo, { home, herdr: false });
+    const checkout = await trees.open('task');
+    const replacement = join(home, 'replacement');
+    await mkdir(replacement);
+    await rm(checkout.path, { recursive: true });
+    await symlink(replacement, checkout.path, 'dir');
+    await assert.rejects(trees.open('task'), /Worktree directory is unavailable/);
+    assert.equal(await realpath(checkout.path), replacement);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('reuse rejects another checkout from the same repository at the registered path', async () => {
+  const { home, repo } = await repoFixture('pi-worktree-wrong-checkout-');
+  try {
+    const trees = new Worktrees(repo, { home, herdr: false });
+    const checkout = await trees.open('task');
+    const other = await trees.open('other');
+    await rm(checkout.path, { recursive: true });
+    await symlink(other.path, checkout.path, 'dir');
+    await assert.rejects(trees.open('task'), /no longer matches its Git checkout/);
+    assert.equal(await realpath(checkout.path), other.path);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('restore rejects a replaced checkout and keeps shell and relative files in the original directory', async () => {
+  const { home, repo } = await repoFixture('pi-worktree-restore-replaced-');
+  const sessionId = 'restore-replaced';
+  const handlers: Record<string, (...args: any[]) => any> = {};
+  const tools: Record<string, any> = {};
+  const notices: string[] = [];
+  try {
+    const checkout = await new Worktrees(repo, { home, herdr: false }).open('task');
+    const replacement = join(home, 'replacement');
+    await mkdir(replacement);
+    await writeFile(join(replacement, 'MARKER'), 'unrelated');
+    await rm(checkout.path, { recursive: true });
+    await symlink(replacement, checkout.path, 'dir');
+    const ctx: any = {
+      cwd: repo, hasUI: true, isIdle: () => true,
+      ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
+      sessionManager: { getSessionId: () => sessionId, getSessionFile: () => undefined, getBranch: () => [{ type: 'custom', customType: 'agent-workflows:worktree', data: { version: 1, path: checkout.path } }] },
+    };
+    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool: (tool: any) => tools[tool.name] = tool, registerCommand() {} } as any);
+    await handlers.session_start({}, ctx);
+    assert.equal(getActiveCwd(repo, sessionId), repo);
+    const relative = { toolName: 'read', input: { path: 'MARKER' } };
+    handlers.tool_call(relative, ctx);
+    assert.equal(relative.input.path, join(repo, 'MARKER'));
+    const result = await tools.bash.execute('call', { command: 'pwd' }, undefined, undefined, ctx);
+    assert.equal(result.content[0].text.trim(), repo);
+    assert.match(notices.at(-1) ?? '', /Saved worktree.*using original session directory/);
+  } finally { setActiveCwd(repo, undefined, sessionId); await rm(home, { recursive: true, force: true }); }
+});
+
 test('creates the managed checkout layout, preserves an explicit branch and reuses an existing checkout', async () => {
   const { home, repo } = await repoFixture('pi-worktree-');
   try {

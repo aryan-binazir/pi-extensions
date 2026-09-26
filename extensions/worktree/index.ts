@@ -1,5 +1,5 @@
 import { createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { realpath, stat } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { getActiveCwd, resolveToolPath, setActiveCwd } from './routing.ts';
 const entryType = 'agent-workflows:worktree';
@@ -38,12 +38,17 @@ export default function worktree(pi: ExtensionAPI): void {
     }
     if (typeof path === 'string' && isAbsolute(path)) {
       try {
-        if ((await stat(path)).isDirectory()) {
-          const canonical = await realpath(path);
-          if (canonical !== await realpath(ctx.cwd)) setActiveCwd(ctx.cwd, canonical, ctx.sessionManager.getSessionId());
+        const canonical = await realpath(path);
+        if (canonical !== await realpath(ctx.cwd)) {
+          // Saved paths are untrusted until Git still recognizes the checkout.
+          const { Worktrees } = await import('./manager.ts');
+          const trees = new Worktrees(ctx.cwd);
+          const checkout = (await trees.list()).find(item => resolve(item.path) === resolve(path) || item.path === canonical);
+          if (!checkout || !await trees.matches(checkout)) throw new Error('Saved checkout is unavailable');
+          setActiveCwd(ctx.cwd, canonical, id);
         }
       }
-      catch { if (ctx.hasUI) ctx.ui.notify('Saved worktree no longer exists; using original session directory', 'warning'); }
+      catch { if (ctx.hasUI) ctx.ui.notify('Saved worktree is unavailable or invalid; using original session directory', 'warning'); }
     }
     paint(ctx);
   };

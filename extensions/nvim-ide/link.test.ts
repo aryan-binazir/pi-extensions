@@ -4,6 +4,8 @@ import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { WebSocketServer } from 'ws';
 import { IdeLink, chooseLock, maxSelectionChars, readLocks, type Lock, type LinkState } from './link.ts';
 import { fakeIde, token, until } from './test-support.ts';
@@ -17,6 +19,9 @@ test('lock files: parse, skip dead pids and junk, choose by workspace then env',
     await writeFile(join(dir, '1001.lock'), JSON.stringify({ pid: 2, transport: 'ws', workspaceFolders: ['/w/'], ideName: 'Neovim', authToken: token }));
     await writeFile(join(dir, '1002.lock'), JSON.stringify({ pid: 3, transport: 'ws', workspaceFolders: ['/w'], authToken: token }));
     await writeFile(join(dir, '1003.lock'), '{not json');
+    await writeFile(join(dir, '0.lock'), lockFile());
+    await writeFile(join(dir, '65536.lock'), lockFile());
+    await writeFile(join(dir, '999999999999999999999999.lock'), lockFile());
     await writeFile(join(dir, 'notes.txt'), 'ignored');
     const locks = await readLocks(dir, pid => pid !== 3);
     assert.deepEqual(locks.map(l => [l.port, l.workspaceFolders[0]]).sort(), [[1000, '/w/a'], [1001, '/w']]);
@@ -29,10 +34,40 @@ test('lock files: parse, skip dead pids and junk, choose by workspace then env',
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('a lock that makes WebSocket construction throw does not crash the host', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  try {
+    await writeFile(join(dir, '12345.lock'), lockFile({ authToken: 'bad\nheader' }));
+    const source = `
+      import { IdeLink } from ${JSON.stringify(new URL('./link.ts', import.meta.url).href)};
+      const link = new IdeLink({ cwd: '/w', lockDir: process.argv[1], alive: () => true, retryMs: 100 });
+      link.start();
+      await new Promise(resolve => setTimeout(resolve, 150));
+      await link.stop();
+    `;
+    await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', source, dir]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('newest lock wins among equal workspace matches', () => {
   const base: Lock = { port: 1, authToken: token, workspaceFolders: ['/w'], ideName: 'Neovim', mtimeMs: 0 };
   const locks = [{ ...base, port: 1, mtimeMs: 1 }, { ...base, port: 2, mtimeMs: 5 }, { ...base, port: 3, mtimeMs: 3 }];
   assert.equal(chooseLock(locks, '/w', '')?.port, 2);
+});
+
+test('an invalid port lock does not hide a valid IDE lock', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w/project', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile({ workspaceFolders: ['/w'] }));
+    await writeFile(join(dir, '65536.lock'), lockFile({ workspaceFolders: ['/w/project'] }));
+    link.start();
+    await until(() => link.connected);
+    assert.equal(link.state.port, ide.port());
+    assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
+  } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
 test('connects with the token, tracks selection and mentions, calls tools, reconnects', async () => {

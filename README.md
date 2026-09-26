@@ -26,8 +26,6 @@ load; helpers and tests are not extensions.
    - [Bash approvals](docs/agent-setup.md#automatic-bash-permissions-external-package):
      Hank Warren's Auto Permissions. This repo's status extension is only its
      display companion, not the approval engine.
-   - [Cursor SDK](#cursor-sdk-setup-for-agents): `pi-cursor-sdk`. Cursor models
-     through the official SDK; usage bills to the key owner's plan.
 4. **Set up Guard**, if wanted: follow [Guard setup](#guard-setup-for-agents) to
    link the tracked rules file directly. Installation alone
    does not enable the rules.
@@ -126,47 +124,6 @@ control flow (`if`, loops), `!`, `time`, or wrappers such as `command`, `env`, a
 use direct simple invocations for predictable results. `gh api`, MCP/API calls,
 user `!`/`!!` commands and subagent sessions without Guard loaded are not covered.
 This does not extend the separate Bash Auto Permissions reviewer to MCP.
-
-## Cursor SDK setup for agents
-
-Use this when the user wants Cursor models inside Pi through Cursor's official SDK.
-Install the third-party extension separately, pinned. It is published by Mitch
-Fultz and calls `@cursor/sdk`; Pi and Cursor do not ship this package.
-
-```sh
-pi install npm:pi-cursor-sdk@0.3.10
-```
-
-Requires Node.js 22.19+ and Pi 0.84 or later. Pi records
-`npm:pi-cursor-sdk@0.3.10` in the `packages` array. The pin does not update
-itself; review a newer release before changing it.
-
-Authenticate with a Cursor SDK API key. A user API key from
-[Cursor Dashboard → API Keys](https://cursor.com/dashboard/api) bills that user's
-plan. A service-account key bills the team that owns the account. Both draw from
-the same request pools as the IDE and Cloud Agents. Spend shows on the
-[usage dashboard](https://cursor.com/dashboard/usage) under the SDK tag. Team
-Admin API keys do not work with the SDK.
-
-Before storing a key, tell the user that Pi usage bills their plan, and wait for
-them to accept that. Ask them to create the key and paste it in Pi's `/login`.
-Leave the key out of this repository, chat logs, and shell history.
-
-In Pi:
-
-1. Run `/login`.
-2. Choose `Use an API key`.
-3. Choose `Cursor`.
-4. Paste the key. Pi saves it in `~/.pi/agent/auth.json` (or `$PI_CODING_AGENT_DIR/auth.json`).
-5. If Pi was already running, run `/cursor-refresh-models`.
-6. Run `/model` and select a `cursor/…` model.
-
-`CURSOR_API_KEY` or `pi --api-key` can supply the same key for a single run.
-Startup model discovery reads the stored `cursor` entry, then `CURSOR_API_KEY`.
-
-Completion: `pi --list-models cursor` lists models for that key, the key is only
-in Pi's auth store or the environment, and the user has agreed to the plan
-billing. Ask the user to run `/reload` after install.
 
 ## Subagent configuration
 

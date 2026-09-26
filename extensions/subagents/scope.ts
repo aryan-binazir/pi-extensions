@@ -36,7 +36,9 @@ export async function assertChildTask(task: { cwd: string; tools: string[]; exte
       if (!isAbsolute(extension)) throw new Error('Child extensions must be absolute local paths');
       if (!(await stat(await realpath(extension))).isFile()) throw new Error('Child extension must be a file');
     }
-    if (!options.approve || !await options.approve(`Load trusted local child extensions with host privileges? ${JSON.stringify(task.extensions)}`)) throw new Error('Child extension loading was not approved');
+    if (!options.approve) throw new Error('Child extension loading was not approved');
+    if (!await options.approve(`Load trusted local child extensions with host privileges? ${JSON.stringify(task.extensions)}`))
+      throw Object.assign(new Error('Child extension loading was not approved'), {retryable: false});
   }
 }
 

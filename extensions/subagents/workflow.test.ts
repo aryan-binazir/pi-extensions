@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { assertChildTask } from './scope.ts';
 import { runWorkflow } from './workflow.ts';
 
 test('workflow rejects unapproved source, executes approved TS, and replays successful stages', async () => {
@@ -42,6 +43,26 @@ test('capabilities enforce read bounds, retries, checkpoints, and restricted glo
   finally {await rm(outside,{force:true});}
   await assert.rejects(runWorkflow({...base,source:'return Function("return process")();'}),/Code generation/);
   await assert.rejects(runWorkflow({...base,source:'while (true) {}',timeout:20000}),/Script execution timed out after 100ms/);
+ } finally {await rm(cwd,{recursive:true,force:true});}
+});
+
+test('workflow retry stops after child extension approval is denied', async () => {
+ const cwd=await mkdtemp(join(tmpdir(),'workflow-denied-extension-'));
+ const extension=join(cwd,'child.ts');
+ await writeFile(extension,'export default () => {}');
+ let prompts=0;let launches=0;
+ try {
+  await assert.rejects(runWorkflow({
+   source:`return await api.retry(5,()=>api.spawn({task:'inspect',preset:'reader',extensions:[${JSON.stringify(extension)}]},'inspect'));`,
+   cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'reader',approve:async()=>true,
+   spawn:async task=>{
+    await assertChildTask({...task,tools:task.tools ?? []},{parent:{cwd,tools:['read','grep','find','ls']},approve:async()=>{prompts++;return false;}});
+    launches++;
+    return 'launched';
+   },
+  }),/Child extension loading was not approved/);
+  assert.equal(prompts,1);
+  assert.equal(launches,0);
  } finally {await rm(cwd,{recursive:true,force:true});}
 });
 

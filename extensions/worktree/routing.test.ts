@@ -1,11 +1,24 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { join, resolve } from 'node:path';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, symlink } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import worktree from './index.ts';
+import { Worktrees } from './manager.ts';
 import { getActiveCwd, resolveToolPath, setActiveCwd } from './routing.ts';
+
+async function checkoutFixture(prefix: string) {
+  const home = await realpath(await mkdtemp(join(tmpdir(), prefix)));
+  const original = join(home, 'repo');
+  await mkdir(original);
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: original, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-b', 'main');
+  git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'init');
+  const active = (await new Worktrees(original, { home, herdr: false }).open('task')).path;
+  return { home, original, active };
+}
 
 /** Enough of Pi's ExtensionContext to drive the extension, with the UI calls it makes recorded. */
 function fakeCtx(options: { cwd: string; sessionId: string; branch?: string; hasUI?: boolean }) {
@@ -21,8 +34,7 @@ function fakeCtx(options: { cwd: string; sessionId: string; branch?: string; has
 }
 
 test('restored active checkout routes shell and relative files while preserving absolute paths', async () => {
-  const original = await realpath(await mkdtemp(join(tmpdir(), 'pi-route-origin-')));
-  const active = await realpath(await mkdtemp(join(tmpdir(), 'pi-route-active-')));
+  const { home, original, active } = await checkoutFixture('pi-route-origin-');
   const handlers: Record<string, (...args: any[]) => any> = {};
   const tools: Record<string, any> = {};
   const { ctx } = fakeCtx({ cwd: original, sessionId: 'synthetic', branch: active, hasUI: false });
@@ -65,7 +77,21 @@ test('restored active checkout routes shell and relative files while preserving 
     await handlers.session_tree({}, ctx);
     assert.equal(getActiveCwd(original, 'synthetic'), active);
     await handlers.session_shutdown({}, ctx);
-  } finally { await rm(original, { recursive: true, force: true }); await rm(active, { recursive: true, force: true }); }
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('restore accepts an alias to the registered checkout', async () => {
+  const { home, original, active } = await checkoutFixture('pi-route-alias-');
+  const alias = join(home, 'alias');
+  await symlink(active, alias);
+  const handlers: Record<string, (...args: any[]) => any> = {};
+  const { ctx, notices } = fakeCtx({ cwd: original, sessionId: 'alias', branch: alias });
+  try {
+    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
+    await handlers.session_start({}, ctx);
+    assert.equal(getActiveCwd(original, 'alias'), active);
+    assert.deepEqual(notices, []);
+  } finally { setActiveCwd(original, undefined, 'alias'); await rm(home, { recursive: true, force: true }); }
 });
 
 test('session switches clear the prior routing entry without clearing another session', async () => {
@@ -125,8 +151,7 @@ test('routing identities stay distinct as sessions and directories interleave', 
 });
 
 test('directory tools with no path default to the active checkout while read keeps its own default', async () => {
-  const original = await realpath(await mkdtemp(join(tmpdir(), 'pi-route-dir-origin-')));
-  const active = await realpath(await mkdtemp(join(tmpdir(), 'pi-route-dir-active-')));
+  const { home, original, active } = await checkoutFixture('pi-route-dir-origin-');
   const handlers: Record<string, (...args: any[]) => any> = {};
   const { ctx } = fakeCtx({ cwd: original, sessionId: 'dir-tools', branch: active, hasUI: false });
   try {
@@ -140,7 +165,7 @@ test('directory tools with no path default to the active checkout while read kee
     }
     assert.deepEqual(routed, { grep: active, find: active, ls: active, read: undefined });
     await handlers.session_shutdown({}, ctx);
-  } finally { await rm(original, { recursive: true, force: true }); await rm(active, { recursive: true, force: true }); }
+  } finally { await rm(home, { recursive: true, force: true }); }
 });
 
 test('a saved checkout that no longer exists falls back to the original directory with a warning', async () => {
@@ -150,7 +175,7 @@ test('a saved checkout that no longer exists falls back to the original director
   try {
     worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
     await handlers.session_start({}, ctx);
-    assert.deepEqual({ active: getActiveCwd(home, 'stale'), notice: notices.at(-1) }, { active: home, notice: 'Saved worktree no longer exists; using original session directory' });
+    assert.deepEqual({ active: getActiveCwd(home, 'stale'), notice: notices.at(-1) }, { active: home, notice: 'Saved worktree is unavailable or invalid; using original session directory' });
     await handlers.session_shutdown({}, ctx);
   } finally { await rm(home, { recursive: true, force: true }); }
 });

@@ -139,6 +139,28 @@ test('discovery survives a lock directory that does not exist yet', async () => 
   } finally { await link.stop(); await ide.close(); await rm(parent, { recursive: true, force: true }); }
 });
 
+test('discovery survives replacement of an already watched lock directory', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
+  const parent = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const dir = join(parent, 'ide');
+  await mkdir(dir);
+  await writeFile(join(dir, `${ide.port()}.lock`), lockFile({ workspaceFolders: ['/elsewhere'] }));
+  let initialLockRead!: () => void;
+  const initialScan = new Promise<void>(resolve => { initialLockRead = resolve; });
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 60_000, alive: () => { initialLockRead(); return true; } });
+  try {
+    link.start();
+    await initialScan;
+    assert.equal(link.connected, false);
+    await rm(dir, { recursive: true });
+    await mkdir(dir);
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
+    await until(() => link.connected, 2000);
+    assert.equal(link.state.port, ide.port());
+  } finally { await link.stop(); await ide.close(); await rm(parent, { recursive: true, force: true }); }
+});
+
 test('wrong token is refused and never reported as connected', async () => {
   const ide = fakeIde();
   await once(ide.server, 'listening');

@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { appendFileSync, watch, type FSWatcher } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import type WebSocket from 'ws';
 
 /** `ws` costs ~17 ms and ~12 MB; load it only once an editor is actually there. */
@@ -77,6 +77,7 @@ export class IdeLink {
   private started = false;
   private timer?: NodeJS.Timeout;
   private watcher?: FSWatcher;
+  private parentWatcher?: FSWatcher;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private selection?: Selection;
@@ -87,14 +88,20 @@ export class IdeLink {
   get state(): LinkState { return { connected: this.ready, ideName: this.lock?.ideName, port: this.lock?.port, selection: this.selection, mentions: this.mentions.length }; }
   get connected(): boolean { return this.ready; }
 
-  start(): void { if (this.started) return; this.started = true; this.watchLocks(); void this.attempt(); }
+  start(): void { if (this.started) return; this.started = true; this.watchParent(); this.watchLocks(); void this.attempt(); }
   async stop(): Promise<void> {
     this.started = false;
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     this.watcher?.close(); this.watcher = undefined;
+    this.parentWatcher?.close(); this.parentWatcher = undefined;
     const socket = this.socket;
     this.drop(new Error('IDE link stopped'));
-    if (socket && socket.readyState !== CLOSED) await new Promise<void>(done => { socket.once('close', () => done()); socket.close(); setTimeout(() => { socket.terminate(); done(); }, 500).unref(); });
+    if (socket && socket.readyState !== CLOSED) await new Promise<void>(done => {
+      const timeout = setTimeout(() => { socket.terminate(); done(); }, 500);
+      timeout.unref();
+      socket.once('close', () => { clearTimeout(timeout); done(); });
+      socket.close();
+    });
   }
   reconnect(): void { const socket = this.socket; this.drop(new Error('reconnecting')); socket?.terminate(); void this.attempt(); }
   takeMentions(): Mention[] { const taken = this.mentions; this.mentions = []; if (taken.length) this.emit(); return taken; }
@@ -130,19 +137,50 @@ export class IdeLink {
         .catch(error => { trace?.(`initialize failed ${error.message}`); socket.terminate(); });
     });
   }
-  /** Discovery is woken by the lock directory watch; schedule()'s poll only covers a directory that cannot be watched (it may not exist yet, and some filesystems do not report changes). */
+  /** The parent watch detects replacement of the lock directory, whose old watcher stays on the deleted inode. */
+  private watchParent(): void {
+    if (this.parentWatcher) return;
+    const dir = this.options.lockDir ?? defaultLockDir();
+    try {
+      const watcher = watch(dirname(dir), { persistent: false }, (event, name) => {
+        if (!this.started || event !== 'rename' || (name && name !== basename(dir))) return;
+        trace?.(`parent watch ${event} ${name}`);
+        this.watcher?.close(); this.watcher = undefined;
+        this.watchLocks();
+        if (!this.socket) {
+          if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
+          this.schedule(200);
+        }
+      });
+      this.parentWatcher = watcher;
+      watcher.on('error', error => {
+        trace?.(`parent watch error ${error.message}`);
+        if (this.parentWatcher !== watcher) return;
+        watcher.close(); this.parentWatcher = undefined;
+        this.schedule();
+      });
+    } catch { /* parent missing or unwatchable: schedule() polls until it can be watched */ }
+  }
+  /** Discovery is woken by the lock directory watch; schedule() polls while either required watch is unavailable. */
   private watchLocks(): void {
     if (this.watcher) return;
     try {
-      this.watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (event, name) => { trace?.(`watch ${event} ${name} socket=${!!this.socket} timer=${!!this.timer}`); if (!this.started || this.socket || (name && !name.endsWith('.lock'))) return; if (this.timer) { clearTimeout(this.timer); this.timer = undefined; } this.schedule(200); });
-      this.watcher.on('error', error => { trace?.(`watch error ${error.message}`); this.watcher?.close(); this.watcher = undefined; });
+      const watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (event, name) => { trace?.(`watch ${event} ${name} socket=${!!this.socket} timer=${!!this.timer}`); if (!this.started || this.socket || (name && !name.endsWith('.lock'))) return; if (this.timer) { clearTimeout(this.timer); this.timer = undefined; } this.schedule(200); });
+      this.watcher = watcher;
+      watcher.on('error', error => {
+        trace?.(`watch error ${error.message}`);
+        if (this.watcher !== watcher) return;
+        watcher.close(); this.watcher = undefined;
+        this.schedule();
+      });
     } catch { /* directory missing: the poll handles it and a later attempt retries the watch */ }
   }
   private schedule(delay?: number): void {
     trace?.(`schedule ${delay ?? 'default'} timer=${!!this.timer} watcher=${!!this.watcher}`);
     if (!this.started || this.timer) return;
+    if (!this.parentWatcher) this.watchParent();
     if (!this.watcher) this.watchLocks();
-    if (delay === undefined) { if (this.watcher) return; delay = this.options.retryMs ?? 15000; }
+    if (delay === undefined) { if (this.parentWatcher && this.watcher) return; delay = this.options.retryMs ?? 15000; }
     this.timer = setTimeout(() => { this.timer = undefined; void this.attempt(); }, delay);
     this.timer.unref();
   }

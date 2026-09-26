@@ -30,8 +30,8 @@ export async function readLocks(dir: string, alive: (pid: number) => boolean = p
   try { names = await readdir(dir); } catch { return []; }
   const locks: Lock[] = [];
   for (const name of names) {
-    const port = /^(\d+)\.lock$/.exec(name)?.[1];
-    if (!port) continue;
+    const port = Number(/^(\d+)\.lock$/.exec(name)?.[1]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
     try {
       const file = join(dir, name);
       const [raw, info] = await Promise.all([readFile(file, 'utf8'), stat(file)]);
@@ -39,7 +39,7 @@ export async function readLocks(dir: string, alive: (pid: number) => boolean = p
       const data = JSON.parse(raw) as Partial<Lock> & { transport?: string; pid?: number };
       if (data.transport !== 'ws' || typeof data.authToken !== 'string' || !Number.isInteger(data.pid) || !Array.isArray(data.workspaceFolders)) continue;
       if (!alive(data.pid as number)) continue;
-      locks.push({ port: Number(port), authToken: data.authToken, workspaceFolders: data.workspaceFolders.filter((f): f is string => typeof f === 'string').map(f => trimSep(resolve(f))), ideName: typeof data.ideName === 'string' ? data.ideName : 'IDE', mtimeMs: info.mtimeMs });
+      locks.push({ port, authToken: data.authToken, workspaceFolders: data.workspaceFolders.filter((f): f is string => typeof f === 'string').map(f => trimSep(resolve(f))), ideName: typeof data.ideName === 'string' ? data.ideName : 'IDE', mtimeMs: info.mtimeMs });
     } catch { /* unreadable or partial lock file: skip it */ }
   }
   return locks;
@@ -117,7 +117,14 @@ export class IdeLink {
     const WebSocket = await loadWs();
     if (!this.started || this.socket) return;
     this.lock = lock;
-    const socket = new WebSocket(`ws://127.0.0.1:${lock.port}`, { headers: { 'x-claude-code-ide-authorization': lock.authToken }, handshakeTimeout: 3000, perMessageDeflate: false, skipUTF8Validation: true });
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(`ws://127.0.0.1:${lock.port}`, { headers: { 'x-claude-code-ide-authorization': lock.authToken }, handshakeTimeout: 3000, perMessageDeflate: false, skipUTF8Validation: true });
+    } catch {
+      this.lock = undefined;
+      this.schedule(this.options.retryMs ?? 15000);
+      return;
+    }
     this.socket = socket;
     socket.on('message', data => this.receive(data.toString()));
     socket.on('error', error => trace?.(`socket error ${error.message}`));

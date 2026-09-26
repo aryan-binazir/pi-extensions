@@ -60,10 +60,50 @@ test('fast-mode aliases resolve to the base model for direct and workflow childr
 test('cancel all stops current children and leaves the orchestrator usable', async () => fixture(async ({execute, settle}: any) => {
   await Promise.all([execute('subagent', {task: 'hold', preset: 'reader'}), execute('subagent', {task: 'hold', preset: 'reader'})]);
   const cancelled = await execute('subagent_cancel', {id: 'all'});
-  assert.equal(cancelled.details.count, 2);
+  assert.deepEqual(cancelled.details, {cancelled: true, count: 2});
   assert.ok((await execute('subagent_status')).details.every((task: any) => task.status === 'cancelled'));
   const next = await execute('subagent', {task: 'next', preset: 'reader'});
   assert.equal((await settle(next.details.id)).status, 'succeeded');
+}));
+
+test('cancel all reports cancellation of a workflow waiting for source approval', async () => fixture(async ({execute, ctx}: any) => {
+  let entered!: () => void;
+  const editorOpened = new Promise<void>(resolve => { entered = resolve; });
+  ctx.ui.editor = () => { entered(); return new Promise<string>(() => {}); };
+  const workflow = execute('workflow', {source: 'return 1;'}).then(() => 'resolved', (error: unknown) => String(error));
+  await editorOpened;
+
+  const cancelled = await execute('subagent_cancel', {id: 'all'});
+  assert.deepEqual(cancelled.details, {cancelled: true, count: 0});
+  assert.match(await workflow, /Workflow aborted/);
+}));
+
+test('/subagents cancel all reports cancellation of a workflow waiting for source approval', async () => fixture(async ({execute, commands, ctx, uiNotices}: any) => {
+  let entered!: () => void;
+  const editorOpened = new Promise<void>(resolve => { entered = resolve; });
+  ctx.ui.editor = () => { entered(); return new Promise<string>(() => {}); };
+  const workflow = execute('workflow', {source: 'return 1;'}).then(() => 'resolved', (error: unknown) => String(error));
+  await editorOpened;
+
+  await commands.get('subagents').handler('cancel all', ctx);
+  assert.equal(uiNotices.at(-1), 'Cancellation completed');
+  assert.match(await workflow, /Workflow aborted/);
+}));
+
+test('cancel all reports no cancellation when truly idle', async () => fixture(async ({execute, commands, ctx, uiNotices}: any) => {
+  assert.deepEqual((await execute('subagent_cancel', {id: 'all'})).details, {cancelled: false, count: 0});
+  await commands.get('subagents').handler('cancel all', ctx);
+  assert.equal(uiNotices.at(-1), 'No active task with that ID');
+}));
+
+test('cancel all counts workflow children once alongside direct children', async () => fixture(async ({execute}: any) => {
+  const workflow = execute('workflow', {source: "return await api.spawn({task:'hold',preset:'reader'},'stage');"}).then(() => 'resolved', (error: unknown) => String(error));
+  await execute('subagent', {task: 'hold', preset: 'reader'});
+  await until(async () => (await execute('subagent_status')).details.length === 2, 'workflow and direct children to appear');
+
+  assert.deepEqual((await execute('subagent_cancel', {id: 'all'})).details, {cancelled: true, count: 2});
+  assert.match(await workflow, /Workflow aborted/);
+  assert.deepEqual((await execute('subagent_status')).details.map((task: any) => task.status), ['cancelled', 'cancelled']);
 }));
 
 test('a workflow deadline prevents a late editor submission from opening confirmation', async () => fixture(async ({execute, ctx}: any) => {

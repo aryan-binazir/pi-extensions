@@ -94,6 +94,19 @@ test('restore accepts an alias to the registered checkout', async () => {
   } finally { setActiveCwd(original, undefined, 'alias'); await rm(home, { recursive: true, force: true }); }
 });
 
+test('restore keeps routing to a valid checkout after it is detached', async () => {
+  const { home, original, active } = await checkoutFixture('pi-route-detached-');
+  execFileSync('git', ['-C', active, 'checkout', '--detach'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const handlers: Record<string, (...args: any[]) => any> = {};
+  const { ctx, notices } = fakeCtx({ cwd: original, sessionId: 'detached', branch: active });
+  try {
+    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
+    await handlers.session_start({}, ctx);
+    assert.equal(getActiveCwd(original, 'detached'), active);
+    assert.deepEqual(notices, []);
+  } finally { setActiveCwd(original, undefined, 'detached'); await rm(home, { recursive: true, force: true }); }
+});
+
 test('session switches clear the prior routing entry without clearing another session', async () => {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'pi-route-switch-')));
   const handlers: Record<string, (...args: any[]) => any> = {};

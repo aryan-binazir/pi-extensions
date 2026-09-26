@@ -31,7 +31,7 @@ export class Worktrees {
       const common = await realpath(await this.run('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']));
       const checkoutCommon = await realpath(await this.run('git', ['-C', checkout.path, 'rev-parse', '--path-format=absolute', '--git-common-dir']));
       if (checkoutCommon !== common) return false;
-      if (await this.run('git', ['-C', checkout.path, 'symbolic-ref', '--quiet', 'HEAD']) !== `refs/heads/${checkout.branch}`) return false;
+      if (await this.run('git', ['-C', checkout.path, 'rev-parse', '--abbrev-ref', 'HEAD']) !== (checkout.branch || 'HEAD')) return false;
       const gitdir = await realpath(await this.run('git', ['-C', checkout.path, 'rev-parse', '--absolute-git-dir']));
       if (checkout.primary) return gitdir === common && await realpath(join(checkout.path, '.git')) === common;
       if (dirname(gitdir) !== join(common, 'worktrees')) return false;

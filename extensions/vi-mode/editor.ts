@@ -594,9 +594,22 @@ export class ViEditor extends CustomEditor {
       data = this.pasteOpening + data;
       this.pasteOpening = "";
     }
-    if (data.length > 1 && data.length < 6 && "\x1b[200~".startsWith(data)) {
-      this.pasteOpening = data;
-      return;
+    if (this.paste === undefined) {
+      const opening = "\x1b[200~";
+      const opener = data.indexOf(opening);
+      if (opener > 0) {
+        this.handleInput(data.slice(0, opener));
+        this.handleInput(data.slice(opener));
+        return;
+      }
+      if (opener < 0) {
+        for (let length = Math.min(data.length, opening.length - 1); length > 1; length--) {
+          if (!opening.startsWith(data.slice(-length))) continue;
+          if (data.length > length) this.handleInput(data.slice(0, -length));
+          this.pasteOpening = data.slice(-length);
+          return;
+        }
+      }
     }
     // Buffer a bracketed paste across input chunks before interpreting any vi keys.
     if (this.paste !== undefined || data.startsWith("\x1b[200~")) {

@@ -39,11 +39,18 @@ test('a lock that makes WebSocket construction throw does not crash the host', a
   try {
     await writeFile(join(dir, '12345.lock'), lockFile({ authToken: 'bad\nheader' }));
     const source = `
+      import assert from 'node:assert/strict';
       import { IdeLink } from ${JSON.stringify(new URL('./link.ts', import.meta.url).href)};
-      const link = new IdeLink({ cwd: '/w', lockDir: process.argv[1], alive: () => true, retryMs: 100 });
+      let scans = 0;
+      const link = new IdeLink({ cwd: '/w', lockDir: process.argv[1], alive: () => { scans++; return true; }, retryMs: 100 });
       link.start();
-      await new Promise(resolve => setTimeout(resolve, 150));
-      await link.stop();
+      try {
+        const deadline = Date.now() + 2000;
+        while (scans < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.ok(scans >= 2, 'constructor failure schedules a retry');
+        assert.equal(link.state.port, undefined, 'failed construction clears the chosen lock');
+        assert.equal(link.connected, false);
+      } finally { await link.stop(); }
     `;
     await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', source, dir]);
   } finally { await rm(dir, { recursive: true, force: true }); }

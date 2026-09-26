@@ -103,10 +103,14 @@ test('discovery survives replacement of an already watched lock directory', asyn
   const parent = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const dir = join(parent, 'ide');
   await mkdir(dir);
-  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 60_000, alive: () => true });
+  await writeFile(join(dir, `${ide.port()}.lock`), lockFile({ workspaceFolders: ['/elsewhere'] }));
+  let initialLockRead!: () => void;
+  const initialScan = new Promise<void>(resolve => { initialLockRead = resolve; });
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 60_000, alive: () => { initialLockRead(); return true; } });
   try {
     link.start();
-    await new Promise(r => setTimeout(r, 100));
+    await initialScan;
+    assert.equal(link.connected, false);
     await rm(dir, { recursive: true });
     await mkdir(dir);
     await writeFile(join(dir, `${ide.port()}.lock`), lockFile());

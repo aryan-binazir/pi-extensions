@@ -81,7 +81,7 @@ reviews. Create `~/.pi/agent/pi-auto-permissions/config.json` (or under your
   "rules": ["$defaults"],
   "reviewer": {
     "provider": "openai-codex",
-    "model": "gpt-5.6-luna",
+    "model": "gpt-6-luna",
     "reasoningEffort": "low",
     "timeoutMs": 60000,
     "prefilter": false
@@ -98,7 +98,7 @@ reviews. Create `~/.pi/agent/pi-auto-permissions/config.json` (or under your
 Review is then on by default across sessions: every Bash command goes through the
 rules and, absent a hard deny or an explicit bypass/standing approval, Luna review
 at low reasoning. Authenticate to `openai-codex` with `/login` and make sure
-`gpt-5.6-luna` is available; the main agent can use a different model. The
+`gpt-6-luna` is available; the main agent can use a different model. The
 prefilter stays off because it uses minimal reasoning whatever the full-review
 setting says. `guardianPolicy` takes natural-language preferences: trusted
 infrastructure in `environment`, scoped exceptions in `allow`, restrictions

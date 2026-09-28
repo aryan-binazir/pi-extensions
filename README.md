@@ -24,8 +24,9 @@ load; helpers and tests are not extensions.
 3. **Install external plugins separately**, if wanted:
    - [MCP / Linear](docs/mcp-plugin-setup.md): `pi-mcp-adapter`.
    - [Bash approvals](docs/agent-setup.md#automatic-bash-permissions-external-package):
-     Hank Warren's Auto Permissions. This repo's status extension is only its
-     display companion, not the approval engine.
+     Hank Warren's Auto Permissions, configured with `openai-codex/gpt-6-luna`
+     at low reasoning. This repo's status extension is only its display companion,
+     not the approval engine.
 4. **Set up Guard**, if wanted: follow [Guard setup](#guard-setup-for-agents) to
    link the tracked rules file directly. Installation alone
    does not enable the rules.

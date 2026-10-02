@@ -1,6 +1,6 @@
-# MCP permissions
+# MCP configuration
 
-When configuring or repairing MCP access, follow [the external adapter setup guide](docs/mcp-plugin-setup.md). Ar's standing preference is `mcpServers.linear.approveTools: false` in the user-scoped MCP config, allowing all Linear calls, including mutations and deletions, without adapter prompts. Preserve other servers' approval settings; configure the external plugin rather than patching its installed code. Back up the config before editing and ask Ar to run `/reload` afterward.
+Use Pi's built-in MCP support. Keep personal servers and credentials in the user-scoped `~/.pi/agent/mcp.json`, preserve unrelated server entries when editing it, and ask Ar to run `/reload` afterward.
 
 # Verification
 

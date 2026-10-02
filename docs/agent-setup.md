@@ -4,10 +4,9 @@
 
 ## Global system-prompt append (agent setup)
 
-The ordered setup checklist — install, link, external plugins, reload — is in
-the [README](../README.md#agent-setup-checklist). This page covers the three
-steps that need more than one line: the append-file link, and the two external
-packages.
+The ordered setup checklist — install, link, optional Bash approvals, reload — is
+in the [README](../README.md#agent-setup-checklist). This page covers the two
+steps that need more than one line: the append-file link and Bash approvals.
 
 [`APPEND_SYSTEM.md`](../APPEND_SYSTEM.md) is the version-controlled source for shared
 cross-project instructions, including editable subagent selection guidance.
@@ -50,13 +49,6 @@ command to discard existing instructions. Verify the link as above, then run
 `/reload` in Pi or restart it. Edit the repository source, not a separate copy;
 future source updates are picked up on reload. If the checkout moves, update the
 link. This is an explicit local setup step, not an automatic install hook.
-
-## MCP / Linear (external package)
-
-General MCP connectivity uses the separately installed free
-[`pi-mcp-adapter`](https://www.npmjs.com/package/pi-mcp-adapter). Its
-installation, configuration, approval policy, footer settings and Linear
-authentication are documented in [MCP / Linear setup](mcp-plugin-setup.md).
 
 ## Automatic Bash permissions (external package)
 

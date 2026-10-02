@@ -1,6 +1,6 @@
 # Pi extensions
 
-Independent tools and workflows for Pi 0.85.1. Enable only what you use.
+Independent tools and workflows for Pi 0.99.1. Enable only what you use.
 
 ## Install
 
@@ -21,16 +21,16 @@ load; helpers and tests are not extensions.
    this checkout's [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) into
    `~/.pi/agent/APPEND_SYSTEM.md`. Use a stable checkout; preserve existing files.
    Package installation does **not** create the link.
-3. **Install external plugins separately**, if wanted:
-   - [MCP / Linear](docs/mcp-plugin-setup.md): `pi-mcp-adapter`.
-   - [Bash approvals](docs/agent-setup.md#automatic-bash-permissions-external-package):
-     Hank Warren's Auto Permissions, configured with `openai-codex/gpt-6-luna`
-     at low reasoning. This repo's status extension is only its display companion,
-     not the approval engine.
+3. **Install Bash approvals separately**, if wanted. Follow
+   [Automatic Bash permissions](docs/agent-setup.md#automatic-bash-permissions-external-package)
+   to configure Hank Warren's Auto Permissions with `openai-codex/gpt-6-luna`
+   at low reasoning. This repo's status extension is only its display companion,
+   not the approval engine.
 4. **Set up Guard**, if wanted: follow [Guard setup](#guard-setup-for-agents) to
    link the tracked rules file directly. Installation alone
    does not enable the rules.
-5. **Reload Pi.** Complete provider/server authentication where required.
+5. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
+   servers through its built-in MCP support and `~/.pi/agent/mcp.json`.
 
 With Subagents enabled, the system prompt includes **both** the editable selection
 instructions from `APPEND_SYSTEM.md` and the effective profile catalog added by the

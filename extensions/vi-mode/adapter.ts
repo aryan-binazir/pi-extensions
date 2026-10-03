@@ -227,11 +227,12 @@ export function installEditorHandoff(): void {
     const restore = (next: string) => {
       const setText = previousSetText();
       if (this.editor === source && next === text) {
+        const owner = source.setText;
         source.setText = setText;
         try {
           restoreRawDraft(source, text, payloads);
         } finally {
-          if (source.setText === setText) source.setText = restore;
+          if (source.setText === setText) source.setText = owner;
         }
       } else {
         setText.call(source, next);

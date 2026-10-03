@@ -190,43 +190,50 @@ for (const timing of ['after close', 'during dispose']) {
   });
 }
 for (const order of ['first then second', 'second then first']) {
-  test(`overlapping inline custom UI preserves the mixed draft when closing ${order}`, async () => {
-    const h = host();
-    paste(h.app.editor);
-    keys(h.app.editor, 'typed'.repeat(220));
-    const source = h.app.editor;
-    const visible = source.getText();
-    const expanded = payload + 'typed'.repeat(220);
-    const setText = source.setText;
-    let closeFirst = () => {}, closeSecond = () => {};
-    try {
-      const first = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
-        closeFirst = () => done(undefined);
-        return new Container();
-      });
-      const second = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
-        closeSecond = () => done(undefined);
-        return new Container();
-      });
-      await new Promise(resolve => setTimeout(resolve, 0));
-      const dialogs = order === 'first then second'
-        ? [[closeFirst, first], [closeSecond, second]] as const
-        : [[closeSecond, second], [closeFirst, first]] as const;
-      for (const [close, pending] of dialogs) {
-        close();
-        await pending;
-        assert.equal(source.getText(), visible);
-        assert.equal(source.getExpandedText(), expanded);
+  for (const varied of [false, true]) {
+    test(`overlapping inline custom UI preserves ${varied ? 'distinct' : 'identical'} drafts when closing ${order}`, async () => {
+      const h = host();
+      paste(h.app.editor);
+      keys(h.app.editor, 'typed'.repeat(220));
+      const source = h.app.editor;
+      const visible = source.getText();
+      const expanded = payload + 'typed'.repeat(220);
+      const setText = source.setText;
+      let closeFirst = () => {}, closeSecond = () => {};
+      try {
+        const first = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
+          closeFirst = () => done(undefined);
+          return new Container();
+        });
+        if (varied) keys(source, '!');
+        const secondVisible = source.getText();
+        const secondExpanded = expanded + (varied ? '!' : '');
+        const second = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
+          closeSecond = () => done(undefined);
+          return new Container();
+        });
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const dialogs = order === 'first then second'
+          ? [[closeFirst, first, visible, expanded], [closeSecond, second, secondVisible, secondExpanded]] as const
+          : [[closeSecond, second, secondVisible, secondExpanded], [closeFirst, first, visible, expanded]] as const;
+        let finalExpanded = '';
+        for (const [close, pending, savedVisible, savedExpanded] of dialogs) {
+          close();
+          await pending;
+          assert.equal(source.getText(), savedVisible);
+          assert.equal(source.getExpandedText(), savedExpanded);
+          finalExpanded = savedExpanded;
+        }
+        assert.equal(source.setText, setText);
+        let submitted = '';
+        source.onSubmit = (text: string) => { submitted = text; };
+        source.handleInput('\r');
+        assert.equal(submitted, finalExpanded.replace(/\r/g, '').trim());
+      } finally {
+        h.emit('session_shutdown');
       }
-      assert.equal(source.setText, setText);
-      let submitted = '';
-      source.onSubmit = (text: string) => { submitted = text; };
-      source.handleInput('\r');
-      assert.equal(submitted, expanded.replace(/\r/g, '').trim());
-    } finally {
-      h.emit('session_shutdown');
-    }
-  });
+    });
+  }
 }
 test('inline custom UI leaves a replacement editor owned by Pi', async () => {
   const h = host();

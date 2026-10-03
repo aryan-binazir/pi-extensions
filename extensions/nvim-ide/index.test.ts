@@ -73,8 +73,8 @@ test('a connected editor registers its tools and reports the selection in the st
     await settle();
     assert.equal(status.length, paints, 'identical selection does not repaint');
 
-    ide.broadcast('at_mentioned', { filePath: join(project, 'a.ts'), lineStart: 3, lineEnd: 4 });
-    ide.broadcast('at_mentioned', { filePath: join(project, 'missing.ts'), lineStart: 1, lineEnd: 1 });
+    ide.broadcast('at_mentioned', { filePath: join(project, 'a.ts'), lineStart: 2, lineEnd: 3 });
+    ide.broadcast('at_mentioned', { filePath: join(project, 'missing.ts'), lineStart: 0, lineEnd: 0 });
     await settle();
     const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
     assert.match(turn.systemPrompt, /^BASE\n\n# Editor context \(Neovim\)/);
@@ -302,9 +302,28 @@ test('/vim reconnect drops and re-establishes the link', async () => {
 test('a mention past the line cap is clipped in the body but keeps the requested range in its header', async () => {
   await withConnectedIde(async ({ ide, project, fire, ctx }) => {
     await writeFile(join(project, 'big.ts'), Array.from({ length: 2500 }, (_, i) => `L${i + 1}`).join('\n'));
-    ide.broadcast('at_mentioned', { filePath: join(project, 'big.ts'), lineStart: 1, lineEnd: 2500 });
+    ide.broadcast('at_mentioned', { filePath: join(project, 'big.ts'), lineStart: 0, lineEnd: 2499 });
     await settle();
     const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
     assert.match(turn.systemPrompt, /User sent from editor: .*big\.ts lines 1-2500\n```\n(?:L\d+\n){1999}L2000\n```/);
+  });
+});
+
+test('ClaudeCodeSend includes exactly the selected rows, including row zero', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    for (const { wire, header, text } of [
+      { wire: { lineStart: 0, lineEnd: 0 }, header: '1-1', text: 'line1' },
+      { wire: { lineStart: 1, lineEnd: 1 }, header: '2-2', text: 'line2' },
+      { wire: { lineStart: 1, lineEnd: 2 }, header: '2-3', text: 'line2\nline3' },
+      { wire: { lineStart: 0, lineEnd: 2 }, header: '1-3', text: 'line1\nline2\nline3' },
+      { wire: { lineStart: 0 }, header: '1-1', text: 'line1' },
+    ]) {
+      const filePath = join(project, 'a.ts');
+      ide.broadcast('at_mentioned', { filePath, ...wire });
+      await settle();
+      const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
+      assert.equal(turn.systemPrompt.slice(turn.systemPrompt.indexOf('User sent from editor:')),
+        `User sent from editor: ${filePath} lines ${header}\n\`\`\`\n${text}\n\`\`\``);
+    }
   });
 });

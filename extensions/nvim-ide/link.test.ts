@@ -98,7 +98,7 @@ test('connects with the token, tracks selection and mentions, calls tools, recon
     await until(() => link.state.selection?.filePath === '/w/project/b.ts');
     assert.equal(link.state.selection?.isEmpty, true);
     ide.broadcast('selection_changed', { text: 'bad', filePath: 7 });
-    ide.broadcast('at_mentioned', { filePath: '/w/project/c.ts', lineStart: 3, lineEnd: 9 });
+    ide.broadcast('at_mentioned', { filePath: '/w/project/c.ts', lineStart: 2, lineEnd: 8 });
     ide.broadcast('at_mentioned', { filePath: '/w/project', lineStart: null, lineEnd: null });
     await until(() => link.state.mentions === 2);
     assert.equal(link.state.selection?.filePath, '/w/project/b.ts', 'a malformed selection_changed leaves the last good selection in place');
@@ -313,4 +313,65 @@ test('stop during discovery and stop twice are clean, and start after stop resum
     await until(() => link.connected, 2000);
     assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a mention sent before initialize identifies the server still includes row zero', async () => {
+  const ide = fakeIde(socket => socket.on('message', raw => {
+    if (JSON.parse(raw.toString()).method === 'initialize') socket.send(JSON.stringify({
+      jsonrpc: '2.0', method: 'at_mentioned', params: { filePath: '/w/a.ts', lineStart: 0, lineEnd: 0 },
+    }));
+  }));
+  await once(ide.server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected && link.state.mentions === 1);
+    assert.deepEqual(link.takeMentions(), [{ filePath: '/w/a.ts', lineStart: 1, lineEnd: 1 }]);
+  } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('mention row conversion follows initialized identity across reconnects, not the lock label', async () => {
+  let serverName: string | undefined = 'claudecode-neovim';
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: (info: { req: { headers: Record<string, unknown> } }) => info.req.headers['x-claude-code-ide-authorization'] === token });
+  server.on('connection', socket => socket.on('message', raw => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { serverInfo: { name: serverName } } }));
+  }));
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${address.port}.lock`), lockFile({ ideName: 'IDE' }));
+    link.start();
+    for (const name of ['claudecode-neovim', 'another-ide', undefined]) {
+      serverName = name;
+      if (name !== 'claudecode-neovim') {
+        await writeFile(join(dir, `${address.port}.lock`), lockFile({ ideName: 'Neovim' }));
+        link.reconnect();
+      }
+      await until(() => link.connected);
+      for (const params of [
+        { lineStart: 0, lineEnd: 0 },
+        { lineStart: 1, lineEnd: 2 },
+        { lineStart: 0 },
+        { lineStart: null, lineEnd: null },
+        {},
+        { lineStart: -1, lineEnd: 1.5 },
+      ]) for (const client of server.clients) client.send(JSON.stringify({ jsonrpc: '2.0', method: 'at_mentioned', params: { filePath: '/w/a.ts', ...params } }));
+      await until(() => link.state.mentions === 6);
+      const ranges = name === 'claudecode-neovim'
+        ? [[1, 1], [2, 3], [1, undefined], [undefined, undefined], [undefined, undefined], [undefined, undefined]]
+        : [[undefined, undefined], [1, 2], [undefined, undefined], [undefined, undefined], [undefined, undefined], [undefined, undefined]];
+      assert.deepEqual(link.takeMentions(), ranges.map(([lineStart, lineEnd]) => ({ filePath: '/w/a.ts', lineStart, lineEnd })));
+    }
+  } finally {
+    await link.stop();
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
 });

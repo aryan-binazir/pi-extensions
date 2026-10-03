@@ -43,7 +43,7 @@ export default function worktree(pi: ExtensionAPI): void {
           const trees = new Worktrees(ctx.cwd);
           const checkout = (await trees.list()).find(item => resolve(item.path) === resolve(path) || item.path === canonical);
           if (!checkout || !await trees.matches(checkout)) throw new Error('Saved checkout is unavailable');
-          if (!mutating) setActiveCwd(ctx.cwd, canonical, id);
+          if (!mutating && ctx.isIdle()) setActiveCwd(ctx.cwd, canonical, id);
         }
       }
       catch { if (ctx.hasUI) ctx.ui.notify('Saved worktree is unavailable or invalid; using original session directory', 'warning'); }

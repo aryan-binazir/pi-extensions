@@ -595,3 +595,40 @@ test('a removal that becomes dirty after approval stays detached and permits a l
     });
   } finally { h.release(); await rm(home, { recursive: true, force: true }); }
 });
+
+test('session-tree checkout opening preserves a turn started during Git validation', { timeout: 15_000 }, async () => {
+  const { home, repo } = await repoFixture('pi-worktree-sdk-restore-');
+  try {
+    await withHome(home, async () => {
+      await heldSdkSession(home, repo, async (session, held) => {
+        const runner = session.extensionRunner!;
+        runner.setUIContext({ ...runner.getUIContext(), notify() {}, setStatus() {} }, 'tui');
+        await session.prompt('/worktree task');
+        const saved = session.sessionManager.getBranch().find(entry => entry.type === 'custom' && entry.customType === 'agent-workflows:worktree');
+        assert.ok(saved);
+        await session.prompt('/worktree original');
+        await withPausedGit(home, ['worktree', 'list'], async gate => {
+          const navigation = session.navigateTree(saved.id);
+          await gate.wait();
+          const entriesBefore = session.sessionManager.getBranch().filter(entry => entry.type === 'custom');
+          const turn = session.prompt('Hold this turn');
+          try {
+            await held.entered;
+            assert.equal(session.isIdle, false);
+            await gate.release();
+            assert.equal((await navigation).cancelled, false);
+            assert.equal(session.isStreaming, true);
+            assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), repo);
+            assert.ok(session.systemPrompt.includes(`Active worktree directory: ${repo}.`));
+            assert.deepEqual(session.sessionManager.getBranch().filter(entry => entry.type === 'custom'), entriesBefore);
+            const bash = session.agent.state.tools.find(tool => tool.name === 'bash');
+            assert.ok(bash);
+            assert.deepEqual((await bash.execute('restore-pwd', { command: 'pwd' })).content, [{ type: 'text', text: `${repo}\n` }]);
+          } finally { await gate.release(); held.finish(); await navigation; await turn; }
+          await session.prompt('/worktree task');
+          assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), join(home, 'repos/.worktrees/repo/task'));
+        });
+      });
+    });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});

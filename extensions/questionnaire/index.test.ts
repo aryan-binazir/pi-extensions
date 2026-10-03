@@ -1,5 +1,6 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { validateToolArguments } from "@earendil-works/pi-ai";
+import { type Component, type Terminal, CURSOR_MARKER, TuiMainScreen, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import assert from "node:assert/strict";
 import test from "node:test";
 import questionnaire from "./index.ts";
@@ -44,6 +45,7 @@ function host(onEmit?: (value: any) => void) {
     },
   };
   return {
+    tool,
     terminal,
     events,
     hooks,
@@ -361,6 +363,72 @@ test("long tabs keep every active question and Submit visible", async () => {
   }
 });
 
+test("newline tab labels keep real TUI rows aligned without changing prompts or answer IDs", async () => {
+  for (const width of [80, 40, 32]) {
+    const h = host();
+    const writes: string[] = [];
+    const terminal = {
+      columns: width, rows: 24, kittyProtocolActive: false,
+      write: (data: string) => { writes.push(data); },
+      start() {}, stop() {}, hideCursor() {}, showCursor() {}, moveBy() {},
+      clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {},
+      setProgress() {}, async drainInput() {},
+    } satisfies Terminal;
+    const tui = new TuiMainScreen(terminal, false);
+    let component: Component | undefined;
+    h.ctx.ui.custom = (factory: any) => new Promise((resolve) => {
+      component = factory(tui, { fg: (_: string, text: string) => text }, {}, resolve);
+      assert.ok(component);
+      tui.addChild(component);
+      tui.setFocus(component);
+    });
+    const args = validateToolArguments(h.tool, {
+      type: "toolCall", id: "newline-tabs", name: "questionnaire",
+      arguments: { questions: [
+        { ...question("first"), label: "First\n\nTwo", prompt: "Line one\nLine two" },
+        question("Fallback\nID"),
+      ] },
+    });
+    const pending = h.run(args.questions);
+    try {
+      assert.ok(component?.handleInput);
+      const checkFrame = () => {
+        tui.renderNow();
+        const rows = tui.captureRenderState().previousLines.map(stripTerminalSequences);
+        assert.ok(rows.every((row) => !/[\r\n]/.test(row)));
+        assert.ok(rows.every((row) => visibleWidth(row) <= width));
+        assert.doesNotMatch(writes.join(""), /(?<!\r)\n/);
+        return rows;
+      };
+      const initial = checkFrame();
+      assert.equal((writes.join("").match(/\n/g) ?? []).length, initial.length - 1);
+      assert.equal(tui.captureRenderState().hardwareCursorRow, initial.length - 1);
+      assert.match(initial[1], width === 80
+        ? /\[ First  Two \]   Fallback ID   Submit/
+        : /1\/3 \[ First  Two \] · Submit/);
+      assert.ok(initial.some((row) => row.includes("Line one") && !row.includes("Line two")));
+      assert.ok(initial.some((row) => row.includes("Line two") && !row.includes("Line one")));
+      writes.length = 0;
+      component.handleInput("\r");
+      assert.match(checkFrame()[1], width === 80
+        ? /\[ Fallback ID \]/
+        : /2\/3 \[ Fallback ID \] · Submit/);
+      assert.ok(writes.length > 0, "Answering must repaint the next tab");
+      component.handleInput("\r");
+      checkFrame();
+      component.handleInput("\r");
+      const result = await pending;
+      assert.equal(result.details.cancelled, false);
+      assert.deepEqual(result.details.answers.map((answer: any) => answer.id), ["first", "Fallback\nID"]);
+      assert.deepEqual(JSON.parse(result.content[0].text).answers.map((answer: any) => answer.id), ["first", "Fallback\nID"]);
+    } finally {
+      component?.handleInput?.("\x1b");
+      await pending;
+      tui.stop();
+    }
+  }
+});
+
 test("six-row terminals retain prompt, selection, editor and cancellation controls", async () => {
   const h = host();
   h.terminal.rows = 6;
@@ -572,4 +640,16 @@ test("the model receives the answers as JSON text", async () => {
   const result = h.run([question("a")]);
   h.key("\r");
   assert.equal((await result).content[0].text, '{"cancelled":false,"answers":[{"id":"a","value":"yes","label":"Yes","wasCustom":false}]}');
+});
+
+test("custom answers preserve literal paste markers inside earlier payloads", async () => {
+  const h = host();
+  const result = h.run([{ id: "literal", prompt: "Paste literal text", options: [] }]);
+  const first = "Literal marker [paste #2] " + "a".repeat(1001);
+  const second = "b".repeat(1001);
+  h.key("\r");
+  h.key(`\x1b[200~${first}\x1b[201~`);
+  h.key(`\x1b[200~${second}\x1b[201~`);
+  h.key("\r");
+  assert.equal((await result).details.answers[0].value, first + second);
 });

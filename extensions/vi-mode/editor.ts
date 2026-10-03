@@ -652,7 +652,7 @@ export class ViEditor extends CustomEditor {
       return;
     }
     data = decodeKittyPrintable(data) ?? data;
-    if ((data.length !== 1 || data.charCodeAt(0) < 32) && !matchesKey(data, "ctrl+r")) {
+    if (!/^[^\x00-\x1f]+$/u.test(data) && !matchesKey(data, "ctrl+r")) {
       this.baseInput(data);
       return;
     }
@@ -673,6 +673,12 @@ export class ViEditor extends CustomEditor {
       this.resetPending();
       this.register = '"';
       this.cursorShape();
+      return;
+    }
+    if (!/^[\x20-\x7e]$/.test(data)) {
+      this.discardArgument = false;
+      this.resetPending();
+      this.register = '"';
       return;
     }
     if (this.prefix === "i" || this.prefix === "a") {
@@ -808,9 +814,20 @@ export class ViEditor extends CustomEditor {
       return;
     }
     if (data === "v" || data === "V") {
-      this.visualScroll = 0;
-      this.mode = data === "v" ? "visual" : "line";
-      this.anchor = this.pos();
+      const mode = data === "v" ? "visual" : "line";
+      if (this.mode === mode) {
+        this.mode = "normal";
+        this.anchor = 0;
+        this.visualScroll = 0;
+        this.move(this.onGrapheme(this.pos()));
+      } else {
+        if (this.mode === "normal") {
+          this.anchor = this.pos();
+          this.visualScroll = 0;
+        }
+        this.mode = mode;
+      }
+      this.resetPending();
       this.cursorShape();
       return;
     }

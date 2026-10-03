@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { PowerKeeper, readPower, startInhibitor } from './power.ts';
+import { PowerKeeper, readPower, startInhibitor, type KeeperOptions } from './power.ts';
 import { mkdtemp,mkdir,writeFile,rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -29,6 +29,58 @@ test('Linux power distinguishes AC, battery and missing information',async()=>{
   assert.equal(await readPower('linux',dir),'ac');
   await writeFile(join(dir,'AC/online'),'0');assert.equal(await readPower('linux',dir),'battery');
   await writeFile(join(dir,'AC/online'),'garbage');assert.equal(await readPower('linux',dir),'unknown');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('programmable USB power keeps ongoing work inhibited until unplugged',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-power-usb-'));
+ let starts=0,stops=0,alive=false;
+ const keeper=new PowerKeeper({power:()=>readPower('linux',dir),start:()=>{
+  starts++;alive=true;return {alive:()=>alive,stop:async()=>{stops++;alive=false;}};
+ }});
+ try{
+  await mkdir(join(dir,'USB'));await writeFile(join(dir,'USB/type'),'USB\n');
+  await writeFile(join(dir,'USB/online'),'1\n');
+  await keeper.setAgent(true);assert.equal(starts,1);assert.equal(alive,true);
+  for(const online of ['2','3']){
+   await writeFile(join(dir,'USB/online'),`${online}\n`);await keeper.check();
+   assert.equal(alive,true,`online=${online} retains inhibition`);
+   assert.equal(starts,1);assert.equal(stops,0);
+   assert.equal(await readPower('linux',dir),'ac');
+  }
+  await writeFile(join(dir,'USB/online'),'0\n');await keeper.check();
+  assert.equal(alive,false);assert.equal(stops,1);
+ }finally{await keeper.shutdown();await rm(dir,{recursive:true,force:true});}
+});
+for(const type of ['Mains','USB','USB_C','USB_PD','USB_PD_DRP','Wireless']){
+ test(`Linux ${type} recognizes fixed and programmable power alongside offline mains`,async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'pi-power-online-'));
+  try{
+   await mkdir(join(dir,'SUPPLY'));await writeFile(join(dir,'SUPPLY/type'),type);
+   assert.equal(await readPower('linux',dir),'unknown');
+   for(const online of ['','garbage','4','-1','02','+2','2.0']){
+    await writeFile(join(dir,'SUPPLY/online'),online);assert.equal(await readPower('linux',dir),'unknown',online);
+   }
+   await writeFile(join(dir,'SUPPLY/online'),'0\n');assert.equal(await readPower('linux',dir),'battery');
+   for(const online of ['1','2','3']){
+    await writeFile(join(dir,'SUPPLY/online'),`${online}\n`);assert.equal(await readPower('linux',dir),'ac',online);
+   }
+   await mkdir(join(dir,'AC'));await writeFile(join(dir,'AC/type'),'Mains');await writeFile(join(dir,'AC/online'),'0');
+   for(const online of ['1','2','3']){
+    await writeFile(join(dir,'SUPPLY/online'),`${online}\n`);assert.equal(await readPower('linux',dir),'ac',online);
+   }
+   await writeFile(join(dir,'SUPPLY/online'),'4');assert.equal(await readPower('linux',dir),'battery');
+  }finally{await rm(dir,{recursive:true,force:true});}
+ });
+}
+test('online values do not make unknown supply types external power',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-power-unknown-'));
+ try{
+  await mkdir(join(dir,'SUPPLY'));await writeFile(join(dir,'SUPPLY/type'),'Unknown');
+  for(const online of ['1','2','3']){
+   await writeFile(join(dir,'SUPPLY/online'),online);assert.equal(await readPower('linux',dir),'unknown');
+  }
+  await mkdir(join(dir,'AC'));await writeFile(join(dir,'AC/type'),'Mains');await writeFile(join(dir,'AC/online'),'0');
+  assert.equal(await readPower('linux',dir),'battery');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('awake status tracks inhibition, linger, power loss, child exit and shutdown',async()=>{
@@ -65,6 +117,7 @@ test('Linux inhibitor uses a pipe, and cleanup reaps the real synthetic child',a
  const inhibitor=startInhibitor('linux',launch)!;
  assert.ok(seen.includes('--what=idle'));assert.ok(!seen.includes('--what=idle:sleep'));assert.ok(seen.includes('--no-ask-password'));
  assert.ok(child!.stdin);
+ assert.equal(inhibitor.alive(),true);
  await inhibitor.stop();assert.equal(inhibitor.alive(),false);
  assert.notEqual(child!.exitCode,null);
 });
@@ -151,9 +204,9 @@ test('cached supply types follow devices appearing and disappearing',async()=>{
 
 import { createEventBus } from '@earendil-works/pi-coding-agent';
 import autoCaffeinate from './index.ts';
-const wired=(power:'ac'|'battery')=>{
+const wired=(power:'ac'|'battery',start:KeeperOptions['start']=()=>({alive:()=>true,stop:async()=>{}}))=>{
  const handlers=new Map<string,any>();const status:(string|undefined)[]=[];const bus=createEventBus();
- autoCaffeinate({on:(name:string,handler:any)=>handlers.set(name,handler),events:bus} as any,{power:async()=>power,start:()=>({alive:()=>true,stop:async()=>{}})});
+ autoCaffeinate({on:(name:string,handler:any)=>handlers.set(name,handler),events:bus} as any,{power:async()=>power,start});
  const ctx={hasUI:true,ui:{setStatus:(_key:string,text?:string)=>status.push(text)}};
  return {status,bus,fire:(name:string)=>handlers.get(name)({},ctx),settle:()=>new Promise<void>(resolve=>setImmediate(resolve))};
 };
@@ -172,4 +225,26 @@ test('agent turns on battery never show the machine as held awake',async()=>{
  await h.fire('session_start');
  try{await h.fire('agent_start');await h.settle();await h.fire('agent_settled');await h.settle();assert.deepEqual(h.status,[]);}
  finally{await h.fire('session_shutdown');}
+});
+
+test('a helper that fails to spawn never shows Awake in the status bar',{timeout:5000},async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-inhibitor-missing-'));
+ let child:ReturnType<typeof spawn>|undefined;let failed:Promise<Error>|undefined;
+ const launch:typeof spawn=((_command:string,_args:readonly string[],options:Parameters<typeof spawn>[2])=>{
+  const launched=spawn(join(dir,'missing-helper'),[],options);child=launched;
+  failed=new Promise(resolve=>launched.once('error',resolve));
+  return launched;
+ }) as typeof spawn;
+ const h=wired('ac',()=>startInhibitor('linux',launch));
+ try{
+  await h.fire('session_start');await h.fire('agent_start');
+  assert.ok(child);assert.ok(failed);
+  assert.equal(child.pid,undefined);
+  assert.deepEqual(h.status,[]);
+  const error=await failed;
+  assert.equal('code' in error?error.code:undefined,'ENOENT');
+  assert.deepEqual(h.status,[]);
+ }finally{
+  await h.fire('session_shutdown');await rm(dir,{recursive:true,force:true});
+ }
 });

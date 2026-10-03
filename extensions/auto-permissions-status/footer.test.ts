@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ExtensionContext, ReadonlyFooterDataProvider, Theme } from '@earendil-works/pi-coding-agent';
+import { ModelRuntime, ModelRegistry, SessionManager, type ExtensionContext, type ReadonlyFooterDataProvider, type Theme } from '@earendil-works/pi-coding-agent';
+import { InMemoryCredentialStore, InMemoryModelsStore, type OAuthCredential } from '@earendil-works/pi-ai';
+import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { permissionFooter, rightAligned, STATUS_KEY } from './footer.ts';
 
@@ -87,4 +89,57 @@ test('memoised rows still follow width, cwd and empty-status changes', () => {
   f.statuses.delete('tracker');
   assert.equal(f.footer.render(140).length, 2);
   f.footer.dispose();
+});
+
+test('subscription labels require explicit provider metadata and OAuth, except for Kimi', async t => {
+  for (const scenario of [
+    { name: 'metered OAuth', providerId: 'footer-billing-test', isSubscription: false, oauth: true, subscription: false },
+    { name: 'OAuth without subscription metadata', providerId: 'footer-billing-test', isSubscription: undefined, oauth: true, subscription: false },
+    { name: 'subscription OAuth', providerId: 'footer-billing-test', isSubscription: true, oauth: true, subscription: true },
+    { name: 'subscription provider using an API key', providerId: 'footer-billing-test', isSubscription: true, oauth: false, subscription: false },
+    { name: 'Kimi using an API key', providerId: 'kimi-coding', isSubscription: false, oauth: false, subscription: true },
+  ]) await t.test(scenario.name, async t => {
+    const { providerId } = scenario;
+    const credentials = new InMemoryCredentialStore();
+    const oauthCredential: OAuthCredential = { type: 'oauth', access: 'synthetic-unused', refresh: 'synthetic-unused', expires: Date.now() + 3600000 };
+    await credentials.modify(providerId, async () => scenario.oauth ? oauthCredential : { type: 'api_key', key: 'synthetic-unused' });
+    const runtime = await ModelRuntime.create({ credentials, modelsStore: new InMemoryModelsStore(), modelsPath: null,
+      refreshOnCreate: false, allowModelNetwork: false });
+    const base = openaiProvider();
+    const model = { ...base.getModels()[0], id: 'billing-model', provider: providerId };
+    runtime.registerNativeProvider({ ...base, id: providerId, getModels: () => [model], auth: {
+      apiKey: { name: 'Synthetic API key', resolve: async () => ({ auth: { apiKey: 'synthetic-unused' } }) },
+      oauth: { name: 'Synthetic OAuth', ...(scenario.isSubscription === undefined ? {} : { isSubscription: scenario.isSubscription }),
+        login: async () => { throw new Error('Unexpected login'); }, refresh: async () => { throw new Error('Unexpected token refresh'); }, toAuth: async () => ({ apiKey: 'synthetic-unused' }) },
+    } });
+    await runtime.refresh({ providers: [providerId], allowNetwork: false });
+    const registry = new ModelRegistry(runtime);
+    assert.equal(registry.isUsingOAuth(model), scenario.oauth);
+    const manager = SessionManager.inMemory('/workspace/project');
+    const f = fixture();
+    t.after(() => f.footer.dispose());
+    f.ctx.model = model;
+    f.ctx.modelRegistry = registry;
+    f.ctx.sessionManager = manager;
+    const beforeUsage = f.footer.render(140)[1];
+    if (scenario.subscription) assert.match(beforeUsage, /\$0\.000 \(sub\)/);
+    else assert.doesNotMatch(beforeUsage, /\$|\(sub\)/);
+    manager.appendMessage({ role: 'assistant', content: [], api: model.api, provider: providerId, model: model.id,
+      usage, stopReason: 'stop', timestamp: Date.now() });
+    manager.appendMessage({ role: 'assistant', content: [], api: model.api, provider: providerId, model: model.id,
+      usage, stopReason: 'stop', timestamp: Date.now() });
+    const afterUsage = f.footer.render(140)[1];
+    assert.match(afterUsage, /\$0\.060/);
+    if (scenario.subscription) assert.match(afterUsage, /\$0\.060 \(sub\)/);
+    else assert.doesNotMatch(afterUsage, /\(sub\)/);
+    if (scenario.oauth && scenario.subscription) {
+      await credentials.modify(providerId, async () => ({ type: 'api_key', key: 'synthetic-unused' }));
+      await runtime.refresh({ providers: [providerId], allowNetwork: false });
+      assert.equal(registry.isUsingOAuth(model), false);
+      assert.doesNotMatch(f.footer.render(140)[1], /\(sub\)/);
+    }
+    f.ctx.model = undefined;
+    assert.match(f.footer.render(140)[1], /no-model$/);
+    assert.doesNotMatch(f.footer.render(140)[1], /\(sub\)/);
+  });
 });

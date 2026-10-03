@@ -1,21 +1,81 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createAgentSession, ModelRuntime, SessionManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { InMemoryCredentialStore, fauxProvider, fauxAssistantMessage, fauxToolCall, type Context } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
+import { type Component, type Terminal, TuiMainScreen, visibleWidth } from '@earendil-works/pi-tui';
 import todo from './index.js';
 
 interface Snapshot { version: 1; todos: { content: string; status: string }[]; staleTurns: number }
 
-function runtime(initial: any[] = []) {
+function runtime(initial: any[] = [], colored = false) {
   let tool: ToolDefinition;
   let branch = initial;
   let widget: string[] | undefined;
+  let component: Component | undefined;
   const warnings: string[] = [];
   const hooks = new Map<string, (event: any, ctx: any) => any>();
   todo({ registerTool: (value: ToolDefinition) => { tool = value; }, on: (name: string, callback: any) => hooks.set(name, callback), appendEntry: (customType: string, data: unknown) => branch.push({ type: 'custom', customType, data }) } as unknown as ExtensionAPI);
-  const theme = { fg: (_color: string, text: string) => text };
-  const ctx = { hasUI: true, sessionManager: { getBranch: () => branch }, ui: { setWidget: (_key: string, value: ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined) => { widget = value?.(undefined, theme).render(40); }, notify: (message: string) => { warnings.push(message); } } } as unknown as ExtensionContext;
-  return { call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, ctx), hook: (name: string) => hooks.get(name)!({ systemPrompt: 'You are a coding assistant.\nPreserve the user instructions.' }, ctx), branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
+  const theme = { fg: (_color: string, text: string) => colored ? `\x1b[34m${text}\x1b[39m` : text };
+  const ctx = { hasUI: true, sessionManager: { getBranch: () => branch }, ui: { setWidget: (_key: string, value: ((tui: unknown, theme: unknown) => Component) | undefined) => { component = value?.(undefined, theme); widget = component?.render(40); }, notify: (message: string) => { warnings.push(message); } } } as unknown as ExtensionContext;
+  const hook = (name: string, event: object = {}) => hooks.get(name)?.({ messages: [], ...event }, ctx);
+  const turn = async () => {
+    await hook('message_start', { message: { role: 'user', content: 'User prompt' } });
+    const result = await hook('context');
+    return result?.messages.at(-1)?.content;
+  };
+  return { turn, reminder: async () => (await hook('context'))?.messages.at(-1)?.content, call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, ctx), hook, branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, render: (width: number) => component?.render(width) ?? [], warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
 }
+
+test('todo updates fit narrow main-screen frames and remain visible after resizing', async t => {
+  for (const width of [1, 2, 3, 4, 5, 6, 7, 8, 80]) {
+    await t.test(`${width} columns`, async t => {
+      const app = runtime([], true);
+      const logDirectory = mkdtempSync(join(tmpdir(), 'pi-todo-render-'));
+      let writes = '';
+      let stops = 0;
+      let resize = () => {};
+      const terminal = {
+        columns: width, rows: 100, kittyProtocolActive: false,
+        start(_onInput: (data: string) => void, onResize: () => void) { resize = onResize; },
+        stop() { stops++; },
+        async drainInput() {},
+        write(data: string) { writes += data; },
+        moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {},
+        clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {},
+      } satisfies Terminal;
+      const screen = new TuiMainScreen(terminal, false, logDirectory);
+      t.after(() => { screen.stop(); rmSync(logDirectory, { recursive: true, force: true }); });
+      screen.addChild({ invalidate() {}, render: app.render });
+      screen.start();
+      await app.call([{ content: 'A', status: 'pending' }]);
+      screen.renderNow();
+      for (const content of ['B', '🧪', '界', 'क्ष्म', 'क्क्क्क']) {
+        await app.call([{ content, status: 'pending' }]);
+        assert.doesNotThrow(() => screen.renderNow(), `changed frame at ${width} columns: ${content}`);
+        const frame = app.render(width);
+        assert.ok(frame.every(line => visibleWidth(line) <= width), `frame fits ${width} columns`);
+        if (width < 6) assert.deepEqual(frame, []);
+        else assert.ok(frame.length > 0);
+      }
+      assert.deepEqual(app.render(0), []);
+      terminal.columns = 40;
+      writes = '';
+      resize();
+      screen.renderNow();
+      assert.match(writes, /क्क्क्क/);
+      await app.call([{ content: 'Recovered', status: 'in_progress' }]);
+      writes = '';
+      assert.doesNotThrow(() => screen.renderNow());
+      assert.match(writes, /Recovered/);
+      assert.equal(stops, 0, 'todo updates must not stop the TUI');
+    });
+  }
+});
 
 test('todo replacement normalizes list, enforces one active task and restores selected branch', async () => {
   const app = runtime(); await app.hook('session_start');
@@ -36,15 +96,15 @@ test('todo replacement normalizes list, enforces one active task and restores se
 test('completed/cleared todos remove reminder; stale warnings survive resume without invented completion', async () => {
   const app = runtime();
   await app.call([{ content: 'Unfinished work', status: 'in_progress' }]);
-  assert.equal((await app.hook('before_agent_start')).systemPrompt, 'You are a coding assistant.\nPreserve the user instructions.\n\nKeep the todo list current as work progresses.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
-  for (let turn = 0; turn < 4; turn++) await app.hook('before_agent_start');
+  assert.equal((await app.turn()), 'Keep the todo list current as work progresses.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
+  for (let turn = 0; turn < 4; turn++) await app.turn();
   const resumed = runtime(app.branch()); await resumed.hook('session_start');
-  assert.equal((await resumed.hook('before_agent_start')).systemPrompt, 'You are a coding assistant.\nPreserve the user instructions.\n\nSTALE TODO: Before proceeding, reconcile this list with actual work; explain blockers or clear obsolete tasks. Do not mark tasks complete without evidence.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
+  assert.equal((await resumed.turn()), 'STALE TODO: Before proceeding, reconcile this list with actual work; explain blockers or clear obsolete tasks. Do not mark tasks complete without evidence.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
   await resumed.call([{ content: 'Unfinished work', status: 'in_progress' }]);
-  assert.equal((await resumed.hook('before_agent_start')).systemPrompt, 'You are a coding assistant.\nPreserve the user instructions.\n\nSTALE TODO: Before proceeding, reconcile this list with actual work; explain blockers or clear obsolete tasks. Do not mark tasks complete without evidence.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
+  assert.equal((await resumed.turn()), 'STALE TODO: Before proceeding, reconcile this list with actual work; explain blockers or clear obsolete tasks. Do not mark tasks complete without evidence.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
   await resumed.call([{ content: 'Unfinished work', status: 'completed' }]);
   assert.equal(resumed.widget(), undefined);
-  assert.equal(await resumed.hook('before_agent_start'), undefined);
+  assert.equal(await resumed.turn(), undefined);
   await resumed.call([]); assert.equal(resumed.widget(), undefined);
   const fresh = runtime(resumed.branch()); await fresh.hook('session_start'); assert.equal(fresh.widget(), undefined);
 });
@@ -76,9 +136,9 @@ test('appended snapshots are decoupled from the live todo state', async () => {
   const appended = app.appended().at(-1) as any;
   appended.todos[0].content = 'Tampered';
   appended.todos.push({ content: 'Injected', status: 'pending' });
-  const { systemPrompt } = await app.hook('before_agent_start');
-  assert.match(systemPrompt, /\[pending\] Shared task/);
-  assert.doesNotMatch(systemPrompt, /Tampered|Injected/);
+  const reminder = await app.turn();
+  assert.match(reminder, /\[pending\] Shared task/);
+  assert.doesNotMatch(reminder, /Tampered|Injected/);
 });
 
 test('todo accepts 100 tasks and rejects an oversized replacement without changing progress', async () => {
@@ -108,22 +168,168 @@ test('repeated branch switches restore each branch and still warn once per inval
     assert.equal(app.warnings().length, pass * 2 + 2);
     assert.equal(app.warnings().at(-1), 'Skipped 1 invalid or unsupported todo snapshot: Unsupported todo snapshot');
   }
-  assert.match((await app.hook('before_agent_start')).systemPrompt, /not changed for several turns[\s\S]*Gamma/);
+  assert.match((await app.turn()), /not changed for several turns[\s\S]*Gamma/);
 });
 
 test('changing the declared list resets the stale reminder', async () => {
   const app = runtime();
   await app.call([{ content: 'Unfinished work', status: 'in_progress' }]);
-  for (let turn = 0; turn < 6; turn++) await app.hook('before_agent_start');
-  assert.match((await app.hook('before_agent_start')).systemPrompt, /STALE TODO/);
+  for (let turn = 0; turn < 6; turn++) await app.turn();
+  assert.match((await app.turn()), /STALE TODO/);
   await app.call([{ content: 'Unfinished work', status: 'in_progress' }, { content: 'Next step', status: 'pending' }]);
-  assert.equal((await app.hook('before_agent_start')).systemPrompt, 'You are a coding assistant.\nPreserve the user instructions.\n\nKeep the todo list current as work progresses.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work\n[pending] Next step');
+  assert.equal((await app.turn()), 'Keep the todo list current as work progresses.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work\n[pending] Next step');
 });
 
 test('the reminder strengthens on exactly the third unchanged turn', async () => {
   const app = runtime();
   await app.call([{ content: 'Unfinished work', status: 'in_progress' }]);
-  await app.hook('before_agent_start');
-  assert.match((await app.hook('before_agent_start')).systemPrompt, /Keep the todo list current/);
-  assert.equal((await app.hook('before_agent_start')).systemPrompt, 'You are a coding assistant.\nPreserve the user instructions.\n\nThis todo list has not changed for several turns. Update actual progress or explain the blocker.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
+  await app.turn();
+  assert.match((await app.turn()), /Keep the todo list current/);
+  assert.equal((await app.turn()), 'This todo list has not changed for several turns. Update actual progress or explain the blocker.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
+});
+
+async function todoSession(run: (session: Awaited<ReturnType<typeof createAgentSession>>['session'], provider: ReturnType<typeof fauxProvider>, manager: SessionManager) => Promise<void>) {
+  const cwd = await mkdtemp(join(tmpdir(), 'pi-todo-queue-'));
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    const agentDir = join(cwd, 'agent');
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, followUpMode: 'one-at-a-time', steeringMode: 'one-at-a-time' });
+    const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, extensionFactories: [todo], noExtensions: true, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true });
+    await resourceLoader.reload();
+    assert.deepEqual(resourceLoader.getExtensions().errors, []);
+    const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
+    const provider = fauxProvider({ provider: 'todo-queue-regression', tokensPerSecond: 100000 });
+    modelRuntime.registerNativeProvider(provider.provider);
+    const manager = SessionManager.create(cwd, join(cwd, 'sessions'));
+    ({ session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader, sessionManager: manager, modelRuntime, model: provider.getModel(), noTools: 'builtin' }));
+    await session.bindExtensions({});
+    const errors: unknown[] = [];
+    session.extensionRunner!.onError(error => errors.push(error));
+    await session.getToolDefinition('todo_write')!.execute('seed', { todos: [{ content: 'Still working', status: 'pending' }] }, undefined, undefined, session.extensionRunner!.createContext());
+    await run(session, provider, manager);
+    assert.deepEqual(errors, []);
+  } finally { session?.dispose(); await rm(cwd, { recursive: true, force: true }); }
+}
+
+function providerText(context: Context): string {
+  return [context.systemPrompt, ...context.messages.map(message => typeof message.content === 'string' ? message.content : message.content.filter(part => part.type === 'text').map(part => part.text).join('\n'))].join('\n');
+}
+
+for (const mode of ['steer', 'followUp'] as const) {
+  test(`queued ${mode} prompts count each delivered user and refresh stale reminders`, async () => todoSession(async (session, provider, manager) => {
+    const requests: string[] = [];
+    provider.setResponses(Array.from({ length: 7 }, (_, index) => async context => {
+      requests.push(providerText(context));
+      if (index === 0) for (let queued = 1; queued <= 6; queued++) await session.prompt(`Queued ${queued}`, { streamingBehavior: mode });
+      return fauxAssistantMessage(`Response ${index}`);
+    }));
+    await session.prompt('Initial prompt');
+    assert.equal(requests.length, 7);
+    assert.match(requests[1], /Keep the todo list current/);
+    assert.match(requests[2], /not changed for several turns/);
+    assert.match(requests[4], /not changed for several turns/);
+    assert.match(requests[5], /STALE TODO/);
+    assert.match(requests[6], /STALE TODO/);
+    assert.ok(requests.every(text => text.split('Persisted todos are declared progress').length === 2));
+    const branch = manager.getBranch();
+    assert.equal(branch.filter(entry => entry.type === 'message' && entry.message.role === 'user').length, 7);
+    const snapshots = branch.filter(entry => entry.type === 'custom').filter(entry => entry.customType === 'interactive-tools:todo');
+    assert.equal(snapshots.length, 8, 'one seed and seven saved counts, without an agent_end duplicate');
+    assert.deepEqual(snapshots.at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 7 });
+    for (const entry of snapshots.slice(1)) {
+      const parent = manager.getEntry(entry.parentId!);
+      assert.equal(parent?.type, 'message');
+      if (parent?.type === 'message') assert.equal(parent.message.role, 'user', 'accounting snapshot follows its delivered user');
+    }
+    assert.ok(!branch.some(entry => entry.type === 'custom_message' && entry.customType === 'interactive-tools:todo-reminder'), 'reminders never enter saved history');
+    assert.ok(!session.messages.some(message => message.role === 'custom' && message.customType === 'interactive-tools:todo-reminder'));
+    const reopened = SessionManager.open(manager.getSessionFile()!);
+    assert.deepEqual(reopened.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, snapshots.at(-1)?.data);
+    const users = branch.filter(entry => entry.type === 'message').filter(entry => entry.message.role === 'user');
+    await session.navigateTree(users[3].id, { summarize: false });
+    provider.setResponses([fauxAssistantMessage('Branch reply')]);
+    await session.prompt('New branch prompt');
+    assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 4 });
+  }));
+}
+
+for (const mode of ['steer', 'followUp'] as const) {
+  for (const todos of [[{ content: 'Still working', status: 'completed' }], []]) {
+    test(`${mode} requests drop obsolete reminders after ${todos.length ? 'completion' : 'clearing'}`, async () => todoSession(async (session, provider, manager) => {
+      const requests: string[] = [];
+      provider.setResponses([
+        async context => {
+          requests.push(providerText(context));
+          await session.prompt('Queued prompt after todo update', { streamingBehavior: mode });
+          return fauxAssistantMessage(fauxToolCall('todo_write', { todos }, { id: 'complete' }));
+        },
+        context => { requests.push(providerText(context)); return fauxAssistantMessage('Updated'); },
+        context => { requests.push(providerText(context)); return fauxAssistantMessage('Queued reply'); },
+      ]);
+      await session.prompt('Initial prompt');
+      assert.match(requests[0], /\[pending\] Still working/);
+      assert.ok(requests.length >= 2);
+      for (const text of requests.slice(1)) assert.doesNotMatch(text, /Persisted todos are declared progress|\[pending\] Still working/);
+      assert.equal(manager.getBranch().filter(entry => entry.type === 'message' && entry.message.role === 'user').length, 2);
+      assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos, staleTurns: 0 });
+    }));
+  }
+}
+
+test('batched prompts count users rather than provider requests', async () => todoSession(async (session, provider, manager) => {
+  session.setFollowUpMode('all');
+  const requests: string[] = [];
+  provider.setResponses([
+    async context => {
+      requests.push(providerText(context));
+      for (let queued = 1; queued <= 6; queued++) await session.prompt(`Queued ${queued}`, { streamingBehavior: 'followUp' });
+      return fauxAssistantMessage('First reply');
+    },
+    context => { requests.push(providerText(context)); return fauxAssistantMessage('Batch reply'); },
+  ]);
+  await session.prompt('Initial prompt');
+  assert.equal(requests.length, 2);
+  assert.match(requests[1], /STALE TODO/);
+  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 7 });  const snapshots = manager.getBranch().filter(entry => entry.type === 'custom');
+  assert.equal(snapshots.length, 8);
+  for (const entry of snapshots.slice(1)) {
+    const parent = manager.getEntry(entry.parentId!);
+    assert.equal(parent?.type, 'message');
+    if (parent?.type === 'message') assert.equal(parent.message.role, 'user');
+  }
+  const users = manager.getBranch().filter(entry => entry.type === 'message').filter(entry => entry.message.role === 'user');
+  await session.navigateTree(users[3].id, { summarize: false });
+  provider.setResponses([fauxAssistantMessage('New branch reply')]);
+  await session.prompt('Branch after first three users');
+  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 4 });
+}));
+
+test('preparation failure saves delivered user accounting without a provider context', async () => todoSession(async (session, provider, manager) => {
+  session.agent.transformContext = async () => { throw new Error('Synthetic preparation failure'); };
+  await session.prompt('Delivered before preparation fails');
+  assert.equal(provider.state.callCount, 0);
+  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 1 });
+  const snapshot = manager.getBranch().filter(entry => entry.type === 'custom').at(-1)!;
+  const parent = manager.getEntry(snapshot.parentId!);
+  assert.equal(parent?.type, 'message');
+}));
+
+test('queued prompts cancelled before delivery do not count', async () => todoSession(async (session, provider, manager) => {
+  provider.setResponses([async () => {
+    await session.prompt('Cancelled queued prompt', { streamingBehavior: 'followUp' });
+    session.clearQueue();
+    return fauxAssistantMessage('Aborted response');
+  }]);
+  await session.prompt('Initial prompt');
+  assert.equal(manager.getBranch().filter(entry => entry.type === 'message' && entry.message.role === 'user').length, 1);
+  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 1 });
+}));
+
+test('repeated provider contexts do not count as user messages', async () => {
+  const app = runtime();
+  await app.call([{ content: 'Unfinished work', status: 'pending' }]);
+  await app.turn();
+  for (let request = 0; request < 6; request++) assert.match(await app.reminder(), /Keep the todo list current/);
+  assert.equal(app.branch().length, 2);
+  assert.equal(app.appended().at(-1).staleTurns, 1);
 });

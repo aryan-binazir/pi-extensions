@@ -8,6 +8,7 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { installSinglePassPasteExpansion } from "../vi-mode/adapter.ts";
 
 const parameters = Type.Object({
   questions: Type.Array(
@@ -202,6 +203,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 noMatch: (s) => s,
               },
             });
+            installSinglePassPasteExpansion(editor);
             const advance = () => {
               if (params.questions.length === 1) submit(false);
               else {

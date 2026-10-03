@@ -17,7 +17,7 @@ import { ThinkingSelectorComponent } from '../node_modules/@earendil-works/pi-co
 initTheme('dark', false);
 const payload = 'SYNTHETIC_PAYLOAD 😀\t\r\n'.repeat(100);
 const paste = (e: any) => e.handleInput('\x1b[200~' + payload + '\x1b[201~');
-function host(stashFirst: boolean | "stock" = false) {
+function host(stashFirst: boolean | "stock" = false, useVi = true) {
   const app: any = Object.create(InteractiveMode.prototype);
   app.defaultEditor = editor(CustomEditor);
   app.editor = app.defaultEditor;
@@ -25,6 +25,7 @@ function host(stashFirst: boolean | "stock" = false) {
   app.editorContainer = new Container();
   app.statusContainer = new Container();
   app.disposeActiveSelector = () => {};
+  app.footerDataProvider = { setExtensionStatus() {} };
   let overlay: any;
   let showHardwareCursor = false;
   app.ui = {
@@ -61,7 +62,10 @@ function host(stashFirst: boolean | "stock" = false) {
     },
   };
   const emit = (n: string) => {for (const fn of hooks.get(n) ?? []) fn({}, ctx);};
-  if (stashFirst !== "stock") {
+  if (!useVi) {
+    ctx.ui = app.createExtensionUIContext();
+    stash(api);
+  } else if (stashFirst !== "stock") {
     if (stashFirst) { stash(api); viMode(api); } else { viMode(api); stash(api); }
   }
   emit('session_start'); emit('resources_discover');
@@ -591,5 +595,97 @@ for (const command of ['btw', 'side']) test(`real ${command} overlay tracks edit
     h.emit('session_shutdown');
     await pending;
     tui.stop();
+  }
+});
+
+test('standalone stash preserves a typed literal marker after the next paste', () => {
+  const h = host(false, false);
+  const draft = 'Explain the literal placeholder [paste #2] in this synthetic example. ' + 'a'.repeat(1100);
+  const subsequent = 'b'.repeat(1200);
+  try {
+    h.ctx.ui.setEditorText(draft);
+    h.app.editor.handleInput('\x13');
+    h.app.editor.handleInput('\x13');
+    const restoredVisible = h.app.editor.getText();
+    h.ctx.ui.pasteToEditor(subsequent);
+    assert.equal(h.ctx.ui.getEditorText(), draft + subsequent);
+    assert.equal(restoredVisible, draft);
+    let submitted = '';
+    h.app.editor.onSubmit = (text: string) => { submitted = text; };
+    h.app.editor.handleInput('\r');
+    assert.equal(submitted, draft + subsequent);
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
+
+test('standalone stash keeps an eleven-line typed draft visible', () => {
+  const draft = 'literal [paste #2]\n' + 'line\n'.repeat(9) + 'end';
+  const h = host(false, false);
+  try {
+    keys(h.app.editor, draft);
+    h.app.editor.handleInput('\x13');
+    h.app.editor.handleInput('\x13');
+    assert.equal(h.app.editor.getText(), draft);
+    h.ctx.ui.pasteToEditor('b'.repeat(1001));
+    assert.equal(h.ctx.ui.getEditorText(), draft + 'b'.repeat(1001));
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
+
+test('standalone stash restores collapsed pastes into a recreated editor without rescanning payloads', () => {
+  const h = host(false, false);
+  const first = 'Literal marker [paste #2] ' + 'a'.repeat(1001);
+  const second = 'b'.repeat(1001);
+  try {
+    h.ctx.ui.setEditorText('prefix ');
+    h.ctx.ui.pasteToEditor(first);
+    const visible = h.app.editor.getText();
+    h.app.editor.handleInput('\x13');
+    h.ctx.ui.setEditorComponent(h.ctx.ui.getEditorComponent());
+    h.app.editor.handleInput('\x13');
+    assert.equal(h.app.editor.getText(), visible);
+    assert.equal(h.ctx.ui.getEditorText(), 'prefix ' + first);
+    h.ctx.ui.pasteToEditor(second);
+    assert.equal(h.app.editor.getText(), visible + '[paste #2 1001 chars]');
+    assert.equal(h.ctx.ui.getEditorText(), 'prefix ' + first + second);
+    let submitted = '';
+    h.app.editor.onSubmit = (text: string) => { submitted = text; };
+    h.app.editor.handleInput('\r');
+    assert.equal(submitted, 'prefix ' + first + second);
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
+
+test('standalone stash restoration can be undone back to the empty draft', () => {
+  const h = host(false, false);
+  try {
+    h.ctx.ui.setEditorText('draft to restore');
+    h.app.editor.handleInput('\x13');
+    h.app.editor.handleInput('\x13');
+    assert.equal(h.ctx.ui.getEditorText(), 'draft to restore');
+    h.app.editor.handleInput('\x1f');
+    assert.equal(h.ctx.ui.getEditorText(), '');
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
+
+test('standalone stash can undo swaps between identical markers with different payloads', () => {
+  const h = host(false, false);
+  const first = 'a'.repeat(1001);
+  const second = 'b'.repeat(1001);
+  try {
+    h.ctx.ui.pasteToEditor(first);
+    h.app.editor.handleInput('\x13');
+    h.ctx.ui.pasteToEditor(second);
+    h.app.editor.handleInput('\x13');
+    assert.equal(h.ctx.ui.getEditorText(), first);
+    h.app.editor.handleInput('\x1f');
+    assert.equal(h.ctx.ui.getEditorText(), second);
+  } finally {
+    h.emit('session_shutdown');
   }
 });

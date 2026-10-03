@@ -273,6 +273,98 @@ test("quote objects work and missing objects disarm operators without losing reg
   keys(e, '"ap');
   assert.equal(e.getExpandedText(), "keep me\nsecond\nkeep me");
 });
+test("a closing quote belongs to its enclosing string for delete objects", () => {
+  const e = editor();
+  e.setText('say "one" and "two"');
+  keys(e, '\x1b08lda"');
+  assert.equal(e.getText(), 'say  and "two"');
+  assert.equal(e.getExpandedText(), 'say  and "two"');
+  e.dispose();
+});
+for (const quote of ['"', "'", "`"])
+  for (const scenario of [
+    {
+      input: `say ${quote}one${quote}`,
+      positions: [4, 6, 8],
+      inner: `say ${quote}${quote}`,
+      around: "say ",
+      changed: `say ${quote}X${quote}`,
+      yanked: "one",
+    },
+    {
+      input: `say ${quote}one${quote} and ${quote}two${quote}`,
+      positions: [4, 6, 8],
+      inner: `say ${quote}${quote} and ${quote}two${quote}`,
+      around: `say  and ${quote}two${quote}`,
+      changed: `say ${quote}X${quote} and ${quote}two${quote}`,
+      yanked: "one",
+    },
+    {
+      input: `say ${quote}one${quote} and ${quote}two${quote}`,
+      positions: [14, 16, 18],
+      inner: `say ${quote}one${quote} and ${quote}${quote}`,
+      around: `say ${quote}one${quote} and `,
+      changed: `say ${quote}one${quote} and ${quote}X${quote}`,
+      yanked: "two",
+    },
+    {
+      input: `say ${quote}one${quote}${quote}two${quote}`,
+      positions: [9, 11, 13],
+      inner: `say ${quote}one${quote}${quote}${quote}`,
+      around: `say ${quote}one${quote}`,
+      changed: `say ${quote}one${quote}${quote}X${quote}`,
+      yanked: "two",
+    },
+  ])
+    for (const position of scenario.positions)
+      for (const operation of ["di", "da", "ci", "yi", "vi", "va"])
+        test(`${operation}${quote} selects the enclosing pair at column ${position} in ${scenario.input}`, () => {
+          const e = editor();
+          e.setText(scenario.input);
+          keys(e, `\x1b0${position}l${operation}${quote}`);
+          let expected = scenario.inner;
+          if (operation === "da" || operation === "va") expected = scenario.around;
+          if (operation.startsWith("v")) keys(e, "d");
+          if (operation === "ci") {
+            keys(e, "X\x1b");
+            expected = scenario.changed;
+          }
+          if (operation === "yi") {
+            assert.equal(e.getText(), scenario.input);
+            assert.equal(e.getExpandedText(), scenario.input);
+            keys(e, "$p");
+            expected = scenario.input + scenario.yanked;
+          }
+          assert.equal(e.getText(), expected);
+          assert.equal(e.getExpandedText(), expected);
+          e.dispose();
+        });
+test("quote objects require an enclosing pair and preserve the register on a miss", () => {
+  for (const quote of ['"', "'", "`"])
+    for (const [input, position] of [
+      [`say ${quote}one${quote} and ${quote}two${quote}`, 11],
+      [`say ${quote}one${quote} end`, 12],
+      [`say ${quote}one`, 6],
+    ] satisfies [string, number][]) {
+      const e = editor();
+      e.setText(input);
+      keys(e, `\x1b0yiw0${position}ldi${quote}`);
+      assert.equal(e.getText(), input);
+      keys(e, "$p");
+      assert.equal(e.getText(), input + "say");
+      e.dispose();
+    }
+});
+test("quote pairing retains multiline objects", () => {
+  for (const quote of ['"', "'", "`"])
+    for (const motion of ["gg04l", "gg0j4l"]) {
+      const e = editor();
+      e.setText(`say ${quote}one\nmore${quote} end`);
+      keys(e, `\x1b${motion}di${quote}`);
+      assert.equal(e.getText(), `say ${quote}${quote} end`);
+      e.dispose();
+    }
+});
 test("unicode word objects and cw edge positions respect word boundaries", () => {
   const e = editor();
   e.setText("café bar");

@@ -517,8 +517,11 @@ export class ViEditor extends CustomEditor {
     let a = -1,
       b = -1;
     if (open === close) {
-      a = t.lastIndexOf(open, p);
-      b = t.indexOf(close, a + 1);
+      for (a = t.indexOf(open); a >= 0 && a <= p; a = t.indexOf(open, b + 1)) {
+        b = t.indexOf(close, a + 1);
+        if (b < 0) return;
+        if (b >= p) break;
+      }
     } else {
       const openCode = open.charCodeAt(0),
         closeCode = close.charCodeAt(0);

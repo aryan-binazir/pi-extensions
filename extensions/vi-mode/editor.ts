@@ -194,11 +194,14 @@ export class ViEditor extends CustomEditor {
   override insertTextAtCursor(text: string): void {
     text = safeDraft(text);
     if (!text) return;
+    if (this.insertion && this.insertion.text !== this.text())
+      this.checkpoint(this.insertion);
     this.checkpoint();
     const p = this.pos(),
       draft = this.text();
     this.writeText(draft.slice(0, p) + text + draft.slice(p));
     this.move(p + text.length);
+    this.insertion = undefined;
   }
 
   override setText(text: string): void {

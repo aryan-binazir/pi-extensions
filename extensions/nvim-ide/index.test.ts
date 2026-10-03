@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { once } from 'node:events';
+import { getEventListeners, once } from 'node:events';
 import nvimIde, { editorContext, statusText } from './index.ts';
 import { maxSelectionChars } from './link.ts';
 import { fakeIde, token, until } from './test-support.ts';
@@ -50,8 +50,8 @@ async function withConnectedIde(body: (harness: Connected) => Promise<void>): Pr
     nvimIde(pi.api as any);
     await pi.fire('session_start', {}, context.ctx);
     await until(() => context.status.includes('Neovim ✓'));
-    await body({ ide, project, ...pi, ...context });
-    await pi.fire('session_shutdown', {}, context.ctx);
+    try { await body({ ide, project, ...pi, ...context }); }
+    finally { await pi.fire('session_shutdown', {}, context.ctx); }
   } finally {
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
     await ide.close();
@@ -139,6 +139,35 @@ test('editor tools resolve paths, and a closed editor clears status, prompt and 
     assert.match(notices.at(-1)!, /not connected/);
   });
 });
+
+for (const [mode, message] of [['disconnect', 'IDE disconnected'], ['reconnect', 'reconnecting'], ['stop', 'IDE link stopped']] as const) {
+  test(`pending nvim_context settles when the editor link ${mode}s`, async () => {
+    await withConnectedIde(async ({ ide, fire, tools, commands, ctx }) => {
+      for (const client of ide.server.clients) {
+        client.removeAllListeners('message');
+        client.on('message', raw => {
+          const request = JSON.parse(raw.toString());
+          if (request.method === 'tools/call') ide.calls.push(request.params);
+        });
+      }
+      const controller = new AbortController();
+      let error: Error | undefined;
+      const execution = tools.get('nvim_context').execute('pending', {}, controller.signal, undefined, ctx).catch((failure: Error) => { error = failure; });
+      await until(() => ide.calls.length === 3);
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 3);
+
+      if (mode === 'disconnect') {
+        for (const client of ide.server.clients) client.terminate();
+      } else if (mode === 'reconnect') await commands.get('vim').handler('reconnect', ctx);
+      else await fire('session_shutdown', {}, ctx);
+      await until(() => error !== undefined, 1000);
+      assert.equal(error?.message, message);
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+      controller.abort();
+      await execution;
+    });
+  });
+}
 
 test('session without an editor: no status, no prompt injection, shutdown is clean', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));

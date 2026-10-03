@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { StringEnum } from '@earendil-works/pi-ai';
 
@@ -49,12 +49,13 @@ export default function todo(pi: ExtensionAPI): void {
       return {
         invalidate() {},
         render(width: number) {
-          const inner = Math.max(1, width - 4);
+          if (width < 6) return [];
+          const inner = width - 4;
           return [
             blue(`╭${'─'.repeat(inner + 2)}╮`),
             ...lines.flatMap(line => wrapTextWithAnsi(line, inner)).map(line => `${blue('│')} ${line}${' '.repeat(Math.max(0, inner - visibleWidth(line)))} ${blue('│')}`),
             blue(`╰${'─'.repeat(inner + 2)}╯`),
-          ];
+          ].map(line => truncateToWidth(line, width, ''));
         },
       };
     });

@@ -1,32 +1,81 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgentSession, ModelRuntime, SessionManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { InMemoryCredentialStore, fauxProvider, fauxAssistantMessage, fauxToolCall, type Context } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
+import { type Component, type Terminal, TuiMainScreen, visibleWidth } from '@earendil-works/pi-tui';
 import todo from './index.js';
 
 interface Snapshot { version: 1; todos: { content: string; status: string }[]; staleTurns: number }
 
-function runtime(initial: any[] = []) {
+function runtime(initial: any[] = [], colored = false) {
   let tool: ToolDefinition;
   let branch = initial;
   let widget: string[] | undefined;
+  let component: Component | undefined;
   const warnings: string[] = [];
   const hooks = new Map<string, (event: any, ctx: any) => any>();
   todo({ registerTool: (value: ToolDefinition) => { tool = value; }, on: (name: string, callback: any) => hooks.set(name, callback), appendEntry: (customType: string, data: unknown) => branch.push({ type: 'custom', customType, data }) } as unknown as ExtensionAPI);
-  const theme = { fg: (_color: string, text: string) => text };
-  const ctx = { hasUI: true, sessionManager: { getBranch: () => branch }, ui: { setWidget: (_key: string, value: ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined) => { widget = value?.(undefined, theme).render(40); }, notify: (message: string) => { warnings.push(message); } } } as unknown as ExtensionContext;
+  const theme = { fg: (_color: string, text: string) => colored ? `\x1b[34m${text}\x1b[39m` : text };
+  const ctx = { hasUI: true, sessionManager: { getBranch: () => branch }, ui: { setWidget: (_key: string, value: ((tui: unknown, theme: unknown) => Component) | undefined) => { component = value?.(undefined, theme); widget = component?.render(40); }, notify: (message: string) => { warnings.push(message); } } } as unknown as ExtensionContext;
   const hook = (name: string, event: object = {}) => hooks.get(name)?.({ messages: [], ...event }, ctx);
   const turn = async () => {
     await hook('message_start', { message: { role: 'user', content: 'User prompt' } });
     const result = await hook('context');
     return result?.messages.at(-1)?.content;
   };
-  return { turn, reminder: async () => (await hook('context'))?.messages.at(-1)?.content, call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, ctx), hook, branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
+  return { turn, reminder: async () => (await hook('context'))?.messages.at(-1)?.content, call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, ctx), hook, branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, render: (width: number) => component?.render(width) ?? [], warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
 }
+
+test('todo updates fit narrow main-screen frames and remain visible after resizing', async t => {
+  for (const width of [1, 2, 3, 4, 5, 6, 7, 8, 80]) {
+    await t.test(`${width} columns`, async t => {
+      const app = runtime([], true);
+      const logDirectory = mkdtempSync(join(tmpdir(), 'pi-todo-render-'));
+      let writes = '';
+      let stops = 0;
+      let resize = () => {};
+      const terminal = {
+        columns: width, rows: 100, kittyProtocolActive: false,
+        start(_onInput: (data: string) => void, onResize: () => void) { resize = onResize; },
+        stop() { stops++; },
+        async drainInput() {},
+        write(data: string) { writes += data; },
+        moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {},
+        clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {},
+      } satisfies Terminal;
+      const screen = new TuiMainScreen(terminal, false, logDirectory);
+      t.after(() => { screen.stop(); rmSync(logDirectory, { recursive: true, force: true }); });
+      screen.addChild({ invalidate() {}, render: app.render });
+      screen.start();
+      await app.call([{ content: 'A', status: 'pending' }]);
+      screen.renderNow();
+      for (const content of ['B', '🧪', '界', 'क्ष्म', 'क्क्क्क']) {
+        await app.call([{ content, status: 'pending' }]);
+        assert.doesNotThrow(() => screen.renderNow(), `changed frame at ${width} columns: ${content}`);
+        const frame = app.render(width);
+        assert.ok(frame.every(line => visibleWidth(line) <= width), `frame fits ${width} columns`);
+        if (width < 6) assert.deepEqual(frame, []);
+        else assert.ok(frame.length > 0);
+      }
+      assert.deepEqual(app.render(0), []);
+      terminal.columns = 40;
+      writes = '';
+      resize();
+      screen.renderNow();
+      assert.match(writes, /क्क्क्क/);
+      await app.call([{ content: 'Recovered', status: 'in_progress' }]);
+      writes = '';
+      assert.doesNotThrow(() => screen.renderNow());
+      assert.match(writes, /Recovered/);
+      assert.equal(stops, 0, 'todo updates must not stop the TUI');
+    });
+  }
+});
 
 test('todo replacement normalizes list, enforces one active task and restores selected branch', async () => {
   const app = runtime(); await app.hook('session_start');

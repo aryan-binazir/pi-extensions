@@ -273,6 +273,98 @@ test("quote objects work and missing objects disarm operators without losing reg
   keys(e, '"ap');
   assert.equal(e.getExpandedText(), "keep me\nsecond\nkeep me");
 });
+test("a closing quote belongs to its enclosing string for delete objects", () => {
+  const e = editor();
+  e.setText('say "one" and "two"');
+  keys(e, '\x1b08lda"');
+  assert.equal(e.getText(), 'say  and "two"');
+  assert.equal(e.getExpandedText(), 'say  and "two"');
+  e.dispose();
+});
+for (const quote of ['"', "'", "`"])
+  for (const scenario of [
+    {
+      input: `say ${quote}one${quote}`,
+      positions: [4, 6, 8],
+      inner: `say ${quote}${quote}`,
+      around: "say ",
+      changed: `say ${quote}X${quote}`,
+      yanked: "one",
+    },
+    {
+      input: `say ${quote}one${quote} and ${quote}two${quote}`,
+      positions: [4, 6, 8],
+      inner: `say ${quote}${quote} and ${quote}two${quote}`,
+      around: `say  and ${quote}two${quote}`,
+      changed: `say ${quote}X${quote} and ${quote}two${quote}`,
+      yanked: "one",
+    },
+    {
+      input: `say ${quote}one${quote} and ${quote}two${quote}`,
+      positions: [14, 16, 18],
+      inner: `say ${quote}one${quote} and ${quote}${quote}`,
+      around: `say ${quote}one${quote} and `,
+      changed: `say ${quote}one${quote} and ${quote}X${quote}`,
+      yanked: "two",
+    },
+    {
+      input: `say ${quote}one${quote}${quote}two${quote}`,
+      positions: [9, 11, 13],
+      inner: `say ${quote}one${quote}${quote}${quote}`,
+      around: `say ${quote}one${quote}`,
+      changed: `say ${quote}one${quote}${quote}X${quote}`,
+      yanked: "two",
+    },
+  ])
+    for (const position of scenario.positions)
+      for (const operation of ["di", "da", "ci", "yi", "vi", "va"])
+        test(`${operation}${quote} selects the enclosing pair at column ${position} in ${scenario.input}`, () => {
+          const e = editor();
+          e.setText(scenario.input);
+          keys(e, `\x1b0${position}l${operation}${quote}`);
+          let expected = scenario.inner;
+          if (operation === "da" || operation === "va") expected = scenario.around;
+          if (operation.startsWith("v")) keys(e, "d");
+          if (operation === "ci") {
+            keys(e, "X\x1b");
+            expected = scenario.changed;
+          }
+          if (operation === "yi") {
+            assert.equal(e.getText(), scenario.input);
+            assert.equal(e.getExpandedText(), scenario.input);
+            keys(e, "$p");
+            expected = scenario.input + scenario.yanked;
+          }
+          assert.equal(e.getText(), expected);
+          assert.equal(e.getExpandedText(), expected);
+          e.dispose();
+        });
+test("quote objects require an enclosing pair and preserve the register on a miss", () => {
+  for (const quote of ['"', "'", "`"])
+    for (const [input, position] of [
+      [`say ${quote}one${quote} and ${quote}two${quote}`, 11],
+      [`say ${quote}one${quote} end`, 12],
+      [`say ${quote}one`, 6],
+    ] satisfies [string, number][]) {
+      const e = editor();
+      e.setText(input);
+      keys(e, `\x1b0yiw0${position}ldi${quote}`);
+      assert.equal(e.getText(), input);
+      keys(e, "$p");
+      assert.equal(e.getText(), input + "say");
+      e.dispose();
+    }
+});
+test("quote pairing retains multiline objects", () => {
+  for (const quote of ['"', "'", "`"])
+    for (const motion of ["gg04l", "gg0j4l"]) {
+      const e = editor();
+      e.setText(`say ${quote}one\nmore${quote} end`);
+      keys(e, `\x1b${motion}di${quote}`);
+      assert.equal(e.getText(), `say ${quote}${quote} end`);
+      e.dispose();
+    }
+});
 test("unicode word objects and cw edge positions respect word boundaries", () => {
   const e = editor();
   e.setText("café bar");
@@ -370,6 +462,88 @@ test("programmatic image-path insertion participates in vi undo", () => {
   assert.equal(e.getExpandedText(), "draf /tmp/image.pngt");
   keys(e, "u");
   assert.equal(e.getExpandedText(), "draft");
+});
+test("programmatic insertion separates earlier and later typing in undo and redo", () => {
+  const e = editor();
+  keys(e, "abc");
+  e.insertTextAtCursor(" /tmp/image.png");
+  keys(e, "tail\x1b");
+  assert.equal(e.getExpandedText(), "abc /tmp/image.pngtail");
+  for (const text of ["abc /tmp/image.png", "abc", ""]) {
+    keys(e, "u");
+    assert.equal(e.getExpandedText(), text);
+  }
+  for (const text of ["abc", "abc /tmp/image.png", "abc /tmp/image.pngtail"]) {
+    keys(e, "\x12");
+    assert.equal(e.getExpandedText(), text);
+  }
+});
+test("consecutive multiline insertions undo independently without later typing", () => {
+  const e = editor();
+  keys(e, "abc");
+  e.insertTextAtCursor("\nimage");
+  e.insertTextAtCursor("\nnext");
+  keys(e, "\x1bu");
+  assert.equal(e.getExpandedText(), "abc\nimage");
+  assert.deepEqual(e.getCursor(), { line: 1, col: 5 });
+  for (const text of ["abc", ""]) {
+    keys(e, "u");
+    assert.equal(e.getExpandedText(), text);
+  }
+  for (const text of ["abc", "abc\nimage", "abc\nimage\nnext"]) {
+    keys(e, "\x12");
+    assert.equal(e.getExpandedText(), text);
+  }
+});
+test("programmatic insertion skips an unchanged typing transaction", () => {
+  const e = editor();
+  e.setText("seed");
+  keys(e, "\x1b0xi");
+  e.insertTextAtCursor("IMG");
+  keys(e, "\x1bu");
+  assert.equal(e.getExpandedText(), "eed");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), "seed");
+});
+test("programmatic insertion commits a change command before any typing", () => {
+  const e = editor();
+  e.setText("seed");
+  keys(e, "\x1b0C");
+  e.insertTextAtCursor("IMG");
+  keys(e, "\x1bu");
+  assert.equal(e.getExpandedText(), "");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), "seed");
+  for (const text of ["", "IMG"]) {
+    keys(e, "\x12");
+    assert.equal(e.getExpandedText(), text);
+  }
+});
+test("empty programmatic insertion preserves pending typing and redo", () => {
+  for (const input of ["", "\x00\x07"]) {
+    const e = editor();
+    keys(e, "abc");
+    e.insertTextAtCursor(input);
+    keys(e, "tail\x1bu");
+    assert.equal(e.getExpandedText(), "");
+    e.insertTextAtCursor(input);
+    keys(e, "\x12");
+    assert.equal(e.getExpandedText(), "abctail");
+  }
+});
+test("programmatic insertion after undo replaces the old redo branch", () => {
+  const e = editor();
+  keys(e, "abc");
+  e.insertTextAtCursor("IMG");
+  keys(e, "\x1bu");
+  assert.equal(e.getExpandedText(), "abc");
+  e.insertTextAtCursor("NEW");
+  keys(e, "\x12");
+  assert.equal(e.getExpandedText(), "abcNEW");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), "abc");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), "");
 });
 test("an upward delete takes both whole lines", () => {
   const e = editor();
@@ -943,4 +1117,136 @@ test("3x deletes three characters", () => {
 test("yy2p puts the line twice", () => {
   const e = editor(); e.setText("a\nb"); keys(e, "\x1bggyy2p");
   assert.equal(e.getText(), "a\na\na\nb");
+});
+
+
+test("counted puts separate copies of the final unterminated line", () => {
+  const e = editor();
+  e.setText("a\nb");
+  keys(e, "\x1bGyy2p");
+  assert.equal(e.getExpandedText(), "a\nb\nb\nb");
+  undoRedoRestoresPut(e, "a\nb");
+  e.dispose();
+});
+
+for (const [source, yank, target, command, expected] of [
+  ["ab", "yy", "ab", "3P", "ab\nab\nab\nab"],
+  ["ab\n", "ggyy", "ab", "3P", "ab\nab\nab\nab"],
+  ["b", "yy", "x\ny", "G2p", "x\ny\nb\nb"],
+  ["b\n", "ggyy", "x\ny", "G2p", "x\ny\nb\nb"],
+  ["a\nb", "gg2yy", "x\ny", "G2p", "x\ny\na\nb\na\nb"],
+  ["a\nb\n", "gg2yy", "x\ny", "G2p", "x\ny\na\nb\na\nb"],
+  ["a\nb", "gg2yy", "x\ny", "gg2P", "a\nb\na\nb\nx\ny"],
+  ["a\nb\n", "gg2yy", "x\ny", "gg2P", "a\nb\na\nb\nx\ny"],
+]) test(`counted linewise ${command} preserves block boundaries from ${JSON.stringify(source)}`, () => {
+  const e = editor();
+  e.setText(source);
+  keys(e, "\x1b" + yank);
+  e.setText(target);
+  keys(e, command);
+  assert.equal(e.getExpandedText(), expected);
+  undoRedoRestoresPut(e, target);
+  e.dispose();
+});
+
+for (const [source, yank, target, selection, expected] of [
+  ["ab", "yy", "xyz", "gglv2", "x\nab\nab\nz"],
+  ["ab\n", "ggyy", "xyz", "gglv2", "x\nab\nab\nz"],
+  ["a\nb", "gg2yy", "xyz", "gglv2", "x\na\nb\na\nb\nz"],
+  ["ab", "yy", "x\ny", "GV2", "x\nab\nab"],
+  ["a\nb", "gg2yy", "x\ny", "ggV2", "a\nb\na\nb\ny"],
+  ["a\nb\n", "gg2yy", "x\ny", "ggV2", "a\nb\na\nb\ny"],
+  ["ab", "yy", "xyz", "G$v", "xy\nab"],
+  ["ab", "yy", "x\ny", "GV", "x\nab"],
+]) for (const put of ["p", "P"]) test(`visual linewise ${selection}${put} preserves boundaries from ${JSON.stringify(source)}`, () => {
+  const e = editor();
+  e.setText(source);
+  keys(e, "\x1b" + yank);
+  e.setText(target);
+  keys(e, selection + put);
+  assert.equal(e.getExpandedText(), expected);
+  undoRedoRestoresPut(e, target);
+  e.dispose();
+});
+
+test("counted characterwise puts keep adjacent copies", () => {
+  const e = editor();
+  e.setText("ab");
+  keys(e, "\x1b0yl3P");
+  assert.equal(e.getExpandedText(), "aaaab");
+  e.dispose();
+});
+
+test("counted empty linewise puts preserve the existing boundary", () => {
+  const e = editor();
+  e.setText("ab");
+  keys(e, "\x1byy");
+  e.setText("");
+  keys(e, "Vp2p");
+  assert.equal(e.getExpandedText(), "ab\n");
+  e.dispose();
+});
+
+for (const put of ["p", "P"]) test(`counted linewise ${put} includes separators and boundaries in the draft limit`, () => {
+  const e = editor(), limit = 1024 * 1024;
+  e.setText("x");
+  keys(e, "\x1byy");
+  const oversized = "z".repeat(limit - 3);
+  e.setText(oversized);
+  keys(e, "G2" + put);
+  assert.equal(e.getExpandedText(), oversized);
+  const fits = "z".repeat(limit - 4);
+  e.setText(fits);
+  const visible = e.getText();
+  keys(e, "G2" + put);
+  assert.equal(e.getExpandedText(), put === "p" ? fits + "\nx\nx" : "x\nx\n" + fits);
+  assert.equal(e.getExpandedText().length, limit);
+  undoRedoRestoresPut(e, visible);
+  e.dispose();
+});
+
+for (const put of ["p", "P"]) test(`visual counted linewise ${put} rejects separator overflow without losing the register`, () => {
+  const e = editor(), limit = 1024 * 1024;
+  const source = "z".repeat(limit / 2);
+  e.setText(source);
+  keys(e, "\x1byy");
+  e.setText("x");
+  keys(e, "ggV2" + put);
+  assert.equal(e.getExpandedText(), "x");
+  assert.ok(e.render(40).at(-1)!.endsWith(" LINE "));
+  keys(e, put);
+  assert.equal(e.getExpandedText(), source);
+  undoRedoRestoresPut(e, "x");
+  e.dispose();
+});
+
+for (const put of ["p", "P"]) test(`visual counted linewise ${put} accepts an exactly full expanded draft`, () => {
+  const e = editor(), source = "z".repeat(1024 * 1024 / 2 - 1);
+  e.setText(source);
+  keys(e, "\x1byy");
+  e.setText("\nx");
+  keys(e, "GV2" + put);
+  assert.equal(e.getExpandedText(), "\n" + source + "\n" + source);
+  assert.equal(e.getExpandedText().length, 1024 * 1024);
+  undoRedoRestoresPut(e, "\nx");
+  e.dispose();
+});
+
+test("rejected visual counted put preserves collapsed text, redo and the register", () => {
+  const e = editor(), prefix = "z".repeat(1024 * 1024 - 8);
+  e.setText("ab");
+  keys(e, "\x1byy");
+  e.setText(prefix);
+  keys(e, "Axyz\x1bA!\x1bu");
+  const before = prefix + "xyz";
+  assert.equal(e.getExpandedText(), before);
+  keys(e, "G$hv2p");
+  assert.equal(e.getExpandedText(), before);
+  assert.ok(e.render(40).at(-1)!.endsWith(" VISUAL "));
+  keys(e, "\x12");
+  assert.equal(e.getExpandedText(), before + "!");
+  e.setText("q");
+  keys(e, "ggP");
+  assert.equal(e.getExpandedText(), "ab\nq");
+  e.dispose();
 });

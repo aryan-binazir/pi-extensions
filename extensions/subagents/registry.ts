@@ -64,7 +64,7 @@ interface RegistryOptions {
   concurrency?: number;
   allowedTools?: () => string[];
   invocation?: (spec: ValidTask) => { command: string; args: string[]; env?: NodeJS.ProcessEnv; supervised?: boolean };
-  authorize?: (spec: ValidTask) => Promise<void>;
+  authorize?: (spec: ValidTask, signal: AbortSignal) => Promise<void>;
   onUpdate?: (task: TaskResult) => void;
   onComplete?: (task: TaskResult) => void;
 }
@@ -154,7 +154,7 @@ export class SubagentRegistry {
     try {
       validated = await abortable(validateTask(spec, this.options.allowedTools?.()), admissionSignal);
       admissionSignal.throwIfAborted();
-      await abortable(this.options.authorize?.(validated), admissionSignal);
+      await abortable(this.options.authorize?.(validated, admissionSignal), admissionSignal);
       admissionSignal.throwIfAborted();
       if (Date.now() >= deadlineAt) throw new Error('Task admission deadline exceeded');
     } finally { clearTimeout(timer); }
@@ -419,7 +419,7 @@ export function piInvocation(spec: ValidTask) {
   if (spec.model) args.push('--model', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
   for (const extension of new Set(spec.extensions)) args.push('-e', extension);
-  args.push('--', spec.task);
+  args.push('--', spec.task.startsWith('@') ? `\n${spec.task}` : spec.task);
   const env = childEnv(process.env, {PI_SUBAGENT_TIMEOUT_MS: String(spec.timeout)});
   return {
     command: 'node',

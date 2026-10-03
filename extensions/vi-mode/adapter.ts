@@ -158,7 +158,14 @@ export function collapsePaste(editor: Editor, text: string): string {
 }
 
 export function restoreRawDraft(editor: Editor, text: string, payloads: PasteState): void {
-  editor.setText(viEditor in editor ? "" : text);
+  const vi = viEditor in editor;
+  if (!vi && editor.getText() === text) {
+    const internal = editor as unknown as { pushUndoSnapshot?: unknown };
+    if (typeof internal.pushUndoSnapshot !== "function")
+      throw new Error("Unsupported Pi undo layout");
+    internal.pushUndoSnapshot();
+  }
+  editor.setText(vi ? "" : text);
   retainRawText(editor, text);
   writePastes(editor, payloads);
   placeCursor(editor, text.length);

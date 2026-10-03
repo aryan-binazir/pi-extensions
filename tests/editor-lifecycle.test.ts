@@ -273,3 +273,20 @@ test('standalone stash restoration can be undone back to the empty draft', () =>
     h.emit('session_shutdown');
   }
 });
+
+test('standalone stash can undo swaps between identical markers with different payloads', () => {
+  const h = host(false, false);
+  const first = 'a'.repeat(1001);
+  const second = 'b'.repeat(1001);
+  try {
+    h.ctx.ui.pasteToEditor(first);
+    h.app.editor.handleInput('\x13');
+    h.ctx.ui.pasteToEditor(second);
+    h.app.editor.handleInput('\x13');
+    assert.equal(h.ctx.ui.getEditorText(), first);
+    h.app.editor.handleInput('\x1f');
+    assert.equal(h.ctx.ui.getEditorText(), second);
+  } finally {
+    h.emit('session_shutdown');
+  }
+});

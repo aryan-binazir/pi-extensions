@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
-import { getSupportedThinkingLevels, type ThinkingLevel, type Provider } from '@earendil-works/pi-ai';
+import { createModels, getSupportedThinkingLevels, type ThinkingLevel, type Provider } from '@earendil-works/pi-ai';
 import { withFastModels } from './provider.ts';
 
 const priorityRate=(model:{id:string})=>model.id==='gpt-5.5'?2.5:2;
@@ -13,11 +13,11 @@ test('both model views expose unique chat aliases and preserve the complete mixe
  const image={...base,id:'gpt-5.5~fast',type:'image' as const,api:'fixture-images',output:['image'] as ['image']};
  const classifier={...base,type:'classifier' as const,api:'fixture-classifier'};
  const existing={...other,id:'gpt-direct~fast',name:'Existing alias'};
- let chats=[existing,base,other];
+ let chats=[base,other];
  let catalog=[image,existing,{...base},classifier,{...other}];
  const mixed={...original,getModels:()=>chats,getAllModels(){assert.equal(this,mixed);return catalog;},filterModels:(models:ReturnType<Provider['getModels']>)=>models.filter(model=>model.id===base.id)};
  const provider=withFastModels(mixed);
- const expected=['gpt-direct~fast','gpt-5.5','gpt-5.5~fast','gpt-direct'];
+ const expected=['gpt-5.5','gpt-5.5~fast','gpt-direct','gpt-direct~fast'];
  assert.deepEqual(provider.getModels().map(model=>model.id),expected);
  assert.ok('getAllModels' in provider && typeof provider.getAllModels==='function');
  const all=provider.getAllModels();
@@ -35,6 +35,29 @@ test('both model views expose unique chat aliases and preserve the complete mixe
  assert.deepEqual(refreshed.find(model=>model.id==='gpt-5.5'&&model.type===undefined),{...base,name:'Updated catalog model'});
  assert.deepEqual(provider.getModels().map(model=>model.id),['gpt-5.5','gpt-5.5~fast']);
  assert.equal(provider.getModels()[1].name,'Updated catalog model (fast)');
+});
+
+test('provider-owned fast IDs retain their original routing and filtering',async()=>{
+ const original=openaiProvider();
+ const base=original.getModels().find(model=>model.id==='gpt-5.5')!;
+ const nativeAlias={...base,id:'gpt-5.5~fast',name:'Provider-owned model'};
+ for(const models of [[base,nativeAlias],[nativeAlias]]) {
+  const native={...original,getModels:()=>models,filterModels:(models:ReturnType<Provider['getModels']>)=>models};
+  const provider=withFastModels(native);
+  assert.equal(provider,native);
+  assert.deepEqual(provider.filterModels(provider.getModels()),models);
+  const collection=createModels({credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore()});
+  collection.setProvider(provider);
+  let payload:Record<string,unknown>|undefined;
+  const fetch:typeof globalThis.fetch=async(_url,init)=>{
+   payload=JSON.parse(String(init?.body));
+   return new Response('data: '+JSON.stringify({type:'response.completed',response:{status:'completed',usage:{input_tokens:0,output_tokens:0}}})+'\n\n',{headers:{'content-type':'text/event-stream'}});
+  };
+  const output=await collection.streamSimple(nativeAlias,{messages:[]},{apiKey:'fixture-key',fetch,maxRetries:0}).result();
+  assert.equal(output.stopReason,'stop',output.errorMessage);
+  assert.equal(payload!.model,'gpt-5.5~fast');
+  assert.equal(payload!.service_tier,undefined);
+ }
 });
 
 test('fast aliases preserve auth and pricing metadata and send priority through real provider',async()=>{
@@ -100,7 +123,7 @@ test('ModelRuntime overlays and refreshes preserve fast aliases and non-chat mod
   const base=original.getModels().find(model=>model.id==='gpt-5.5')!;
   const image={...base,id:'gpt-5.5~fast',type:'image' as const,api:'fixture-images',output:['image'] as ['image']};
   const classifier={...base,type:'classifier' as const,api:'fixture-classifier'};
-  const native:Provider={...original,getModels:()=>[base],...{getAllModels:()=>[image,{...base},classifier]}};
+  const native={...original,getModels:()=>[base],getAllModels:()=>[image,{...base},classifier]};
   await writeFile(modelsPath,JSON.stringify({providers:{openai:{modelOverrides:{'gpt-5.5':{name:'Customized chat'}}}}}));
   const runtime=await ModelRuntime.create({modelsPath,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
   runtime.registerNativeProvider(native);

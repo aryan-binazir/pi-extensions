@@ -25,7 +25,7 @@ function supported(model:Model<Api>):boolean {
 export function withFastModels(original:Provider,view:Provider=original):CatalogProvider {
  if(!buildBaseOptions)return original;
  const baseOptions=buildBaseOptions;
- if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED]) return original;
+ if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED] || original.getModels().some(model=>model.id.endsWith(FAST_SUFFIX))) return original;
  const eligible=new Map(view.getModels().filter(supported).map(model=>[model.id,model]));
  const bases=original.getModels();
  const custom=[...eligible.values()].filter(model=>!bases.some(base=>base.id===model.id)&&!model.id.endsWith(FAST_SUFFIX));
@@ -37,10 +37,8 @@ export function withFastModels(original:Provider,view:Provider=original):Catalog
  };
  const aliases=(models:readonly Model<Api>[],extras:readonly Model<Api>[]=[])=>{
   const out:Model<Api>[]=[];
-  const ids=new Set(models.map(model=>model.id));
-  const addAlias=(model:Model<Api>)=>{const alias=aliasOf(model);if(alias&&!ids.has(alias.id)){out.push(alias);ids.add(alias.id);}};
-  for(const model of models){out.push(model);addAlias(model);}
-  for(const extra of extras)if(!ids.has(extra.id))addAlias(extra);
+  for(const model of models){out.push(model);const alias=aliasOf(model);if(alias)out.push(alias);}
+  for(const extra of extras)if(!models.some(base=>base.id===extra.id)){const alias=aliasOf(extra);if(alias)out.push(alias);}
   return out;
  };
  const resolve=(model:Model<Api>)=>{

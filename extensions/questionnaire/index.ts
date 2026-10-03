@@ -147,7 +147,7 @@ export default function questionnaire(pi: ExtensionAPI) {
             const answers = new Map<string, Answer>();
             const cleanAnswers = new Map<string, string>();
             const labels = params.questions.map((item) =>
-              clean(item.label || item.id),
+              clean(item.label || item.id).replace(/\n/g, " "),
             );
             const tabLabel = (index: number) =>
               `${answers.has(params.questions[index].id) ? "✓ " : ""}${labels[index]}`;

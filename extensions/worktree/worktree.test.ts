@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { fauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai';
 import { test } from 'node:test';
-import { mkdtemp, readFile, realpath, mkdir, symlink, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, mkdir, rename, symlink, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Worktrees } from './manager.ts';
 import worktree from './index.ts';
 import { getActiveCwd, setActiveCwd } from './routing.ts';
@@ -49,7 +52,7 @@ test('remove requires one nonempty path argument without confirmation or routing
       sessionManager: { getSessionId: () => sessionId },
       ui: { notify: (message: string, level: string) => notices.push({ message, level }), setStatus() {}, confirm: async () => { confirmations++; return true; } },
     };
-    worktree({ on() {}, registerTool() {}, appendEntry: (...args: unknown[]) => entries.push(args), registerCommand: (name: string, command: any) => commands[name] = command } as any);
+    worktree({ getSettings: () => ({}), on() {}, registerTool() {}, appendEntry: (...args: unknown[]) => entries.push(args), registerCommand: (name: string, command: any) => commands[name] = command } as any);
     for (const args of ['remove', 'remove --force', 'remove /a/one /a/two', 'remove /a/one --force /a/two', 'remove "" --force']) {
       await t.test(args, async () => {
         notices.length = 0;
@@ -131,7 +134,7 @@ test('restore rejects a replaced checkout and keeps shell and relative files in 
       ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
       sessionManager: { getSessionId: () => sessionId, getSessionFile: () => undefined, getBranch: () => [{ type: 'custom', customType: 'agent-workflows:worktree', data: { version: 1, path: checkout.path } }] },
     };
-    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool: (tool: any) => tools[tool.name] = tool, registerCommand() {} } as any);
+    worktree({ getSettings: () => ({}), on: (name: string, fn: any) => handlers[name] = fn, registerTool: (tool: any) => tools[tool.name] = tool, registerCommand() {} } as any);
     await handlers.session_start({}, ctx);
     assert.equal(getActiveCwd(repo, sessionId), repo);
     const relative = { toolName: 'read', input: { path: 'MARKER' } };
@@ -184,6 +187,113 @@ test('cleanup only removes a clean checkout at the exact head of a merged PR', a
       assert.equal(results.find(item => item.path === ahead.path)?.reason, 'no merged PR at checkout HEAD');
       await assert.rejects(trees.remove(repo, { force: true, confirm: async () => true }), /primary/);
     });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('cleanup preserves a checkout committed during confirmation, even with force', async t => {
+  for (const force of [false, true]) await t.test(`force=${force}`, async () => {
+    const { home, repo, git } = await repoFixture('pi-cleanup-commit-');
+    try {
+      const trees = new Worktrees(repo, { home, herdr: false });
+      const checkout = await trees.open('task');
+      const mergedHead = git('rev-parse', 'HEAD').trim();
+      await withFakeBin(home, 'gh', mergedPrGh(mergedHead), async () => {
+        let confirmations = 0;
+        const results = await trees.cleanup({ force, confirm: async () => {
+          confirmations++;
+          await writeFile(join(checkout.path, 'new-work'), 'keep committed work');
+          git('-C', checkout.path, 'add', 'new-work');
+          git('-C', checkout.path, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'unmerged work');
+          return true;
+        } });
+        assert.deepEqual(results, [{ path: checkout.path, removed: false, reason: 'checkout changed since cleanup eligibility' }]);
+        assert.equal(confirmations, 1);
+        assert.equal(await realpath(checkout.path), checkout.path);
+        assert.notEqual(git('-C', checkout.path, 'rev-parse', 'HEAD').trim(), mergedHead);
+        assert.equal(await readFile(join(checkout.path, 'new-work'), 'utf8'), 'keep committed work');
+      });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+});
+
+test('cleanup preserves a changed branch or checkout identity during confirmation', async t => {
+  for (const change of ['branch', 'replacement', 'alias']) for (const force of [false, true]) await t.test(`${change}, force=${force}`, async () => {
+    const { home, repo, git } = await repoFixture('pi-cleanup-identity-');
+    try {
+      const trees = new Worktrees(repo, { home, herdr: false });
+      const checkout = await trees.open('task');
+      const mergedHead = git('rev-parse', 'HEAD').trim();
+      const saved = join(home, 'saved-checkout');
+      await withFakeBin(home, 'gh', mergedPrGh(mergedHead), async () => {
+        const results = await trees.cleanup({ force, confirm: async () => {
+          if (change === 'branch') git('-C', checkout.path, 'switch', '-c', 'unmerged');
+          else if (change === 'replacement') {
+            await rename(checkout.path, saved);
+            git('worktree', 'remove', '--force', checkout.path);
+            git('worktree', 'add', checkout.path, checkout.branch);
+          } else {
+            git('worktree', 'move', checkout.path, saved);
+            await symlink(saved, checkout.path, 'dir');
+          }
+          return true;
+        } });
+        assert.deepEqual(results, [{ path: checkout.path, removed: false, reason: 'checkout changed since cleanup eligibility' }]);
+        assert.equal(await realpath(checkout.path), change === 'alias' ? saved : checkout.path);
+        assert.equal(git('-C', checkout.path, 'rev-parse', 'HEAD').trim(), mergedHead);
+        assert.equal(git('-C', checkout.path, 'branch', '--show-current').trim(), change === 'branch' ? 'unmerged' : checkout.branch);
+        if (change !== 'branch') assert.equal(await realpath(saved), saved);
+      });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+});
+
+test('cleanup skips a branch changed during the PR lookup without confirmation', async () => {
+  const { home, repo, git } = await repoFixture('pi-cleanup-lookup-');
+  try {
+    const trees = new Worktrees(repo, { home, herdr: false });
+    const checkout = await trees.open('task');
+    const head = git('rev-parse', 'HEAD').trim();
+    const gh = mergedPrGh(head).replace('#!/bin/sh\n', `#!/bin/sh\ngit -C '${checkout.path}' switch -c unmerged >/dev/null 2>&1 || exit 1\n`);
+    await withFakeBin(home, 'gh', gh, async () => {
+      let confirmations = 0;
+      const results = await trees.cleanup({ confirm: async () => { confirmations++; return true; } });
+      assert.deepEqual(results, [{ path: checkout.path, removed: false, reason: 'checkout changed since cleanup eligibility' }]);
+      assert.equal(confirmations, 0);
+      assert.equal(await realpath(checkout.path), checkout.path);
+      assert.equal(git('-C', checkout.path, 'branch', '--show-current').trim(), 'unmerged');
+    });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('cleanup still rechecks dirty files after confirmation and force still permits them', async t => {
+  for (const force of [false, true]) await t.test(`force=${force}`, async () => {
+    const { home, repo, git } = await repoFixture('pi-cleanup-dirty-');
+    try {
+      const trees = new Worktrees(repo, { home, herdr: false });
+      const checkout = await trees.open('task');
+      await withFakeBin(home, 'gh', mergedPrGh(git('rev-parse', 'HEAD').trim()), async () => {
+        const results = await trees.cleanup({ force, confirm: async () => { await writeFile(join(checkout.path, 'new-work'), 'dirty'); return true; } });
+        assert.deepEqual(results, [force ? { path: checkout.path, removed: true } : { path: checkout.path, removed: false, reason: 'dirty' }]);
+        if (force) await assert.rejects(realpath(checkout.path), { code: 'ENOENT' });
+        else assert.equal(await readFile(join(checkout.path, 'new-work'), 'utf8'), 'dirty');
+      });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+});
+
+test('explicit remove still permits a clean commit during confirmation', async () => {
+  const { home, repo, git } = await repoFixture('pi-remove-commit-');
+  try {
+    const trees = new Worktrees(repo, { home, herdr: false });
+    const checkout = await trees.open('task');
+    const originalHead = git('rev-parse', 'HEAD').trim();
+    const result = await trees.remove(checkout.path, { confirm: async () => {
+      git('-C', checkout.path, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'unmerged work');
+      return true;
+    } });
+    assert.deepEqual(result, { removed: true });
+    await assert.rejects(realpath(checkout.path), { code: 'ENOENT' });
+    assert.notEqual(git('rev-parse', checkout.branch).trim(), originalHead);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
@@ -328,7 +438,7 @@ function commandHost(repo: string, sessionId: string, options: { confirm?: () =>
     sessionManager: { getSessionId: () => sessionId, getBranch: () => [] },
     ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: options.confirm ?? (async () => true) },
   };
-  worktree({ on() {}, registerTool() {}, appendEntry: (_type: string, data: unknown) => entries.push(data), registerCommand: (name: string, value: any) => commands[name] = value } as any);
+  worktree({ getSettings: () => ({}), on() {}, registerTool() {}, appendEntry: (_type: string, data: unknown) => entries.push(data), registerCommand: (name: string, value: any) => commands[name] = value } as any);
   return { ctx, entries, notices, run: (args: string) => commands.worktree.handler(args, ctx), release: () => setActiveCwd(repo, undefined, sessionId) };
 }
 
@@ -381,4 +491,251 @@ test('removing the active checkout through an alias resets routing before the di
       assert.match(h.notices.at(-1) ?? '', /ENOENT/);
     });
   } finally { h.release(); await rm(home, { recursive: true, force: true }); }
+});
+
+async function withPausedGit(home: string, command: string[], body: (gate: { wait: () => Promise<void>; release: () => Promise<void> }) => Promise<void>): Promise<void> {
+  const executable = execFileSync('which', ['git'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const arrived = join(home, 'git-arrived'), released = join(home, 'git-released');
+  const source = `#!/usr/bin/env node
+const fs = require('node:fs'), cp = require('node:child_process');
+const args = process.argv.slice(2), command = ${JSON.stringify(command)};
+if (command.every((word, index) => args[index] === word)) {
+  fs.writeFileSync(${JSON.stringify(arrived)}, 'arrived');
+  const deadline = Date.now() + 10000;
+  while (!fs.existsSync(${JSON.stringify(released)})) {
+    if (Date.now() > deadline) process.exit(99);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+}
+const result = cp.spawnSync(${JSON.stringify(executable)}, args, { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`;
+  const release = () => writeFile(released, 'release');
+  await withFakeBin(home, 'git', source, async () => {
+    try {
+      await body({ release, wait: async () => {
+        const deadline = Date.now() + 10000;
+        while (true) {
+          try { await readFile(arrived); return; } catch (error) {
+            if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
+          }
+          assert.ok(Date.now() < deadline, 'Git operation did not reach the gate');
+          await delay(10);
+        }
+      } });
+    } finally { await release(); }
+  });
+}
+
+type SdkSession = Awaited<ReturnType<typeof createAgentSession>>['session'];
+
+async function heldSdkSession(home: string, repo: string, body: (session: SdkSession, held: { entered: Promise<void>; finish: () => void }) => Promise<void>): Promise<void> {
+  const agentDir = join(home, 'agent');
+  const settingsManager = SettingsManager.inMemory();
+  const loader = new DefaultResourceLoader({ cwd: repo, agentDir, settingsManager, extensionFactories: [worktree], noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true });
+  await loader.reload();
+  assert.deepEqual(loader.getExtensions().errors, []);
+  const runtime = await ModelRuntime.create({ authPath: join(agentDir, 'auth.json'), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
+  let finish = () => {}, enter = () => {};
+  const gate = new Promise<void>(resolve => finish = resolve);
+  const entered = new Promise<void>(resolve => enter = resolve);
+  const faux = fauxProvider({ tokensPerSecond: Infinity });
+  faux.setResponses([async () => { enter(); await gate; return fauxAssistantMessage('finished'); }]);
+  runtime.registerNativeProvider(faux.provider);
+  const { session } = await createAgentSession({ cwd: repo, agentDir, settingsManager, resourceLoader: loader, modelRuntime: runtime, sessionManager: SessionManager.inMemory(repo), model: faux.getModel() });
+  try {
+    await session.bindExtensions({});
+    await body(session, { entered, finish });
+  } finally {
+    finish();
+    await session.abort();
+    await session.extensionRunner?.emit({ type: 'session_shutdown', reason: 'quit' });
+    session.dispose();
+  }
+}
+
+test('async worktree opening preserves the running SDK turn and allows an idle retry', { timeout: 30_000 }, async t => {
+  for (const reuse of [false, true]) await t.test(reuse ? 'reuse' : 'create', async () => {
+    const { home, repo } = await repoFixture('pi-worktree-sdk-open-');
+    try {
+      await withHome(home, async () => {
+        const expected = join(home, 'repos/.worktrees/repo/task');
+        if (reuse) await new Worktrees(repo, { home, herdr: false }).open('task');
+        await withPausedGit(home, ['check-ref-format'], async gate => {
+          await heldSdkSession(home, repo, async (session, held) => {
+            const runner = session.extensionRunner!;
+            const notices: string[] = [];
+            runner.setUIContext({ ...runner.getUIContext(), notify: message => notices.push(message), setStatus() {} }, 'tui');
+            const entries = () => session.sessionManager.getBranch().filter(entry => entry.type === 'custom' && entry.customType === 'agent-workflows:worktree');
+            const command = session.prompt('/worktree task');
+            await gate.wait();
+            const turn = session.prompt('Hold this turn');
+            try {
+              await held.entered;
+              await gate.release();
+              await command;
+              assert.equal(session.isStreaming, true);
+              assert.equal(session.isIdle, false);
+              assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), repo);
+              assert.deepEqual(entries(), []);
+              assert.ok(session.systemPrompt.includes(`Active worktree directory: ${repo}.`));
+              const bash = session.agent.state.tools.find(tool => tool.name === 'bash');
+              assert.ok(bash);
+              const result = await bash.execute('held-pwd', { command: 'pwd' });
+              assert.deepEqual(result.content, [{ type: 'text', text: `${repo}\n` }]);
+              assert.equal(await realpath(expected), expected);
+              assert.ok(notices.some(message => message.includes('retry') && message.includes(expected)));
+            } finally { await gate.release(); held.finish(); await command; await turn; }
+            await session.prompt('/worktree task');
+            assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), expected);
+            assert.equal(entries().length, 1);
+            const bash = session.agent.state.tools.find(tool => tool.name === 'bash');
+            assert.ok(bash);
+            assert.deepEqual((await bash.execute('idle-pwd', { command: 'pwd' })).content, [{ type: 'text', text: `${expected}\n` }]);
+          });
+        });
+      });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+});
+
+test('a turn started during removal confirmation keeps the active checkout and session entry', { timeout: 15_000 }, async t => {
+  for (const args of ['remove', 'cleanup', 'cleanup --force']) await t.test(args, async () => {
+    const { home, repo, git } = await repoFixture('pi-worktree-sdk-remove-');
+    try {
+      await withHome(home, async () => {
+        const checkout = await new Worktrees(repo, { home, herdr: false }).open('task');
+        if (args.includes('--force')) await writeFile(join(checkout.path, 'dirty'), 'keep');
+        await withFakeBin(home, 'gh', mergedPrGh(git('rev-parse', 'HEAD').trim()), async () => {
+          await heldSdkSession(home, repo, async (session, held) => {
+            const runner = session.extensionRunner!;
+            let confirmEntered = () => {}, approve = () => {};
+            const confirming = new Promise<void>(resolve => confirmEntered = resolve);
+            const approval = new Promise<void>(resolve => approve = resolve);
+            const notices: string[] = [];
+            runner.setUIContext({ ...runner.getUIContext(), notify: message => notices.push(message), setStatus() {}, confirm: async () => { confirmEntered(); await approval; return true; } }, 'tui');
+            await session.prompt('/worktree task');
+            const entriesBefore = session.sessionManager.getBranch().filter(entry => entry.type === 'custom');
+            const command = session.prompt(args === 'remove' ? `/worktree remove "${checkout.path}"` : `/worktree ${args}`);
+            await confirming;
+            const turn = session.prompt('Hold this turn');
+            try {
+              await held.entered;
+              assert.equal(session.isIdle, false);
+              approve();
+              await command;
+              assert.equal(await realpath(checkout.path), checkout.path);
+              assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), checkout.path);
+              assert.deepEqual(session.sessionManager.getBranch().filter(entry => entry.type === 'custom'), entriesBefore);
+              assert.ok(session.systemPrompt.includes(`Active worktree directory: ${checkout.path}.`));
+              assert.ok(notices.some(message => message.includes('active turn')));
+            } finally { approve(); held.finish(); await command; await turn; }
+          });
+        });
+      });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+});
+
+test('approved active removal detaches before Git deletion and blocks overlapping reactivation', { timeout: 30_000 }, async t => {
+  for (const args of ['remove', 'cleanup', 'cleanup --force']) await t.test(args, async () => {
+    const { home, repo, git } = await repoFixture('pi-worktree-sdk-delete-');
+    try {
+      await withHome(home, async () => {
+        const checkout = await new Worktrees(repo, { home, herdr: false }).open('task');
+        const alias = join(home, 'alias');
+        await symlink(checkout.path, alias);
+        if (args.includes('--force')) await writeFile(join(checkout.path, 'dirty'), 'discard');
+        await withFakeBin(home, 'gh', mergedPrGh(git('rev-parse', 'HEAD').trim()), async () => {
+          await withPausedGit(home, ['worktree', 'remove'], async gate => {
+            await heldSdkSession(home, repo, async (session, held) => {
+              const runner = session.extensionRunner!;
+              const notices: string[] = [];
+              runner.setUIContext({ ...runner.getUIContext(), notify: message => notices.push(message), setStatus() {}, confirm: async () => true }, 'tui');
+              await session.prompt('/worktree task');
+              const saved = session.sessionManager.getBranch().find(entry => entry.type === 'custom' && entry.customType === 'agent-workflows:worktree');
+              assert.ok(saved);
+              const command = session.prompt(args === 'remove' ? `/worktree remove "${alias}"` : `/worktree ${args}`);
+              try {
+                await gate.wait();
+                assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), repo);
+                assert.equal(await realpath(checkout.path), checkout.path);
+                await session.prompt('/worktree task');
+                assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), repo);
+                assert.ok(notices.some(message => message.includes('pending worktree operation')));
+                assert.equal((await session.navigateTree(saved.id)).cancelled, false);
+                assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), repo);
+                const entriesBefore = session.sessionManager.getBranch().filter(entry => entry.type === 'custom');
+                const turn = session.prompt('Hold this turn');
+                try {
+                  await held.entered;
+                  assert.equal(session.isIdle, false);
+                  assert.ok(session.systemPrompt.includes(`Active worktree directory: ${repo}.`));
+                  await gate.release();
+                  await command;
+                  await assert.rejects(realpath(checkout.path), { code: 'ENOENT' });
+                  assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), repo);
+                  assert.deepEqual(session.sessionManager.getBranch().filter(entry => entry.type === 'custom'), entriesBefore);
+                } finally { held.finish(); await turn; }
+              } finally { await gate.release(); await command; }
+            });
+          });
+        });
+      });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+});
+
+test('a removal that becomes dirty after approval stays detached and permits a later activation', async () => {
+  const { home, repo } = await repoFixture('pi-worktree-remove-changed-');
+  const checkout = await new Worktrees(repo, { home, herdr: false }).open('task');
+  const h = commandHost(repo, 'remove-changed', { confirm: async () => { await writeFile(join(checkout.path, 'dirty'), 'keep'); return true; } });
+  try {
+    await withHome(home, async () => {
+      await h.run('task');
+      await h.run(`remove "${checkout.path}"`);
+      assert.equal(h.notices.at(-1), `${checkout.path}: dirty`);
+      assert.equal(getActiveCwd(repo, 'remove-changed'), repo);
+      assert.equal(await readFile(join(checkout.path, 'dirty'), 'utf8'), 'keep');
+      await h.run('task');
+      assert.equal(getActiveCwd(repo, 'remove-changed'), checkout.path);
+    });
+  } finally { h.release(); await rm(home, { recursive: true, force: true }); }
+});
+
+test('session-tree checkout opening preserves a turn started during Git validation', { timeout: 15_000 }, async () => {
+  const { home, repo } = await repoFixture('pi-worktree-sdk-restore-');
+  try {
+    await withHome(home, async () => {
+      await heldSdkSession(home, repo, async (session, held) => {
+        const runner = session.extensionRunner!;
+        runner.setUIContext({ ...runner.getUIContext(), notify() {}, setStatus() {} }, 'tui');
+        await session.prompt('/worktree task');
+        const saved = session.sessionManager.getBranch().find(entry => entry.type === 'custom' && entry.customType === 'agent-workflows:worktree');
+        assert.ok(saved);
+        await session.prompt('/worktree original');
+        await withPausedGit(home, ['worktree', 'list'], async gate => {
+          const navigation = session.navigateTree(saved.id);
+          await gate.wait();
+          const entriesBefore = session.sessionManager.getBranch().filter(entry => entry.type === 'custom');
+          const turn = session.prompt('Hold this turn');
+          try {
+            await held.entered;
+            assert.equal(session.isIdle, false);
+            await gate.release();
+            assert.equal((await navigation).cancelled, false);
+            assert.equal(session.isStreaming, true);
+            assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), repo);
+            assert.ok(session.systemPrompt.includes(`Active worktree directory: ${repo}.`));
+            assert.deepEqual(session.sessionManager.getBranch().filter(entry => entry.type === 'custom'), entriesBefore);
+            const bash = session.agent.state.tools.find(tool => tool.name === 'bash');
+            assert.ok(bash);
+            assert.deepEqual((await bash.execute('restore-pwd', { command: 'pwd' })).content, [{ type: 'text', text: `${repo}\n` }]);
+          } finally { await gate.release(); held.finish(); await navigation; await turn; }
+          await session.prompt('/worktree task');
+          assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), join(home, 'repos/.worktrees/repo/task'));
+        });
+      });
+    });
+  } finally { await rm(home, { recursive: true, force: true }); }
 });

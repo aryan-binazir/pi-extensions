@@ -453,16 +453,19 @@ export class ViEditor extends CustomEditor {
     if (!r) return;
     const t = this.text();
     const visual = this.mode === "visual" || this.mode === "line";
-    let a = 0,
-      b = 0,
-      value = "",
+    let a = key === "P" ? this.pos() : Math.min(this.lineEnd(), this.next(this.pos())),
+      b = a;
+    if (visual) [a, b] = this.range();
+    const selected = visual ? expandPastes(this, t.slice(a, b)) : "";
+    const separator = r.line && r.text && !r.text.endsWith("\n") ? "\n" : "";
+    const repeatedLength = r.text.length * n + separator.length * (n - 1);
+    const remainingLength = this.getExpandedText().length - selected.length;
+    if (remainingLength + repeatedLength > MAX_DRAFT) return;
+    let value = (r.text + separator).repeat(n),
       before = "",
       after = "";
+    if (separator) value = value.slice(0, -1);
     if (visual) {
-      [a, b] = this.range();
-      const selected = expandPastes(this, t.slice(a, b));
-      if (r.text.length * n + this.getExpandedText().length - selected.length > MAX_DRAFT) return;
-      value = r.text.repeat(n);
       if (this.mode === "line") {
         if (t.slice(a, b).endsWith("\n") || value.endsWith("\n")) after = "\n";
       } else if (r.line) {
@@ -470,20 +473,15 @@ export class ViEditor extends CustomEditor {
         if (b < t.length || value.endsWith("\n")) after = "\n";
       }
       if (after) value = value.replace(/\n$/, "");
-      this.checkpoint();
-      this.registers.set('"', { text: selected, line: this.mode === "line" });
-    } else {
-      a = b = key === "P" ? this.pos() : Math.min(this.lineEnd(), this.next(this.pos()));
-      if (r.text.length * n + this.getExpandedText().length > MAX_DRAFT) return;
-      this.checkpoint();
-      value = r.text.repeat(n);
-      if (r.line) {
-        a = b = key === "P" ? this.lineStart() : Math.min(t.length, this.lineEnd() + 1);
-        if (a === t.length && t && !t.endsWith("\n")) before = "\n";
-        else after = "\n";
-        value = value.replace(/\n$/, "");
-      }
+    } else if (r.line) {
+      a = b = key === "P" ? this.lineStart() : Math.min(t.length, this.lineEnd() + 1);
+      if (a === t.length && t && !t.endsWith("\n")) before = "\n";
+      else after = "\n";
+      value = value.replace(/\n$/, "");
     }
+    if (remainingLength + before.length + value.length + after.length > MAX_DRAFT) return;
+    this.checkpoint();
+    if (visual) this.registers.set('"', { text: selected, line: this.mode === "line" });
     this.writeText(t.slice(0, a) + before + collapsePaste(this, value) + after + t.slice(b));
     this.move(a + before.length);
     if (visual) {

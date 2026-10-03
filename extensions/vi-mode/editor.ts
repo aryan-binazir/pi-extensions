@@ -810,9 +810,20 @@ export class ViEditor extends CustomEditor {
       return;
     }
     if (data === "v" || data === "V") {
-      this.visualScroll = 0;
-      this.mode = data === "v" ? "visual" : "line";
-      this.anchor = this.pos();
+      const mode = data === "v" ? "visual" : "line";
+      if (this.mode === mode) {
+        this.mode = "normal";
+        this.anchor = 0;
+        this.visualScroll = 0;
+        this.move(this.onGrapheme(this.pos()));
+      } else {
+        if (this.mode === "normal") {
+          this.anchor = this.pos();
+          this.visualScroll = 0;
+        }
+        this.mode = mode;
+      }
+      this.resetPending();
       this.cursorShape();
       return;
     }

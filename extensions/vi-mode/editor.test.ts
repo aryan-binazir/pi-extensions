@@ -72,6 +72,80 @@ test("visual selection, named registers and text objects operate on selected tex
   keys(e, "ggVjd");
   assert.equal(e.getExpandedText(), "three");
 });
+for (const toggle of ["v", "V"]) {
+  test(`repeating ${toggle} exits visual mode and the next delete waits for a motion`, () => {
+    const e = editor();
+    e.setText("abc");
+    keys(e, `\x1b0${toggle}ll${toggle}`);
+    assert.equal(e.getExpandedText(), "abc");
+    assert.deepEqual(e.getCursor(), { line: 0, col: 2 });
+    assert.ok(e.render(50).at(-1)?.endsWith(" NORMAL "));
+    keys(e, "d");
+    assert.equal(e.getExpandedText(), "abc");
+    assert.ok(e.render(50).at(-1)?.endsWith(" NORMAL d "));
+    keys(e, "h");
+    assert.equal(e.getExpandedText(), "ac");
+    e.dispose();
+  });
+}
+test("switching visual modes preserves the anchor across lines in both directions", () => {
+  for (const { input, mode, cursor, expected } of [
+    { input: "gg02lvj2lV", mode: "LINE", cursor: { line: 1, col: 4 }, expected: "mnopqr" },
+    { input: "gg02lVj2lv", mode: "VISUAL", cursor: { line: 1, col: 4 }, expected: "abl\nmnopqr" },
+    { input: "G04lvk2hV", mode: "LINE", cursor: { line: 1, col: 2 }, expected: "abcdef" },
+    { input: "G04lVk2hv", mode: "VISUAL", cursor: { line: 1, col: 2 }, expected: "abcdef\nghr" },
+    { input: "gg02lvj2lVv", mode: "VISUAL", cursor: { line: 1, col: 4 }, expected: "abl\nmnopqr" },
+    { input: "G04lvk2hVv", mode: "VISUAL", cursor: { line: 1, col: 2 }, expected: "abcdef\nghr" },
+  ]) {
+    const e = editor();
+    e.setText("abcdef\nghijkl\nmnopqr");
+    keys(e, "\x1b" + input);
+    assert.equal(e.getExpandedText(), "abcdef\nghijkl\nmnopqr", input);
+    assert.deepEqual(e.getCursor(), cursor, input);
+    assert.ok(e.render(50).at(-1)?.endsWith(` ${mode} `), input);
+    keys(e, "d");
+    assert.equal(e.getExpandedText(), expected, input);
+    e.dispose();
+  }
+});
+test("visual toggle exit clears an earlier pending operator", () => {
+  for (const toggle of ["v", "V"]) {
+    const e = editor();
+    e.setText("abc");
+    keys(e, `\x1b0d${toggle}${toggle}d`);
+    assert.equal(e.getExpandedText(), "abc");
+    assert.ok(e.render(50).at(-1)?.endsWith(" NORMAL d "));
+    keys(e, "l");
+    assert.equal(e.getExpandedText(), "bc");
+    e.dispose();
+  }
+});
+test("visual toggle exit restores a normal cursor at end of text", () => {
+  for (const toggle of ["v", "V"]) {
+    for (const { text, input, cursor } of [
+      { text: "a😀", input: "0", cursor: { line: 0, col: 1 } },
+      { text: "", input: "0", cursor: { line: 0, col: 0 } },
+      { text: "abc\n", input: "G", cursor: { line: 1, col: 0 } },
+    ]) {
+      const e = editor();
+      e.setText(text);
+      keys(e, `\x1b${input}${toggle}w${toggle}`);
+      assert.equal(e.getExpandedText(), text);
+      assert.deepEqual(e.getCursor(), cursor);
+      assert.ok(e.render(50).at(-1)?.endsWith(" NORMAL "));
+      e.dispose();
+    }
+  }
+});
+test("switching visual modes retains the selected named register", () => {
+  const e = editor();
+  e.setText("abcdef\nghijkl\nmnopqr");
+  keys(e, '\x1bgg02l"avj2lVvy');
+  e.setText("X");
+  keys(e, '0"ap');
+  assert.equal(e.getExpandedText(), "Xcdef\nghijk");
+  e.dispose();
+});
 test("bracketed paste is one undo transaction and never interpreted as vi commands", () => {
   const e = editor();
   e.setText("draft");

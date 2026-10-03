@@ -300,12 +300,21 @@ test('new branches use master or the remote default and require a base when neit
   const { home, repo, git } = await repoFixture('pi-worktree-base-', { branch: 'master' });
   try {
     const trees = new Worktrees(repo, { home, herdr: false });
+    const originalHead = git('rev-parse', 'HEAD').trim();
     assert.equal((await trees.open('from-master')).branch, 'amb/from-master');
     git('branch', '-m', 'trunk');
     await assert.rejects(trees.open('needs-base'), /specify --base/);
+    git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/deleted');
+    await assert.rejects(trees.open('dangling-needs-base'), /specify --base/);
+    assert.equal((await trees.open('explicit-base', { base: 'trunk' })).branch, 'amb/explicit-base');
     git('update-ref', 'refs/remotes/origin/trunk', 'HEAD');
     git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk');
-    assert.equal((await trees.open('from-remote')).branch, 'amb/from-remote');
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'local defaults');
+    git('branch', 'main');
+    git('branch', 'master');
+    const remote = await trees.open('from-remote');
+    assert.equal(remote.branch, 'amb/from-remote');
+    assert.equal(git('-C', remote.path, 'rev-parse', 'HEAD').trim(), originalHead);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
@@ -331,6 +340,30 @@ function commandHost(repo: string, sessionId: string, options: { confirm?: () =>
   worktree({ on() {}, registerTool() {}, appendEntry: (_type: string, data: unknown) => entries.push(data), registerCommand: (name: string, value: any) => commands[name] = value } as any);
   return { ctx, entries, notices, run: (args: string) => commands.worktree.handler(args, ctx), release: () => setActiveCwd(repo, undefined, sessionId) };
 }
+
+test('/worktree falls back to local main or master when origin/HEAD is dangling', async t => {
+  for (const branch of ['main', 'master']) {
+    await t.test(branch, async () => {
+      const { home, repo, git } = await repoFixture('pi-worktree-dangling-', { branch });
+      const sessionId = `dangling-${branch}`;
+      const h = commandHost(repo, sessionId);
+      try {
+        const baseHead = git('rev-parse', 'HEAD').trim();
+        git('checkout', '-b', 'topic');
+        git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'topic');
+        if (branch === 'main') git('branch', 'master');
+        git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/deleted');
+        await withHome(home, async () => {
+          await h.run('feature');
+          const path = join(home, 'repos/.worktrees/repo/feature');
+          assert.deepEqual({ entries: h.entries, active: getActiveCwd(repo, sessionId), notice: h.notices.at(-1) },
+            { entries: [{ version: 1, path }], active: path, notice: `Active worktree: ${path}. Pi session storage remains at ${repo}.` });
+          assert.equal(git('-C', path, 'rev-parse', 'HEAD').trim(), baseHead);
+        });
+      } finally { h.release(); await rm(home, { recursive: true, force: true }); }
+    });
+  }
+});
 
 test('/worktree <name> --branch creates the checkout, activates it and persists the switch', async () => {
   const { home, repo } = await repoFixture('pi-worktree-command-');

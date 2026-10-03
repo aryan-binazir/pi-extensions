@@ -19,6 +19,25 @@ function fixture(run: (host: any) => Promise<void>) {
 const noticeFlushWindowMs = 250;
 const afterNoticeFlushWindow = () => new Promise<void>(resolve => setTimeout(resolve, noticeFlushWindowMs + 50));
 
+test('direct and workflow children escape leading @ only in the CLI brief with no tools', async () => {
+  await withHost({prefix: 'literal-brief-host-', pi, tools: []}, async ({execute}) => {
+    const brief = '@literal task brief\n--model keep this text  ';
+    const child = await execute('subagent', {task: brief, tools: []});
+    const direct = await until(async () => {
+      const result = (await execute('subagent_status', {id: child.details.id})).details;
+      return result.status === 'succeeded' ? result : undefined;
+    }, 'literal brief child to complete');
+    const workflow = await execute('workflow', {source: `return await api.spawn({task:${JSON.stringify(brief)},tools:[]},'literal');`});
+    for (const result of [direct, workflow.details]) {
+      assert.equal(result.status, 'succeeded');
+      assert.equal(result.task, brief);
+      const args = JSON.parse(result.output);
+      assert.deepEqual(args.slice(-2), ['--', '\n@literal task brief\n--model keep this text  ']);
+      assert.equal(args[args.indexOf('--tools') + 1], '');
+    }
+  });
+});
+
 test('batch re-clipping marks omitted output even when each original notice fitted', async () => fixture(async ({execute, settle, notifications}: any) => {
   const children = await Promise.all([1, 2].map(i => execute('subagent', {task: String(i) + 'x'.repeat(1700), preset: 'reader'})));
   await Promise.all(children.map(child => settle(child.details.id)));

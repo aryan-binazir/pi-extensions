@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { once } from 'node:events';
+import { getEventListeners, once } from 'node:events';
+import { pathToFileURL } from 'node:url';
+import { createEditTool, createWriteTool } from '@earendil-works/pi-coding-agent';
 import nvimIde, { editorContext, statusText } from './index.ts';
 import { maxSelectionChars } from './link.ts';
 import { fakeIde, token, until } from './test-support.ts';
@@ -39,20 +41,20 @@ async function withConnectedIde(body: (harness: Connected) => Promise<void>): Pr
   const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const project = join(root, 'project');
   const previous = process.env.CLAUDE_CONFIG_DIR;
+  const pi = fakePi();
+  const context = fakeCtx(project);
   try {
     await mkdir(join(root, 'ide'), { recursive: true });
     await mkdir(project);
     await writeFile(join(project, 'a.ts'), 'line1\nline2\nline3\nline4\n');
     await writeFile(join(root, 'ide', `${ide.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [project], ideName: 'Neovim', authToken: token }));
     process.env.CLAUDE_CONFIG_DIR = root;
-    const pi = fakePi();
-    const context = fakeCtx(project);
     nvimIde(pi.api as any);
     await pi.fire('session_start', {}, context.ctx);
     await until(() => context.status.includes('Neovim ✓'));
     await body({ ide, project, ...pi, ...context });
-    await pi.fire('session_shutdown', {}, context.ctx);
   } finally {
+    await pi.fire('session_shutdown', {}, context.ctx);
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
     await ide.close();
     await rm(root, { recursive: true, force: true });
@@ -115,6 +117,47 @@ test('follow after edit opens the changed file, and /vim follow turns it off', a
   });
 });
 
+test('follow opens the actual files written and edited by Pi with normalized paths in the active worktree', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    const routed = join(project, 'checkout');
+    await mkdir(routed);
+    const previousHome = process.env.HOME;
+    process.env.HOME = routed;
+    setActiveCwd(project, routed, ctx.sessionManager.getSessionId());
+    try {
+      assert.equal(homedir(), routed);
+      const cases = [
+        { path: '@written.ts', file: 'written.ts' },
+        { path: pathToFileURL(join(routed, 'url file.ts')).href, file: 'url file.ts' },
+        { path: '~/home.ts', file: 'home.ts' },
+        { path: 'unicode\u00a0space.ts', file: 'unicode space.ts' },
+        { path: 'narrow\u202fspace.ts', file: 'narrow space.ts' },
+      ];
+      const write = createWriteTool(routed);
+      for (const [i, { path, file }] of cases.entries()) {
+        const toolCallId = `write-${i}`;
+        const args = { path, content: 'written' };
+        await fire('tool_execution_start', { toolCallId, toolName: 'write', args }, ctx);
+        const result = await write.execute(toolCallId, args, undefined);
+        assert.equal(await readFile(join(routed, file), 'utf8'), 'written');
+        await fire('tool_execution_end', { toolCallId, toolName: 'write', result, isError: false }, ctx);
+        await until(() => ide.calls.length === i + 1);
+        assert.equal(ide.calls[i].arguments.filePath, join(routed, file), path);
+      }
+      const args = { path: '@written.ts', edits: [{ oldText: 'written', newText: 'edited' }] };
+      await fire('tool_execution_start', { toolCallId: 'edit-at', toolName: 'edit', args }, ctx);
+      const result = await createEditTool(routed).execute('edit-at', args, undefined);
+      assert.equal(await readFile(join(routed, 'written.ts'), 'utf8'), 'edited');
+      await fire('tool_execution_end', { toolCallId: 'edit-at', toolName: 'edit', result, isError: false }, ctx);
+      await until(() => ide.calls.length === cases.length + 1);
+      assert.deepEqual(ide.calls.at(-1)?.arguments, { filePath: join(routed, 'written.ts'), preview: false, makeFrontmost: true, startLine: 1, endLine: 1 });
+    } finally {
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    }
+  });
+});
+
 test('editor tools resolve paths, and a closed editor clears status, prompt and tools', async () => {
   await withConnectedIde(async ({ ide, project, fire, tools, commands, ctx, status, notices }) => {
     ide.broadcast('selection_changed', { text: 'line2', filePath: join(project, 'a.ts'), selection: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 }, isEmpty: false } });
@@ -139,6 +182,35 @@ test('editor tools resolve paths, and a closed editor clears status, prompt and 
     assert.match(notices.at(-1)!, /not connected/);
   });
 });
+
+for (const [mode, message] of [['disconnect', 'IDE disconnected'], ['reconnect', 'reconnecting'], ['stop', 'IDE link stopped']] as const) {
+  test(`pending nvim_context settles when the editor link ${mode}s`, async () => {
+    await withConnectedIde(async ({ ide, fire, tools, commands, ctx }) => {
+      for (const client of ide.server.clients) {
+        client.removeAllListeners('message');
+        client.on('message', raw => {
+          const request = JSON.parse(raw.toString());
+          if (request.method === 'tools/call') ide.calls.push(request.params);
+        });
+      }
+      const controller = new AbortController();
+      let error: Error | undefined;
+      const execution = tools.get('nvim_context').execute('pending', {}, controller.signal, undefined, ctx).catch((failure: Error) => { error = failure; });
+      await until(() => ide.calls.length === 3);
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 3);
+
+      if (mode === 'disconnect') {
+        for (const client of ide.server.clients) client.terminate();
+      } else if (mode === 'reconnect') await commands.get('vim').handler('reconnect', ctx);
+      else await fire('session_shutdown', {}, ctx);
+      await until(() => error !== undefined, 1000);
+      assert.equal(error?.message, message);
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+      controller.abort();
+      await execution;
+    });
+  });
+}
 
 test('session without an editor: no status, no prompt injection, shutdown is clean', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
@@ -194,14 +266,27 @@ test('follow after edit opens the file inside the active worktree, not the origi
   });
 });
 
-test('nvim_open resolves relative paths against the active worktree', async () => {
+test('editor tools normalize file paths against the active worktree', async () => {
   await withConnectedIde(async ({ ide, project, tools, ctx }) => {
-    const routed = join(project, 'checkout'); await mkdir(routed);
+    const routed = join(project, 'checkout');
+    await mkdir(routed);
+    const previousHome = process.env.HOME;
+    process.env.HOME = routed;
     setActiveCwd(project, routed, ctx.sessionManager.getSessionId());
     try {
-      await tools.get('nvim_open').execute('o1', { path: 'b.ts' }, undefined, undefined, ctx);
-      assert.equal(ide.calls[0].arguments.filePath, join(routed, 'b.ts'));
-    } finally { setActiveCwd(project, undefined, ctx.sessionManager.getSessionId()); }
+      assert.equal(homedir(), routed);
+      const paths = ['b.ts', '@b.ts', pathToFileURL(join(routed, 'b.ts')).href, '~/b.ts', 'unicode\u00a0space.ts'];
+      for (const path of paths) {
+        const expected = join(routed, path.startsWith('unicode') ? 'unicode space.ts' : 'b.ts');
+        await tools.get('nvim_open').execute('open', { path }, undefined, undefined, ctx);
+        assert.equal(ide.calls.at(-1)?.arguments.filePath, expected, path);
+        await tools.get('nvim_diagnostics').execute('diagnostics', { path }, undefined, undefined, ctx);
+        assert.deepEqual(ide.calls.at(-1)?.arguments, { uri: pathToFileURL(expected).href }, path);
+      }
+    } finally {
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    }
   });
 });
 

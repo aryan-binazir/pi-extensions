@@ -7,6 +7,8 @@ try {
 } catch { buildBaseOptions = undefined; }
 const WRAPPED=Symbol.for('pi-interactive:fast-provider');
 export const FAST_SUFFIX='~fast';
+type CatalogEntry=Provider extends {getAllModels?:()=>readonly (infer Entry)[]} ? Entry : {id:string;type?:string};
+type CatalogProvider=Provider & {getAllModels?:()=>readonly CatalogEntry[]};
 function eligibility(model:Model<Api>):boolean {
  try {
   const origin=new URL(model.baseUrl).origin;
@@ -20,7 +22,7 @@ function supported(model:Model<Api>):boolean {
  if(result===undefined)supportedCache.set(model,result=eligibility(model));
  return result;
 }
-export function withFastModels(original:Provider,view:Provider=original):Provider {
+export function withFastModels(original:Provider,view:Provider=original):CatalogProvider {
  if(!buildBaseOptions)return original;
  const baseOptions=buildBaseOptions;
  if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED] || original.getModels().some(model=>model.id.endsWith(FAST_SUFFIX))) return original;
@@ -46,8 +48,16 @@ export function withFastModels(original:Provider,view:Provider=original):Provide
   if(!base || !supported(base))throw new Error('Fast model no longer available');
   return {model:{...model,id:base.id,cost:base.cost},fast:true};
  };
- const wrapped:Provider={
+ const catalog:CatalogProvider=original;
+ const getAllModels=catalog.getAllModels;
+ const wrapped:CatalogProvider={
   ...original,
+  ...(getAllModels?{getAllModels:()=>{
+   const models=getAllModels.call(original);
+   const chatIds=new Set(models.filter(model=>model.type===undefined||model.type==='chat').map(model=>model.id));
+   const fast=aliases(original.getModels(),custom).filter(model=>model.id.endsWith(FAST_SUFFIX)&&!chatIds.has(model.id));
+   return [...models,...fast];
+  }}:{}),
   getModels:()=>aliases(original.getModels(),custom),
   filterModels:original.filterModels ? (models,credential)=>{
    const withoutAliases=models.filter(model=>!model.id.endsWith(FAST_SUFFIX));

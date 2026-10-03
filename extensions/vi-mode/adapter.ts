@@ -209,26 +209,41 @@ export function installEditorHandoff(): void {
   };
   // Inline custom UI also restores getText() via setText(), clearing paste data.
   const showCustom = prototype.showExtensionCustom;
+  const hooks = new WeakMap<Editor["setText"], { previous: Editor["setText"]; active: boolean }>();
   prototype.showExtensionCustom = async function (this: { editor: Editor }, factory, options) {
     const source = this.editor;
     if (options?.overlay || !(viEditor in source))
       return showCustom.call(this, factory, options);
     const text = source.getText();
     const payloads = readPastes(source);
-    const setText = source.setText;
+    const hook = { previous: source.setText, active: true };
+    const previousSetText = () => {
+      let setText = hook.previous;
+      for (let previous = hooks.get(setText); previous && !previous.active; previous = hooks.get(setText)) {
+        setText = previous.previous;
+      }
+      return setText;
+    };
     const restore = (next: string) => {
+      const setText = previousSetText();
       if (this.editor === source && next === text) {
         source.setText = setText;
-        restoreRawDraft(source, text, payloads);
+        try {
+          restoreRawDraft(source, text, payloads);
+        } finally {
+          if (source.setText === setText) source.setText = restore;
+        }
       } else {
         setText.call(source, next);
       }
     };
+    hooks.set(restore, hook);
     source.setText = restore;
     try {
       return await showCustom.call(this, factory, options);
     } finally {
-      if (source.setText === restore) source.setText = setText;
+      hook.active = false;
+      if (source.setText === restore) source.setText = previousSetText();
     }
   };
   Object.defineProperty(prototype, handoffInstalled, { value: true });

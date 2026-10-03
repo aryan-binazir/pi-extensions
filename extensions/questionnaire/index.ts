@@ -344,7 +344,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 const promptPrefix = !showHeader && params.questions.length > 1
                   ? (q ? `${tab + 1}/${params.questions.length + 1} ${w >= 28 ? "Submit" : "S"} | ` : "[ Submit ] ") : "";
                 const prompt = promptPrefix + (view ? view.prompt : "Review your answers");
-                const editorRows = editing ? editor.render(Math.max(10, w)) : [];
+                const editorRows = editing ? editor.render(Math.max(3, w)) : [];
                 const wrappedPrompt = wrap(prompt);
                 const content: string[] = [];
                 let focusRow = 0;

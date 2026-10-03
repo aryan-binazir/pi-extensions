@@ -1,5 +1,5 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import assert from "node:assert/strict";
 import test from "node:test";
 import questionnaire from "./index.ts";
@@ -51,6 +51,7 @@ function host(onEmit?: (value: any) => void) {
     run: (questions: any[], signal?: AbortSignal) =>
       tool.execute("id", { questions }, signal, undefined, ctx),
     key: (key: string) => component.handleInput(key),
+    focus: () => { component.focused = true; },
     render: (width = 60) => component.render(width),
     options: () => uiOptions,
   };
@@ -397,6 +398,36 @@ test("six-row terminals retain prompt, selection, editor and cancellation contro
   } finally {
     h.key("\x03");
     await running;
+  }
+});
+
+test("custom answer cursors survive narrow frames and short viewports", async () => {
+  for (const height of [6, 10, 16, 30]) {
+    for (const answer of ["abcdef", "Custom 日本語 answer", "first\nsecond\nthird\nfourth\nfifth\nabcdefghijklmnopqrstuvwxyz"]) {
+      const h = host();
+      h.terminal.rows = height;
+      const pending = h.run([{ id: "free", prompt: "Write", options: [] }]);
+      try {
+        h.focus();
+        h.key("\r");
+        h.key(`\x1b[200~${answer}\x1b[201~`);
+        for (const width of [7, 8, 9, 10, 11, 12, 13, 14, 20, 80]) {
+          h.terminal.columns = width;
+          const rows: string[] = h.render(width);
+          const size = `${width} columns, ${height} rows`;
+          assert.ok(rows.some((line) => line.includes(CURSOR_MARKER) && line.includes("\x1b[7m \x1b[0m")), `Both cursors must remain visible at ${size}`);
+          assert.ok(rows.every((line) => visibleWidth(line) <= width), `Frame must fit at ${size}`);
+          assert.ok(rows.length <= viewport(height), `Viewport must fit at ${size}`);
+        }
+        h.key("\r");
+        assert.deepEqual((await pending).details.answers, [
+          { id: "free", value: answer, label: answer, wasCustom: true },
+        ]);
+      } finally {
+        h.hooks.session_shutdown();
+        await pending;
+      }
+    }
   }
 });
 

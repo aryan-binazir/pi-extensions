@@ -321,3 +321,68 @@ for (const trusted of [false, true]) {
       }
     }));
 }
+
+for (const firstTool of ['subagent', 'workflow']) {
+  for (const stop of ['timeout', 'owner']) {
+    test(`a ${firstTool} ${stop} leaves another admission approval usable`, async () =>
+      withHost({prefix: 'subagent-overlap-', pi: echoArgs}, async host => {
+        const mode = interactiveUI(host);
+        const firstOwner = new AbortController(), secondOwner = new AbortController();
+        const extension = join(host.cwd, 'child.ts');
+        await writeFile(extension, 'export default () => {};');
+        const child = {task: 'read', preset: 'reader', extensions: [extension]};
+        let secondDialog: any;
+        let confirmations = 0;
+        host.ctx.ui.confirm = (title: string, message: string, opts: any) => {
+          const confirmation = mode.showExtensionConfirm(title, message, opts);
+          if (++confirmations === (firstTool === 'subagent' ? 2 : 1)) secondDialog = mode.extensionSelector;
+          return confirmation;
+        };
+        const first = host.execute(firstTool, {...(firstTool === 'subagent' ? child : {source: 'return 1;'}), timeout: stop === 'timeout' ? 150 : 5000}, firstOwner.signal).catch(error => error);
+        await until(() => mode.focus !== mode.editor, 'the first approval');
+        const second = host.execute('subagent', {...child, timeout: 5000}, secondOwner.signal);
+        try {
+          if (stop === 'owner') { await new Promise(resolve => setTimeout(resolve, 50)); firstOwner.abort(); }
+          assert.match(String(await first), /aborted|deadline/);
+          await until(() => secondDialog, 'the remaining approval');
+          assert.equal(mode.focus, secondDialog, 'expiry must not dismiss the remaining approval');
+          assert.deepEqual(mode.editorContainer.children, [secondDialog]);
+          secondDialog.handleInput('\r');
+          const launched = await second;
+          const finished = await until(async () => {
+            const task = (await host.execute('subagent_status', {id: launched.details.id})).details;
+            return task.status === 'succeeded' ? task : undefined;
+          }, 'the approved remaining child to finish');
+          assert.equal(finished.status, 'succeeded');
+        } finally {
+          firstOwner.abort(); secondOwner.abort();
+          await second.catch(() => {});
+        }
+      }));
+  }
+}
+
+test('an admission expiring while queued leaves the active approval usable', async () =>
+  withHost({prefix: 'subagent-queued-ui-', pi: echoArgs}, async host => {
+    const mode = interactiveUI(host);
+    const owner = new AbortController();
+    const extension = join(host.cwd, 'child.ts');
+    await writeFile(extension, 'export default () => {};');
+    const child = {preset: 'reader', extensions: [extension]};
+    const active = host.execute('subagent', {...child, task: 'active', timeout: 5000}, owner.signal);
+    const dialog = await until(() => mode.extensionSelector, 'the active approval');
+    try {
+      await assert.rejects(host.execute('subagent', {...child, task: 'expired', timeout: 100}), /deadline/);
+      assert.equal(mode.focus, dialog);
+      assert.deepEqual(mode.editorContainer.children, [dialog]);
+      dialog.handleInput('\r');
+      const launched = await active;
+      await until(async () => (await host.execute('subagent_status', {id: launched.details.id})).details.status === 'succeeded', 'the active child to finish');
+      const tasks = (await host.execute('subagent_status')).details;
+      assert.deepEqual(tasks.map((task: {task: string}) => task.task), ['active']);
+      assert.equal(mode.focus, mode.editor);
+    } finally {
+      owner.abort();
+      await active.catch(() => {});
+    }
+  }));

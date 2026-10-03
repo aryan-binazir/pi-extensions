@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { join, resolve } from 'node:path';
-import { mkdtemp, mkdir, realpath, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import worktree from './index.ts';
 import { Worktrees } from './manager.ts';
 import { getActiveCwd, resolveToolPath, setActiveCwd } from './routing.ts';
@@ -216,4 +217,65 @@ test('switching is refused while a turn is active', async () => {
     await commands.worktree.handler('original', ctx);
     assert.deepEqual({ entries, notice: notices.at(-1) }, { entries: [], notice: 'Wait for the active turn before switching worktrees' });
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('routed agent and user bash preserve the configured shell and apply the prefix once', async t => {
+  for (const source of ['persisted', 'effective']) await t.test(source, async t => {
+    const { home, original, active } = await checkoutFixture('pi-route-shell-');
+    const agentDir = join(home, 'agent');
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+    try {
+      await mkdir(agentDir);
+      const shellPath = join(home, 'configured shell');
+      await writeFile(shellPath, '#!/bin/sh\nexport PI_WORKTREE_SHELL=custom\nexec /bin/bash "$@"\n', { mode: 0o755 });
+      await writeFile(join(agentDir, 'settings.json'), JSON.stringify({
+        shellPath, shellCommandPrefix: source === 'persisted' ? 'export PI_WORKTREE_PREFIX="${PI_WORKTREE_PREFIX}x"' : 'export PI_WORKTREE_PREFIX=from-disk',
+      }));
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      const settingsManager = source === 'persisted' ? SettingsManager.create(original, agentDir) : SettingsManager.inMemory({
+        shellPath, shellCommandPrefix: 'export PI_WORKTREE_PREFIX="${PI_WORKTREE_PREFIX}x"',
+      });
+      let supportsEffectiveSettings = false;
+      const resourceLoader = new DefaultResourceLoader({ cwd: original, agentDir, settingsManager,
+        extensionFactories: [pi => { supportsEffectiveSettings = 'getSettings' in pi; worktree(pi); }], noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true });
+      await resourceLoader.reload();
+      if (source === 'effective' && !supportsEffectiveSettings) { t.skip('This SDK lacks ExtensionAPI.getSettings'); return; }
+      const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, 'auth.json'), modelsPath: null,
+        refreshOnCreate: false, allowModelNetwork: false });
+      ({ session } = await createAgentSession({ cwd: original, agentDir, settingsManager, resourceLoader,
+        modelRuntime, sessionManager: SessionManager.inMemory(original) }));
+      await session.bindExtensions({});
+      const runner = session.extensionRunner;
+      assert.ok(runner);
+      const errors: unknown[] = [];
+      runner.onError(error => errors.push(error));
+      let marker = 'x|custom';
+      const command = 'printf "%s|%s|%s" "${PI_WORKTREE_PREFIX:-missing}" "${PI_WORKTREE_SHELL:-missing}" "$PWD"';
+      for (const cwd of [original, active, original]) {
+        session.sessionManager.appendCustomEntry('agent-workflows:worktree', { version: 1, path: cwd });
+        await runner.emit({ type: 'session_tree', newLeafId: session.sessionManager.getLeafId(), oldLeafId: null });
+        const bash: (typeof session.agent.state.tools)[number] | undefined = session.agent.state.tools.find(tool => tool.name === 'bash');
+        assert.ok(bash);
+        const agent = await bash.execute('shell-settings', { command });
+        assert.deepEqual(agent.content, [{ type: 'text', text: `${marker}|${cwd}` }]);
+        const intercepted = await runner.emitUserBash({ type: 'user_bash', command, cwd: original, excludeFromContext: false });
+        const user = await session.executeBash(command, undefined, { operations: intercepted?.operations });
+        assert.equal(user.output, `${marker}|${cwd}`);
+        assert.equal(user.exitCode, 0);
+        if (source === 'effective' && cwd === active) {
+          const secondShell = join(home, 'second shell');
+          await writeFile(secondShell, '#!/bin/sh\nexport PI_WORKTREE_SHELL=updated\nexec /bin/bash "$@"\n', { mode: 0o755 });
+          settingsManager.applyOverrides({ shellPath: secondShell, shellCommandPrefix: 'export PI_WORKTREE_PREFIX="${PI_WORKTREE_PREFIX}y"' });
+          marker = 'y|updated';
+        }
+      }
+      assert.deepEqual(errors, []);
+    } finally {
+      if (session) { setActiveCwd(original, undefined, session.sessionManager.getSessionId()); session.dispose(); }
+      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { appendFileSync, watch, type FSWatcher } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type WebSocket from 'ws';
 
 let wsModule: Promise<typeof WebSocket> | undefined;
@@ -98,7 +98,21 @@ export class IdeLink {
     });
   }
   reconnect(): void { const socket = this.socket; this.drop(new Error('reconnecting')); socket?.terminate(); void this.attempt(); }
-  takeMentions(): Mention[] { const taken = this.mentions; this.mentions = []; if (taken.length) this.emit(); return taken; }
+  async takeMentions(): Promise<Mention[]> {
+    const taken = this.mentions;
+    this.mentions = [];
+    if (taken.length) this.emit();
+    if (taken.every(mention => isAbsolute(mention.filePath))) return taken;
+    const socket = this.socket;
+    let root: string | undefined;
+    try {
+      const workspace: unknown = JSON.parse(await this.call('getWorkspaceFolders'));
+      if (this.socket === socket && workspace && typeof workspace === 'object'
+        && 'rootPath' in workspace && typeof workspace.rootPath === 'string' && isAbsolute(workspace.rootPath)
+        && !('success' in workspace && workspace.success === false)) root = workspace.rootPath;
+    } catch {}
+    return taken.flatMap(mention => isAbsolute(mention.filePath) ? [mention] : root ? [{ ...mention, filePath: resolve(root, mention.filePath) }] : []);
+  }
 
   async call(name: string, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<string> {
     const result = await this.request('tools/call', { name, arguments: args }, signal) as { content?: Content; isError?: boolean } | undefined;
@@ -187,6 +201,7 @@ export class IdeLink {
     const wasReady = this.ready;
     this.socket?.removeAllListeners('close');
     this.socket = undefined; this.ready = false; this.lock = undefined; this.selection = undefined;
+    this.mentions = this.mentions.filter(mention => isAbsolute(mention.filePath));
     for (const [id, item] of this.pending) { clearTimeout(item.timer); this.pending.delete(id); item.reject(error); }
     if (wasReady) this.emit();
   }

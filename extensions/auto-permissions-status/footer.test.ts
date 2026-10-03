@@ -93,13 +93,13 @@ test('memoised rows still follow width, cwd and empty-status changes', () => {
 
 test('subscription labels require explicit provider metadata and OAuth, except for Kimi', async t => {
   for (const scenario of [
-    { name: 'metered OAuth', isSubscription: false, oauth: true, subscription: false },
-    { name: 'OAuth without subscription metadata', isSubscription: undefined, oauth: true, subscription: false },
-    { name: 'subscription OAuth', isSubscription: true, oauth: true, subscription: true },
-    { name: 'subscription provider using an API key', isSubscription: true, oauth: false, subscription: false },
-    { name: 'Kimi using an API key', isSubscription: false, oauth: false, subscription: true },
+    { name: 'metered OAuth', providerId: 'footer-billing-test', isSubscription: false, oauth: true, subscription: false },
+    { name: 'OAuth without subscription metadata', providerId: 'footer-billing-test', isSubscription: undefined, oauth: true, subscription: false },
+    { name: 'subscription OAuth', providerId: 'footer-billing-test', isSubscription: true, oauth: true, subscription: true },
+    { name: 'subscription provider using an API key', providerId: 'footer-billing-test', isSubscription: true, oauth: false, subscription: false },
+    { name: 'Kimi using an API key', providerId: 'kimi-coding', isSubscription: false, oauth: false, subscription: true },
   ]) await t.test(scenario.name, async t => {
-    const providerId = scenario.name.startsWith('Kimi') ? 'kimi-coding' : 'footer-billing-test';
+    const { providerId } = scenario;
     const credentials = new InMemoryCredentialStore();
     const oauthCredential: OAuthCredential = { type: 'oauth', access: 'synthetic-unused', refresh: 'synthetic-unused', expires: Date.now() + 3600000 };
     await credentials.modify(providerId, async () => scenario.oauth ? oauthCredential : { type: 'api_key', key: 'synthetic-unused' });

@@ -49,7 +49,11 @@ export class Worktrees {
     }
   }
   private async defaultBase(): Promise<string> {
-    try { return await this.run('git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']); } catch {}
+    try {
+      const target = await this.run('git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+      await this.run('git', ['rev-parse', '--verify', `${target}^{commit}`]);
+      return target;
+    } catch {}
     for (const branch of ['main', 'master']) {
       try { await this.run('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]); return branch; } catch { continue; }
     }

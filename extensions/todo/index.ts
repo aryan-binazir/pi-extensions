@@ -33,6 +33,12 @@ function parse(data: unknown): Snapshot {
 
 export default function todo(pi: ExtensionAPI): void {
   let state: Snapshot = { version: 1, todos: [], staleTurns: 0 };
+  let dirty = false;
+  const persist = () => {
+    if (!dirty) return;
+    pi.appendEntry(entryType, clone(state));
+    dirty = false;
+  };
   const active = () => state.todos.some(item => item.status !== 'completed');
   const paint = (ctx: ExtensionContext) => {
     if (!ctx.hasUI) return;
@@ -69,6 +75,7 @@ export default function todo(pi: ExtensionAPI): void {
     return error;
   };
   const restore = (ctx: ExtensionContext) => {
+    dirty = false;
     const branch = ctx.sessionManager.getBranch();
     let newest = -1;
     let newestData: unknown;
@@ -100,6 +107,7 @@ export default function todo(pi: ExtensionAPI): void {
   pi.on('session_start', (_event, ctx) => restore(ctx));
   pi.on('session_tree', (_event, ctx) => restore(ctx));
   pi.on('session_shutdown', (_event, ctx) => {
+    dirty = false;
     state = { version: 1, todos: [], staleTurns: 0 };
     paint(ctx);
   });
@@ -115,15 +123,22 @@ export default function todo(pi: ExtensionAPI): void {
       const next: Snapshot = { version: 1, todos, staleTurns: changed ? 0 : state.staleTurns };
       pi.appendEntry(entryType, clone(next));
       state = next;
+      dirty = false;
       paint(ctx);
       return { content: [{ type: 'text', text: todos.length ? `Declared progress saved: ${todos.filter(item => item.status === 'completed').length}/${todos.length} completed.` : 'Todo list cleared.' }], details: clone(state) };
     },
   });
-  pi.on('before_agent_start', (event, _ctx) => {
-    if (!active()) return;
+  pi.on('message_start', event => {
+    if (event.message.role !== 'user' || !active()) return;
+    persist();
     state = { ...state, staleTurns: state.staleTurns + 1 };
-    pi.appendEntry(entryType, clone(state));
+    dirty = true;
+  });
+  pi.on('agent_end', () => persist());
+  pi.on('context', event => {
+    persist();
+    if (!active()) return;
     const warning = state.staleTurns >= 6 ? 'STALE TODO: Before proceeding, reconcile this list with actual work; explain blockers or clear obsolete tasks. Do not mark tasks complete without evidence.' : state.staleTurns >= 3 ? 'This todo list has not changed for several turns. Update actual progress or explain the blocker.' : 'Keep the todo list current as work progresses.';
-    return { systemPrompt: `${event.systemPrompt}\n\n${warning}\nPersisted todos are declared progress, not verified completion:\n${state.todos.map(item => `[${item.status}] ${item.content}`).join('\n')}` };
+    return { messages: [...event.messages, { role: 'custom', customType: 'interactive-tools:todo-reminder', display: false, timestamp: Date.now(), content: `${warning}\nPersisted todos are declared progress, not verified completion:\n${state.todos.map(item => `[${item.status}] ${item.content}`).join('\n')}` }] };
   });
 }

@@ -92,18 +92,26 @@ export default function guard(pi: ExtensionAPI) {
       let start = 0;
       while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[start] ?? '')) start++;
       if (basename(words[start] ?? '') !== 'gh') continue;
-      const args: string[] = [], inherited: string[] = [];
-      for (let i = start + 1; i < words.length; i++) {
-        if (/^(--help|-h)(=.*)?$/.test(words[i])) { inherited.push(words[i]); continue; }
-        if (words[i] === '-R' || words[i] === '--repo') { i++; continue; }
-        if (words[i].startsWith('--repo=') || /^-R.+/.test(words[i])) continue;
-        args.push(words[i]);
-        if (args.length === 2) { args.push(...words.slice(i + 1)); break; }
+      const args = words.slice(start + 1), selected: string[] = [];
+      for (let level = 0; level < 2; level++) {
+        for (let i = 0; i < args.length; i++) {
+          const arg = args[i];
+          if (arg === '--') break;
+          if (arg.startsWith('-')) {
+            if (!arg.includes('=') && ((arg.startsWith('--') && arg !== '--help'
+              && !(level === 0 && arg === '--version')) || arg.length === 2)) i++;
+            continue;
+          }
+          if (!arg) continue;
+          selected.push(arg);
+          args.splice(i, 1);
+          break;
+        }
       }
-      if (args[0] !== 'pr') continue;
-      const action = args[1] === 'new' ? 'create' : args[1];
+      if (selected[0] !== 'pr') continue;
+      const action = selected[1] === 'new' ? 'create' : selected[1];
       if (action !== 'create' && action !== 'merge') continue;
-      const options = flags([...inherited, ...args.slice(2)], action);
+      const options = flags(args, action);
       if (options.has('--help')) continue;
       if (action === 'merge' && config.blockAdminMerge && options.has('--admin')) {
         return { block: true, reason: 'Merge without --admin. Satisfy the repository review and check requirements instead of bypassing them.' };

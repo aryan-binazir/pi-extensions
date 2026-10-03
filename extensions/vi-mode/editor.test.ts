@@ -371,6 +371,88 @@ test("programmatic image-path insertion participates in vi undo", () => {
   keys(e, "u");
   assert.equal(e.getExpandedText(), "draft");
 });
+test("programmatic insertion separates earlier and later typing in undo and redo", () => {
+  const e = editor();
+  keys(e, "abc");
+  e.insertTextAtCursor(" /tmp/image.png");
+  keys(e, "tail\x1b");
+  assert.equal(e.getExpandedText(), "abc /tmp/image.pngtail");
+  for (const text of ["abc /tmp/image.png", "abc", ""]) {
+    keys(e, "u");
+    assert.equal(e.getExpandedText(), text);
+  }
+  for (const text of ["abc", "abc /tmp/image.png", "abc /tmp/image.pngtail"]) {
+    keys(e, "\x12");
+    assert.equal(e.getExpandedText(), text);
+  }
+});
+test("consecutive multiline insertions undo independently without later typing", () => {
+  const e = editor();
+  keys(e, "abc");
+  e.insertTextAtCursor("\nimage");
+  e.insertTextAtCursor("\nnext");
+  keys(e, "\x1bu");
+  assert.equal(e.getExpandedText(), "abc\nimage");
+  assert.deepEqual(e.getCursor(), { line: 1, col: 5 });
+  for (const text of ["abc", ""]) {
+    keys(e, "u");
+    assert.equal(e.getExpandedText(), text);
+  }
+  for (const text of ["abc", "abc\nimage", "abc\nimage\nnext"]) {
+    keys(e, "\x12");
+    assert.equal(e.getExpandedText(), text);
+  }
+});
+test("programmatic insertion skips an unchanged typing transaction", () => {
+  const e = editor();
+  e.setText("seed");
+  keys(e, "\x1b0xi");
+  e.insertTextAtCursor("IMG");
+  keys(e, "\x1bu");
+  assert.equal(e.getExpandedText(), "eed");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), "seed");
+});
+test("programmatic insertion commits a change command before any typing", () => {
+  const e = editor();
+  e.setText("seed");
+  keys(e, "\x1b0C");
+  e.insertTextAtCursor("IMG");
+  keys(e, "\x1bu");
+  assert.equal(e.getExpandedText(), "");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), "seed");
+  for (const text of ["", "IMG"]) {
+    keys(e, "\x12");
+    assert.equal(e.getExpandedText(), text);
+  }
+});
+test("empty programmatic insertion preserves pending typing and redo", () => {
+  for (const input of ["", "\x00\x07"]) {
+    const e = editor();
+    keys(e, "abc");
+    e.insertTextAtCursor(input);
+    keys(e, "tail\x1bu");
+    assert.equal(e.getExpandedText(), "");
+    e.insertTextAtCursor(input);
+    keys(e, "\x12");
+    assert.equal(e.getExpandedText(), "abctail");
+  }
+});
+test("programmatic insertion after undo replaces the old redo branch", () => {
+  const e = editor();
+  keys(e, "abc");
+  e.insertTextAtCursor("IMG");
+  keys(e, "\x1bu");
+  assert.equal(e.getExpandedText(), "abc");
+  e.insertTextAtCursor("NEW");
+  keys(e, "\x12");
+  assert.equal(e.getExpandedText(), "abcNEW");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), "abc");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), "");
+});
 test("an upward delete takes both whole lines", () => {
   const e = editor();
   e.setText("a\nb\nc");

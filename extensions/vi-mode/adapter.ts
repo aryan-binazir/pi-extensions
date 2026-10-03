@@ -167,12 +167,18 @@ export function restoreRawDraft(editor: Editor, text: string, payloads: PasteSta
 
 const viEditor = Symbol.for("pi-interactive:vi-editor");
 const handoffInstalled = Symbol.for("pi-interactive:editor-handoff");
-export function markViEditor(editor: Editor): void {
-  Object.defineProperty(editor, viEditor, { value: true });
+const singlePassInstalled = Symbol.for("pi-interactive:single-pass-pastes");
+export function installSinglePassPasteExpansion(editor: Editor): void {
+  if (singlePassInstalled in editor) return;
   // Stock submission expands recursively; use the same single pass as draft reads.
   Object.defineProperty(editor, "expandPasteMarkers", {
     value: (text: string) => expandPastes(editor, text),
   });
+  Object.defineProperty(editor, singlePassInstalled, { value: true });
+}
+export function markViEditor(editor: Editor): void {
+  Object.defineProperty(editor, viEditor, { value: true });
+  installSinglePassPasteExpansion(editor);
 }
 // Pi 0.85.1 copies getText() without its paste registry before extension shutdown.
 export function installEditorHandoff(): void {

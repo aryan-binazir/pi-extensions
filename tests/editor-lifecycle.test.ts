@@ -17,7 +17,7 @@ import { ThinkingSelectorComponent } from '../node_modules/@earendil-works/pi-co
 initTheme('dark', false);
 const payload = 'SYNTHETIC_PAYLOAD 😀\t\r\n'.repeat(100);
 const paste = (e: any) => e.handleInput('\x1b[200~' + payload + '\x1b[201~');
-function host(stashFirst = false) {
+function host(stashFirst = false, useVi = true) {
   const app: any = Object.create(InteractiveMode.prototype);
   app.defaultEditor = editor(CustomEditor);
   app.editor = app.defaultEditor;
@@ -25,6 +25,7 @@ function host(stashFirst = false) {
   app.editorContainer = new Container();
   app.statusContainer = new Container();
   app.disposeActiveSelector = () => {};
+  app.footerDataProvider = { setExtensionStatus() {} };
   let overlay: any;
   let showHardwareCursor = false;
   app.ui = {
@@ -60,7 +61,10 @@ function host(stashFirst = false) {
     },
   };
   const emit = (n: string) => {for (const fn of hooks.get(n) ?? []) fn({}, ctx);};
-  if (stashFirst) { stash(api); viMode(api); } else { viMode(api); stash(api); }
+  if (!useVi) {
+    ctx.ui = app.createExtensionUIContext();
+    stash(api);
+  } else if (stashFirst) { stash(api); viMode(api); } else { viMode(api); stash(api); }
   emit('session_start'); emit('resources_discover');
   return {
     app, api, ctx, emit, shortcuts, commands, tools,
@@ -193,4 +197,65 @@ test('real btw overlay through InteractiveMode.showExtensionCustom preserves the
   await new Promise(r => setTimeout(r, 0)); h.closeDialog(); await pending;
   assert.equal(h.app.editor.getExpandedText(), payload); assert.equal(h.app.editor.getText(), visible);
   h.emit('session_shutdown');
+});
+
+test('standalone stash preserves a typed literal marker after the next paste', () => {
+  const h = host(false, false);
+  const draft = 'Explain the literal placeholder [paste #2] in this synthetic example. ' + 'a'.repeat(1100);
+  const subsequent = 'b'.repeat(1200);
+  try {
+    h.ctx.ui.setEditorText(draft);
+    h.app.editor.handleInput('\x13');
+    h.app.editor.handleInput('\x13');
+    const restoredVisible = h.app.editor.getText();
+    h.ctx.ui.pasteToEditor(subsequent);
+    assert.equal(h.ctx.ui.getEditorText(), draft + subsequent);
+    assert.equal(restoredVisible, draft);
+    let submitted = '';
+    h.app.editor.onSubmit = (text: string) => { submitted = text; };
+    h.app.editor.handleInput('\r');
+    assert.equal(submitted, draft + subsequent);
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
+
+test('standalone stash keeps an eleven-line typed draft visible', () => {
+  const draft = 'literal [paste #2]\n' + 'line\n'.repeat(9) + 'end';
+  const h = host(false, false);
+  try {
+    keys(h.app.editor, draft);
+    h.app.editor.handleInput('\x13');
+    h.app.editor.handleInput('\x13');
+    assert.equal(h.app.editor.getText(), draft);
+    h.ctx.ui.pasteToEditor('b'.repeat(1001));
+    assert.equal(h.ctx.ui.getEditorText(), draft + 'b'.repeat(1001));
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
+
+test('standalone stash restores collapsed pastes into a recreated editor without rescanning payloads', () => {
+  const h = host(false, false);
+  const first = 'Literal marker [paste #2] ' + 'a'.repeat(1001);
+  const second = 'b'.repeat(1001);
+  try {
+    h.ctx.ui.setEditorText('prefix ');
+    h.ctx.ui.pasteToEditor(first);
+    const visible = h.app.editor.getText();
+    h.app.editor.handleInput('\x13');
+    h.ctx.ui.setEditorComponent(h.ctx.ui.getEditorComponent());
+    h.app.editor.handleInput('\x13');
+    assert.equal(h.app.editor.getText(), visible);
+    assert.equal(h.ctx.ui.getEditorText(), 'prefix ' + first);
+    h.ctx.ui.pasteToEditor(second);
+    assert.equal(h.app.editor.getText(), visible + '[paste #2 1001 chars]');
+    assert.equal(h.ctx.ui.getEditorText(), 'prefix ' + first + second);
+    let submitted = '';
+    h.app.editor.onSubmit = (text: string) => { submitted = text; };
+    h.app.editor.handleInput('\r');
+    assert.equal(submitted, 'prefix ' + first + second);
+  } finally {
+    h.emit('session_shutdown');
+  }
 });

@@ -17,7 +17,7 @@ import { ThinkingSelectorComponent } from '../node_modules/@earendil-works/pi-co
 initTheme('dark', false);
 const payload = 'SYNTHETIC_PAYLOAD 😀\t\r\n'.repeat(100);
 const paste = (e: any) => e.handleInput('\x1b[200~' + payload + '\x1b[201~');
-function host(stashFirst = false) {
+function host(stashFirst: boolean | "stock" = false) {
   const app: any = Object.create(InteractiveMode.prototype);
   app.defaultEditor = editor(CustomEditor);
   app.editor = app.defaultEditor;
@@ -52,6 +52,7 @@ function host(stashFirst = false) {
     ui: {
       getEditorText: () => app.editor.getExpandedText(),
       setEditorText: (s: string) => app.editor.setText(s),
+      pasteToEditor: (s: string) => app.editor.handleInput('\x1b[200~' + s + '\x1b[201~'),
       getEditorComponent: () => app.editorComponentFactory,
       setEditorComponent: (f: any) => app.setCustomEditorComponent(f),
       setStatus() {},
@@ -60,7 +61,9 @@ function host(stashFirst = false) {
     },
   };
   const emit = (n: string) => {for (const fn of hooks.get(n) ?? []) fn({}, ctx);};
-  if (stashFirst) { stash(api); viMode(api); } else { viMode(api); stash(api); }
+  if (stashFirst !== "stock") {
+    if (stashFirst) { stash(api); viMode(api); } else { viMode(api); stash(api); }
+  }
   emit('session_start'); emit('resources_discover');
   return {
     app, api, ctx, emit, shortcuts, commands, tools,
@@ -71,6 +74,127 @@ function host(stashFirst = false) {
     },
   };
 }
+for (const action of ['complete', 'escape', 'ctrl+c', 'abort', 'shutdown', 'factory throw', 'factory rejection', 'early abort'])
+  test(`questionnaire ${action} preserves and submits the expanded stock-editor draft`, async () => {
+    const h = host("stock");
+    const first = 'SYNTHETIC DRAFT 😀 '.repeat(100);
+    const second = 'short line\n'.repeat(12);
+    const draft = 'typed prefix ' + first + ' between ' + second + ' typed suffix';
+    h.app.editor.handleInput('typed prefix ');
+    h.app.editor.handleInput('\x1b[200~' + first + '\x1b[201~');
+    h.app.editor.handleInput(' between ');
+    h.app.editor.handleInput('\x1b[200~' + second + '\x1b[201~');
+    h.app.editor.handleInput(' typed suffix');
+    assert.equal(h.app.editor.getExpandedText(), draft);
+    assert.match(h.app.editor.getText(), /\[paste #/);
+    questionnaire(h.api);
+    const controller = new AbortController();
+    const ui = h.ctx.ui;
+    let live = true;
+    Object.defineProperty(h.ctx, 'ui', {
+      get() { assert.ok(live, 'A retired context cannot access UI'); return ui; },
+    });
+    const emit = h.api.events.emit.bind(h.api.events);
+    h.api.events.emit = (channel: string, data: unknown) => {
+      assert.ok(live, 'A retired runtime cannot emit events');
+      emit(channel, data);
+    };
+    const waiting: boolean[] = [];
+    h.api.events.on('pi-interactive:questionnaire-waiting', (event: any) => waiting.push(event.waiting));
+    if (action.startsWith('factory') || action === 'early abort') {
+      ui.custom = (factory: any, options: any) => h.app.showExtensionCustom((...args: any[]) => {
+        const component = factory(...args);
+        if (action === 'factory throw') throw new Error('Synthetic factory failure');
+        if (action === 'factory rejection') return Promise.reject(new Error('Synthetic factory failure'));
+        controller.abort();
+        return component;
+      }, options);
+    }
+    const pending = h.tools.get('questionnaire').execute('synthetic', {
+      questions: [{id: 'a', prompt: 'Synthetic?', options: [{label: 'Yes', value: 'yes'}]}],
+    }, controller.signal, undefined, h.ctx);
+    await new Promise(r => setImmediate(r));
+    if (action === 'complete') h.app.editorContainer.children[0].handleInput('\r');
+    if (action === 'escape') h.closeDialog();
+    if (action === 'ctrl+c') h.app.editorContainer.children[0].handleInput('\x03');
+    if (action === 'abort') controller.abort();
+    if (action === 'shutdown') {
+      h.emit('session_shutdown');
+      assert.equal(h.app.editor.getExpandedText(), draft, 'Restore before retiring the context');
+      live = false;
+    }
+    const result = await pending;
+    assert.equal(result.details.cancelled, action !== 'complete');
+    if (action.startsWith('factory')) assert.match(result.details.reason, /Synthetic factory failure/);
+    assert.deepEqual(waiting, [true, false]);
+    assert.equal(h.app.editor.getExpandedText(), draft);
+    assert.match(h.app.editor.getText(), /\[paste #/);
+    let submitted = '';
+    h.app.editor.onSubmit = (text: string) => { submitted = text; };
+    h.app.editor.handleInput('\r');
+    assert.equal(submitted, draft);
+  });
+
+for (const fallback of ['missing', 'throws', 'ineffective', 'control bytes'])
+  test(`stock questionnaire restores exact draft when paste is ${fallback}`, async () => {
+    const h = host("stock");
+    const text = 'SYNTHETIC DRAFT '.repeat(100);
+    const prefix = fallback === 'control bytes' ? 'typed\x01\x1b[201~suffix ' : 'typed prefix ';
+    const draft = prefix + text + ' typed suffix';
+    h.app.editor.setText(prefix);
+    h.app.editor.handleInput('\x1b[200~' + text + '\x1b[201~');
+    h.app.editor.handleInput(' typed suffix');
+    if (fallback === 'missing') h.ctx.ui.pasteToEditor = undefined;
+    if (fallback === 'throws') h.ctx.ui.pasteToEditor = () => { throw new Error('Synthetic paste failure'); };
+    if (fallback === 'ineffective') h.ctx.ui.pasteToEditor = () => {};
+    questionnaire(h.api);
+    const pending = h.tools.get('questionnaire').execute('synthetic', {
+      questions: [{id: 'a', prompt: 'Synthetic?', options: [{label: 'Yes', value: 'yes'}]}],
+    }, undefined, undefined, h.ctx);
+    await new Promise(r => setImmediate(r));
+    h.closeDialog();
+    assert.equal((await pending).details.cancelled, true);
+    assert.equal(h.app.editor.getExpandedText(), draft);
+  });
+
+test('shutdown restoration cannot overwrite a new draft when a factory later rejects', async () => {
+  const h = host("stock");
+  const draft = 'SYNTHETIC DRAFT '.repeat(100);
+  h.app.editor.handleInput('\x1b[200~' + draft + '\x1b[201~');
+  questionnaire(h.api);
+  let rejectFactory: (error: Error) => void = () => {};
+  h.ctx.ui.custom = (factory: any, options: any) => h.app.showExtensionCustom((...args: any[]) => {
+    factory(...args);
+    return new Promise((_resolve, reject) => { rejectFactory = reject; });
+  }, options);
+  const pending = h.tools.get('questionnaire').execute('synthetic', {
+    questions: [{id: 'a', prompt: 'Synthetic?', options: [{label: 'Yes', value: 'yes'}]}],
+  }, undefined, undefined, h.ctx);
+  h.emit('session_shutdown');
+  assert.equal(h.app.editor.getExpandedText(), draft);
+  Object.defineProperty(h.ctx, 'ui', { get() { throw new Error('Retired context'); } });
+  h.api.events.emit = () => { throw new Error('Retired runtime'); };
+  h.app.editor.setText('new session draft');
+  rejectFactory(new Error('Delayed factory failure'));
+  assert.equal((await pending).details.cancelled, true);
+  await new Promise(r => setImmediate(r));
+  assert.equal(h.app.editor.getExpandedText(), 'new session draft');
+});
+
+for (const draft of ['', 'typed draft']) test(`stock questionnaire leaves ${draft ? 'typed' : 'empty'} drafts unchanged`, async () => {
+  const h = host("stock");
+  h.app.editor.setText(draft);
+  h.ctx.ui.setEditorText = () => { throw new Error('Unchanged draft must not be rewritten'); };
+  questionnaire(h.api);
+  const pending = h.tools.get('questionnaire').execute('synthetic', {
+    questions: [{id: 'a', prompt: 'Synthetic?', options: [{label: 'Yes', value: 'yes'}]}],
+  }, undefined, undefined, h.ctx);
+  await new Promise(r => setImmediate(r));
+  h.closeDialog();
+  assert.equal((await pending).details.cancelled, true);
+  assert.equal(h.app.editor.getExpandedText(), draft);
+});
+
 test('real InteractiveMode editor swap preserves visible marker and raw payload', () => {
   const h = host(); paste(h.app.editor); const visible = h.app.editor.getText();
   h.app.setCustomEditorComponent(undefined);

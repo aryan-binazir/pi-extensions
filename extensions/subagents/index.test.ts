@@ -416,3 +416,18 @@ for (const stop of ['escape', 'owner', 'timeout', 'submit']) {
       assert.equal(mode.focus, mode.editor);
     }));
 }
+
+test('source review cancellation restores synchronously and preserves a replacement draft', async () =>
+  withHost({prefix: 'workflow-replace-'}, async host => {
+    const mode = interactiveUI(host);
+    const controller = new AbortController();
+    const run = host.execute('workflow', {source: 'return 1;', timeout: 5000}, controller.signal);
+    const dialog = await until(() => mode.focus instanceof ExtensionEditorComponent && mode.focus, 'source review');
+    controller.abort();
+    assert.equal(mode.focus, mode.editor);
+    host.ctx.ui.setEditorText('replacement draft');
+    await assert.rejects(run);
+    dialog.handleInput('\r');
+    dialog.handleInput('\x1b');
+    assert.equal(host.ctx.ui.getEditorText(), 'replacement draft');
+  }));

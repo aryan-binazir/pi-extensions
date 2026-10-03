@@ -273,23 +273,27 @@ export default function subagents(pi: ExtensionAPI): void {
             const reviewed = await withApprovalUI(ctx, controller.signal, async () => {
               if (ctx.mode !== 'tui') return ctx.ui.editor(title, source);
               const draft = ctx.ui.getEditorText();
-              try {
-                return await ctx.ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
-                  const cleanup = () => controller.signal.removeEventListener('abort', abort);
-                  const finish = (value?: string) => { cleanup(); done(value); };
-                  const abort = () => finish();
-                  const settings: unknown = 'getSettings' in pi && typeof pi.getSettings === 'function' ? pi.getSettings() : undefined;
-                  const externalEditor = settings && typeof settings === 'object' && 'externalEditor' in settings
-                    ? typeof settings.externalEditor === 'string' && settings.externalEditor.trim() ? settings.externalEditor : undefined
-                    : settings === undefined ? SettingsManager.create(ctx.cwd, getAgentDir(), {projectTrusted: ctx.isProjectTrusted?.() === true}).getExternalEditorCommand() : undefined;
-                  const editor = Object.assign(new ExtensionEditorComponent(tui, keybindings, title, source, finish, abort, undefined, externalEditor), {dispose: cleanup});
-                  controller.signal.addEventListener('abort', abort, {once: true});
-                  if (controller.signal.aborted) abort();
-                  return editor;
-                });
-              } finally {
-                ctx.ui.setEditorText(draft);
-              }
+              return ctx.ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+                const cleanup = () => controller.signal.removeEventListener('abort', abort);
+                let finished = false;
+                const finish = (value?: string) => {
+                  if (finished) return;
+                  finished = true;
+                  cleanup();
+                  done(value);
+                  ctx.ui.setEditorText(draft);
+                };
+                const abort = () => finish();
+                const settings: unknown = 'getSettings' in pi && typeof pi.getSettings === 'function' ? pi.getSettings() : undefined;
+                const externalEditor = settings && typeof settings === 'object' && 'externalEditor' in settings
+                  ? typeof settings.externalEditor === 'string' && settings.externalEditor.trim() ? settings.externalEditor : undefined
+                  : settings === undefined ? SettingsManager.create(ctx.cwd, getAgentDir(), {projectTrusted: ctx.isProjectTrusted?.() === true}).getExternalEditorCommand() : undefined;
+                const editor = Object.assign(new ExtensionEditorComponent(tui, keybindings, title, source, finish, abort, undefined, externalEditor), {dispose: cleanup});
+                controller.signal.addEventListener('abort', abort, {once: true});
+                if (controller.signal.aborted) abort();
+                return editor;
+  
+            });
             });
             return reviewed === source && await withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.', {signal: controller.signal}));
           } : undefined,

@@ -1,6 +1,7 @@
-import { createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { getActiveCwd, resolveToolPath, setActiveCwd } from './routing.ts';
 const entryType = 'agent-workflows:worktree';
 const routedTools = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls']);
@@ -15,7 +16,12 @@ const activeWorktreeNotice = (active: string, original: string): string => [
   'Subagents resolve defaults against the active worktree.',
   'Inspect this checkout\'s instructions before editing.',
 ].join(' ');
-export default function worktree(pi: ExtensionAPI): void {
+type ShellSettings = Pick<ReturnType<SettingsManager['getGlobalSettings']>, 'shellCommandPrefix' | 'shellPath'>;
+export default function worktree(pi: ExtensionAPI & { getSettings?: () => ShellSettings }): void {
+  const shellSettings = (ctx: ExtensionContext) => {
+    const effective = pi.getSettings?.();
+    return effective ? SettingsManager.inMemory(effective) : SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() });
+  };
   const paint = (ctx: ExtensionContext) => { if (ctx.hasUI) { const active = activeCwd(ctx); ctx.ui.setStatus(entryType, active === ctx.cwd ? undefined : `Worktree: ${active}`); } };
   let previousSession: { cwd: string; id: string } | undefined;
   const restore = async (ctx: ExtensionContext) => {
@@ -57,18 +63,19 @@ export default function worktree(pi: ExtensionAPI): void {
     const input = event.input as { path?: unknown };
     if (typeof input.path === 'string') input.path = resolveToolPath(input.path, activeCwd(ctx));
     else if (input.path === undefined && directoryTools.has(event.toolName)) input.path = activeCwd(ctx);
+    if (typeof input.path === 'string' && /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/.test(input.path)) input.path = pathToFileURL(input.path).href;
   });
   const bashMetadata = createBashToolDefinition(process.cwd());
   pi.registerTool({
     ...bashMetadata,
     execute(id, params, signal, onUpdate, ctx) {
       const cwd = activeCwd(ctx);
-      return createBashToolDefinition(cwd, { spawnHook: context => ({ ...context, cwd }) }).execute(id, params, signal, onUpdate, ctx);
+      const settings = shellSettings(ctx);
+      return createBashToolDefinition(cwd, { commandPrefix: settings.getShellCommandPrefix(), shellPath: settings.getShellPath(), spawnHook: context => ({ ...context, cwd }) }).execute(id, params, signal, onUpdate, ctx);
     },
   });
   pi.on('user_bash', (_event, ctx) => {
-    const local = createLocalBashOperations();
-    return { operations: { exec: (command, _cwd, options) => local.exec(command, activeCwd(ctx), options) } };
+    return { operations: { exec: (command, _cwd, options) => createLocalBashOperations({ shellPath: shellSettings(ctx).getShellPath() }).exec(command, activeCwd(ctx), options) } };
   });
   pi.on('before_agent_start', (event, ctx) => ({ systemPrompt: `${event.systemPrompt}\n\n${activeWorktreeNotice(activeCwd(ctx), ctx.cwd)}` }));
   pi.registerCommand('worktree', {

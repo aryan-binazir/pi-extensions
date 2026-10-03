@@ -652,7 +652,7 @@ export class ViEditor extends CustomEditor {
       return;
     }
     data = decodeKittyPrintable(data) ?? data;
-    if (!/^[^\x00-\x1f\x7f-\x9f]+$/u.test(data) && !matchesKey(data, "ctrl+r")) {
+    if (!/^[^\x00-\x1f]+$/u.test(data) && !matchesKey(data, "ctrl+r")) {
       this.baseInput(data);
       return;
     }

@@ -634,6 +634,20 @@ test("unsupported r, m and q consume Unicode arguments without inserting or swal
     }
   }
 });
+test("unsupported r, m and q consume DEL and C1 arguments without inserting or swallowing the next command", () => {
+  for (const command of ["r", "m", "q"]) {
+    for (const argument of ["\x7f", "\x80", "\x85", "\x9b", "\x9f", "\x1b[133u", "\x1b[155u"]) {
+      const e = editor();
+      e.setText("abc");
+      keys(e, "\x1b0" + command);
+      e.handleInput(argument);
+      assert.equal(e.getExpandedText(), "abc", command + argument);
+      e.handleInput("x");
+      assert.equal(e.getExpandedText(), "bc", command + argument);
+      e.dispose();
+    }
+  }
+});
 test("normal mode rejects unsupported printable events and cancels pending commands", () => {
   for (const pending of ["", "d", "di", "g", '"']) {
     for (const input of ["😀", "e\u0301", "👩‍💻", "\x1b[128512u", "rm", "ia", "toString"]) {

@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { once } from 'node:events';
+import { getEventListeners, once } from 'node:events';
+import { WebSocketServer } from 'ws';
+import { pathToFileURL } from 'node:url';
+import { createEditTool, createWriteTool } from '@earendil-works/pi-coding-agent';
 import nvimIde, { editorContext, statusText } from './index.ts';
 import { maxSelectionChars } from './link.ts';
 import { fakeIde, token, until } from './test-support.ts';
@@ -39,20 +42,20 @@ async function withConnectedIde(body: (harness: Connected) => Promise<void>): Pr
   const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const project = join(root, 'project');
   const previous = process.env.CLAUDE_CONFIG_DIR;
+  const pi = fakePi();
+  const context = fakeCtx(project);
   try {
     await mkdir(join(root, 'ide'), { recursive: true });
     await mkdir(project);
     await writeFile(join(project, 'a.ts'), 'line1\nline2\nline3\nline4\n');
     await writeFile(join(root, 'ide', `${ide.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [project], ideName: 'Neovim', authToken: token }));
     process.env.CLAUDE_CONFIG_DIR = root;
-    const pi = fakePi();
-    const context = fakeCtx(project);
     nvimIde(pi.api as any);
     await pi.fire('session_start', {}, context.ctx);
     await until(() => context.status.includes('Neovim ✓'));
     await body({ ide, project, ...pi, ...context });
-    await pi.fire('session_shutdown', {}, context.ctx);
   } finally {
+    await pi.fire('session_shutdown', {}, context.ctx);
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
     await ide.close();
     await rm(root, { recursive: true, force: true });
@@ -71,8 +74,8 @@ test('a connected editor registers its tools and reports the selection in the st
     await settle();
     assert.equal(status.length, paints, 'identical selection does not repaint');
 
-    ide.broadcast('at_mentioned', { filePath: join(project, 'a.ts'), lineStart: 3, lineEnd: 4 });
-    ide.broadcast('at_mentioned', { filePath: join(project, 'missing.ts'), lineStart: 1, lineEnd: 1 });
+    ide.broadcast('at_mentioned', { filePath: join(project, 'a.ts'), lineStart: 2, lineEnd: 3 });
+    ide.broadcast('at_mentioned', { filePath: join(project, 'missing.ts'), lineStart: 0, lineEnd: 0 });
     await settle();
     const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
     assert.match(turn.systemPrompt, /^BASE\n\n# Editor context \(Neovim\)/);
@@ -115,6 +118,47 @@ test('follow after edit opens the changed file, and /vim follow turns it off', a
   });
 });
 
+test('follow opens the actual files written and edited by Pi with normalized paths in the active worktree', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    const routed = join(project, 'checkout');
+    await mkdir(routed);
+    const previousHome = process.env.HOME;
+    process.env.HOME = routed;
+    setActiveCwd(project, routed, ctx.sessionManager.getSessionId());
+    try {
+      assert.equal(homedir(), routed);
+      const cases = [
+        { path: '@written.ts', file: 'written.ts' },
+        { path: pathToFileURL(join(routed, 'url file.ts')).href, file: 'url file.ts' },
+        { path: '~/home.ts', file: 'home.ts' },
+        { path: 'unicode\u00a0space.ts', file: 'unicode space.ts' },
+        { path: 'narrow\u202fspace.ts', file: 'narrow space.ts' },
+      ];
+      const write = createWriteTool(routed);
+      for (const [i, { path, file }] of cases.entries()) {
+        const toolCallId = `write-${i}`;
+        const args = { path, content: 'written' };
+        await fire('tool_execution_start', { toolCallId, toolName: 'write', args }, ctx);
+        const result = await write.execute(toolCallId, args, undefined);
+        assert.equal(await readFile(join(routed, file), 'utf8'), 'written');
+        await fire('tool_execution_end', { toolCallId, toolName: 'write', result, isError: false }, ctx);
+        await until(() => ide.calls.length === i + 1);
+        assert.equal(ide.calls[i].arguments.filePath, join(routed, file), path);
+      }
+      const args = { path: '@written.ts', edits: [{ oldText: 'written', newText: 'edited' }] };
+      await fire('tool_execution_start', { toolCallId: 'edit-at', toolName: 'edit', args }, ctx);
+      const result = await createEditTool(routed).execute('edit-at', args, undefined);
+      assert.equal(await readFile(join(routed, 'written.ts'), 'utf8'), 'edited');
+      await fire('tool_execution_end', { toolCallId: 'edit-at', toolName: 'edit', result, isError: false }, ctx);
+      await until(() => ide.calls.length === cases.length + 1);
+      assert.deepEqual(ide.calls.at(-1)?.arguments, { filePath: join(routed, 'written.ts'), preview: false, makeFrontmost: true, startLine: 1, endLine: 1 });
+    } finally {
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    }
+  });
+});
+
 test('editor tools resolve paths, and a closed editor clears status, prompt and tools', async () => {
   await withConnectedIde(async ({ ide, project, fire, tools, commands, ctx, status, notices }) => {
     ide.broadcast('selection_changed', { text: 'line2', filePath: join(project, 'a.ts'), selection: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 }, isEmpty: false } });
@@ -139,6 +183,35 @@ test('editor tools resolve paths, and a closed editor clears status, prompt and 
     assert.match(notices.at(-1)!, /not connected/);
   });
 });
+
+for (const [mode, message] of [['disconnect', 'IDE disconnected'], ['reconnect', 'reconnecting'], ['stop', 'IDE link stopped']] as const) {
+  test(`pending nvim_context settles when the editor link ${mode}s`, async () => {
+    await withConnectedIde(async ({ ide, fire, tools, commands, ctx }) => {
+      for (const client of ide.server.clients) {
+        client.removeAllListeners('message');
+        client.on('message', raw => {
+          const request = JSON.parse(raw.toString());
+          if (request.method === 'tools/call') ide.calls.push(request.params);
+        });
+      }
+      const controller = new AbortController();
+      let error: Error | undefined;
+      const execution = tools.get('nvim_context').execute('pending', {}, controller.signal, undefined, ctx).catch((failure: Error) => { error = failure; });
+      await until(() => ide.calls.length === 3);
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 3);
+
+      if (mode === 'disconnect') {
+        for (const client of ide.server.clients) client.terminate();
+      } else if (mode === 'reconnect') await commands.get('vim').handler('reconnect', ctx);
+      else await fire('session_shutdown', {}, ctx);
+      await until(() => error !== undefined, 1000);
+      assert.equal(error?.message, message);
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+      controller.abort();
+      await execution;
+    });
+  });
+}
 
 test('session without an editor: no status, no prompt injection, shutdown is clean', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
@@ -194,14 +267,27 @@ test('follow after edit opens the file inside the active worktree, not the origi
   });
 });
 
-test('nvim_open resolves relative paths against the active worktree', async () => {
+test('editor tools normalize file paths against the active worktree', async () => {
   await withConnectedIde(async ({ ide, project, tools, ctx }) => {
-    const routed = join(project, 'checkout'); await mkdir(routed);
+    const routed = join(project, 'checkout');
+    await mkdir(routed);
+    const previousHome = process.env.HOME;
+    process.env.HOME = routed;
     setActiveCwd(project, routed, ctx.sessionManager.getSessionId());
     try {
-      await tools.get('nvim_open').execute('o1', { path: 'b.ts' }, undefined, undefined, ctx);
-      assert.equal(ide.calls[0].arguments.filePath, join(routed, 'b.ts'));
-    } finally { setActiveCwd(project, undefined, ctx.sessionManager.getSessionId()); }
+      assert.equal(homedir(), routed);
+      const paths = ['b.ts', '@b.ts', pathToFileURL(join(routed, 'b.ts')).href, '~/b.ts', 'unicode\u00a0space.ts'];
+      for (const path of paths) {
+        const expected = join(routed, path.startsWith('unicode') ? 'unicode space.ts' : 'b.ts');
+        await tools.get('nvim_open').execute('open', { path }, undefined, undefined, ctx);
+        assert.equal(ide.calls.at(-1)?.arguments.filePath, expected, path);
+        await tools.get('nvim_diagnostics').execute('diagnostics', { path }, undefined, undefined, ctx);
+        assert.deepEqual(ide.calls.at(-1)?.arguments, { uri: pathToFileURL(expected).href }, path);
+      }
+    } finally {
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    }
   });
 });
 
@@ -217,9 +303,103 @@ test('/vim reconnect drops and re-establishes the link', async () => {
 test('a mention past the line cap is clipped in the body but keeps the requested range in its header', async () => {
   await withConnectedIde(async ({ ide, project, fire, ctx }) => {
     await writeFile(join(project, 'big.ts'), Array.from({ length: 2500 }, (_, i) => `L${i + 1}`).join('\n'));
-    ide.broadcast('at_mentioned', { filePath: join(project, 'big.ts'), lineStart: 1, lineEnd: 2500 });
+    ide.broadcast('at_mentioned', { filePath: join(project, 'big.ts'), lineStart: 0, lineEnd: 2499 });
     await settle();
     const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
     assert.match(turn.systemPrompt, /User sent from editor: .*big\.ts lines 1-2500\n```\n(?:L\d+\n){1999}L2000\n```/);
   });
+});
+
+test('ClaudeCodeSend includes exactly the selected rows, including row zero', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    for (const { wire, header, text } of [
+      { wire: { lineStart: 0, lineEnd: 0 }, header: '1-1', text: 'line1' },
+      { wire: { lineStart: 1, lineEnd: 1 }, header: '2-2', text: 'line2' },
+      { wire: { lineStart: 1, lineEnd: 2 }, header: '2-3', text: 'line2\nline3' },
+      { wire: { lineStart: 0, lineEnd: 2 }, header: '1-3', text: 'line1\nline2\nline3' },
+      { wire: { lineStart: 0 }, header: '1-1', text: 'line1' },
+    ]) {
+      const filePath = join(project, 'a.ts');
+      ide.broadcast('at_mentioned', { filePath, ...wire });
+      await settle();
+      const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
+      assert.equal(turn.systemPrompt.slice(turn.systemPrompt.indexOf('User sent from editor:')),
+        `User sent from editor: ${filePath} lines ${header}\n\`\`\`\n${text}\n\`\`\``);
+    }
+  });
+});
+
+test('relative editor mentions read the live editor root from a child Pi directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-mention-'));
+  const project = join(root, 'project');
+  const nested = join(project, 'nested');
+  let editorRoot = project;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  server.on('connection', socket => socket.on('message', raw => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }));
+    else if (message.method === 'tools/call') {
+      assert.deepEqual(message.params, { name: 'getWorkspaceFolders', arguments: {} });
+      socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify({ success: true, rootPath: editorRoot }) }] } }));
+    }
+  }));
+  await once(server, 'listening');
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const previousCwd = process.cwd();
+  const pi = fakePi();
+  const { ctx, status } = fakeCtx(nested);
+  const send = (filePath: string, range = false) => {
+    for (const client of server.clients) client.send(JSON.stringify({ jsonrpc: '2.0', method: 'at_mentioned', params: { filePath, ...(range ? { lineStart: 2, lineEnd: 2 } : {}) } }));
+  };
+  try {
+    await mkdir(nested, { recursive: true });
+    await mkdir(join(root, 'ide'));
+    await writeFile(join(project, 'selected.ts'), 'EDITOR_FIRST\nEDITOR_SECOND\n');
+    await writeFile(join(nested, 'selected.ts'), 'WRONG_FIRST\nWRONG_SECOND\n');
+    await writeFile(join(root, 'ide', `${(server.address() as { port: number }).port}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [project], ideName: 'Neovim', authToken: token }));
+    process.env.CLAUDE_CONFIG_DIR = root;
+    process.chdir(nested);
+    nvimIde(pi.api as any);
+    await pi.fire('session_start', {}, ctx);
+    await until(() => status.includes('Neovim ✓'));
+    send('selected.ts', true);
+    await settle();
+    const turn = await pi.fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.ok(turn.systemPrompt.includes(`User sent from editor: ${join(project, 'selected.ts')} lines 2-2`));
+    assert.match(turn.systemPrompt, /```\nEDITOR_SECOND\n```/);
+    assert.doesNotMatch(turn.systemPrompt, /WRONG_/);
+    const next = await pi.fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.doesNotMatch(next.systemPrompt, /User sent from editor/);
+
+    await writeFile(join(project, 'editor-only.ts'), 'ROOT_ONLY_FIRST\nROOT_ONLY_SECOND\n');
+    await mkdir(join(project, 'folder'));
+    send('editor-only.ts', true);
+    send('folder');
+    send(join(project, 'selected.ts'), true);
+    await settle();
+    const extra = await pi.fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.ok(extra.systemPrompt.includes(`User sent from editor: ${join(project, 'editor-only.ts')} lines 2-2\n` + '```\nROOT_ONLY_SECOND'));
+    assert.ok(extra.systemPrompt.includes(`User sent from editor: ${join(project, 'folder')}\nUser sent from editor: ${join(project, 'selected.ts')}`));
+    assert.match(extra.systemPrompt, /```\nEDITOR_SECOND\n```/);
+
+    editorRoot = join(root, 'other');
+    await mkdir(editorRoot);
+    await writeFile(join(editorRoot, 'selected.ts'), 'CHANGED_FIRST\nCHANGED_SECOND\n');
+    setActiveCwd(nested, project, ctx.sessionManager.getSessionId());
+    try {
+      send('selected.ts', true);
+      await settle();
+      const changed = await pi.fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+      assert.ok(changed.systemPrompt.includes(`User sent from editor: ${join(editorRoot, 'selected.ts')} lines 2-2`));
+      assert.match(changed.systemPrompt, /```\nCHANGED_SECOND\n```/);
+      assert.doesNotMatch(changed.systemPrompt, /EDITOR_|WRONG_/);
+    } finally { setActiveCwd(nested, undefined, ctx.sessionManager.getSessionId()); }
+  } finally {
+    await pi.fire('session_shutdown', {}, ctx);
+    process.chdir(previousCwd);
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(root, { recursive: true, force: true });
+  }
 });

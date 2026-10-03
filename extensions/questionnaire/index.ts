@@ -101,13 +101,45 @@ export default function questionnaire(pi: ExtensionAPI) {
           reason: "A questionnaire is already active",
         });
       let cancel = () => {};
+      let restoreDraft = () => {};
+      let retired = false;
+      const shutdown = () => {
+        if (retired) return;
+        cancel();
+        restoreDraft();
+        retired = true;
+        pi.events.emit("pi-interactive:questionnaire-waiting", {
+          toolCallId,
+          waiting: false,
+        });
+      };
       try {
         inFlight = true;
+        active.add(shutdown);
         pi.events.emit("pi-interactive:questionnaire-waiting", {
           toolCallId,
           waiting: true,
         });
-        const result = await ctx.ui.custom<Result>(
+        if (retired)
+          return finish({ cancelled: true, answers: [], reason: "Session ended" });
+        const ui = ctx.ui;
+        const savedDraft = ui.getEditorText();
+        let restored = false;
+        restoreDraft = () => {
+          if (retired || restored) return;
+          restored = true;
+          if (ui.getEditorText() === savedDraft) return;
+          if (savedDraft && ui.pasteToEditor && savedDraft.search(CONTROL_CHARS) < 0) {
+            ui.setEditorText("");
+            try {
+              ui.pasteToEditor(savedDraft);
+            } catch {
+              ui.setEditorText(savedDraft);
+            }
+            if (ui.getEditorText() !== savedDraft) ui.setEditorText(savedDraft);
+          } else ui.setEditorText(savedDraft);
+        };
+        const result = await ui.custom<Result>(
           (tui, theme, _keys, done) => {
             let tab = 0;
             let selected = 0;
@@ -159,7 +191,6 @@ export default function questionnaire(pi: ExtensionAPI) {
               });
             };
             cancel = () => submit(true, "Aborted or session ended");
-            active.add(cancel);
             signal?.addEventListener("abort", cancel, { once: true });
             if (signal?.aborted) cancel();
             const editor = new Editor(tui, {
@@ -396,13 +427,15 @@ export default function questionnaire(pi: ExtensionAPI) {
           reason: error instanceof Error ? error.message : "UI failed",
         });
       } finally {
+        restoreDraft();
         signal?.removeEventListener("abort", cancel);
-        active.delete(cancel);
+        active.delete(shutdown);
         inFlight = false;
-        pi.events.emit("pi-interactive:questionnaire-waiting", {
-          toolCallId,
-          waiting: false,
-        });
+        if (!retired)
+          pi.events.emit("pi-interactive:questionnaire-waiting", {
+            toolCallId,
+            waiting: false,
+          });
       }
     },
   });

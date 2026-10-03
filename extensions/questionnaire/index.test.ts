@@ -29,6 +29,8 @@ function host(onEmit?: (value: any) => void) {
   const ctx: any = {
     mode: "tui",
     ui: {
+      getEditorText: () => "",
+      setEditorText() {},
       custom: (factory: any, options: any) =>
         new Promise((resolve) => {
           uiOptions = options;
@@ -125,6 +127,27 @@ test("UI exception releases waiting; noninteractive and invalid questions never 
     h.events.map((e) => e.waiting),
     [true, false],
   );
+});
+
+test("shutdown during the waiting notification never opens UI through a retired context", async () => {
+  let live = true;
+  const h = host((value) => {
+    assert.ok(live, "A retired runtime cannot emit events");
+    if (value.waiting) {
+      h.hooks.session_shutdown();
+      live = false;
+    }
+  });
+  const ui = h.ctx.ui;
+  Object.defineProperty(h.ctx, "ui", {
+    get() {
+      assert.ok(live, "A retired context cannot access UI");
+      return ui;
+    },
+  });
+  assert.equal((await h.run([question("a")])).details.cancelled, true);
+  assert.equal(h.options(), undefined);
+  assert.deepEqual(h.events.map((event) => event.waiting), [true, false]);
 });
 
 test("concurrent calls cannot replace the active questionnaire and cancellation settles once", async () => {

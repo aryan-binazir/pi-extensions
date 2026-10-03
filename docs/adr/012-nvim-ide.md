@@ -14,7 +14,7 @@ Editor context is ambient, matching Claude Code: the latest `selection_changed` 
 
 Edits are shown, not gated. After a successful `edit` or `write` the editor opens the file at the first changed line via `openFile`. The IDE protocol's `openDiff` accept/reject flow is deliberately unused: Pi has no per-edit approval today and adding one through the editor would change how Pi is used, so that decision is left for a later ADR. `/vim follow off` disables the jump; `/vim` reports status and `/vim reconnect` forces rediscovery.
 
-Line numbers differ across the protocol: `selection_changed` positions are zero-based LSP positions, `at_mentioned` and `openFile` lines are one-based. The prompt block converts selection lines to one-based.
+Line numbers differ across the protocol. `selection_changed` positions are zero-based LSP positions, and `openFile` lines are one-based. Servers identifying themselves as `claudecode-neovim` in the initialize response send zero-based inclusive `at_mentioned` ranges. The link converts those ranges to one-based inclusive mentions, including row zero, and defers mentions received before initialization until the server identity is known. Other server identities retain the existing one-based interpretation. File and directory mentions without ranges remain unchanged. The prompt block converts selection lines to one-based.
 
 Setting `NVIM_IDE_TRACE=/path/to/file` appends link state transitions (discovery, watch events, handshake, disconnects) to that file; it is the intended first step when the status bar does not show an editor. A Neovim sitting at a hit-enter prompt accepts the socket but cannot answer `initialize` until the prompt is dismissed; the link stays disconnected rather than half-connected in that case.
 

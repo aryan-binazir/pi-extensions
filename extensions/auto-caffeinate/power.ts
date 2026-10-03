@@ -42,7 +42,7 @@ export function startInhibitor(platform:NodeJS.Platform=process.platform,launch=
  if(platform==='darwin')child=launch('/usr/bin/caffeinate',['-i','-w',String(process.pid)],{stdio:['pipe','ignore','ignore']});
  else if(platform==='linux')child=launch('systemd-inhibit',['--what=idle','--mode=block','--who=Pi','--why=Agent work','--no-ask-password','/bin/cat'],{stdio:['pipe','ignore','ignore']});
  else return undefined;
- let running=true;
+ let running=child.pid!==undefined;
  child.once('error',()=>{running=false;});child.once('exit',()=>{running=false;});
  return {alive:()=>running,stop:async()=>{
   if(!running)return;

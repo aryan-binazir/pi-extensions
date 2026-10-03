@@ -1,5 +1,6 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
+import { installSinglePassPasteExpansion, readPastes, restoreRawDraft } from "../vi-mode/adapter.ts";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 
@@ -17,6 +18,7 @@ export default function promptStash(pi: ExtensionAPI): void {
   let installed: EditorFactory | undefined;
   let previous: EditorFactory | undefined;
   let enabled = false;
+  let active: CustomEditor | undefined;
 
   const setText = (ctx: ExtensionContext, text: string) => {
     if (text && ctx.ui.pasteToEditor && !CONTROL_BYTES.test(text)) {
@@ -30,7 +32,14 @@ export default function promptStash(pi: ExtensionAPI): void {
     const current = ctx.ui.getEditorText();
     if (slot === undefined && current === "") return;
     const captured: { text: string; restore?: () => boolean } = { text: current };
+    const draft = active && { text: active.getText(), payloads: readPastes(active) };
+    const factory = installed;
     pi.events?.emit("pi-interactive:stash-capture", captured);
+    if (!captured.restore && draft) captured.restore = () => {
+      if (!active || ctx.ui.getEditorComponent() !== factory) return false;
+      restoreRawDraft(active, draft.text, draft.payloads);
+      return true;
+    };
     if (!slot?.restore?.()) setText(ctx, slot?.text ?? "");
     slot = current === "" ? undefined : captured;
     ctx.ui.setStatus(
@@ -58,6 +67,8 @@ export default function promptStash(pi: ExtensionAPI): void {
     const base = previous;
     installed = (tui, theme, keybindings) => {
       const editor = base?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+      active = editor instanceof CustomEditor ? editor : undefined;
+      if (active) installSinglePassPasteExpansion(active);
       const input = editor.handleInput.bind(editor);
       let pasting = false;
       let boundary = "";
@@ -92,5 +103,6 @@ export default function promptStash(pi: ExtensionAPI): void {
     if (installed && ctx.mode === "tui" && ctx.ui.getEditorComponent() === installed)
       replace(ctx, previous);
     installed = previous = undefined;
+    active = undefined;
   });
 }

@@ -542,3 +542,15 @@ test("the model receives the answers as JSON text", async () => {
   h.key("\r");
   assert.equal((await result).content[0].text, '{"cancelled":false,"answers":[{"id":"a","value":"yes","label":"Yes","wasCustom":false}]}');
 });
+
+test("custom answers preserve literal paste markers inside earlier payloads", async () => {
+  const h = host();
+  const result = h.run([{ id: "literal", prompt: "Paste literal text", options: [] }]);
+  const first = "Literal marker [paste #2] " + "a".repeat(1001);
+  const second = "b".repeat(1001);
+  h.key("\r");
+  h.key(`\x1b[200~${first}\x1b[201~`);
+  h.key(`\x1b[200~${second}\x1b[201~`);
+  h.key("\r");
+  assert.equal((await result).details.answers[0].value, first + second);
+});

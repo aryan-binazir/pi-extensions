@@ -235,6 +235,52 @@ for (const order of ['first then second', 'second then first']) {
     });
   }
 }
+for (const order of ['first then second', 'second then first']) {
+  test(`overlapping inline UI keeps identical markers with different payloads when closing ${order}`, async () => {
+    const h = host();
+    const source = h.app.editor;
+    const getText = source.getText;
+    const typed = 'typed'.repeat(220);
+    const firstPayload = 'FIRST__\n'.repeat(20);
+    const secondPayload = 'SECOND_\n'.repeat(20);
+    let closeFirst = () => {}, closeSecond = () => {};
+    try {
+      source.handleInput(`\x1b[200~${firstPayload}\x1b[201~`);
+      keys(source, typed);
+      const firstVisible = source.getText();
+      const first = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
+        closeFirst = () => done(undefined);
+        return new Container();
+      });
+      h.ctx.ui.setEditorText('');
+      source.handleInput(`\x1b[200~${secondPayload}\x1b[201~`);
+      keys(source, typed);
+      const secondVisible = source.getText();
+      assert.equal(secondVisible, firstVisible);
+      const second = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
+        closeSecond = () => done(undefined);
+        return new Container();
+      });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const dialogs = order === 'first then second'
+        ? [[closeFirst, first, firstPayload], [closeSecond, second, secondPayload]] as const
+        : [[closeSecond, second, secondPayload], [closeFirst, first, firstPayload]] as const;
+      for (const [close, pending, savedPayload] of dialogs) {
+        close();
+        await pending;
+        assert.equal(source.getText(), firstVisible);
+        assert.equal(source.getExpandedText(), savedPayload + typed);
+        assert.equal(source.getText, getText);
+        let submitted = '';
+        source.onSubmit = (text: string) => { submitted = text; };
+        source.handleInput('\r');
+        assert.equal(submitted, savedPayload + typed);
+      }
+    } finally {
+      h.emit('session_shutdown');
+    }
+  });
+}
 test('inline custom UI leaves a replacement editor owned by Pi', async () => {
   const h = host();
   paste(h.app.editor);
@@ -256,7 +302,7 @@ test('inline custom UI leaves a replacement editor owned by Pi', async () => {
     assert.equal(source.getText(), visible);
     assert.equal(source.getExpandedText(), expanded);
     assert.equal(source.setText, setText);
-    assert.equal(h.app.editor.getExpandedText(), visible, 'Pi restores its saved visible draft into the replacement');
+    assert.equal(h.app.editor.getExpandedText(), 'SYNTHETIC_PAYLOAD 😀    \n'.repeat(100) + 'typed'.repeat(220));
   } finally {
     h.emit('session_shutdown');
   }

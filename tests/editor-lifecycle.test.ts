@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from 'node:assert/strict';
 import { CustomEditor, createEventBus } from '@earendil-works/pi-coding-agent';
-import { Container } from '@earendil-works/pi-tui';
+import { Container, CURSOR_MARKER, isFocusable, stripTerminalSequences, TuiMainScreen, type Terminal } from '@earendil-works/pi-tui';
 import { InteractiveMode } from '../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js';
 import { initTheme } from '../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';
 import { KeybindingsManager } from '../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js';
@@ -531,4 +531,65 @@ test('real btw overlay through InteractiveMode.showExtensionCustom preserves the
   await new Promise(r => setTimeout(r, 0)); h.closeDialog(); await pending;
   assert.equal(h.app.editor.getExpandedText(), payload); assert.equal(h.app.editor.getText(), visible);
   h.emit('session_shutdown');
+});
+
+for (const command of ['btw', 'side']) test(`real ${command} overlay tracks editor cursor focus`, async () => {
+  const h = host("stock");
+  paste(h.app.editor);
+  const visible = h.app.editor.getText();
+  const expanded = h.app.editor.getExpandedText();
+  let input: (data: string) => void = () => { throw new Error('Terminal has not started'); };
+  let cursorVisible = false;
+  const terminal = {
+    rows: 40, columns: 100, kittyProtocolActive: false,
+    start(onInput: (data: string) => void) { input = onInput; },
+    stop() {}, async drainInput() {}, write() {}, moveBy() {},
+    hideCursor() { cursorVisible = false; }, showCursor() { cursorVisible = true; },
+    clearLine() {}, clearFromCursor() {},
+    clearScreen() {}, setTitle() {}, setProgress() {},
+  } satisfies Terminal;
+  const tui = new TuiMainScreen(terminal);
+  h.app.ui = tui;
+  h.app.editorContainer.addChild(h.app.editor);
+  tui.addChild(h.app.editorContainer);
+  tui.setFocus(h.app.editor);
+  tui.setShowHardwareCursor(true);
+  tui.start();
+  Object.assign(h.ctx, {sessionManager: {getBranch: () => []}, getSystemPrompt: () => ''});
+  btw(h.api);
+  const pending = h.commands.get(command).handler('', h.ctx);
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    const overlay = tui.getFocusedComponent();
+    assert.ok(overlay?.handleInput);
+    assert.notEqual(overlay, h.app.editor);
+    input('typed question');
+    input('\x1b[D');
+    const frame = overlay.render(90);
+    const inputLine = frame.find(line => line.includes(CURSOR_MARKER));
+    assert.ok(inputLine, 'focused side editor emits a cursor marker');
+    assert.equal(stripTerminalSequences(inputLine.slice(0, inputLine.indexOf(CURSOR_MARKER))), '│typed questio');
+    assert.equal(frame.filter(line => line.includes(CURSOR_MARKER)).length, 1);
+    tui.renderNow();
+    assert.equal(cursorVisible, true, 'mounted TUI shows the hardware cursor');
+    assert.ok(isFocusable(overlay));
+    assert.equal(overlay.focused, true);
+    tui.setFocus(h.app.editor);
+    assert.equal(overlay.focused, false);
+    assert.ok(overlay.render(90).every(line => !line.includes(CURSOR_MARKER)));
+    tui.setFocus(overlay);
+    assert.equal(overlay.focused, true);
+    assert.ok(overlay.render(90).some(line => line.includes(CURSOR_MARKER)));
+    input('\x1b');
+    await pending;
+    assert.equal(overlay.focused, false);
+    assert.ok(overlay.render(90).every(line => !line.includes(CURSOR_MARKER)));
+    assert.equal(tui.getFocusedComponent(), h.app.editor);
+    assert.equal(h.app.editor.getText(), visible);
+    assert.equal(h.app.editor.getExpandedText(), expanded);
+  } finally {
+    h.emit('session_shutdown');
+    await pending;
+    tui.stop();
+  }
 });

@@ -270,6 +270,8 @@ export default function btw(pi: ExtensionAPI) {
           };
           if (args.trim()) void ask(args);
           return {
+            get focused() { return editor.focused; },
+            set focused(value: boolean) { editor.focused = value; },
             invalidate() {
               editor.invalidate();
             },

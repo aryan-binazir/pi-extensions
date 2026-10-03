@@ -66,9 +66,11 @@ export default function nvimIde(pi: ExtensionAPI): void {
   pi.on('session_shutdown', async () => { const current = link; link = undefined; await current?.stop(); paint({ connected: false, mentions: 0 }); });
 
   pi.on('before_agent_start', async event => {
-    if (!link?.connected) return;
-    const mentions = await Promise.all(link.takeMentions().map(async mention => ({ mention, text: await mentionText(mention) })));
-    const block = editorContext(link.state, mentions);
+    const current = link;
+    if (!current?.connected) return;
+    const mentions = await Promise.all((await current.takeMentions()).map(async mention => ({ mention, text: await mentionText(mention) })));
+    if (link !== current) return;
+    const block = editorContext(current.state, mentions);
     return block ? { systemPrompt: `${event.systemPrompt}\n\n${block}` } : undefined;
   });
 

@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { appendFileSync, watch, type FSWatcher } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type WebSocket from 'ws';
 
 let wsModule: Promise<typeof WebSocket> | undefined;
@@ -77,6 +77,8 @@ export class IdeLink {
   private selection?: Selection;
   private mentions: Mention[] = [];
   private ready = false;
+  private zeroBasedMentionLines = false;
+  private pendingMentions: unknown[] = [];
   constructor(private readonly options: LinkOptions) {}
 
   get state(): LinkState { return { connected: this.ready, ideName: this.lock?.ideName, port: this.lock?.port, selection: this.selection, mentions: this.mentions.length }; }
@@ -98,7 +100,21 @@ export class IdeLink {
     });
   }
   reconnect(): void { const socket = this.socket; this.drop(new Error('reconnecting')); socket?.terminate(); void this.attempt(); }
-  takeMentions(): Mention[] { const taken = this.mentions; this.mentions = []; if (taken.length) this.emit(); return taken; }
+  async takeMentions(): Promise<Mention[]> {
+    const taken = this.mentions;
+    this.mentions = [];
+    if (taken.length) this.emit();
+    if (taken.every(mention => isAbsolute(mention.filePath))) return taken;
+    const socket = this.socket;
+    let root: string | undefined;
+    try {
+      const workspace: unknown = JSON.parse(await this.call('getWorkspaceFolders'));
+      if (this.socket === socket && workspace && typeof workspace === 'object'
+        && 'rootPath' in workspace && typeof workspace.rootPath === 'string' && isAbsolute(workspace.rootPath)
+        && !('success' in workspace && workspace.success === false)) root = workspace.rootPath;
+    } catch {}
+    return taken.flatMap(mention => isAbsolute(mention.filePath) ? [mention] : root ? [{ ...mention, filePath: resolve(root, mention.filePath) }] : []);
+  }
 
   async call(name: string, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<string> {
     const result = await this.request('tools/call', { name, arguments: args }, signal) as { content?: Content; isError?: boolean } | undefined;
@@ -132,7 +148,14 @@ export class IdeLink {
     socket.once('open', () => {
       trace?.('open');
       this.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'pi-nvim-ide', version: '1' } })
-        .then(() => { if (this.socket !== socket) return; this.notify('notifications/initialized'); this.ready = true; trace?.('ready'); this.emit(); })
+        .then(result => {
+          if (this.socket !== socket) return;
+          const serverInfo = result && typeof result === 'object' && 'serverInfo' in result ? result.serverInfo : undefined;
+          this.zeroBasedMentionLines = !!serverInfo && typeof serverInfo === 'object' && 'name' in serverInfo && serverInfo.name === 'claudecode-neovim';
+          this.notify('notifications/initialized'); this.ready = true;
+          for (const params of this.pendingMentions) this.handleNotification('at_mentioned', params);
+          this.pendingMentions = []; trace?.('ready'); this.emit();
+        })
         .catch(error => { trace?.(`initialize failed ${error.message}`); socket.terminate(); });
     });
   }
@@ -186,7 +209,8 @@ export class IdeLink {
     trace?.(`drop ${error.message}`);
     const wasReady = this.ready;
     this.socket?.removeAllListeners('close');
-    this.socket = undefined; this.ready = false; this.lock = undefined; this.selection = undefined;
+    this.socket = undefined; this.ready = false; this.zeroBasedMentionLines = false; this.pendingMentions = []; this.lock = undefined; this.selection = undefined;
+    this.mentions = this.mentions.filter(mention => isAbsolute(mention.filePath));
     for (const item of this.pending.values()) item.reject(error);
     if (wasReady) this.emit();
   }
@@ -233,7 +257,13 @@ export class IdeLink {
       this.emit();
     } else if (method === 'at_mentioned') {
       if (typeof data.filePath !== 'string') return;
-      const line = (value: unknown) => Number.isInteger(value) && (value as number) > 0 ? value as number : undefined;
+      if (!this.ready) {
+        if (this.pendingMentions.length >= 50) this.pendingMentions.shift();
+        this.pendingMentions.push(params);
+        return;
+      }
+      const offset = this.zeroBasedMentionLines ? 1 : 0;
+      const line = (value: unknown) => typeof value === 'number' && Number.isInteger(value) && value >= 1 - offset ? value + offset : undefined;
       if (this.mentions.length >= 50) this.mentions.shift();
       this.mentions.push({ filePath: data.filePath, lineStart: line(data.lineStart), lineEnd: line(data.lineEnd) });
       this.emit();

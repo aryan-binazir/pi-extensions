@@ -39,7 +39,7 @@ test('restored active checkout routes shell and relative files while preserving 
   const tools: Record<string, any> = {};
   const { ctx } = fakeCtx({ cwd: original, sessionId: 'synthetic', branch: active, hasUI: false });
   try {
-    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool: (tool: any) => tools[tool.name] = tool, registerCommand() {} } as any);
+    worktree({ getSettings: () => ({}), on: (name: string, fn: any) => handlers[name] = fn, registerTool: (tool: any) => tools[tool.name] = tool, registerCommand() {} } as any);
     await handlers.session_start({}, ctx);
     assert.equal(getActiveCwd(original, 'synthetic'), active);
     const relative = { toolName: 'read', input: { path: 'nested/file' } }; await handlers.tool_call(relative, ctx);
@@ -86,7 +86,7 @@ test('restore accepts an alias to the registered checkout', async () => {
   const handlers: Record<string, (...args: any[]) => any> = {};
   const { ctx, notices } = fakeCtx({ cwd: original, sessionId: 'alias', branch: alias });
   try {
-    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
+    worktree({ getSettings: () => ({}), on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
     await handlers.session_start({}, ctx);
     assert.equal(getActiveCwd(original, 'alias'), active);
     assert.deepEqual(notices, []);
@@ -99,7 +99,7 @@ test('restore keeps routing to a valid checkout after it is detached', async () 
   const handlers: Record<string, (...args: any[]) => any> = {};
   const { ctx, notices } = fakeCtx({ cwd: original, sessionId: 'detached', branch: active });
   try {
-    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
+    worktree({ getSettings: () => ({}), on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
     await handlers.session_start({}, ctx);
     assert.equal(getActiveCwd(original, 'detached'), active);
     assert.deepEqual(notices, []);
@@ -112,7 +112,7 @@ test('session switches clear the prior routing entry without clearing another se
   let sessionId = 'old';
   const ctx: any = { cwd: home, hasUI: false, sessionManager: { getSessionId: () => sessionId, getBranch: () => [] } };
   try {
-    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
+    worktree({ getSettings: () => ({}), on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
     await handlers.session_start({}, ctx);
     setActiveCwd(home, '/tmp/old-route', 'old');
     setActiveCwd(home, '/tmp/independent-route', 'independent');
@@ -166,7 +166,7 @@ test('directory tools with no path default to the active checkout while read kee
   const handlers: Record<string, (...args: any[]) => any> = {};
   const { ctx } = fakeCtx({ cwd: original, sessionId: 'dir-tools', branch: active, hasUI: false });
   try {
-    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
+    worktree({ getSettings: () => ({}), on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
     await handlers.session_start({}, ctx);
     const routed: Record<string, string | undefined> = {};
     for (const toolName of ['grep', 'find', 'ls', 'read']) {
@@ -184,7 +184,7 @@ test('a saved checkout that no longer exists falls back to the original director
   const handlers: Record<string, (...args: any[]) => any> = {};
   const { ctx, notices } = fakeCtx({ cwd: home, sessionId: 'stale', branch: join(home, 'gone') });
   try {
-    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
+    worktree({ getSettings: () => ({}), on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
     await handlers.session_start({}, ctx);
     assert.deepEqual({ active: getActiveCwd(home, 'stale'), notice: notices.at(-1) }, { active: home, notice: 'Saved worktree is unavailable or invalid; using original session directory' });
     await handlers.session_shutdown({}, ctx);
@@ -199,7 +199,7 @@ test('the newest worktree entry on the branch wins, so returning to original sti
   const { ctx } = fakeCtx({ cwd: original, sessionId: 'last-wins', hasUI: false });
   ctx.sessionManager.getBranch = () => [entry(active), entry(original)];
   try {
-    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
+    worktree({ getSettings: () => ({}), on: (name: string, fn: any) => handlers[name] = fn, registerTool() {}, registerCommand() {} } as any);
     await handlers.session_start({}, ctx);
     assert.equal(getActiveCwd(original, 'last-wins'), original);
     await handlers.session_shutdown({}, ctx);
@@ -213,10 +213,83 @@ test('switching is refused while a turn is active', async () => {
   const { ctx, notices } = fakeCtx({ cwd: home, sessionId: 'busy' });
   ctx.isIdle = () => false;
   try {
-    worktree({ on() {}, registerTool() {}, appendEntry: (_type: string, data: unknown) => entries.push(data), registerCommand: (name: string, value: any) => commands[name] = value } as any);
+    worktree({ getSettings: () => ({}), on() {}, registerTool() {}, appendEntry: (_type: string, data: unknown) => entries.push(data), registerCommand: (name: string, value: any) => commands[name] = value } as any);
     await commands.worktree.handler('original', ctx);
     assert.deepEqual({ entries, notice: notices.at(-1) }, { entries: [], notice: 'Wait for the active turn before switching worktrees' });
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('routed agent and user bash preserve the configured shell and apply the prefix once', async t => {
+  for (const source of ['persisted', 'effective', 'project-trusted', 'project-untrusted', 'project-malformed']) await t.test(source, async t => {
+    const { home, original, active } = await checkoutFixture('pi-route-shell-');
+    const agentDir = join(home, 'agent');
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+    try {
+      await mkdir(agentDir);
+      const shellPath = join(home, 'configured shell');
+      await writeFile(shellPath, '#!/bin/sh\nexport PI_WORKTREE_SHELL=custom\nexec /bin/bash "$@"\n', { mode: 0o755 });
+      await writeFile(join(agentDir, 'settings.json'), JSON.stringify({
+        shellPath, shellCommandPrefix: source !== 'effective' ? 'export PI_WORKTREE_PREFIX="${PI_WORKTREE_PREFIX}x"' : 'export PI_WORKTREE_PREFIX=from-disk',
+      }));
+      if (source.startsWith('project-')) {
+        await mkdir(join(original, '.pi'));
+        await mkdir(join(active, '.pi'));
+        const projectShell = join(home, 'project shell');
+        await writeFile(projectShell, '#!/bin/sh\nexport PI_WORKTREE_SHELL=project\nexec /bin/bash "$@"\n', { mode: 0o755 });
+        await writeFile(join(original, '.pi/settings.json'), source === 'project-malformed' ? '{broken' : JSON.stringify({
+          shellPath: projectShell, shellCommandPrefix: 'export PI_WORKTREE_PREFIX="${PI_WORKTREE_PREFIX}p"',
+        }));
+        await writeFile(join(active, '.pi/settings.json'), JSON.stringify({
+          shellPath: '/missing-active-checkout-shell', shellCommandPrefix: 'export PI_WORKTREE_PREFIX=wrong-checkout',
+        }));
+      }
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      const settingsManager = source !== 'effective' ? SettingsManager.create(original, agentDir, { projectTrusted: source !== 'project-untrusted' }) : SettingsManager.inMemory({
+        shellPath, shellCommandPrefix: 'export PI_WORKTREE_PREFIX="${PI_WORKTREE_PREFIX}x"',
+      });
+      let supportsEffectiveSettings = false;
+      const resourceLoader = new DefaultResourceLoader({ cwd: original, agentDir, settingsManager,
+        extensionFactories: [pi => { supportsEffectiveSettings = 'getSettings' in pi; worktree(pi); }], noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true });
+      await resourceLoader.reload();
+      if (source === 'effective' && !supportsEffectiveSettings) { t.skip('This SDK lacks ExtensionAPI.getSettings'); return; }
+      const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, 'auth.json'), modelsPath: null,
+        refreshOnCreate: false, allowModelNetwork: false });
+      ({ session } = await createAgentSession({ cwd: original, agentDir, settingsManager, resourceLoader,
+        modelRuntime, sessionManager: SessionManager.inMemory(original) }));
+      await session.bindExtensions({});
+      const runner = session.extensionRunner;
+      assert.ok(runner);
+      const errors: unknown[] = [];
+      runner.onError(error => errors.push(error));
+      let marker = source === 'project-trusted' ? 'p|project' : 'x|custom';
+      const command = 'printf "%s|%s|%s" "${PI_WORKTREE_PREFIX:-missing}" "${PI_WORKTREE_SHELL:-missing}" "$PWD"';
+      for (const cwd of [original, active, original]) {
+        session.sessionManager.appendCustomEntry('agent-workflows:worktree', { version: 1, path: cwd });
+        await runner.emit({ type: 'session_tree', newLeafId: session.sessionManager.getLeafId(), oldLeafId: null });
+        const bash: (typeof session.agent.state.tools)[number] | undefined = session.agent.state.tools.find(tool => tool.name === 'bash');
+        assert.ok(bash);
+        const agent = await bash.execute('shell-settings', { command });
+        assert.deepEqual(agent.content, [{ type: 'text', text: `${marker}|${cwd}` }]);
+        const intercepted = await runner.emitUserBash({ type: 'user_bash', command, cwd: original, excludeFromContext: false });
+        const user = await session.executeBash(command, undefined, { operations: intercepted?.operations });
+        assert.equal(user.output, `${marker}|${cwd}`);
+        assert.equal(user.exitCode, 0);
+        if (source === 'effective' && cwd === active) {
+          const secondShell = join(home, 'second shell');
+          await writeFile(secondShell, '#!/bin/sh\nexport PI_WORKTREE_SHELL=updated\nexec /bin/bash "$@"\n', { mode: 0o755 });
+          settingsManager.applyOverrides({ shellPath: secondShell, shellCommandPrefix: 'export PI_WORKTREE_PREFIX="${PI_WORKTREE_PREFIX}y"' });
+          marker = 'y|updated';
+        }
+      }
+      assert.deepEqual(errors, []);
+    } finally {
+      if (session) { setActiveCwd(original, undefined, session.sessionManager.getSessionId()); session.dispose(); }
+      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 });
 
 for (const space of ['\u00a0', '\u202f', '\u3000']) {

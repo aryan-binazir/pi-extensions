@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getEventListeners, once } from 'node:events';
+import { WebSocketServer } from 'ws';
 import { pathToFileURL } from 'node:url';
 import { createEditTool, createWriteTool } from '@earendil-works/pi-coding-agent';
 import nvimIde, { editorContext, statusText } from './index.ts';
@@ -73,8 +74,8 @@ test('a connected editor registers its tools and reports the selection in the st
     await settle();
     assert.equal(status.length, paints, 'identical selection does not repaint');
 
-    ide.broadcast('at_mentioned', { filePath: join(project, 'a.ts'), lineStart: 3, lineEnd: 4 });
-    ide.broadcast('at_mentioned', { filePath: join(project, 'missing.ts'), lineStart: 1, lineEnd: 1 });
+    ide.broadcast('at_mentioned', { filePath: join(project, 'a.ts'), lineStart: 2, lineEnd: 3 });
+    ide.broadcast('at_mentioned', { filePath: join(project, 'missing.ts'), lineStart: 0, lineEnd: 0 });
     await settle();
     const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
     assert.match(turn.systemPrompt, /^BASE\n\n# Editor context \(Neovim\)/);
@@ -302,9 +303,103 @@ test('/vim reconnect drops and re-establishes the link', async () => {
 test('a mention past the line cap is clipped in the body but keeps the requested range in its header', async () => {
   await withConnectedIde(async ({ ide, project, fire, ctx }) => {
     await writeFile(join(project, 'big.ts'), Array.from({ length: 2500 }, (_, i) => `L${i + 1}`).join('\n'));
-    ide.broadcast('at_mentioned', { filePath: join(project, 'big.ts'), lineStart: 1, lineEnd: 2500 });
+    ide.broadcast('at_mentioned', { filePath: join(project, 'big.ts'), lineStart: 0, lineEnd: 2499 });
     await settle();
     const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
     assert.match(turn.systemPrompt, /User sent from editor: .*big\.ts lines 1-2500\n```\n(?:L\d+\n){1999}L2000\n```/);
   });
+});
+
+test('ClaudeCodeSend includes exactly the selected rows, including row zero', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    for (const { wire, header, text } of [
+      { wire: { lineStart: 0, lineEnd: 0 }, header: '1-1', text: 'line1' },
+      { wire: { lineStart: 1, lineEnd: 1 }, header: '2-2', text: 'line2' },
+      { wire: { lineStart: 1, lineEnd: 2 }, header: '2-3', text: 'line2\nline3' },
+      { wire: { lineStart: 0, lineEnd: 2 }, header: '1-3', text: 'line1\nline2\nline3' },
+      { wire: { lineStart: 0 }, header: '1-1', text: 'line1' },
+    ]) {
+      const filePath = join(project, 'a.ts');
+      ide.broadcast('at_mentioned', { filePath, ...wire });
+      await settle();
+      const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
+      assert.equal(turn.systemPrompt.slice(turn.systemPrompt.indexOf('User sent from editor:')),
+        `User sent from editor: ${filePath} lines ${header}\n\`\`\`\n${text}\n\`\`\``);
+    }
+  });
+});
+
+test('relative editor mentions read the live editor root from a child Pi directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-mention-'));
+  const project = join(root, 'project');
+  const nested = join(project, 'nested');
+  let editorRoot = project;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  server.on('connection', socket => socket.on('message', raw => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }));
+    else if (message.method === 'tools/call') {
+      assert.deepEqual(message.params, { name: 'getWorkspaceFolders', arguments: {} });
+      socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify({ success: true, rootPath: editorRoot }) }] } }));
+    }
+  }));
+  await once(server, 'listening');
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const previousCwd = process.cwd();
+  const pi = fakePi();
+  const { ctx, status } = fakeCtx(nested);
+  const send = (filePath: string, range = false) => {
+    for (const client of server.clients) client.send(JSON.stringify({ jsonrpc: '2.0', method: 'at_mentioned', params: { filePath, ...(range ? { lineStart: 2, lineEnd: 2 } : {}) } }));
+  };
+  try {
+    await mkdir(nested, { recursive: true });
+    await mkdir(join(root, 'ide'));
+    await writeFile(join(project, 'selected.ts'), 'EDITOR_FIRST\nEDITOR_SECOND\n');
+    await writeFile(join(nested, 'selected.ts'), 'WRONG_FIRST\nWRONG_SECOND\n');
+    await writeFile(join(root, 'ide', `${(server.address() as { port: number }).port}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [project], ideName: 'Neovim', authToken: token }));
+    process.env.CLAUDE_CONFIG_DIR = root;
+    process.chdir(nested);
+    nvimIde(pi.api as any);
+    await pi.fire('session_start', {}, ctx);
+    await until(() => status.includes('Neovim ✓'));
+    send('selected.ts', true);
+    await settle();
+    const turn = await pi.fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.ok(turn.systemPrompt.includes(`User sent from editor: ${join(project, 'selected.ts')} lines 2-2`));
+    assert.match(turn.systemPrompt, /```\nEDITOR_SECOND\n```/);
+    assert.doesNotMatch(turn.systemPrompt, /WRONG_/);
+    const next = await pi.fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.doesNotMatch(next.systemPrompt, /User sent from editor/);
+
+    await writeFile(join(project, 'editor-only.ts'), 'ROOT_ONLY_FIRST\nROOT_ONLY_SECOND\n');
+    await mkdir(join(project, 'folder'));
+    send('editor-only.ts', true);
+    send('folder');
+    send(join(project, 'selected.ts'), true);
+    await settle();
+    const extra = await pi.fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.ok(extra.systemPrompt.includes(`User sent from editor: ${join(project, 'editor-only.ts')} lines 2-2\n` + '```\nROOT_ONLY_SECOND'));
+    assert.ok(extra.systemPrompt.includes(`User sent from editor: ${join(project, 'folder')}\nUser sent from editor: ${join(project, 'selected.ts')}`));
+    assert.match(extra.systemPrompt, /```\nEDITOR_SECOND\n```/);
+
+    editorRoot = join(root, 'other');
+    await mkdir(editorRoot);
+    await writeFile(join(editorRoot, 'selected.ts'), 'CHANGED_FIRST\nCHANGED_SECOND\n');
+    setActiveCwd(nested, project, ctx.sessionManager.getSessionId());
+    try {
+      send('selected.ts', true);
+      await settle();
+      const changed = await pi.fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+      assert.ok(changed.systemPrompt.includes(`User sent from editor: ${join(editorRoot, 'selected.ts')} lines 2-2`));
+      assert.match(changed.systemPrompt, /```\nCHANGED_SECOND\n```/);
+      assert.doesNotMatch(changed.systemPrompt, /EDITOR_|WRONG_/);
+    } finally { setActiveCwd(nested, undefined, ctx.sessionManager.getSessionId()); }
+  } finally {
+    await pi.fire('session_shutdown', {}, ctx);
+    process.chdir(previousCwd);
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(root, { recursive: true, force: true });
+  }
 });

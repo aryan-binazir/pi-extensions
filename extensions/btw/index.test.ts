@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import btw from "./index.ts";
+import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { streamSimple as piMessagesStream, type PiMessagesEvent } from "@earendil-works/pi-ai/api/pi-messages";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 
@@ -77,6 +79,137 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
   };
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+const providerUsage = {
+  input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+function providerHost(events: PiMessagesEvent[]) {
+  const h = host();
+  const model: Model<"pi-messages"> = {
+    id: "synthetic", name: "Synthetic", api: "pi-messages", provider: "synthetic",
+    baseUrl: "https://synthetic.invalid", reasoning: false, input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 64000, maxTokens: 8192,
+  };
+  h.ctx.model = model;
+  h.ctx.modelRegistry.getProvider = () => ({
+    streamSimple: (_model: Model<"pi-messages">, context: Context, options: SimpleStreamOptions) => {
+      h.requests.push({ context, options });
+      return piMessagesStream(model, context, {
+        ...options,
+        fetch: async () => new Response(
+          events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+          { headers: { "Content-Type": "text/event-stream" } },
+        ),
+      });
+    },
+  });
+  return h;
+}
+
+test("BTW displays authoritative completed provider text and sends it in followup history", async () => {
+  const h = providerHost([
+    { type: "start" },
+    { type: "text_start", contentIndex: 0 },
+    { type: "text_delta", contentIndex: 0, delta: "The draft says 2" },
+    { type: "text_end", contentIndex: 0, content: "The final answer says 3\n" },
+    { type: "thinking_start", contentIndex: 1 },
+    { type: "thinking_end", contentIndex: 1, content: "Private reasoning" },
+    { type: "text_start", contentIndex: 2 },
+    { type: "text_end", contentIndex: 2, content: "Only finalized text\n" },
+    { type: "text_start", contentIndex: 3 },
+    { type: "text_delta", contentIndex: 3, delta: "Last block." },
+    { type: "text_end", contentIndex: 3, content: "Last block." },
+    { type: "done", reason: "stop", usage: providerUsage },
+  ]);
+  const result = h.commands.btw.handler("First question", h.ctx);
+  try {
+    h.key("Followup");h.key("\r");
+    await tick();
+    assert.match(h.render(), /The final answer says 3/);
+    assert.match(h.render(), /Only finalized text/);
+    assert.match(h.render(), /Last block\./);
+    assert.doesNotMatch(h.render(), /The draft says 2|Private reasoning/);
+    assert.equal(h.requests[1].context.messages[1].content,
+      "Earlier side conversation:\nUser: First question\nAssistant: The final answer says 3\nOnly finalized text\nLast block.");
+  } finally {
+    h.key("\u001b");
+    await result;
+  }
+});
+
+test("BTW clears a draft when the successful final answer has no text", async () => {
+  const h = providerHost([
+    { type: "text_start", contentIndex: 0 },
+    { type: "text_delta", contentIndex: 0, delta: "Obsolete draft" },
+    { type: "text_end", contentIndex: 0, content: "" },
+    { type: "done", reason: "stop", usage: providerUsage },
+  ]);
+  const result = h.commands.btw.handler("Question", h.ctx);
+  try {
+    await tick();
+    assert.match(h.render(), /Provider returned no text/);
+    assert.doesNotMatch(h.render(), /Obsolete draft/);
+    h.key("Followup");h.key("\r");
+    await tick();
+    assert.equal(h.requests[1].context.messages[1].content,
+      "Earlier side conversation:\nUser: Question\nAssistant: ");
+  } finally {
+    h.key("\u001b");await result;
+  }
+});
+
+for (const size of [31999, 32000, 40000]) {
+  test(`BTW bounds authoritative final text across blocks at ${size} characters`, async () => {
+    const h = providerHost([
+      { type: "text_start", contentIndex: 0 },
+      { type: "text_end", contentIndex: 0, content: "x".repeat(16000) },
+      { type: "text_start", contentIndex: 1 },
+      { type: "text_end", contentIndex: 1, content: "y".repeat(size - 16000) },
+      { type: "done", reason: "length", usage: providerUsage },
+    ]);
+    const result = h.commands.btw.handler("Question", h.ctx);
+    try {
+      await tick();
+      assert.equal(/Answer limit reached/.test(h.render()), size >= 32000);
+      assert.equal(h.requests[0].options.signal.aborted, false);
+      h.key("Followup");h.key("\r");
+      await tick();
+      assert.equal(h.requests[1].context.messages[1].content,
+        "Earlier side conversation:\nUser: Question\nAssistant: " +
+        "x".repeat(16000) + "y".repeat(size === 31999 ? 15999 : 16000));
+    } finally {
+      h.key("\u001b");await result;
+    }
+  });
+}
+
+for (const reason of ["error", "aborted"] as const) {
+  test(`BTW preserves the partial draft and excludes history after provider ${reason}`, async () => {
+    const h = providerHost([
+      { type: "text_start", contentIndex: 0 },
+      { type: "text_delta", contentIndex: 0, delta: "Unfinished draft" },
+      { type: "text_end", contentIndex: 0, content: "Unsuccessful final text" },
+      { type: "error", reason, usage: providerUsage, errorMessage: "synthetic failure" },
+    ]);
+    const result = h.commands.btw.handler("Question", h.ctx);
+    try {
+      await tick();
+      assert.match(h.render(), /Unfinished draft/);
+      assert.match(h.render(), /Side request failed: synthetic failure/);
+      assert.doesNotMatch(h.render(), /Unsuccessful final text/);
+      h.key("Followup");h.key("\r");
+      await tick();
+      assert.deepEqual(h.requests[1].context.messages.map((message: any) => message.content),
+        ["Conversation snapshot:\n", "Followup"]);
+    } finally {
+      h.key("\u001b");await result;
+    }
+  });
+}
+
 test("BTW fills its overlay from opening through the first answer and resize", async () => {
   const h = host();
   const result = h.commands.btw.handler("", h.ctx);
@@ -607,10 +740,22 @@ test("the snapshot cap keeps the newest turns and marks what was dropped", async
 });
 
 test("a provider tool request is reported and never executed", async () => {
-  const h = host([{ type: "text_delta", delta: "Checking" }, { type: "done", reason: "toolUse" }]);
+  const h = providerHost([
+    { type: "text_start", contentIndex: 0 },
+    { type: "text_delta", contentIndex: 0, delta: "Checking" },
+    { type: "text_end", contentIndex: 0, content: "Final tool response" },
+    { type: "toolcall_start", contentIndex: 1, id: "synthetic", toolName: "never_run" },
+    { type: "toolcall_end", contentIndex: 1, toolCall: { type: "toolCall", id: "synthetic", name: "never_run", arguments: {} } },
+    { type: "done", reason: "toolUse", usage: providerUsage },
+  ]);
   const result = h.commands.btw.handler("Question", h.ctx);
   await tick();
   assert.deepEqual([h.requests.length, /Provider requested a tool; no tool was run/.test(h.render())], [1, true]);
+  assert.match(h.render(), /Final tool response/);
+  assert.doesNotMatch(h.render(), /Checking|never_run/);
+  h.key("Followup");h.key("\r");await tick();
+  assert.equal(h.requests[1].context.messages[1].content,
+    "Earlier side conversation:\nUser: Question\nAssistant: Final tool response");
   h.key("");
   await result;
 });

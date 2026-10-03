@@ -234,7 +234,10 @@ test('relative editor mentions read the live editor root from a child Pi directo
   server.on('connection', socket => socket.on('message', raw => {
     const message = JSON.parse(raw.toString());
     if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }));
-    else if (message.method === 'tools/call') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify({ success: true, rootPath: editorRoot }) }] } }));
+    else if (message.method === 'tools/call') {
+      assert.deepEqual(message.params, { name: 'getWorkspaceFolders', arguments: {} });
+      socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify({ success: true, rootPath: editorRoot }) }] } }));
+    }
   }));
   await once(server, 'listening');
   const previous = process.env.CLAUDE_CONFIG_DIR;

@@ -288,6 +288,7 @@ test('mentions never fall back to Pi cwd or stale lock folders when live workspa
     const message = JSON.parse(raw.toString());
     if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }));
     else if (message.method === 'tools/call') {
+      assert.deepEqual(message.params, { name: 'getWorkspaceFolders', arguments: {} });
       requests++;
       if (answer) socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: response }], isError } }));
     }
@@ -329,6 +330,18 @@ test('mentions never fall back to Pi cwd or stale lock folders when live workspa
     assert.deepEqual(await pending, [], 'a timeout never returns a relative path');
     assert.deepEqual(await link.takeMentions(), [absolute], 'new notifications belong to the next batch');
     assert.equal(requests, before + 1, 'absolute-only batches do not need the editor root');
+
+    send('selected.ts');
+    send(absolute.filePath);
+    await until(() => link.state.mentions === 2);
+    const interrupted = link.takeMentions();
+    let finished = false;
+    void interrupted.then(() => { finished = true; });
+    await until(() => requests === before + 2);
+    link.reconnect();
+    await until(() => finished, 1000);
+    assert.deepEqual(await interrupted, [absolute], 'an interrupted lookup cannot resolve against a replacement editor');
+    await until(() => link.connected);
 
     send('selected.ts');
     send(absolute.filePath);

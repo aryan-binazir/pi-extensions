@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { join, resolve } from 'node:path';
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -291,3 +291,65 @@ test('routed agent and user bash preserve the configured shell and apply the pre
     }
   });
 });
+
+for (const space of ['\u00a0', '\u202f', '\u3000']) {
+  test(`real builtin tools preserve Unicode cwd U+${space.charCodeAt(0).toString(16)} beside an ASCII-space sibling`, async () => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), 'pi-route-unicode-')));
+    const original = join(home, `repo${space}name`);
+    const active = join(home, `checkout${space}name#%`);
+    await mkdir(original);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: original, stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-b', 'main');
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'init');
+    git('worktree', 'add', '-b', 'task', active);
+    try {
+      for (const cwd of [original, active]) {
+        const sibling = cwd.replace(space, ' ');
+        await mkdir(sibling);
+        await writeFile(join(cwd, 'marker'), 'correct checkout');
+        await writeFile(join(sibling, 'marker'), 'wrong sibling');
+        await writeFile(join(sibling, 'new file'), 'untouched sibling');
+        await writeFile(join(sibling, 'sibling-only'), 'untouched');
+        const agentDir = join(home, cwd === original ? 'agent-original' : 'agent-active');
+        const settingsManager = SettingsManager.inMemory();
+        const sessionManager = SessionManager.inMemory(original);
+        if (cwd === active) sessionManager.appendCustomEntry('agent-workflows:worktree', { version: 1, path: active });
+        const resourceLoader = new DefaultResourceLoader({ cwd: original, agentDir, settingsManager, noExtensions: true, extensionFactories: [worktree], noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true });
+        await resourceLoader.reload();
+        const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, 'auth.json'), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
+        const { session } = await createAgentSession({ cwd: original, agentDir, settingsManager, resourceLoader, modelRuntime, sessionManager, tools: ['read', 'write', 'edit', 'ls'] });
+        try {
+          await session.bindExtensions({});
+          const runner = session.extensionRunner;
+          assert.ok(runner);
+          assert.equal(getActiveCwd(original, sessionManager.getSessionId()), cwd);
+          const errors: unknown[] = [];
+          runner.onError(error => errors.push(error));
+          const execute = async (toolName: string, input: Record<string, unknown>) => {
+            assert.notEqual((await runner.emitToolCall({ type: 'tool_call', toolName, toolCallId: toolName, input }))?.block, true);
+            const tool = session.agent.state.tools.find(tool => tool.name === toolName);
+            assert.ok(tool);
+            return tool.execute(toolName, input);
+          };
+          const read = await execute('read', { path: '@marker' });
+          assert.deepEqual(read.content, [{ type: 'text', text: 'correct checkout' }]);
+          await execute('write', { path: `new${space}file`, content: 'intended write' });
+          assert.equal(await readFile(join(cwd, 'new file'), 'utf8'), 'intended write');
+          assert.equal(await readFile(join(sibling, 'new file'), 'utf8'), 'untouched sibling');
+          await execute('write', { path: 'created', content: 'new in checkout' });
+          assert.equal(await readFile(join(cwd, 'created'), 'utf8'), 'new in checkout');
+          await assert.rejects(readFile(join(sibling, 'created')), { code: 'ENOENT' });
+          for (const input of [{}, { path: '.' }]) {
+            const listing = await execute('ls', input);
+            assert.ok(listing.content.some(content => content.type === 'text' && content.text.includes('marker')));
+            assert.ok(!listing.content.some(content => content.type === 'text' && content.text.includes('sibling-only')));
+          }
+          assert.deepEqual(errors, []);
+        } finally {
+          await session.extensionRunner?.emit({ type: 'session_shutdown', reason: 'quit' });
+          session.dispose();
+        }
+      }
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+}

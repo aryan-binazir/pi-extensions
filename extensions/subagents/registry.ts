@@ -419,7 +419,7 @@ export function piInvocation(spec: ValidTask) {
   if (spec.model) args.push('--model', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
   for (const extension of new Set(spec.extensions)) args.push('-e', extension);
-  args.push('--', spec.task);
+  args.push('--', spec.task.startsWith('@') ? `\n${spec.task}` : spec.task);
   const env = childEnv(process.env, {PI_SUBAGENT_TIMEOUT_MS: String(spec.timeout)});
   return {
     command: 'node',

@@ -77,6 +77,8 @@ export class IdeLink {
   private selection?: Selection;
   private mentions: Mention[] = [];
   private ready = false;
+  private zeroBasedMentionLines = false;
+  private pendingMentions: unknown[] = [];
   constructor(private readonly options: LinkOptions) {}
 
   get state(): LinkState { return { connected: this.ready, ideName: this.lock?.ideName, port: this.lock?.port, selection: this.selection, mentions: this.mentions.length }; }
@@ -132,7 +134,14 @@ export class IdeLink {
     socket.once('open', () => {
       trace?.('open');
       this.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'pi-nvim-ide', version: '1' } })
-        .then(() => { if (this.socket !== socket) return; this.notify('notifications/initialized'); this.ready = true; trace?.('ready'); this.emit(); })
+        .then(result => {
+          if (this.socket !== socket) return;
+          const serverInfo = result && typeof result === 'object' && 'serverInfo' in result ? result.serverInfo : undefined;
+          this.zeroBasedMentionLines = !!serverInfo && typeof serverInfo === 'object' && 'name' in serverInfo && serverInfo.name === 'claudecode-neovim';
+          this.notify('notifications/initialized'); this.ready = true;
+          for (const params of this.pendingMentions) this.handleNotification('at_mentioned', params);
+          this.pendingMentions = []; trace?.('ready'); this.emit();
+        })
         .catch(error => { trace?.(`initialize failed ${error.message}`); socket.terminate(); });
     });
   }
@@ -186,8 +195,8 @@ export class IdeLink {
     trace?.(`drop ${error.message}`);
     const wasReady = this.ready;
     this.socket?.removeAllListeners('close');
-    this.socket = undefined; this.ready = false; this.lock = undefined; this.selection = undefined;
-    for (const [id, item] of this.pending) { clearTimeout(item.timer); this.pending.delete(id); item.reject(error); }
+    this.socket = undefined; this.ready = false; this.zeroBasedMentionLines = false; this.pendingMentions = []; this.lock = undefined; this.selection = undefined;
+    for (const item of this.pending.values()) item.reject(error);
     if (wasReady) this.emit();
   }
   private emit(): void { this.options.onChange?.(this.state); }
@@ -233,7 +242,13 @@ export class IdeLink {
       this.emit();
     } else if (method === 'at_mentioned') {
       if (typeof data.filePath !== 'string') return;
-      const line = (value: unknown) => Number.isInteger(value) && (value as number) > 0 ? value as number : undefined;
+      if (!this.ready) {
+        if (this.pendingMentions.length >= 50) this.pendingMentions.shift();
+        this.pendingMentions.push(params);
+        return;
+      }
+      const offset = this.zeroBasedMentionLines ? 1 : 0;
+      const line = (value: unknown) => typeof value === 'number' && Number.isInteger(value) && value >= 1 - offset ? value + offset : undefined;
       if (this.mentions.length >= 50) this.mentions.shift();
       this.mentions.push({ filePath: data.filePath, lineStart: line(data.lineStart), lineEnd: line(data.lineEnd) });
       this.emit();

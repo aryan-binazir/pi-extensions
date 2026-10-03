@@ -8,6 +8,7 @@ export interface Checkout { path: string; branch: string; primary: boolean }
 interface Options { home?: string; herdr?: boolean }
 interface Removal { removed: boolean; reason?: string }
 interface CheckoutRemoval extends Removal { path: string }
+interface CleanupEligibility { checkout: Checkout; head: string; gitdir: string; dev: number; ino: number }
 export class Worktrees {
   constructor(readonly cwd: string, private readonly options: Options = {}) {}
   private async run(command: string, args: string[]) {
@@ -89,6 +90,18 @@ export class Worktrees {
     return checkout;
   }
   async remove(path: string, options: { force?: boolean; confirm: (message: string) => Promise<boolean> }): Promise<Removal> {
+    return this.removeCheckout(path, options);
+  }
+  private async cleanupMatches(expected: CleanupEligibility): Promise<boolean> {
+    try {
+      if (!await this.matches(expected.checkout)) return false;
+      const directory = await stat(expected.checkout.path);
+      if (directory.dev !== expected.dev || directory.ino !== expected.ino) return false;
+      if (await realpath(await this.run('git', ['-C', expected.checkout.path, 'rev-parse', '--absolute-git-dir'])) !== expected.gitdir) return false;
+      return await this.run('git', ['-C', expected.checkout.path, 'rev-parse', 'HEAD']) === expected.head;
+    } catch { return false; }
+  }
+  private async removeCheckout(path: string, options: Parameters<Worktrees['remove']>[1], expected?: CleanupEligibility): Promise<Removal> {
     const canonical = await realpath(path);
     const checkout = (await this.list()).find(item => resolve(item.path) === canonical);
     if (!checkout || checkout.primary) throw new Error('Refusing to remove an unknown or primary checkout');
@@ -103,8 +116,10 @@ export class Worktrees {
     if (openWorkspaceId && openWorkspaceId === process.env.HERDR_WORKSPACE_ID) throw new Error('Refusing to close the active Herdr workspace');
     const dirty = await this.run('git', ['-C', checkout.path, 'status', '--porcelain']);
     if (dirty && !options.force) return { removed: false, reason: 'dirty' };
+    if (expected && !await this.cleanupMatches(expected)) return { removed: false, reason: 'checkout changed since cleanup eligibility' };
     if (!await options.confirm(`Remove ${checkout.path}${dirty ? ' including uncommitted files (--force)' : ''}?`)) return { removed: false, reason: 'not confirmed' };
     if (!options.force && await this.run('git', ['-C', checkout.path, 'status', '--porcelain'])) return { removed: false, reason: 'dirty' };
+    if (expected && !await this.cleanupMatches(expected)) return { removed: false, reason: 'checkout changed since cleanup eligibility' };
     if (openWorkspaceId) {
       await this.run('herdr', ['worktree', 'remove', '--workspace', openWorkspaceId, ...(options.force ? ['--force'] : [])]);
     } else await this.run('git', ['worktree', 'remove', ...(options.force ? ['--force'] : []), '--', checkout.path]);
@@ -116,14 +131,17 @@ export class Worktrees {
       if (checkout.primary || !checkout.branch) continue;
       try {
         if (within(await realpath(checkout.path), await realpath(this.cwd))) { results.push({ path: checkout.path, removed: false, reason: 'original session directory' }); continue; }
+        const directory = await stat(checkout.path);
+        const gitdir = await realpath(await this.run('git', ['-C', checkout.path, 'rev-parse', '--absolute-git-dir']));
+        const head = await this.run('git', ['-C', checkout.path, 'rev-parse', 'HEAD']);
+        const expected: CleanupEligibility = { checkout, head, gitdir, dev: directory.dev, ino: directory.ino };
         let merged: boolean;
         try {
           const prs = JSON.parse(await this.run('gh', ['pr', 'list', '--head', checkout.branch, '--state', 'all', '--json', 'state,headRefOid,mergedAt', '--limit', '100'])) as Array<{ state: string; headRefOid: string; mergedAt: string | null }>;
-          const head = await this.run('git', ['-C', checkout.path, 'rev-parse', 'HEAD']);
           merged = prs.some(pr => pr.state === 'MERGED' && pr.mergedAt && pr.headRefOid === head);
         } catch { results.push({ path: checkout.path, removed: false, reason: 'PR merge status unavailable' }); continue; }
         if (!merged) { results.push({ path: checkout.path, removed: false, reason: 'no merged PR at checkout HEAD' }); continue; }
-        results.push({ path: checkout.path, ...await this.remove(checkout.path, options) });
+        results.push({ path: checkout.path, ...await this.removeCheckout(checkout.path, options, expected) });
       } catch (error) {
         results.push({ path: checkout.path, removed: false, reason: error instanceof Error ? error.message : String(error) });
       }

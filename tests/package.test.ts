@@ -117,14 +117,17 @@ async function packageSession(run: (h: { session: any; runner: any; temp: string
   }
 }
 
-test('todo, subagents and worktree each append to the same system prompt in manifest order', async () => packageSession(async ({session, runner, temp}) => {
+test('todo composes request context while subagents and worktree append to the system prompt', async () => packageSession(async ({session, runner, temp}) => {
   await session.getToolDefinition('todo_write')!.execute('t1', {todos: [{content: 'Composed task', status: 'pending'}]}, undefined, undefined, runner.createContext());
   const checkout = join(temp, 'checkout'); await mkdir(checkout);
   const sessionId = session.sessionManager.getSessionId();
   setActiveCwd(temp, checkout, sessionId);
   try {
     const result = await runner.emitBeforeAgentStart('hi', undefined, 'BASE_PROMPT', {});
-    assert.match(result!.systemPrompt!, /^BASE_PROMPT\n\n[\s\S]*\[pending\] Composed task[\s\S]*Default profile \(used when profile is omitted\): implement[\s\S]*Active worktree directory: /);
+    const context = await runner.emitContext([]);
+    assert.match(context.at(-1)!.content, /\[pending\] Composed task/);
+    assert.doesNotMatch(result!.systemPrompt!, /Composed task/);
+    assert.match(result!.systemPrompt!, /^BASE_PROMPT\n\n[\s\S]*Default profile \(used when profile is omitted\): implement[\s\S]*Active worktree directory: /);
   } finally { setActiveCwd(temp, undefined, sessionId); }
 }));
 
@@ -133,4 +136,12 @@ test('the guard blocks a non-draft PR through the bash tool that worktree suppli
   await writeFile(join(agentDir, 'guard.json'), JSON.stringify({requireDraftPr: true, blockAdminMerge: true}));
   const decision = await runner.emitToolCall({type: 'tool_call', toolName: 'bash', toolCallId: 'g', input: {command: 'gh pr create --title x'}});
   assert.deepEqual(decision, {block: true, reason: 'Create PRs as drafts. Add --draft; mark ready with gh pr ready after review.'});
+}));
+
+
+test('the guard blocks reordered administrator merge flags through worktree Bash in a real session', async () => packageSession(async ({runner, agentDir}) => {
+  await mkdir(agentDir, {recursive: true});
+  await writeFile(join(agentDir, 'guard.json'), JSON.stringify({requireDraftPr: true, blockAdminMerge: true}));
+  const decision = await runner.emitToolCall({type: 'tool_call', toolName: 'bash', toolCallId: 'g-order', input: {command: 'gh pr --body Note merge 42 --admin --squash'}});
+  assert.deepEqual(decision, {block: true, reason: 'Merge without --admin. Satisfy the repository review and check requirements instead of bypassing them.'});
 }));

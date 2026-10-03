@@ -16,17 +16,21 @@ import {
 } from "@earendil-works/pi-tui";
 
 const HANDOFF = "pi-interactive:effort-handoff";
+type HandoffResult =
+  | { kind: "cancelled" }
+  | { kind: "completed"; notify: () => void };
 interface Handoff {
   provider: string;
   model: string;
   level: ModelThinkingLevel;
   sessionId: string;
   acknowledge: () => void;
-  complete: (error?: string) => void;
+  complete: (result: HandoffResult) => void;
 }
 
 export default function effort(pi: ExtensionAPI) {
   let current: ExtensionContext | undefined;
+  const pending = new Set<() => void>();
   // Pi's own event facade is session-bound and becomes stale on replacement.
   // Node's process event emitter survives extension module reloads.
   const events: EventEmitter = process;
@@ -36,20 +40,39 @@ export default function effort(pi: ExtensionAPI) {
       current.sessionManager.getSessionId() !== request.sessionId
     )
       return;
-    request.acknowledge();
     const ctx = current;
+    const cancel = () => {
+      if (pending.delete(cancel)) request.complete({ kind: "cancelled" });
+    };
+    pending.add(cancel);
+    request.acknowledge();
+    const complete = (error?: string) => {
+      if (!pending.delete(cancel)) return;
+      request.complete({
+        kind: "completed",
+        notify: () => {
+          if (current !== ctx) return;
+          ctx.ui.notify(
+            error ?? `Temporary ${request.provider}/${request.model} · ${request.level}`,
+            error ? "error" : "info",
+          );
+        },
+      });
+    };
     void (async () => {
       const model = ctx.modelRegistry.find(request.provider, request.model);
       if (!model) throw new Error("Handoff model unavailable");
       if (!getSupportedThinkingLevels(model).includes(request.level))
         throw new Error("Handoff thinking level unsupported");
-      if (!(await pi.setModel(model)))
+      const selected = await pi.setModel(model);
+      if (current !== ctx) return;
+      if (!selected)
         throw new Error("Handoff model authentication unavailable");
       pi.setThinkingLevel(request.level);
     })().then(
-      () => request.complete(),
+      () => complete(),
       (error) =>
-        request.complete(
+        complete(
           error instanceof Error ? error.message : "Handoff failed",
         ),
     );
@@ -61,6 +84,7 @@ export default function effort(pi: ExtensionAPI) {
   });
   pi.on("session_shutdown", () => {
     current = undefined;
+    for (const cancel of pending) cancel();
     closeSlider?.();
     events.off(HANDOFF, receiveHandoff);
   });
@@ -216,10 +240,16 @@ export default function effort(pi: ExtensionAPI) {
       const result = await ctx.newSession({
         parentSession: ctx.sessionManager.getSessionFile(),
         async withSession(replacement) {
-          const error = await new Promise<string | undefined>((resolve) => {
+          const result = await new Promise<HandoffResult>((resolve) => {
             const receiptDeadline = setTimeout(
               () =>
-                resolve("Effort extension did not acknowledge the new session"),
+                resolve({
+                  kind: "completed",
+                  notify: () => replacement.ui.notify(
+                    "Effort extension did not acknowledge the new session",
+                    "error",
+                  ),
+                }),
               5000,
             );
             events.emit(HANDOFF, {
@@ -228,18 +258,13 @@ export default function effort(pi: ExtensionAPI) {
               level: selectedLevel,
               sessionId: replacement.sessionManager.getSessionId(),
               acknowledge: () => clearTimeout(receiptDeadline),
-              complete: (message?: string) => {
+              complete: (result) => {
                 clearTimeout(receiptDeadline);
-                resolve(message);
+                resolve(result);
               },
             } satisfies Handoff);
           });
-          if (error) replacement.ui.notify(error, "error");
-          else
-            replacement.ui.notify(
-              `Temporary ${provider}/${modelId} · ${selectedLevel}`,
-              "info",
-            );
+          if (result.kind === "completed") result.notify();
         },
       });
       if (result.cancelled) ctx.ui.notify("New session cancelled", "info");

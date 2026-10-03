@@ -232,9 +232,20 @@ export default function btw(pi: ExtensionAPI) {
                   throw new Error(
                     event.error.errorMessage || "Provider request failed",
                   );
-                if (event.type === "done" && event.reason === "toolUse") {
-                  answering = false;
-                  status = "Provider requested a tool; no tool was run";
+                if (event.type === "done") {
+                  answer = "";
+                  for (const block of event.message.content) {
+                    if (block.type === "text")
+                      answer += block.text.slice(0, MAX_ANSWER - answer.length);
+                    if (answer.length >= MAX_ANSWER) break;
+                  }
+                  if (event.reason === "toolUse") {
+                    answering = false;
+                    status = "Provider requested a tool; no tool was run";
+                  } else if (answer.length >= MAX_ANSWER) {
+                    answering = false;
+                    status = "Answer limit reached";
+                  }
                 }
                 }
               if (!closed && answering)

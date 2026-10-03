@@ -17,7 +17,7 @@ import { ThinkingSelectorComponent } from '../node_modules/@earendil-works/pi-co
 initTheme('dark', false);
 const payload = 'SYNTHETIC_PAYLOAD 😀\t\r\n'.repeat(100);
 const paste = (e: any) => e.handleInput('\x1b[200~' + payload + '\x1b[201~');
-function host(stashFirst = false) {
+function host(stashFirst: boolean | "stock" = false) {
   const app: any = Object.create(InteractiveMode.prototype);
   app.defaultEditor = editor(CustomEditor);
   app.editor = app.defaultEditor;
@@ -52,6 +52,7 @@ function host(stashFirst = false) {
     ui: {
       getEditorText: () => app.editor.getExpandedText(),
       setEditorText: (s: string) => app.editor.setText(s),
+      pasteToEditor: (s: string) => app.editor.handleInput('\x1b[200~' + s + '\x1b[201~'),
       getEditorComponent: () => app.editorComponentFactory,
       setEditorComponent: (f: any) => app.setCustomEditorComponent(f),
       setStatus() {},
@@ -60,7 +61,9 @@ function host(stashFirst = false) {
     },
   };
   const emit = (n: string) => {for (const fn of hooks.get(n) ?? []) fn({}, ctx);};
-  if (stashFirst) { stash(api); viMode(api); } else { viMode(api); stash(api); }
+  if (stashFirst !== "stock") {
+    if (stashFirst) { stash(api); viMode(api); } else { viMode(api); stash(api); }
+  }
   emit('session_start'); emit('resources_discover');
   return {
     app, api, ctx, emit, shortcuts, commands, tools,
@@ -71,6 +74,127 @@ function host(stashFirst = false) {
     },
   };
 }
+for (const action of ['complete', 'escape', 'ctrl+c', 'abort', 'shutdown', 'factory throw', 'factory rejection', 'early abort'])
+  test(`questionnaire ${action} preserves and submits the expanded stock-editor draft`, async () => {
+    const h = host("stock");
+    const first = 'SYNTHETIC DRAFT 😀 '.repeat(100);
+    const second = 'short line\n'.repeat(12);
+    const draft = 'typed prefix ' + first + ' between ' + second + ' typed suffix';
+    h.app.editor.handleInput('typed prefix ');
+    h.app.editor.handleInput('\x1b[200~' + first + '\x1b[201~');
+    h.app.editor.handleInput(' between ');
+    h.app.editor.handleInput('\x1b[200~' + second + '\x1b[201~');
+    h.app.editor.handleInput(' typed suffix');
+    assert.equal(h.app.editor.getExpandedText(), draft);
+    assert.match(h.app.editor.getText(), /\[paste #/);
+    questionnaire(h.api);
+    const controller = new AbortController();
+    const ui = h.ctx.ui;
+    let live = true;
+    Object.defineProperty(h.ctx, 'ui', {
+      get() { assert.ok(live, 'A retired context cannot access UI'); return ui; },
+    });
+    const emit = h.api.events.emit.bind(h.api.events);
+    h.api.events.emit = (channel: string, data: unknown) => {
+      assert.ok(live, 'A retired runtime cannot emit events');
+      emit(channel, data);
+    };
+    const waiting: boolean[] = [];
+    h.api.events.on('pi-interactive:questionnaire-waiting', (event: any) => waiting.push(event.waiting));
+    if (action.startsWith('factory') || action === 'early abort') {
+      ui.custom = (factory: any, options: any) => h.app.showExtensionCustom((...args: any[]) => {
+        const component = factory(...args);
+        if (action === 'factory throw') throw new Error('Synthetic factory failure');
+        if (action === 'factory rejection') return Promise.reject(new Error('Synthetic factory failure'));
+        controller.abort();
+        return component;
+      }, options);
+    }
+    const pending = h.tools.get('questionnaire').execute('synthetic', {
+      questions: [{id: 'a', prompt: 'Synthetic?', options: [{label: 'Yes', value: 'yes'}]}],
+    }, controller.signal, undefined, h.ctx);
+    await new Promise(r => setImmediate(r));
+    if (action === 'complete') h.app.editorContainer.children[0].handleInput('\r');
+    if (action === 'escape') h.closeDialog();
+    if (action === 'ctrl+c') h.app.editorContainer.children[0].handleInput('\x03');
+    if (action === 'abort') controller.abort();
+    if (action === 'shutdown') {
+      h.emit('session_shutdown');
+      assert.equal(h.app.editor.getExpandedText(), draft, 'Restore before retiring the context');
+      live = false;
+    }
+    const result = await pending;
+    assert.equal(result.details.cancelled, action !== 'complete');
+    if (action.startsWith('factory')) assert.match(result.details.reason, /Synthetic factory failure/);
+    assert.deepEqual(waiting, [true, false]);
+    assert.equal(h.app.editor.getExpandedText(), draft);
+    assert.match(h.app.editor.getText(), /\[paste #/);
+    let submitted = '';
+    h.app.editor.onSubmit = (text: string) => { submitted = text; };
+    h.app.editor.handleInput('\r');
+    assert.equal(submitted, draft);
+  });
+
+for (const fallback of ['missing', 'throws', 'ineffective', 'control bytes'])
+  test(`stock questionnaire restores exact draft when paste is ${fallback}`, async () => {
+    const h = host("stock");
+    const text = 'SYNTHETIC DRAFT '.repeat(100);
+    const prefix = fallback === 'control bytes' ? 'typed\x01\x1b[201~suffix ' : 'typed prefix ';
+    const draft = prefix + text + ' typed suffix';
+    h.app.editor.setText(prefix);
+    h.app.editor.handleInput('\x1b[200~' + text + '\x1b[201~');
+    h.app.editor.handleInput(' typed suffix');
+    if (fallback === 'missing') h.ctx.ui.pasteToEditor = undefined;
+    if (fallback === 'throws') h.ctx.ui.pasteToEditor = () => { throw new Error('Synthetic paste failure'); };
+    if (fallback === 'ineffective') h.ctx.ui.pasteToEditor = () => {};
+    questionnaire(h.api);
+    const pending = h.tools.get('questionnaire').execute('synthetic', {
+      questions: [{id: 'a', prompt: 'Synthetic?', options: [{label: 'Yes', value: 'yes'}]}],
+    }, undefined, undefined, h.ctx);
+    await new Promise(r => setImmediate(r));
+    h.closeDialog();
+    assert.equal((await pending).details.cancelled, true);
+    assert.equal(h.app.editor.getExpandedText(), draft);
+  });
+
+test('shutdown restoration cannot overwrite a new draft when a factory later rejects', async () => {
+  const h = host("stock");
+  const draft = 'SYNTHETIC DRAFT '.repeat(100);
+  h.app.editor.handleInput('\x1b[200~' + draft + '\x1b[201~');
+  questionnaire(h.api);
+  let rejectFactory: (error: Error) => void = () => {};
+  h.ctx.ui.custom = (factory: any, options: any) => h.app.showExtensionCustom((...args: any[]) => {
+    factory(...args);
+    return new Promise((_resolve, reject) => { rejectFactory = reject; });
+  }, options);
+  const pending = h.tools.get('questionnaire').execute('synthetic', {
+    questions: [{id: 'a', prompt: 'Synthetic?', options: [{label: 'Yes', value: 'yes'}]}],
+  }, undefined, undefined, h.ctx);
+  h.emit('session_shutdown');
+  assert.equal(h.app.editor.getExpandedText(), draft);
+  Object.defineProperty(h.ctx, 'ui', { get() { throw new Error('Retired context'); } });
+  h.api.events.emit = () => { throw new Error('Retired runtime'); };
+  h.app.editor.setText('new session draft');
+  rejectFactory(new Error('Delayed factory failure'));
+  assert.equal((await pending).details.cancelled, true);
+  await new Promise(r => setImmediate(r));
+  assert.equal(h.app.editor.getExpandedText(), 'new session draft');
+});
+
+for (const draft of ['', 'typed draft']) test(`stock questionnaire leaves ${draft ? 'typed' : 'empty'} drafts unchanged`, async () => {
+  const h = host("stock");
+  h.app.editor.setText(draft);
+  h.ctx.ui.setEditorText = () => { throw new Error('Unchanged draft must not be rewritten'); };
+  questionnaire(h.api);
+  const pending = h.tools.get('questionnaire').execute('synthetic', {
+    questions: [{id: 'a', prompt: 'Synthetic?', options: [{label: 'Yes', value: 'yes'}]}],
+  }, undefined, undefined, h.ctx);
+  await new Promise(r => setImmediate(r));
+  h.closeDialog();
+  assert.equal((await pending).details.cancelled, true);
+  assert.equal(h.app.editor.getExpandedText(), draft);
+});
+
 test('real InteractiveMode editor swap preserves visible marker and raw payload', () => {
   const h = host(); paste(h.app.editor); const visible = h.app.editor.getText();
   h.app.setCustomEditorComponent(undefined);
@@ -108,6 +232,220 @@ test('inline custom UI synchronous completion preserves pasted draft', async () 
       return new Container();
     });
     assert.equal(h.app.editor.getExpandedText(), payload);
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
+for (const shape of ['characters', 'lines']) {
+  for (const completion of ['async close', 'async rejection', 'sync close']) {
+    test(`inline custom UI restores mixed drafts over the ${shape} limit after ${completion}`, async () => {
+      const h = host();
+      const first = 'PAYLOAD\t\r\n'.repeat(20);
+      const second = 'literal [paste #1]\t\r\n'.repeat(20);
+      const typed = shape === 'characters' ? 'typed'.repeat(220) : '\nline'.repeat(11);
+      const source = h.app.editor;
+      source.handleInput(`\x1b[200~${first}\x1b[201~`);
+      source.handleInput(`\x1b[200~${second}\x1b[201~`);
+      source.insertTextAtCursor('\t\r' + typed);
+      const visible = source.getText();
+      const expanded = first + second + '\t\r' + typed;
+      assert.equal(source.getExpandedText(), expanded);
+      assert.ok(shape === 'characters' ? visible.length > 1000 : visible.split('\n').length > 10);
+      const setText = source.setText;
+      let changed = '';
+      source.onChange = (text: string) => { changed = text; };
+      try {
+        const pending = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
+          if (completion === 'async rejection') return Promise.reject(new Error('synthetic failure'));
+          if (completion === 'sync close') done('closed');
+          return Object.assign(new Container(), {handleInput: () => done('closed')});
+        });
+        if (completion === 'async rejection') {
+          await assert.rejects(pending, /synthetic failure/);
+        } else {
+          if (completion === 'async close') {
+            await new Promise(resolve => setTimeout(resolve, 0));
+            h.closeDialog();
+          }
+          assert.equal(await pending, 'closed');
+        }
+        assert.equal(h.app.editor, source);
+        assert.equal(source.setText, setText);
+        assert.equal(source.getText(), visible);
+        assert.equal(source.getExpandedText(), expanded);
+        assert.equal(changed, visible);
+        let submitted = '';
+        source.onSubmit = (text: string) => { submitted = text; };
+        source.handleInput('\r');
+        assert.equal(submitted, expanded.replace(/\r/g, '').trim());
+      } finally {
+        h.emit('session_shutdown');
+      }
+    });
+  }
+}
+for (const timing of ['after close', 'during dispose']) {
+  test(`inline custom UI preserves a newer draft written ${timing}`, async () => {
+    const h = host();
+    paste(h.app.editor);
+    keys(h.app.editor, 'typed'.repeat(220));
+    const source = h.app.editor;
+    const setText = source.setText;
+    try {
+      const pending = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) =>
+        Object.assign(new Container(), {
+          handleInput() {
+            done(undefined);
+            if (timing === 'after close') source.setText('replacement draft');
+          },
+          dispose() {
+            if (timing === 'during dispose') source.setText('replacement draft');
+          },
+        }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      h.closeDialog();
+      await pending;
+      assert.equal(source.getText(), 'replacement draft');
+      assert.equal(source.getExpandedText(), 'replacement draft');
+      assert.equal(source.setText, setText);
+    } finally {
+      h.emit('session_shutdown');
+    }
+  });
+}
+for (const order of ['first then second', 'second then first']) {
+  for (const varied of [false, true]) {
+    test(`overlapping inline custom UI preserves ${varied ? 'distinct' : 'identical'} drafts when closing ${order}`, async () => {
+      const h = host();
+      paste(h.app.editor);
+      keys(h.app.editor, 'typed'.repeat(220));
+      const source = h.app.editor;
+      const visible = source.getText();
+      const expanded = payload + 'typed'.repeat(220);
+      const setText = source.setText;
+      let closeFirst = () => {}, closeSecond = () => {};
+      try {
+        const first = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
+          closeFirst = () => done(undefined);
+          return new Container();
+        });
+        if (varied) keys(source, '!');
+        const secondVisible = source.getText();
+        const secondExpanded = expanded + (varied ? '!' : '');
+        const second = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
+          closeSecond = () => done(undefined);
+          return new Container();
+        });
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const dialogs = order === 'first then second'
+          ? [[closeFirst, first, visible, expanded], [closeSecond, second, secondVisible, secondExpanded]] as const
+          : [[closeSecond, second, secondVisible, secondExpanded], [closeFirst, first, visible, expanded]] as const;
+        let finalExpanded = '';
+        for (const [close, pending, savedVisible, savedExpanded] of dialogs) {
+          close();
+          await pending;
+          assert.equal(source.getText(), savedVisible);
+          assert.equal(source.getExpandedText(), savedExpanded);
+          finalExpanded = savedExpanded;
+        }
+        assert.equal(source.setText, setText);
+        let submitted = '';
+        source.onSubmit = (text: string) => { submitted = text; };
+        source.handleInput('\r');
+        assert.equal(submitted, finalExpanded.replace(/\r/g, '').trim());
+      } finally {
+        h.emit('session_shutdown');
+      }
+    });
+  }
+}
+for (const order of ['first then second', 'second then first']) {
+  test(`overlapping inline UI keeps identical markers with different payloads when closing ${order}`, async () => {
+    const h = host();
+    const source = h.app.editor;
+    const getText = source.getText;
+    const typed = 'typed'.repeat(220);
+    const firstPayload = 'FIRST__\n'.repeat(20);
+    const secondPayload = 'SECOND_\n'.repeat(20);
+    let closeFirst = () => {}, closeSecond = () => {};
+    try {
+      source.handleInput(`\x1b[200~${firstPayload}\x1b[201~`);
+      keys(source, typed);
+      const firstVisible = source.getText();
+      const first = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
+        closeFirst = () => done(undefined);
+        return new Container();
+      });
+      h.ctx.ui.setEditorText('');
+      source.handleInput(`\x1b[200~${secondPayload}\x1b[201~`);
+      keys(source, typed);
+      const secondVisible = source.getText();
+      assert.equal(secondVisible, firstVisible);
+      const second = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
+        closeSecond = () => done(undefined);
+        return new Container();
+      });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const dialogs = order === 'first then second'
+        ? [[closeFirst, first, firstPayload], [closeSecond, second, secondPayload]] as const
+        : [[closeSecond, second, secondPayload], [closeFirst, first, firstPayload]] as const;
+      for (const [close, pending, savedPayload] of dialogs) {
+        close();
+        await pending;
+        assert.equal(source.getText(), firstVisible);
+        assert.equal(source.getExpandedText(), savedPayload + typed);
+        assert.equal(source.getText, getText);
+        let submitted = '';
+        source.onSubmit = (text: string) => { submitted = text; };
+        source.handleInput('\r');
+        assert.equal(submitted, savedPayload + typed);
+      }
+    } finally {
+      h.emit('session_shutdown');
+    }
+  });
+}
+test('inline custom UI leaves a replacement editor owned by Pi', async () => {
+  const h = host();
+  paste(h.app.editor);
+  keys(h.app.editor, 'typed'.repeat(220));
+  const source = h.app.editor;
+  const visible = source.getText();
+  const expanded = source.getExpandedText();
+  const setText = source.setText;
+  try {
+    const pending = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) =>
+      Object.assign(new Container(), {handleInput: () => done(undefined)}));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const component = h.app.editorContainer.children[0];
+    h.ctx.ui.setEditorComponent(undefined);
+    component.handleInput('\x1b');
+    await pending;
+    assert.equal(h.app.editor, h.app.defaultEditor);
+    assert.notEqual(h.app.editor, source);
+    assert.equal(source.getText(), visible);
+    assert.equal(source.getExpandedText(), expanded);
+    assert.equal(source.setText, setText);
+    assert.equal(h.app.editor.getExpandedText(), 'SYNTHETIC_PAYLOAD 😀    \n'.repeat(100) + 'typed'.repeat(220));
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
+test('inline custom UI synchronous throw keeps the cursor and undo history', async () => {
+  const h = host();
+  keys(h.app.editor, 'typed'.repeat(220));
+  keys(h.app.editor, '\x1b0x');
+  const source = h.app.editor;
+  const visible = source.getText();
+  const cursor = source.getCursor();
+  const setText = source.setText;
+  try {
+    await assert.rejects(h.ctx.ui.custom(() => { throw new Error('synthetic failure'); }), /synthetic failure/);
+    assert.equal(source.getText(), visible);
+    assert.deepEqual(source.getCursor(), cursor);
+    assert.equal(source.setText, setText);
+    keys(source, 'u');
+    assert.equal(source.getText(), 'typed'.repeat(220));
   } finally {
     h.emit('session_shutdown');
   }

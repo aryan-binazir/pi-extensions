@@ -31,7 +31,7 @@ export async function readPower(platform=process.platform,root='/sys/class/power
   let offline=false;
   for(const path of online){
    const state=await readTrimmed(path);
-   if(state==='1')return 'ac';if(state==='0')offline=true;
+   if(state==='1'||state==='2'||state==='3')return 'ac';if(state==='0')offline=true;
   }
   return offline?'battery':'unknown';
  }catch{return 'unknown';}

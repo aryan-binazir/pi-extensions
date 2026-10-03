@@ -31,6 +31,58 @@ test('Linux power distinguishes AC, battery and missing information',async()=>{
   await writeFile(join(dir,'AC/online'),'garbage');assert.equal(await readPower('linux',dir),'unknown');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('programmable USB power keeps ongoing work inhibited until unplugged',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-power-usb-'));
+ let starts=0,stops=0,alive=false;
+ const keeper=new PowerKeeper({power:()=>readPower('linux',dir),start:()=>{
+  starts++;alive=true;return {alive:()=>alive,stop:async()=>{stops++;alive=false;}};
+ }});
+ try{
+  await mkdir(join(dir,'USB'));await writeFile(join(dir,'USB/type'),'USB\n');
+  await writeFile(join(dir,'USB/online'),'1\n');
+  await keeper.setAgent(true);assert.equal(starts,1);assert.equal(alive,true);
+  for(const online of ['2','3']){
+   await writeFile(join(dir,'USB/online'),`${online}\n`);await keeper.check();
+   assert.equal(alive,true,`online=${online} retains inhibition`);
+   assert.equal(starts,1);assert.equal(stops,0);
+   assert.equal(await readPower('linux',dir),'ac');
+  }
+  await writeFile(join(dir,'USB/online'),'0\n');await keeper.check();
+  assert.equal(alive,false);assert.equal(stops,1);
+ }finally{await keeper.shutdown();await rm(dir,{recursive:true,force:true});}
+});
+for(const type of ['Mains','USB','USB_C','USB_PD','USB_PD_DRP','Wireless']){
+ test(`Linux ${type} recognizes fixed and programmable power alongside offline mains`,async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'pi-power-online-'));
+  try{
+   await mkdir(join(dir,'SUPPLY'));await writeFile(join(dir,'SUPPLY/type'),type);
+   assert.equal(await readPower('linux',dir),'unknown');
+   for(const online of ['','garbage','4','-1','02','+2','2.0']){
+    await writeFile(join(dir,'SUPPLY/online'),online);assert.equal(await readPower('linux',dir),'unknown',online);
+   }
+   await writeFile(join(dir,'SUPPLY/online'),'0\n');assert.equal(await readPower('linux',dir),'battery');
+   for(const online of ['1','2','3']){
+    await writeFile(join(dir,'SUPPLY/online'),`${online}\n`);assert.equal(await readPower('linux',dir),'ac',online);
+   }
+   await mkdir(join(dir,'AC'));await writeFile(join(dir,'AC/type'),'Mains');await writeFile(join(dir,'AC/online'),'0');
+   for(const online of ['1','2','3']){
+    await writeFile(join(dir,'SUPPLY/online'),`${online}\n`);assert.equal(await readPower('linux',dir),'ac',online);
+   }
+   await writeFile(join(dir,'SUPPLY/online'),'4');assert.equal(await readPower('linux',dir),'battery');
+  }finally{await rm(dir,{recursive:true,force:true});}
+ });
+}
+test('online values do not make unknown supply types external power',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-power-unknown-'));
+ try{
+  await mkdir(join(dir,'SUPPLY'));await writeFile(join(dir,'SUPPLY/type'),'Unknown');
+  for(const online of ['1','2','3']){
+   await writeFile(join(dir,'SUPPLY/online'),online);assert.equal(await readPower('linux',dir),'unknown');
+  }
+  await mkdir(join(dir,'AC'));await writeFile(join(dir,'AC/type'),'Mains');await writeFile(join(dir,'AC/online'),'0');
+  assert.equal(await readPower('linux',dir),'battery');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
 test('awake status tracks inhibition, linger, power loss, child exit and shutdown',async()=>{
  let now=0,alive=true;let power:'ac'|'battery'='ac';const states:boolean[]=[];
  const keeper=new PowerKeeper({now:()=>now,power:async()=>power,lingerMs:20,

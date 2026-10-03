@@ -1,10 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { basename, resolve } from 'node:path';
+import { basename } from 'node:path';
 import { Type } from 'typebox';
 import { IdeLink, maxSelectionChars, type LinkState, type Mention } from './link.ts';
-import { getActiveCwd } from '../worktree/routing.ts';
+import { getActiveCwd, resolveToolPath } from '../worktree/routing.ts';
 
 const statusKey = 'nvim-ide';
 const maxMentionLines = 2000;
@@ -75,7 +75,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
   pi.on('tool_execution_start', (event, context) => {
     if (event.toolName !== 'edit' && event.toolName !== 'write') return;
     const path = (event.args as { path?: unknown })?.path;
-    if (typeof path === 'string') editPaths.set(event.toolCallId, resolve(activeCwd(context), path));
+    if (typeof path === 'string') editPaths.set(event.toolCallId, resolveToolPath(path, activeCwd(context)));
   });
   pi.on('tool_execution_end', event => {
     const path = editPaths.get(event.toolCallId);
@@ -107,7 +107,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
     promptSnippet: 'Get LSP diagnostics from the connected editor',
     parameters: Type.Object({ path: Type.Optional(Type.String({ description: 'File path; omit for all open buffers' })) }),
     async execute(_id, params, signal, _update, context) {
-      const args = params.path ? { uri: pathToFileURL(resolve(activeCwd(context), params.path)).href } : {};
+      const args = params.path ? { uri: pathToFileURL(resolveToolPath(params.path, activeCwd(context))).href } : {};
       return { content: [{ type: 'text' as const, text: await need().call('getDiagnostics', args, signal) }], details: undefined };
     },
   });
@@ -118,7 +118,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
     promptSnippet: 'Open a file at a line range in the connected editor',
     parameters: Type.Object({ path: Type.String(), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }),
     async execute(_id, params, signal, _update, context) {
-      const args: Record<string, unknown> = { filePath: resolve(activeCwd(context), params.path), preview: false, makeFrontmost: true };
+      const args: Record<string, unknown> = { filePath: resolveToolPath(params.path, activeCwd(context)), preview: false, makeFrontmost: true };
       if (params.startLine) { args.startLine = params.startLine; args.endLine = params.endLine ?? params.startLine; }
       return { content: [{ type: 'text' as const, text: await need().call('openFile', args, signal) }], details: undefined };
     },

@@ -1,10 +1,43 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { SubagentRegistry } from './registry.ts';
+import { piInvocation, SubagentRegistry, validateTask } from './registry.ts';
+import { assertChildTask } from './scope.ts';
+
+test('explicit task briefs remain literal messages through Pi attachment parsing with no tools', async () => {
+  const entry = import.meta.resolve('@earendil-works/pi-coding-agent');
+  const {parseArgs} = await import(new URL('./cli/args.js', entry).href);
+  const {processFileArguments} = await import(new URL('./cli/file-processor.js', entry).href);
+  const root = await mkdtemp(join(tmpdir(), 'literal-brief-'));
+  const cwd = join(root, 'workspace'), outside = join(root, 'outside.txt');
+  try {
+    await mkdir(cwd);
+    await writeFile(outside, 'SYNTHETIC OUTSIDE DATA');
+    const cases = [
+      {brief: `@${outside}`, message: `\n@${outside}`},
+      {brief: 'normal brief', message: 'normal brief'},
+      {brief: '--model literal/provider', message: '--model literal/provider'},
+      {brief: '@', message: '\n@'},
+      {brief: '@person\n--model literal/provider\n@other  ', message: '\n@person\n--model literal/provider\n@other  '},
+      {brief: `@${join(root, 'missing.txt')}`, message: `\n@${join(root, 'missing.txt')}`},
+      {brief: '\\@literal', message: '\\@literal'},
+      {brief: '\n@already literal', message: '\n@already literal'},
+    ];
+    for (const {brief, message} of cases) {
+      const spec = await validateTask({task: brief, cwd, tools: []}, []);
+      await assertChildTask(spec, {parent: {cwd, tools: []}});
+      assert.equal(spec.task, brief);
+      const parsed = parseArgs(piInvocation(spec).args.slice(2));
+      assert.deepEqual(parsed.fileArgs, [], brief);
+      assert.deepEqual(parsed.messages, [message], brief);
+      assert.deepEqual(parsed.tools, [], brief);
+      assert.deepEqual(await processFileArguments(parsed.fileArgs), {text: '', images: []}, brief);
+    }
+  } finally { await rm(root, {recursive: true, force: true}); }
+});
 
 test('isolated processes stream text and usage and push completion without polling', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'subagents-'));

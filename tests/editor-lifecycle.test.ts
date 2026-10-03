@@ -569,7 +569,7 @@ for (const command of ['btw', 'side']) test(`real ${command} overlay tracks edit
     const inputLine = frame.find(line => line.includes(CURSOR_MARKER));
     assert.ok(inputLine, 'focused side editor emits a cursor marker');
     assert.equal(stripTerminalSequences(inputLine.slice(0, inputLine.indexOf(CURSOR_MARKER))), '│typed questio');
-    assert.equal(frame.filter(line => line.includes(CURSOR_MARKER)).length, 1);
+    assert.equal(frame.join('\n').split(CURSOR_MARKER).length - 1, 1);
     tui.renderNow();
     assert.equal(cursorVisible, true, 'mounted TUI shows the hardware cursor');
     assert.ok(isFocusable(overlay));

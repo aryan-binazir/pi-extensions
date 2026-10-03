@@ -19,10 +19,7 @@ type ShellSettings = Pick<ReturnType<SettingsManager['getGlobalSettings']>, 'she
 export default function worktree(pi: ExtensionAPI & { getSettings?: () => ShellSettings }): void {
   const shellSettings = (ctx: ExtensionContext) => {
     const effective = pi.getSettings?.();
-    const settings = effective ? SettingsManager.inMemory(effective) : SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() });
-    const error = settings.drainErrors()[0];
-    if (error) throw error.error;
-    return settings;
+    return effective ? SettingsManager.inMemory(effective) : SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() });
   };
   const paint = (ctx: ExtensionContext) => { if (ctx.hasUI) { const active = activeCwd(ctx); ctx.ui.setStatus(entryType, active === ctx.cwd ? undefined : `Worktree: ${active}`); } };
   let previousSession: { cwd: string; id: string } | undefined;

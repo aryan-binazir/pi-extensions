@@ -241,7 +241,18 @@ test('batched prompts count users rather than provider requests', async () => to
   await session.prompt('Initial prompt');
   assert.equal(requests.length, 2);
   assert.match(requests[1], /STALE TODO/);
-  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 7 });
+  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 7 });  const snapshots = manager.getBranch().filter(entry => entry.type === 'custom');
+  assert.equal(snapshots.length, 8);
+  for (const entry of snapshots.slice(1)) {
+    const parent = manager.getEntry(entry.parentId!);
+    assert.equal(parent?.type, 'message');
+    if (parent?.type === 'message') assert.equal(parent.message.role, 'user');
+  }
+  const users = manager.getBranch().filter(entry => entry.type === 'message').filter(entry => entry.message.role === 'user');
+  await session.navigateTree(users[3].id, { summarize: false });
+  provider.setResponses([fauxAssistantMessage('New branch reply')]);
+  await session.prompt('Branch after first three users');
+  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 4 });
 }));
 
 test('preparation failure saves delivered user accounting without a provider context', async () => todoSession(async (session, provider, manager) => {

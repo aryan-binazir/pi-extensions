@@ -16,8 +16,9 @@ permits at most one in-progress task. Restoration follows the selected branch on
 startup, resume, fork, reload and tree navigation.
 
 Delivered user messages advance the stale-turn count, including queued steering
-and follow-up messages. The count is saved when provider context is composed,
-after its user messages enter the selected branch, with an end-of-run fallback.
+and follow-up messages. Each accounting snapshot follows its user message on
+the selected branch. Pending counts are saved at the next user delivery or when
+provider context is composed, with an end-of-run fallback.
 Reminders strengthen at three and six unchanged messages, and repeating an
 identical declaration does not reset the count. Each provider request gets a
 current reminder in request-only context. Reminders do not enter saved history

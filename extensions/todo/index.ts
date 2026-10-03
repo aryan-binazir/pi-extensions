@@ -129,6 +129,7 @@ export default function todo(pi: ExtensionAPI): void {
   });
   pi.on('message_start', event => {
     if (event.message.role !== 'user' || !active()) return;
+    persist();
     state = { ...state, staleTurns: state.staleTurns + 1 };
     dirty = true;
   });

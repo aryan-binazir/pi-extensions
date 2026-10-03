@@ -3,7 +3,7 @@ import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { InteractiveMode, ExtensionEditorComponent, initTheme } from '@earendil-works/pi-coding-agent';
+import { InteractiveMode, ExtensionEditorComponent, CustomEditor, SettingsManager, initTheme } from '@earendil-works/pi-coding-agent';
 import { Container } from '@earendil-works/pi-tui';
 import type { Host } from './test-support.ts';
 import { until, withHost } from './test-support.ts';
@@ -163,6 +163,8 @@ function interactiveUI({ctx}: Host) {
   ctx.ui.editor = mode.showExtensionEditor.bind(mode);
   ctx.ui.custom = mode.showExtensionCustom.bind(mode);
   ctx.ui.confirm = mode.showExtensionConfirm.bind(mode);
+  ctx.ui.getEditorText = mode.createExtensionUIContext().getEditorText;
+  ctx.ui.setEditorText = mode.createExtensionUIContext().setEditorText;
   return mode;
 }
 
@@ -291,17 +293,19 @@ for (const approval of ['execution', 'replay', 'cached child extensions']) {
 }
 
 
-for (const trusted of [false, true]) {
-  test(`source review external editor respects ${trusted ? 'trusted project' : 'global'} settings`, async () =>
-    withHost({prefix: 'workflow-external-'}, async host => {
+for (const trusted of [false, true, 'runtime']) {
+  const settings = SettingsManager.inMemory({});
+  test(`source review external editor respects ${trusted === true ? 'trusted project' : trusted || 'global'} settings`, async () =>
+    withHost({prefix: 'workflow-external-', getSettings: typeof trusted === 'string' ? () => 'getSettings' in settings && typeof settings.getSettings === 'function' ? settings.getSettings() : {externalEditor: settings.getExternalEditorCommand()} : undefined}, async host => {
       const script = join(host.cwd, 'editor.cjs');
       await writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(join(host.cwd, 'editor-used'))}, process.argv[2]);`);
       const command = `${process.execPath} ${script}`;
+      if (typeof trusted === 'string') settings.applyOverrides({externalEditor: `${command} runtime`});
       await writeFile(join(host.agentDir, 'settings.json'), JSON.stringify({externalEditor: `${command} global`}));
       await mkdir(join(host.cwd, '.pi'));
       await writeFile(join(host.cwd, '.pi', 'settings.json'), JSON.stringify({externalEditor: `${command} project`}));
       const mode = interactiveUI(host);
-      host.ctx.isProjectTrusted = () => trusted;
+      host.ctx.isProjectTrusted = () => trusted === true;
       let restarted = false;
       mode.ui.stop = () => {};
       mode.ui.start = () => { restarted = true; };
@@ -312,7 +316,7 @@ for (const trusted of [false, true]) {
       dialog.handleInput('\x07');
       try {
         await until(() => restarted, 'the synthetic external editor to finish');
-        assert.equal(await readFile(join(host.cwd, 'editor-used'), 'utf8'), trusted ? 'project' : 'global');
+        assert.equal(await readFile(join(host.cwd, 'editor-used'), 'utf8'), trusted === true ? 'project' : trusted === 'runtime' ? 'runtime' : 'global');
         dialog.handleInput('\r');
         assert.equal((await run).details, 1);
       } finally {
@@ -386,3 +390,29 @@ test('an admission expiring while queued leaves the active approval usable', asy
       await active.catch(() => {});
     }
   }));
+
+for (const stop of ['escape', 'owner', 'timeout', 'submit']) {
+  test(`source review preserves a collapsed pasted draft on ${stop}`, async () =>
+    withHost({prefix: 'workflow-paste-'}, async host => {
+      const mode = interactiveUI(host);
+      mode.editor = new CustomEditor(mode.ui, {borderColor: (text: string) => text, selectList: {selectedPrefix: (text: string) => text, selectedText: (text: string) => text, description: (text: string) => text, scrollInfo: (text: string) => text, noMatch: (text: string) => text}}, mode.keybindings);
+      mode.editorContainer.clear();
+      mode.editorContainer.addChild(mode.editor);
+      mode.focus = mode.editor;
+      const draft = 'pasted draft '.repeat(400);
+      mode.editor.handleInput(`\x1b[200~${draft}\x1b[201~`);
+      assert.notEqual(mode.editor.getText(), draft);
+      assert.equal(host.ctx.ui.getEditorText(), draft);
+      const controller = new AbortController();
+      host.ctx.ui.confirm = async () => true;
+      const run = host.execute('workflow', {source: 'return 1;', timeout: stop === 'timeout' ? 100 : 5000}, controller.signal);
+      const dialog = await until(() => mode.focus instanceof ExtensionEditorComponent && mode.focus, 'source review');
+      if (stop === 'owner') controller.abort();
+      else if (stop === 'escape') dialog.handleInput('\x1b');
+      else if (stop === 'submit') dialog.handleInput('\r');
+      if (stop === 'submit') assert.equal((await run).details, 1);
+      else await assert.rejects(run);
+      assert.equal(host.ctx.ui.getEditorText(), draft);
+      assert.equal(mode.focus, mode.editor);
+    }));
+}

@@ -270,16 +270,27 @@ export default function subagents(pi: ExtensionAPI): void {
           },
           approve: ctx.hasUI ? async source => {
             const title = 'Review workflow TypeScript; submit unchanged source to continue';
-            const reviewed = await withApprovalUI(ctx, controller.signal, () => ctx.mode === 'tui' ? ctx.ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
-              const cleanup = () => controller.signal.removeEventListener('abort', abort);
-              const finish = (value?: string) => { cleanup(); done(value); };
-              const abort = () => finish();
-              const externalEditor = SettingsManager.create(ctx.cwd, getAgentDir(), {projectTrusted: ctx.isProjectTrusted?.() === true}).getExternalEditorCommand();
-              const editor = Object.assign(new ExtensionEditorComponent(tui, keybindings, title, source, finish, abort, undefined, externalEditor), {dispose: cleanup});
-              controller.signal.addEventListener('abort', abort, {once: true});
-              if (controller.signal.aborted) abort();
-              return editor;
-            }) : ctx.ui.editor(title, source));
+            const reviewed = await withApprovalUI(ctx, controller.signal, async () => {
+              if (ctx.mode !== 'tui') return ctx.ui.editor(title, source);
+              const draft = ctx.ui.getEditorText();
+              try {
+                return await ctx.ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+                  const cleanup = () => controller.signal.removeEventListener('abort', abort);
+                  const finish = (value?: string) => { cleanup(); done(value); };
+                  const abort = () => finish();
+                  const settings: unknown = 'getSettings' in pi && typeof pi.getSettings === 'function' ? pi.getSettings() : undefined;
+                  const externalEditor = settings && typeof settings === 'object' && 'externalEditor' in settings
+                    ? typeof settings.externalEditor === 'string' && settings.externalEditor.trim() ? settings.externalEditor : undefined
+                    : settings === undefined ? SettingsManager.create(ctx.cwd, getAgentDir(), {projectTrusted: ctx.isProjectTrusted?.() === true}).getExternalEditorCommand() : undefined;
+                  const editor = Object.assign(new ExtensionEditorComponent(tui, keybindings, title, source, finish, abort, undefined, externalEditor), {dispose: cleanup});
+                  controller.signal.addEventListener('abort', abort, {once: true});
+                  if (controller.signal.aborted) abort();
+                  return editor;
+                });
+              } finally {
+                ctx.ui.setEditorText(draft);
+              }
+            });
             return reviewed === source && await withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.', {signal: controller.signal}));
           } : undefined,
           validateTask: async task => { await assertChildTask(task, { parent: parent(), approve: ctx.hasUI ? request => withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Approve workflow child extensions', request, {signal: controller.signal})) : undefined }); },

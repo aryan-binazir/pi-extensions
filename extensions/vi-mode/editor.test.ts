@@ -944,3 +944,135 @@ test("yy2p puts the line twice", () => {
   const e = editor(); e.setText("a\nb"); keys(e, "\x1bggyy2p");
   assert.equal(e.getText(), "a\na\na\nb");
 });
+
+
+test("counted puts separate copies of the final unterminated line", () => {
+  const e = editor();
+  e.setText("a\nb");
+  keys(e, "\x1bGyy2p");
+  assert.equal(e.getExpandedText(), "a\nb\nb\nb");
+  undoRedoRestoresPut(e, "a\nb");
+  e.dispose();
+});
+
+for (const [source, yank, target, command, expected] of [
+  ["ab", "yy", "ab", "3P", "ab\nab\nab\nab"],
+  ["ab\n", "ggyy", "ab", "3P", "ab\nab\nab\nab"],
+  ["b", "yy", "x\ny", "G2p", "x\ny\nb\nb"],
+  ["b\n", "ggyy", "x\ny", "G2p", "x\ny\nb\nb"],
+  ["a\nb", "gg2yy", "x\ny", "G2p", "x\ny\na\nb\na\nb"],
+  ["a\nb\n", "gg2yy", "x\ny", "G2p", "x\ny\na\nb\na\nb"],
+  ["a\nb", "gg2yy", "x\ny", "gg2P", "a\nb\na\nb\nx\ny"],
+  ["a\nb\n", "gg2yy", "x\ny", "gg2P", "a\nb\na\nb\nx\ny"],
+]) test(`counted linewise ${command} preserves block boundaries from ${JSON.stringify(source)}`, () => {
+  const e = editor();
+  e.setText(source);
+  keys(e, "\x1b" + yank);
+  e.setText(target);
+  keys(e, command);
+  assert.equal(e.getExpandedText(), expected);
+  undoRedoRestoresPut(e, target);
+  e.dispose();
+});
+
+for (const [source, yank, target, selection, expected] of [
+  ["ab", "yy", "xyz", "gglv2", "x\nab\nab\nz"],
+  ["ab\n", "ggyy", "xyz", "gglv2", "x\nab\nab\nz"],
+  ["a\nb", "gg2yy", "xyz", "gglv2", "x\na\nb\na\nb\nz"],
+  ["ab", "yy", "x\ny", "GV2", "x\nab\nab"],
+  ["a\nb", "gg2yy", "x\ny", "ggV2", "a\nb\na\nb\ny"],
+  ["a\nb\n", "gg2yy", "x\ny", "ggV2", "a\nb\na\nb\ny"],
+  ["ab", "yy", "xyz", "G$v", "xy\nab"],
+  ["ab", "yy", "x\ny", "GV", "x\nab"],
+]) for (const put of ["p", "P"]) test(`visual linewise ${selection}${put} preserves boundaries from ${JSON.stringify(source)}`, () => {
+  const e = editor();
+  e.setText(source);
+  keys(e, "\x1b" + yank);
+  e.setText(target);
+  keys(e, selection + put);
+  assert.equal(e.getExpandedText(), expected);
+  undoRedoRestoresPut(e, target);
+  e.dispose();
+});
+
+test("counted characterwise puts keep adjacent copies", () => {
+  const e = editor();
+  e.setText("ab");
+  keys(e, "\x1b0yl3P");
+  assert.equal(e.getExpandedText(), "aaaab");
+  e.dispose();
+});
+
+test("counted empty linewise puts preserve the existing boundary", () => {
+  const e = editor();
+  e.setText("ab");
+  keys(e, "\x1byy");
+  e.setText("");
+  keys(e, "Vp2p");
+  assert.equal(e.getExpandedText(), "ab\n");
+  e.dispose();
+});
+
+for (const put of ["p", "P"]) test(`counted linewise ${put} includes separators and boundaries in the draft limit`, () => {
+  const e = editor(), limit = 1024 * 1024;
+  e.setText("x");
+  keys(e, "\x1byy");
+  const oversized = "z".repeat(limit - 3);
+  e.setText(oversized);
+  keys(e, "G2" + put);
+  assert.equal(e.getExpandedText(), oversized);
+  const fits = "z".repeat(limit - 4);
+  e.setText(fits);
+  const visible = e.getText();
+  keys(e, "G2" + put);
+  assert.equal(e.getExpandedText(), put === "p" ? fits + "\nx\nx" : "x\nx\n" + fits);
+  assert.equal(e.getExpandedText().length, limit);
+  undoRedoRestoresPut(e, visible);
+  e.dispose();
+});
+
+for (const put of ["p", "P"]) test(`visual counted linewise ${put} rejects separator overflow without losing the register`, () => {
+  const e = editor(), limit = 1024 * 1024;
+  const source = "z".repeat(limit / 2);
+  e.setText(source);
+  keys(e, "\x1byy");
+  e.setText("x");
+  keys(e, "ggV2" + put);
+  assert.equal(e.getExpandedText(), "x");
+  assert.ok(e.render(40).at(-1)!.endsWith(" LINE "));
+  keys(e, put);
+  assert.equal(e.getExpandedText(), source);
+  undoRedoRestoresPut(e, "x");
+  e.dispose();
+});
+
+for (const put of ["p", "P"]) test(`visual counted linewise ${put} accepts an exactly full expanded draft`, () => {
+  const e = editor(), source = "z".repeat(1024 * 1024 / 2 - 1);
+  e.setText(source);
+  keys(e, "\x1byy");
+  e.setText("\nx");
+  keys(e, "GV2" + put);
+  assert.equal(e.getExpandedText(), "\n" + source + "\n" + source);
+  assert.equal(e.getExpandedText().length, 1024 * 1024);
+  undoRedoRestoresPut(e, "\nx");
+  e.dispose();
+});
+
+test("rejected visual counted put preserves collapsed text, redo and the register", () => {
+  const e = editor(), prefix = "z".repeat(1024 * 1024 - 8);
+  e.setText("ab");
+  keys(e, "\x1byy");
+  e.setText(prefix);
+  keys(e, "Axyz\x1bA!\x1bu");
+  const before = prefix + "xyz";
+  assert.equal(e.getExpandedText(), before);
+  keys(e, "G$hv2p");
+  assert.equal(e.getExpandedText(), before);
+  assert.ok(e.render(40).at(-1)!.endsWith(" VISUAL "));
+  keys(e, "\x12");
+  assert.equal(e.getExpandedText(), before + "!");
+  e.setText("q");
+  keys(e, "ggP");
+  assert.equal(e.getExpandedText(), "ab\nq");
+  e.dispose();
+});

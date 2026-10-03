@@ -5,8 +5,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgentSession, ModelRuntime, SessionManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
-import { InMemoryCredentialStore, fauxProvider, fauxAssistantMessage, fauxToolCall, type Context } from '@earendil-works/pi-ai';
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
+import { InMemoryCredentialStore, fauxProvider, fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
+import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { type Component, type Terminal, TuiMainScreen, visibleWidth } from '@earendil-works/pi-tui';
 import todo from './index.js';
 
@@ -22,13 +22,14 @@ function runtime(initial: any[] = [], colored = false) {
   todo({ registerTool: (value: ToolDefinition) => { tool = value; }, on: (name: string, callback: any) => hooks.set(name, callback), appendEntry: (customType: string, data: unknown) => branch.push({ type: 'custom', customType, data }) } as unknown as ExtensionAPI);
   const theme = { fg: (_color: string, text: string) => colored ? `\x1b[34m${text}\x1b[39m` : text };
   const ctx = { hasUI: true, sessionManager: { getBranch: () => branch }, ui: { setWidget: (_key: string, value: ((tui: unknown, theme: unknown) => Component) | undefined) => { component = value?.(undefined, theme); widget = component?.render(40); }, notify: (message: string) => { warnings.push(message); } } } as unknown as ExtensionContext;
+  const toolContext: ExtensionToolContext = {...ctx, tools: [], executeTool: async () => { throw new Error('No nested tools in this fixture'); }};
   const hook = (name: string, event: object = {}) => hooks.get(name)?.({ messages: [], ...event }, ctx);
   const turn = async () => {
     await hook('message_start', { message: { role: 'user', content: 'User prompt' } });
     const result = await hook('context');
     return result?.messages.at(-1)?.content;
   };
-  return { turn, reminder: async () => (await hook('context'))?.messages.at(-1)?.content, call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, ctx), hook, branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, render: (width: number) => component?.render(width) ?? [], warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
+  return { turn, reminder: async () => (await hook('context'))?.messages.at(-1)?.content, call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, toolContext), hook, branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, render: (width: number) => component?.render(width) ?? [], warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
 }
 
 test('todo updates fit narrow main-screen frames and remain visible after resizing', async t => {
@@ -205,14 +206,14 @@ async function todoSession(run: (session: Awaited<ReturnType<typeof createAgentS
     await session.bindExtensions({});
     const errors: unknown[] = [];
     session.extensionRunner!.onError(error => errors.push(error));
-    await session.getToolDefinition('todo_write')!.execute('seed', { todos: [{ content: 'Still working', status: 'pending' }] }, undefined, undefined, session.extensionRunner!.createContext());
+    await session.getToolDefinition('todo_write')!.execute('seed', { todos: [{ content: 'Still working', status: 'pending' }] }, undefined, undefined, session.extensionRunner!.createToolContext('seed', undefined));
     await run(session, provider, manager);
     assert.deepEqual(errors, []);
   } finally { session?.dispose(); await rm(cwd, { recursive: true, force: true }); }
 }
 
-function providerText(context: Context): string {
-  return [context.systemPrompt, ...context.messages.map(message => typeof message.content === 'string' ? message.content : message.content.filter(part => part.type === 'text').map(part => part.text).join('\n'))].join('\n');
+function providerText(context: TranscriptContext): string {
+  return context.messages.map(message => typeof message.content === 'string' ? message.content : message.content.filter(part => part.type === 'text').map(part => part.text).join('\n')).join('\n');
 }
 
 for (const mode of ['steer', 'followUp'] as const) {

@@ -228,7 +228,7 @@ test('registered direct and workflow children share native monitoring without re
   };
   const workflow = execute('workflow', {source: "return await api.spawn({task:'hold',preset:'reader'},'tracking');"}).catch(() => undefined);
   await until(() => calls.length > 0, 'the first shared tracker request');
-  assert.equal(calls.length, 1); assert.match(calls[0][1].messages[0].content, /workflow/);
+  assert.equal(calls.length, 1); assert.match(calls[0][1].messages.find((message: any) => message.role === 'user').content, /workflow/);
   assert.equal(widgets.get('interactive-tools:subagents')?.length, 4, 'workflow child appears in shared panel');
   await execute('subagent', {task: 'hold', preset: 'reader'});
   await new Promise(resolve => setTimeout(resolve, 30));
@@ -241,7 +241,7 @@ test('registered direct and workflow children share native monitoring without re
   assert.equal(statuses.has('subagent-tracker'), false);
   const last = await execute('subagent', {task: 'batch', preset: 'reader'});
   await until(() => calls.length >= 2, 'the restarted tracker request', 2000);
-  assert.equal(calls.length, 2); assert.match(calls[1][1].messages[0].content, /parent/);
+  assert.equal(calls.length, 2); assert.match(calls[1][1].messages.find((message: any) => message.role === 'user').content, /parent/);
   assert.equal((await execute('subagent_status')).details.length, 3);
   assert.equal(statuses.size, 1);
   assert.equal(notifications.filter((notice: any) => notice.type === 'subagent-tracker').length, 0);

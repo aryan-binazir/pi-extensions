@@ -85,7 +85,7 @@ test('todo and questionnaire execute in a real headless session behind no tool g
       const decision = await runner.emitToolCall({type: 'tool_call', toolName, toolCallId: `managed-${toolName}`, input});
       assert.equal(decision, undefined, `${toolName}: ${decision?.reason}`);
       const tool = session.getToolDefinition(toolName)!;
-      await tool.execute(`managed-${toolName}`, input, undefined, undefined, runner.createContext());
+      await tool.execute(`managed-${toolName}`, input, undefined, undefined, runner.createToolContext(`managed-${toolName}`, undefined));
     }
     const unknown = await runner.emitToolCall({type: 'tool_call', toolName: 'untrusted_remote_tool', toolCallId: 'unknown', input: {}});
     assert.equal(unknown, undefined, 'no global auto-mode tool gate is installed');
@@ -118,16 +118,16 @@ async function packageSession(run: (h: { session: any; runner: any; temp: string
 }
 
 test('todo composes request context while subagents and worktree append to the system prompt', async () => packageSession(async ({session, runner, temp}) => {
-  await session.getToolDefinition('todo_write')!.execute('t1', {todos: [{content: 'Composed task', status: 'pending'}]}, undefined, undefined, runner.createContext());
+  await session.getToolDefinition('todo_write')!.execute('t1', {todos: [{content: 'Composed task', status: 'pending'}]}, undefined, undefined, runner.createToolContext('t1', undefined));
   const checkout = join(temp, 'checkout'); await mkdir(checkout);
   const sessionId = session.sessionManager.getSessionId();
   setActiveCwd(temp, checkout, sessionId);
   try {
-    const result = await runner.emitBeforeAgentStart('hi', undefined, 'BASE_PROMPT', {});
+    const result = await runner.emitBeforeAgentStart('hi', undefined, {forceSystemPrompt: 'BASE_PROMPT'});
     const context = await runner.emitContext([]);
     assert.match(context.at(-1)!.content, /\[pending\] Composed task/);
-    assert.doesNotMatch(result!.systemPrompt!, /Composed task/);
-    assert.match(result!.systemPrompt!, /^BASE_PROMPT\n\n[\s\S]*Default profile \(used when profile is omitted\): implement[\s\S]*Active worktree directory: /);
+    assert.doesNotMatch(result.systemPromptOptions.forceSystemPrompt!, /Composed task/);
+    assert.match(result.systemPromptOptions.forceSystemPrompt!, /^BASE_PROMPT\n\n[\s\S]*Default profile \(used when profile is omitted\): implement[\s\S]*Active worktree directory: /);
   } finally { setActiveCwd(temp, undefined, sessionId); }
 }));
 

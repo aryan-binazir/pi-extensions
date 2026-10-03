@@ -25,7 +25,8 @@ test('stock Pi permissions gate preset children and workflow replay', async () =
     const runner = session.extensionRunner!;
     assert.ok(!session.getActiveToolNames().includes('grep'));
     assert.notEqual((await runner.emitToolCall({type: 'tool_call', toolName: 'read', toolCallId: 'init', input: {path: join(cwd, 'pi')}}))?.block, true);
-    const ctx = Object.assign({...runner.createContext()},
+    const baseContext = runner.createToolContext('stock-fixture', undefined);
+    const ctx = Object.assign({...baseContext, tools: baseContext.tools, executeTool: baseContext.executeTool},
       {model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off', modelRegistry: fixtureModelRegistry()});
     const execute = async (name: string, params: any) => await session!.getToolDefinition(name)!.execute(name, params, undefined, undefined, ctx) as any;
     const expectedTools = new Map<string, string[]>();
@@ -43,7 +44,7 @@ test('stock Pi permissions gate preset children and workflow replay', async () =
     }
     assert.equal(tasks.length, 3);
     for (const task of tasks) {
-      assert.equal(task.status, 'succeeded');
+      assert.equal(task.status, 'succeeded', task.error ?? task.output);
       assert.deepEqual(JSON.parse(task.output).tools.sort(), expectedTools.get(task.id));
     }
     let replayPrompts = 0;

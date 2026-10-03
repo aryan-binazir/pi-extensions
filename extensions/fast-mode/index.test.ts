@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
-import { createModels, getSupportedThinkingLevels, type ThinkingLevel, type Provider } from '@earendil-works/pi-ai';
+import { createModels, getSupportedThinkingLevels, normalizeContext, type ThinkingLevel, type Provider } from '@earendil-works/pi-ai';
 import { withFastModels } from './provider.ts';
 
 const priorityRate=(model:{id:string})=>model.id==='gpt-5.5'?2.5:2;
@@ -73,7 +73,7 @@ test('fast aliases preserve auth and pricing metadata and send priority through 
    return new Response('data: '+JSON.stringify({type:'response.completed',response:{status:'completed',service_tier:'priority',usage:{input_tokens:1000,output_tokens:100,input_tokens_details:{cached_tokens:0}}}})+'\n\n',{headers:{'content-type':'text/event-stream'}});
   };
   // Pi's runtime handles 'off', but its simple-options type excludes it.
-  const output=await provider.streamSimple(alias,{messages:[]},{apiKey:'fixture-key',reasoning:reasoning as ThinkingLevel,fetch,maxRetries:0}).result();
+  const output=await provider.streamSimple(alias,normalizeContext({messages:[]}),{apiKey:'fixture-key',reasoning:reasoning as ThinkingLevel,fetch,maxRetries:0}).result();
   assert.equal(output.stopReason,'stop',output.errorMessage);
   assert.equal(payload.model,base.id);assert.equal(payload.service_tier,'priority');
   assert.equal(headers!.get('authorization'),'Bearer fixture-key');
@@ -103,7 +103,7 @@ test('Codex fast sends priority using existing subscription auth and reasoning',
  const token='fixture.'+Buffer.from(JSON.stringify({'https://api.openai.com/auth':{chatgpt_account_id:'fixture-account'}})).toString('base64url')+'.fixture';
  let payload:any;let headers:Headers|undefined;
  const fetch:typeof globalThis.fetch=async(_url,init)=>{headers=new Headers(init?.headers);const body=headers.get('content-encoding')==='zstd'?(await import('node:zlib') as any).zstdDecompressSync(init?.body).toString():String(init?.body);payload=JSON.parse(body);return new Response('data: '+JSON.stringify({type:'response.completed',response:{status:'completed',service_tier:'priority',usage:{input_tokens:1000,output_tokens:100,input_tokens_details:{cached_tokens:0}}}})+'\n\n',{headers:{'content-type':'text/event-stream'}});};
- const output=await provider.streamSimple(alias,{messages:[]},{apiKey:token,reasoning:'low',fetch,transport:'sse',maxRetries:0}).result();
+ const output=await provider.streamSimple(alias,normalizeContext({messages:[]}),{apiKey:token,reasoning:'low',fetch,transport:'sse',maxRetries:0}).result();
  assert.equal(output.stopReason,'stop',output.errorMessage);assert.equal(payload.model,base.id);assert.equal(payload.service_tier,'priority');
  assert.equal(payload.reasoning.effort,'low');assert.equal(headers!.get('chatgpt-account-id'),'fixture-account');assert.equal(headers!.get('authorization'),'Bearer '+token);
  assert.equal(output.usage.cost.input,base.cost.input*0.001*priorityRate(base));assert.equal(provider.auth,original.auth);
@@ -229,7 +229,7 @@ test('config-declared direct models retain usable fast aliases',async()=>{
   const alias=registry.find('openai','gpt-custom~fast');
   assert.ok(alias,'Custom alias survives refresh');
   assert.ok(registry.find('openai','gpt-custom'),'Configured base remains available');
-  const output=await registry.getProvider('openai')!.streamSimple(alias,{messages:[]},{apiKey:'fixture-key',reasoning:'low',fetch,maxRetries:0}).result();
+  const output=await registry.getProvider('openai')!.streamSimple(alias,normalizeContext({messages:[]}),{apiKey:'fixture-key',reasoning:'low',fetch,maxRetries:0}).result();
   assert.equal(output.stopReason,'stop',output.errorMessage);
   assert.equal(payload.model,'gpt-custom');
   assert.equal(payload.service_tier,'priority');

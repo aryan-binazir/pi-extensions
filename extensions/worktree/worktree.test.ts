@@ -49,7 +49,7 @@ test('remove requires one nonempty path argument without confirmation or routing
       sessionManager: { getSessionId: () => sessionId },
       ui: { notify: (message: string, level: string) => notices.push({ message, level }), setStatus() {}, confirm: async () => { confirmations++; return true; } },
     };
-    worktree({ on() {}, registerTool() {}, appendEntry: (...args: unknown[]) => entries.push(args), registerCommand: (name: string, command: any) => commands[name] = command } as any);
+    worktree({ getSettings: () => ({}), on() {}, registerTool() {}, appendEntry: (...args: unknown[]) => entries.push(args), registerCommand: (name: string, command: any) => commands[name] = command } as any);
     for (const args of ['remove', 'remove --force', 'remove /a/one /a/two', 'remove /a/one --force /a/two', 'remove "" --force']) {
       await t.test(args, async () => {
         notices.length = 0;
@@ -131,7 +131,7 @@ test('restore rejects a replaced checkout and keeps shell and relative files in 
       ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: async () => true },
       sessionManager: { getSessionId: () => sessionId, getSessionFile: () => undefined, getBranch: () => [{ type: 'custom', customType: 'agent-workflows:worktree', data: { version: 1, path: checkout.path } }] },
     };
-    worktree({ on: (name: string, fn: any) => handlers[name] = fn, registerTool: (tool: any) => tools[tool.name] = tool, registerCommand() {} } as any);
+    worktree({ getSettings: () => ({}), on: (name: string, fn: any) => handlers[name] = fn, registerTool: (tool: any) => tools[tool.name] = tool, registerCommand() {} } as any);
     await handlers.session_start({}, ctx);
     assert.equal(getActiveCwd(repo, sessionId), repo);
     const relative = { toolName: 'read', input: { path: 'MARKER' } };
@@ -328,7 +328,7 @@ function commandHost(repo: string, sessionId: string, options: { confirm?: () =>
     sessionManager: { getSessionId: () => sessionId, getBranch: () => [] },
     ui: { notify: (message: string) => notices.push(message), setStatus() {}, confirm: options.confirm ?? (async () => true) },
   };
-  worktree({ on() {}, registerTool() {}, appendEntry: (_type: string, data: unknown) => entries.push(data), registerCommand: (name: string, value: any) => commands[name] = value } as any);
+  worktree({ getSettings: () => ({}), on() {}, registerTool() {}, appendEntry: (_type: string, data: unknown) => entries.push(data), registerCommand: (name: string, value: any) => commands[name] = value } as any);
   return { ctx, entries, notices, run: (args: string) => commands.worktree.handler(args, ctx), release: () => setActiveCwd(repo, undefined, sessionId) };
 }
 

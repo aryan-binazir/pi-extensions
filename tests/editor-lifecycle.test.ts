@@ -259,3 +259,17 @@ test('standalone stash restores collapsed pastes into a recreated editor without
     h.emit('session_shutdown');
   }
 });
+
+test('standalone stash restoration can be undone back to the empty draft', () => {
+  const h = host(false, false);
+  try {
+    h.ctx.ui.setEditorText('draft to restore');
+    h.app.editor.handleInput('\x13');
+    h.app.editor.handleInput('\x13');
+    assert.equal(h.ctx.ui.getEditorText(), 'draft to restore');
+    h.app.editor.handleInput('\x1f');
+    assert.equal(h.ctx.ui.getEditorText(), '');
+  } finally {
+    h.emit('session_shutdown');
+  }
+});

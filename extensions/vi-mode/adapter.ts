@@ -158,7 +158,7 @@ export function collapsePaste(editor: Editor, text: string): string {
 }
 
 export function restoreRawDraft(editor: Editor, text: string, payloads: PasteState): void {
-  editor.setText("");
+  editor.setText(viEditor in editor ? "" : text);
   retainRawText(editor, text);
   writePastes(editor, payloads);
   placeCursor(editor, text.length);

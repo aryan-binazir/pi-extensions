@@ -305,11 +305,15 @@ for (const reason of ["new", "reload"] as const) {
         () => { settled = true; },
         (error: unknown) => { settled = true; return error; },
       );
+      const staleAccesses: string[] = [];
       recipient.hooks.session_shutdown({ reason });
       Object.defineProperty(recipient.ctx, "ui", {
-        get() { throw new Error("Stale UI access"); },
+        get() { staleAccesses.push("ui"); throw new Error("Stale UI access"); },
       });
-      recipient.pi.setThinkingLevel = () => { throw new Error("Stale thinking mutation"); };
+      recipient.pi.setThinkingLevel = () => {
+        staleAccesses.push("thinking");
+        throw new Error("Stale thinking mutation");
+      };
       const later = host(t);
       later.ctx.sessionManager.getSessionFile = () =>
         reason === "reload" ? "/synthetic/recipient" : "/synthetic/later";
@@ -322,6 +326,7 @@ for (const reason of ["new", "reload"] as const) {
         await pending;
       }
       await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(staleAccesses, []);
       assert.deepEqual(recipient.notices, []);
       assert.deepEqual(recipient.changes, []);
       assert.deepEqual(later.notices, []);

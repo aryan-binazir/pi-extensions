@@ -19,7 +19,7 @@ export default function fastMode(pi:ExtensionAPI):void {
  };
  pi.on('session_start',async(event,ctx)=>{
   install(ctx);
-  if(!['resume','startup'].includes(event.reason))return;
+  if(!['resume','startup','fork'].includes(event.reason))return;
   if(event.reason==='startup'&&process.argv.some(arg=>/^--(?:model|provider)(?:=|$)/.test(arg)))return;
   const branch=[...ctx.sessionManager.getBranch()].reverse();
   const previous=branch.find((entry):entry is ModelChange=>entry.type==='model_change');

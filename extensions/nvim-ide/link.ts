@@ -187,7 +187,7 @@ export class IdeLink {
     const wasReady = this.ready;
     this.socket?.removeAllListeners('close');
     this.socket = undefined; this.ready = false; this.lock = undefined; this.selection = undefined;
-    for (const [id, item] of this.pending) { clearTimeout(item.timer); this.pending.delete(id); item.reject(error); }
+    for (const item of this.pending.values()) item.reject(error);
     if (wasReady) this.emit();
   }
   private emit(): void { this.options.onChange?.(this.state); }

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { once } from 'node:events';
+import { getEventListeners, once } from 'node:events';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { WebSocketServer } from 'ws';
@@ -122,6 +122,43 @@ test('connects with the token, tracks selection and mentions, calls tools, recon
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
   await assert.rejects(link.call('getOpenEditors'), /not connected/);
 });
+
+for (const [mode, message] of [['disconnect', 'IDE disconnected'], ['reconnect', 'reconnecting'], ['stop', 'IDE link stopped']] as const) {
+  test(`${mode} rejects pending editor calls and removes their abort listeners`, async () => {
+    const ide = fakeIde();
+    await once(ide.server, 'listening');
+    const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+    const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 60_000, requestTimeoutMs: 60_000, alive: () => true });
+    const aborted = new AbortController();
+    const pending = new AbortController();
+    const errors: Error[] = [];
+    try {
+      await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
+      link.start();
+      await until(() => link.connected);
+      const calls = [aborted.signal, pending.signal, pending.signal].map(signal => link.call('slow', {}, signal).catch((error: Error) => { errors.push(error); return error.message; }));
+      await until(() => ide.calls.length === 3);
+      assert.equal(getEventListeners(pending.signal, 'abort').length, 2);
+      aborted.abort();
+      assert.equal(await calls[0], 'aborted');
+      assert.equal(getEventListeners(aborted.signal, 'abort').length, 0);
+
+      if (mode === 'disconnect') {
+        for (const client of ide.server.clients) client.terminate();
+      } else if (mode === 'reconnect') link.reconnect();
+      else void link.stop();
+      await until(() => errors.length === 3, 1000);
+      assert.deepEqual(await Promise.all(calls), ['aborted', message, message]);
+      assert.equal(getEventListeners(pending.signal, 'abort').length, 0);
+      pending.abort();
+
+      if (mode === 'reconnect') {
+        await until(() => link.connected);
+        assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
+      }
+    } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
+  });
+}
 
 test('discovery survives a lock directory that does not exist yet', async () => {
   const ide = fakeIde();

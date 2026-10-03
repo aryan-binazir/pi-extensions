@@ -332,3 +332,49 @@ test('reasoning on a sibling branch does not override the resumed fast branch',a
   }finally{session.dispose();}
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+import { AgentSessionRuntime, createAgentSessionServices, type CreateAgentSessionRuntimeFactory } from '@earendil-works/pi-coding-agent';
+
+test('forking a saved fast branch restores its alias in a fresh runtime',async(t)=>{
+ for(const position of ['at','before'] as const)await t.test(position,async()=>{
+  const cwd=await mkdtemp(join(tmpdir(),'pi-fast-fork-'));
+  let runtime:AgentSessionRuntime|undefined;
+  try {
+   const create:CreateAgentSessionRuntimeFactory=async(options)=>{
+    const credentials=new InMemoryCredentialStore();
+    await credentials.modify('openai',async()=>({type:'api_key',key:'fixture-key'}));
+    const modelRuntime=await ModelRuntime.create({modelsPath:null,credentials,modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
+    await modelRuntime.refresh({allowNetwork:false,providers:['openai']});
+    const settingsManager=SettingsManager.inMemory({defaultProvider:'openai',defaultModel:'gpt-5.5'});
+    const services=await createAgentSessionServices({cwd,agentDir:cwd,modelRuntime,settingsManager,resourceLoaderOptions:{extensionFactories:[fastMode],noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true}});
+    const result=await createAgentSession({...services,sessionManager:options.sessionManager,sessionStartEvent:options.sessionStartEvent,tools:[]});
+    const errors:string[]=[];
+    await result.session.bindExtensions({onError:error=>errors.push(error.error)});
+    assert.deepEqual(errors,[]);
+    return {...result,services,diagnostics:[]};
+   };
+   const sessionManager=SessionManager.inMemory(cwd);
+   sessionManager.appendModelChange('openai','gpt-5.5~fast');
+   const firstUserId=sessionManager.appendMessage({role:'user',content:'Saved fast branch',timestamp:Date.now()});
+   const laterUserId=sessionManager.appendMessage({role:'user',content:'Later message',timestamp:Date.now()});
+   const initial=await create({cwd,agentDir:cwd,sessionManager,sessionStartEvent:{type:'session_start',reason:'startup'}});
+   runtime=new AgentSessionRuntime(initial.session,initial.services,create);
+   assert.equal(runtime.session.model?.id,'gpt-5.5~fast');
+   await runtime.session.setModel(runtime.services.modelRuntime.getModel('openai','gpt-5.5')!);
+   assert.equal(runtime.session.model?.id,'gpt-5.5');
+   const argv=process.argv;process.argv=[...argv,'--model','openai/gpt-5.5'];
+   try{assert.equal((await runtime.fork(position==='at'?firstUserId:laterUserId,{position})).cancelled,false);}finally{process.argv=argv;}
+   assert.notEqual(runtime.services.modelRuntime,initial.services.modelRuntime);
+   assert.ok(runtime.services.modelRuntime.getModel('openai','gpt-5.5~fast'));
+   assert.equal(runtime.session.sessionManager.buildSessionContext().model?.modelId,'gpt-5.5~fast');
+   assert.equal(runtime.session.model?.id,'gpt-5.5~fast');
+   await runtime.session.setModel(runtime.services.modelRuntime.getModel('openai','gpt-5.5')!);
+   assert.equal(runtime.session.model?.id,'gpt-5.5');
+   const ordinaryUserId=runtime.session.sessionManager.appendMessage({role:'user',content:'Ordinary model branch',timestamp:Date.now()});
+   assert.equal((await runtime.fork(ordinaryUserId,{position:'at'})).cancelled,false);
+   assert.equal(runtime.session.model?.id,'gpt-5.5');
+   assert.equal((await runtime.newSession()).cancelled,false);
+   assert.equal(runtime.session.model?.id,'gpt-5.5');
+  }finally{await runtime?.dispose();await rm(cwd,{recursive:true,force:true});}
+ });
+});

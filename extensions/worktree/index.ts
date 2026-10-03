@@ -23,12 +23,14 @@ export default function worktree(pi: ExtensionAPI & { getSettings?: () => ShellS
     return effective ? SettingsManager.inMemory(effective) : SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() });
   };
   const paint = (ctx: ExtensionContext) => { if (ctx.hasUI) { const active = activeCwd(ctx); ctx.ui.setStatus(entryType, active === ctx.cwd ? undefined : `Worktree: ${active}`); } };
+  let mutating = false;
   let previousSession: { cwd: string; id: string } | undefined;
   const restore = async (ctx: ExtensionContext) => {
     const id = ctx.sessionManager.getSessionId();
     if (previousSession && (previousSession.cwd !== ctx.cwd || previousSession.id !== id)) setActiveCwd(previousSession.cwd, undefined, previousSession.id);
     previousSession = { cwd: ctx.cwd, id };
     setActiveCwd(ctx.cwd, undefined, id);
+    if (mutating) { paint(ctx); return; }
     let path: unknown;
     const branch = ctx.sessionManager.getBranch();
     for (let index = branch.length - 1; index >= 0; index--) {
@@ -47,7 +49,7 @@ export default function worktree(pi: ExtensionAPI & { getSettings?: () => ShellS
           const trees = new Worktrees(ctx.cwd);
           const checkout = (await trees.list()).find(item => resolve(item.path) === resolve(path) || item.path === canonical);
           if (!checkout || !await trees.matches(checkout)) throw new Error('Saved checkout is unavailable');
-          setActiveCwd(ctx.cwd, canonical, id);
+          if (!mutating && ctx.isIdle()) setActiveCwd(ctx.cwd, canonical, id);
         }
       }
       catch { if (ctx.hasUI) ctx.ui.notify('Saved worktree is unavailable or invalid; using original session directory', 'warning'); }
@@ -82,9 +84,14 @@ export default function worktree(pi: ExtensionAPI & { getSettings?: () => ShellS
     description: 'Worktree: <name> [--branch branch] [--base ref], list, original, remove <path> [--force], cleanup [--force]',
     async handler(args, ctx) {
       if (!ctx.isIdle()) { if (ctx.hasUI) ctx.ui.notify('Wait for the active turn before switching worktrees', 'warning'); return; }
+      let ownsMutation = false;
       try {
         const words = commandWords(args);
         const command = words.shift() ?? 'list';
+        if (command !== 'list') {
+          if (mutating) { if (ctx.hasUI) ctx.ui.notify('Wait for the pending worktree operation before switching worktrees', 'warning'); return; }
+          mutating = ownsMutation = true;
+        }
         if (command === 'original') { activate(ctx, ctx.cwd); return; }
         const { Worktrees } = await import('./manager.ts');
         const trees = new Worktrees(ctx.cwd);
@@ -94,10 +101,16 @@ export default function worktree(pi: ExtensionAPI & { getSettings?: () => ShellS
           const force = words.includes('--force');
           const paths = words.filter(word => word !== '--force');
           if (command === 'remove' && (paths.length !== 1 || !paths[0])) throw new Error('Usage: /worktree remove <path> [--force]');
-          const confirm = (message: string) => ctx.ui.confirm('Remove worktree', message);
           const path = command === 'remove' ? await realpath(resolve(activeCwd(ctx), paths[0])) : undefined;
+          const confirm = async (message: string) => {
+            if (!ctx.isIdle()) { ctx.ui.notify('Wait for the active turn before removing worktrees', 'warning'); return false; }
+            if (!await ctx.ui.confirm('Remove worktree', message)) return false;
+            if (!ctx.isIdle()) { ctx.ui.notify('Wait for the active turn before removing worktrees', 'warning'); return false; }
+            const active = activeCwd(ctx);
+            if (path === active || message === `Remove ${active}?` || message === `Remove ${active} including uncommitted files (--force)?`) activate(ctx, ctx.cwd);
+            return true;
+          };
           const results = command === 'cleanup' ? await trees.cleanup({ force, confirm }) : [{ path: path!, ...await trees.remove(path!, { force, confirm }) }];
-          if (results.some(result => result.removed && resolve(result.path) === resolve(activeCwd(ctx)))) activate(ctx, ctx.cwd);
           ctx.ui.notify(results.map(result => `${result.path}: ${result.removed ? 'removed' : result.reason}`).join('\n') || 'No worktrees to clean', 'info');
           return;
         }
@@ -107,9 +120,12 @@ export default function worktree(pi: ExtensionAPI & { getSettings?: () => ShellS
           if (!value || (flag !== '--branch' && flag !== '--base')) throw new Error('Usage: /worktree <name> [--branch branch] [--base ref]');
           options[flag === '--branch' ? 'branch' : 'base'] = value;
         }
-        const checkout = await trees.open(command, options); activate(ctx, checkout.path);
+        const checkout = await trees.open(command, options);
+        if (!ctx.isIdle()) { ctx.ui.notify(`Worktree available at ${checkout.path}; retry /worktree ${args} after the active turn finishes to activate it`, 'warning'); return; }
+        activate(ctx, checkout.path);
         ctx.ui.notify(`Active worktree: ${checkout.path}. Pi session storage remains at ${ctx.cwd}.`, 'info');
       } catch (error) { if (ctx.hasUI) ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error'); else throw error; }
+      finally { if (ownsMutation) mutating = false; }
     },
   });
 }

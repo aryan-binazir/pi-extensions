@@ -215,13 +215,20 @@ export function installEditorHandoff(): void {
       return showCustom.call(this, factory, options);
     const text = source.getText();
     const payloads = readPastes(source);
+    const setText = source.setText;
+    const restore = (next: string) => {
+      if (this.editor === source && next === text) {
+        source.setText = setText;
+        restoreRawDraft(source, text, payloads);
+      } else {
+        setText.call(source, next);
+      }
+    };
+    source.setText = restore;
     try {
       return await showCustom.call(this, factory, options);
     } finally {
-      if (this.editor === source && source.getText() === text) {
-        writePastes(source, payloads);
-        source.onChange?.(text);
-      }
+      if (source.setText === restore) source.setText = setText;
     }
   };
   Object.defineProperty(prototype, handoffInstalled, { value: true });

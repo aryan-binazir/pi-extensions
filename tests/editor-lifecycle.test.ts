@@ -112,6 +112,128 @@ test('inline custom UI synchronous completion preserves pasted draft', async () 
     h.emit('session_shutdown');
   }
 });
+for (const shape of ['characters', 'lines']) {
+  for (const completion of ['async close', 'async rejection', 'sync close']) {
+    test(`inline custom UI restores mixed drafts over the ${shape} limit after ${completion}`, async () => {
+      const h = host();
+      const first = 'PAYLOAD\t\r\n'.repeat(20);
+      const second = 'literal [paste #1]\t\r\n'.repeat(20);
+      const typed = shape === 'characters' ? 'typed'.repeat(220) : '\nline'.repeat(11);
+      const source = h.app.editor;
+      source.handleInput(`\x1b[200~${first}\x1b[201~`);
+      source.handleInput(`\x1b[200~${second}\x1b[201~`);
+      source.insertTextAtCursor('\t\r' + typed);
+      const visible = source.getText();
+      const expanded = first + second + '\t\r' + typed;
+      assert.equal(source.getExpandedText(), expanded);
+      assert.ok(shape === 'characters' ? visible.length > 1000 : visible.split('\n').length > 10);
+      const setText = source.setText;
+      let changed = '';
+      source.onChange = (text: string) => { changed = text; };
+      try {
+        const pending = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) => {
+          if (completion === 'async rejection') return Promise.reject(new Error('synthetic failure'));
+          if (completion === 'sync close') done('closed');
+          return Object.assign(new Container(), {handleInput: () => done('closed')});
+        });
+        if (completion === 'async rejection') {
+          await assert.rejects(pending, /synthetic failure/);
+        } else {
+          if (completion === 'async close') {
+            await new Promise(resolve => setTimeout(resolve, 0));
+            h.closeDialog();
+          }
+          assert.equal(await pending, 'closed');
+        }
+        assert.equal(h.app.editor, source);
+        assert.equal(source.setText, setText);
+        assert.equal(source.getText(), visible);
+        assert.equal(source.getExpandedText(), expanded);
+        assert.equal(changed, visible);
+        let submitted = '';
+        source.onSubmit = (text: string) => { submitted = text; };
+        source.handleInput('\r');
+        assert.equal(submitted, expanded.replace(/\r/g, '').trim());
+      } finally {
+        h.emit('session_shutdown');
+      }
+    });
+  }
+}
+for (const timing of ['after close', 'during dispose']) {
+  test(`inline custom UI preserves a newer draft written ${timing}`, async () => {
+    const h = host();
+    paste(h.app.editor);
+    keys(h.app.editor, 'typed'.repeat(220));
+    const source = h.app.editor;
+    const setText = source.setText;
+    try {
+      const pending = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) =>
+        Object.assign(new Container(), {
+          handleInput() {
+            done(undefined);
+            if (timing === 'after close') source.setText('replacement draft');
+          },
+          dispose() {
+            if (timing === 'during dispose') source.setText('replacement draft');
+          },
+        }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      h.closeDialog();
+      await pending;
+      assert.equal(source.getText(), 'replacement draft');
+      assert.equal(source.getExpandedText(), 'replacement draft');
+      assert.equal(source.setText, setText);
+    } finally {
+      h.emit('session_shutdown');
+    }
+  });
+}
+test('inline custom UI leaves a replacement editor owned by Pi', async () => {
+  const h = host();
+  paste(h.app.editor);
+  keys(h.app.editor, 'typed'.repeat(220));
+  const source = h.app.editor;
+  const visible = source.getText();
+  const expanded = source.getExpandedText();
+  const setText = source.setText;
+  try {
+    const pending = h.ctx.ui.custom((_tui: any, _theme: any, _keys: any, done: any) =>
+      Object.assign(new Container(), {handleInput: () => done(undefined)}));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const component = h.app.editorContainer.children[0];
+    h.ctx.ui.setEditorComponent(undefined);
+    component.handleInput('\x1b');
+    await pending;
+    assert.equal(h.app.editor, h.app.defaultEditor);
+    assert.notEqual(h.app.editor, source);
+    assert.equal(source.getText(), visible);
+    assert.equal(source.getExpandedText(), expanded);
+    assert.equal(source.setText, setText);
+    assert.equal(h.app.editor.getExpandedText(), visible, 'Pi restores its saved visible draft into the replacement');
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
+test('inline custom UI synchronous throw keeps the cursor and undo history', async () => {
+  const h = host();
+  keys(h.app.editor, 'typed'.repeat(220));
+  keys(h.app.editor, '\x1b0x');
+  const source = h.app.editor;
+  const visible = source.getText();
+  const cursor = source.getCursor();
+  const setText = source.setText;
+  try {
+    await assert.rejects(h.ctx.ui.custom(() => { throw new Error('synthetic failure'); }), /synthetic failure/);
+    assert.equal(source.getText(), visible);
+    assert.deepEqual(source.getCursor(), cursor);
+    assert.equal(source.setText, setText);
+    keys(source, 'u');
+    assert.equal(source.getText(), 'typed'.repeat(220));
+  } finally {
+    h.emit('session_shutdown');
+  }
+});
 test('real extension event wiring preserves typed and mixed drafts through stash', () => {
   const h = host();
   const typed = 'editable prose '.repeat(90);

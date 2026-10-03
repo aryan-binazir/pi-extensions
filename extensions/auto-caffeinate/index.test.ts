@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { PowerKeeper, readPower, startInhibitor } from './power.ts';
+import { PowerKeeper, readPower, startInhibitor, type KeeperOptions } from './power.ts';
 import { mkdtemp,mkdir,writeFile,rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -117,6 +117,7 @@ test('Linux inhibitor uses a pipe, and cleanup reaps the real synthetic child',a
  const inhibitor=startInhibitor('linux',launch)!;
  assert.ok(seen.includes('--what=idle'));assert.ok(!seen.includes('--what=idle:sleep'));assert.ok(seen.includes('--no-ask-password'));
  assert.ok(child!.stdin);
+ assert.equal(inhibitor.alive(),true);
  await inhibitor.stop();assert.equal(inhibitor.alive(),false);
  assert.notEqual(child!.exitCode,null);
 });
@@ -203,9 +204,9 @@ test('cached supply types follow devices appearing and disappearing',async()=>{
 
 import { createEventBus } from '@earendil-works/pi-coding-agent';
 import autoCaffeinate from './index.ts';
-const wired=(power:'ac'|'battery')=>{
+const wired=(power:'ac'|'battery',start:KeeperOptions['start']=()=>({alive:()=>true,stop:async()=>{}}))=>{
  const handlers=new Map<string,any>();const status:(string|undefined)[]=[];const bus=createEventBus();
- autoCaffeinate({on:(name:string,handler:any)=>handlers.set(name,handler),events:bus} as any,{power:async()=>power,start:()=>({alive:()=>true,stop:async()=>{}})});
+ autoCaffeinate({on:(name:string,handler:any)=>handlers.set(name,handler),events:bus} as any,{power:async()=>power,start});
  const ctx={hasUI:true,ui:{setStatus:(_key:string,text?:string)=>status.push(text)}};
  return {status,bus,fire:(name:string)=>handlers.get(name)({},ctx),settle:()=>new Promise<void>(resolve=>setImmediate(resolve))};
 };
@@ -224,4 +225,26 @@ test('agent turns on battery never show the machine as held awake',async()=>{
  await h.fire('session_start');
  try{await h.fire('agent_start');await h.settle();await h.fire('agent_settled');await h.settle();assert.deepEqual(h.status,[]);}
  finally{await h.fire('session_shutdown');}
+});
+
+test('a helper that fails to spawn never shows Awake in the status bar',{timeout:5000},async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-inhibitor-missing-'));
+ let child:ReturnType<typeof spawn>|undefined;let failed:Promise<Error>|undefined;
+ const launch:typeof spawn=((_command:string,_args:readonly string[],options:Parameters<typeof spawn>[2])=>{
+  const launched=spawn(join(dir,'missing-helper'),[],options);child=launched;
+  failed=new Promise(resolve=>launched.once('error',resolve));
+  return launched;
+ }) as typeof spawn;
+ const h=wired('ac',()=>startInhibitor('linux',launch));
+ try{
+  await h.fire('session_start');await h.fire('agent_start');
+  assert.ok(child);assert.ok(failed);
+  assert.equal(child.pid,undefined);
+  assert.deepEqual(h.status,[]);
+  const error=await failed;
+  assert.equal('code' in error?error.code:undefined,'ENOENT');
+  assert.deepEqual(h.status,[]);
+ }finally{
+  await h.fire('session_shutdown');await rm(dir,{recursive:true,force:true});
+ }
 });

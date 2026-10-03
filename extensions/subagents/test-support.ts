@@ -44,6 +44,7 @@ export interface Host {
 export interface HostOptions {
   /** mkdtemp prefix; the temporary directory is the workspace and the PATH head. */
   prefix: string;
+  getSettings?: () => unknown;
   /** Body of the fake `pi` executable placed on PATH, after its node shebang. */
   pi?: string;
   /** Builtins the parent still holds, as a list or a getter a test can change. */
@@ -85,6 +86,7 @@ export async function withHost(options: HostOptions, run: (host: Host) => Promis
     process.env.PATH = `${cwd}:${priorPath ?? ''}`;
     process.env.PI_CODING_AGENT_DIR = agentDir;
     subagents({
+      ...(options.getSettings ? {getSettings: options.getSettings} : {}),
       getActiveTools: typeof active === 'function' ? active : () => active,
       registerTool: (tool: any) => tools.set(tool.name, tool),
       registerCommand: (name: string, command: any) => commands.set(name, command),

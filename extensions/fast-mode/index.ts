@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { parseArgs, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { Provider as ModelProvider } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { FAST_SUFFIX, withFastModels } from './provider.ts';
@@ -19,13 +19,16 @@ export default function fastMode(pi:ExtensionAPI):void {
  };
  pi.on('session_start',async(event,ctx)=>{
   install(ctx);
-  if(!['resume','startup'].includes(event.reason))return;
+  if(!['resume','startup','fork'].includes(event.reason))return;
   if(event.reason==='startup'&&process.argv.some(arg=>/^--(?:model|provider)(?:=|$)/.test(arg)))return;
-  const previous=[...ctx.sessionManager.getBranch()].reverse().find((entry):entry is ModelChange=>entry.type==='model_change');
+  const branch=[...ctx.sessionManager.getBranch()].reverse();
+  const previous=branch.find((entry):entry is ModelChange=>entry.type==='model_change');
   if(!previous||!previous.modelId.endsWith(FAST_SUFFIX))return;
   const restored=ctx.modelRegistry.find(previous.provider,previous.modelId);
   if(!restored)return;
-  const effort=pi.getThinkingLevel();
+  const startupEffort=event.reason==='startup'?parseArgs(process.argv.slice(2)).thinking:undefined;
+  const savedEffort=branch.find(entry=>entry.type==='thinking_level_change')?.thinkingLevel;
+  const effort=startupEffort??parseArgs(savedEffort?['--thinking',savedEffort]:[]).thinking??pi.getThinkingLevel();
   if(await pi.setModel(restored))pi.setThinkingLevel(effort);
  });
  pi.registerCommand('fast',{

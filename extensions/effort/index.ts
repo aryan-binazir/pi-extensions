@@ -23,7 +23,7 @@ interface Handoff {
   provider: string;
   model: string;
   level: ModelThinkingLevel;
-  sessionFile: string | undefined;
+  sessionId: string;
   acknowledge: () => void;
   complete: (result: HandoffResult) => void;
 }
@@ -37,7 +37,7 @@ export default function effort(pi: ExtensionAPI) {
   const receiveHandoff = (request: Handoff) => {
     if (
       !current ||
-      current.sessionManager.getSessionFile() !== request.sessionFile
+      current.sessionManager.getSessionId() !== request.sessionId
     )
       return;
     const ctx = current;
@@ -256,7 +256,7 @@ export default function effort(pi: ExtensionAPI) {
               provider,
               model: modelId,
               level: selectedLevel,
-              sessionFile: replacement.sessionManager.getSessionFile(),
+              sessionId: replacement.sessionManager.getSessionId(),
               acknowledge: () => clearTimeout(receiptDeadline),
               complete: (result) => {
                 clearTimeout(receiptDeadline);

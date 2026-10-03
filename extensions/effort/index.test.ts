@@ -280,3 +280,78 @@ for (const [variant, tweak, expected] of [
   await old.commands.effort.handler("new max", old.ctx);
   assert.deepEqual({ notices: fresh.notices, changes: fresh.changes }, { notices: [expected], changes: [] });
 });
+
+for (const reason of ["new", "reload"] as const) {
+  for (const outcome of ["success", "rejection"] as const) {
+    test(`recipient ${reason} cancels a pending handoff before auth ${outcome}`, async (t) => {
+      const old = host(t);
+      let recipient!: ReturnType<typeof host>;
+      let release!: () => void;
+      const auth = new Promise<void>((resolve) => { release = resolve; });
+      old.ctx.newSession = async ({ withSession }: any) => {
+        old.hooks.session_shutdown();
+        recipient = host(t);
+        recipient.ctx.sessionManager.getSessionFile = () => "/synthetic/recipient";
+        recipient.pi.setModel = async () => {
+          await auth;
+          if (outcome === "rejection") throw new Error("Auth rejected");
+          return true;
+        };
+        await withSession(recipient.ctx);
+        return { cancelled: false };
+      };
+      let settled = false;
+      const pending = old.commands.effort.handler("new max", old.ctx).then(
+        () => { settled = true; },
+        (error: unknown) => { settled = true; return error; },
+      );
+      recipient.hooks.session_shutdown({ reason });
+      Object.defineProperty(recipient.ctx, "ui", {
+        get() { throw new Error("Stale UI access"); },
+      });
+      recipient.pi.setThinkingLevel = () => { throw new Error("Stale thinking mutation"); };
+      const later = host(t);
+      later.ctx.sessionManager.getSessionFile = () =>
+        reason === "reload" ? "/synthetic/recipient" : "/synthetic/later";
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(settled, true, "shutdown must settle without waiting for auth");
+        assert.equal(await pending, undefined);
+      } finally {
+        release();
+        await pending;
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(recipient.notices, []);
+      assert.deepEqual(recipient.changes, []);
+      assert.deepEqual(later.notices, []);
+      assert.deepEqual(later.changes, []);
+      assert.equal(later.pi.getThinkingLevel(), "high");
+    });
+  }
+}
+
+test("recipient shutdown after handoff completion skips the queued notification", async (t) => {
+  const old = host(t);
+  let recipient!: ReturnType<typeof host>;
+  old.ctx.newSession = async ({ withSession }: any) => {
+    old.hooks.session_shutdown();
+    recipient = host(t);
+    recipient.ctx.sessionManager.getSessionFile = () => "/synthetic/completed";
+    const setThinkingLevel = recipient.pi.setThinkingLevel;
+    recipient.pi.setThinkingLevel = (level: string) => {
+      setThinkingLevel(level);
+      queueMicrotask(() => queueMicrotask(() => {
+        recipient.hooks.session_shutdown();
+        Object.defineProperty(recipient.ctx, "ui", {
+          get() { throw new Error("Stale UI access"); },
+        });
+      }));
+    };
+    await withSession(recipient.ctx);
+    return { cancelled: false };
+  };
+  await old.commands.effort.handler("new max", old.ctx);
+  assert.deepEqual(recipient.changes, ["test", "max"]);
+  assert.deepEqual(recipient.notices, []);
+});

@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { assertChildTask, delegationScope, assertWorkflowRead } from './scope.ts';
@@ -28,6 +28,13 @@ export default function subagents(pi: ExtensionAPI): void {
   let cancellingAll = false;
   const workflows = new Set<AbortController>();
   const workflowRuns = new Set<Promise<unknown>>();
+  let approvalUI: Promise<unknown> = Promise.resolve();
+  const withApprovalUI = <T>(ctx: ExtensionContext, signal: AbortSignal, show: () => Promise<T>): Promise<T> => {
+    if (ctx.mode !== 'tui') return abortable(show(), signal);
+    const prompt = approvalUI.then(() => { signal.throwIfAborted(); return show(); });
+    approvalUI = prompt.catch(() => {});
+    return abortable(prompt, signal);
+  };
   let notices: ReturnType<typeof taskView>[] = [];
   let overflowNotices = 0;
   let noticeTriggersTurn = false;
@@ -87,7 +94,10 @@ export default function subagents(pi: ExtensionAPI): void {
   };
   const createRegistry = () => new SubagentRegistry({
     allowedTools: () => delegationScope(parent()).tools,
-    authorize: async task => { await assertChildTask(task, { parent: parent(), approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request) : undefined }); },
+    authorize: async (task, signal) => {
+      const ctx = context;
+      await assertChildTask(task, { parent: parent(), approve: ctx?.hasUI ? request => withApprovalUI(ctx, signal, () => ctx.ui.confirm('Approve local child extensions', request, {signal})) : undefined });
+    },
     invocation: task => {
       if (context && task.configProvenance) {
         if (task.configProvenance.config !== configFor(context).identity) throw new Error('Subagent configuration or trust changed while queued; resubmit task');
@@ -259,11 +269,36 @@ export default function subagents(pi: ExtensionAPI): void {
             return resolveProfile(task, config, selectionContext);
           },
           approve: ctx.hasUI ? async source => {
-            const reviewed = await abortable(ctx.ui.editor('Review workflow TypeScript; submit unchanged source to continue', source), controller.signal);
-            return reviewed === source && await ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.', {signal: controller.signal});
+            const title = 'Review workflow TypeScript; submit unchanged source to continue';
+            const reviewed = await withApprovalUI(ctx, controller.signal, async () => {
+              if (ctx.mode !== 'tui') return ctx.ui.editor(title, source);
+              const draft = ctx.ui.getEditorText();
+              return ctx.ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+                const cleanup = () => controller.signal.removeEventListener('abort', abort);
+                let finished = false;
+                const finish = (value?: string) => {
+                  if (finished) return;
+                  finished = true;
+                  cleanup();
+                  done(value);
+                  ctx.ui.setEditorText(draft);
+                };
+                const abort = () => finish();
+                const settings: unknown = 'getSettings' in pi && typeof pi.getSettings === 'function' ? pi.getSettings() : undefined;
+                const externalEditor = settings && typeof settings === 'object' && 'externalEditor' in settings
+                  ? typeof settings.externalEditor === 'string' && settings.externalEditor.trim() ? settings.externalEditor : undefined
+                  : settings === undefined ? SettingsManager.create(ctx.cwd, getAgentDir(), {projectTrusted: ctx.isProjectTrusted?.() === true}).getExternalEditorCommand() : undefined;
+                const editor = Object.assign(new ExtensionEditorComponent(tui, keybindings, title, source, finish, abort, undefined, externalEditor), {dispose: cleanup});
+                controller.signal.addEventListener('abort', abort, {once: true});
+                if (controller.signal.aborted) abort();
+                return editor;
+  
+            });
+            });
+            return reviewed === source && await withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.', {signal: controller.signal}));
           } : undefined,
-          validateTask: async task => { await assertChildTask(task, { parent: parent(), approve: ctx.hasUI ? request => ctx.ui.confirm('Approve workflow child extensions', request) : undefined }); },
-          approveReplay: ctx.hasUI ? stages => ctx.ui.confirm('Replay previously successful stages?', `These stages will NOT run again: ${stages.join(', ')}. Approve only if their outputs and side effects remain valid in the current workspace.`) : async () => false,
+          validateTask: async task => { await assertChildTask(task, { parent: parent(), approve: ctx.hasUI ? request => withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Approve workflow child extensions', request, {signal: controller.signal})) : undefined }); },
+          approveReplay: ctx.hasUI ? stages => withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Replay previously successful stages?', `These stages will NOT run again: ${stages.join(', ')}. Approve only if their outputs and side effects remain valid in the current workspace.`, {signal: controller.signal})) : async () => false,
           authorizeRead: path => assertWorkflowRead(parent(), path),
           spawn: async (task, taskSignal) => {
             taskSignal.throwIfAborted();

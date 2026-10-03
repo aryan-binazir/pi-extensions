@@ -24,6 +24,7 @@ export default function worktree(pi: ExtensionAPI): void {
     if (previousSession && (previousSession.cwd !== ctx.cwd || previousSession.id !== id)) setActiveCwd(previousSession.cwd, undefined, previousSession.id);
     previousSession = { cwd: ctx.cwd, id };
     setActiveCwd(ctx.cwd, undefined, id);
+    if (mutating) { paint(ctx); return; }
     let path: unknown;
     const branch = ctx.sessionManager.getBranch();
     for (let index = branch.length - 1; index >= 0; index--) {
@@ -42,7 +43,7 @@ export default function worktree(pi: ExtensionAPI): void {
           const trees = new Worktrees(ctx.cwd);
           const checkout = (await trees.list()).find(item => resolve(item.path) === resolve(path) || item.path === canonical);
           if (!checkout || !await trees.matches(checkout)) throw new Error('Saved checkout is unavailable');
-          setActiveCwd(ctx.cwd, canonical, id);
+          if (!mutating) setActiveCwd(ctx.cwd, canonical, id);
         }
       }
       catch { if (ctx.hasUI) ctx.ui.notify('Saved worktree is unavailable or invalid; using original session directory', 'warning'); }

@@ -546,6 +546,8 @@ test('approved active removal detaches before Git deletion and blocks overlappin
               const notices: string[] = [];
               runner.setUIContext({ ...runner.getUIContext(), notify: message => notices.push(message), setStatus() {}, confirm: async () => true }, 'tui');
               await session.prompt('/worktree task');
+              const saved = session.sessionManager.getBranch().find(entry => entry.type === 'custom' && entry.customType === 'agent-workflows:worktree');
+              assert.ok(saved);
               const command = session.prompt(args === 'remove' ? `/worktree remove "${alias}"` : `/worktree ${args}`);
               try {
                 await gate.wait();
@@ -554,6 +556,8 @@ test('approved active removal detaches before Git deletion and blocks overlappin
                 await session.prompt('/worktree task');
                 assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), repo);
                 assert.ok(notices.some(message => message.includes('pending worktree operation')));
+                assert.equal((await session.navigateTree(saved.id)).cancelled, false);
+                assert.equal(getActiveCwd(repo, session.sessionManager.getSessionId()), repo);
                 const entriesBefore = session.sessionManager.getBranch().filter(entry => entry.type === 'custom');
                 const turn = session.prompt('Hold this turn');
                 try {

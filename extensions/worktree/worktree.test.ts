@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, realpath, mkdir, symlink, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, mkdir, rename, symlink, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -184,6 +184,113 @@ test('cleanup only removes a clean checkout at the exact head of a merged PR', a
       assert.equal(results.find(item => item.path === ahead.path)?.reason, 'no merged PR at checkout HEAD');
       await assert.rejects(trees.remove(repo, { force: true, confirm: async () => true }), /primary/);
     });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('cleanup preserves a checkout committed during confirmation, even with force', async t => {
+  for (const force of [false, true]) await t.test(`force=${force}`, async () => {
+    const { home, repo, git } = await repoFixture('pi-cleanup-commit-');
+    try {
+      const trees = new Worktrees(repo, { home, herdr: false });
+      const checkout = await trees.open('task');
+      const mergedHead = git('rev-parse', 'HEAD').trim();
+      await withFakeBin(home, 'gh', mergedPrGh(mergedHead), async () => {
+        let confirmations = 0;
+        const results = await trees.cleanup({ force, confirm: async () => {
+          confirmations++;
+          await writeFile(join(checkout.path, 'new-work'), 'keep committed work');
+          git('-C', checkout.path, 'add', 'new-work');
+          git('-C', checkout.path, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'unmerged work');
+          return true;
+        } });
+        assert.deepEqual(results, [{ path: checkout.path, removed: false, reason: 'checkout changed since cleanup eligibility' }]);
+        assert.equal(confirmations, 1);
+        assert.equal(await realpath(checkout.path), checkout.path);
+        assert.notEqual(git('-C', checkout.path, 'rev-parse', 'HEAD').trim(), mergedHead);
+        assert.equal(await readFile(join(checkout.path, 'new-work'), 'utf8'), 'keep committed work');
+      });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+});
+
+test('cleanup preserves a changed branch or checkout identity during confirmation', async t => {
+  for (const change of ['branch', 'replacement', 'alias']) for (const force of [false, true]) await t.test(`${change}, force=${force}`, async () => {
+    const { home, repo, git } = await repoFixture('pi-cleanup-identity-');
+    try {
+      const trees = new Worktrees(repo, { home, herdr: false });
+      const checkout = await trees.open('task');
+      const mergedHead = git('rev-parse', 'HEAD').trim();
+      const saved = join(home, 'saved-checkout');
+      await withFakeBin(home, 'gh', mergedPrGh(mergedHead), async () => {
+        const results = await trees.cleanup({ force, confirm: async () => {
+          if (change === 'branch') git('-C', checkout.path, 'switch', '-c', 'unmerged');
+          else if (change === 'replacement') {
+            await rename(checkout.path, saved);
+            git('worktree', 'remove', '--force', checkout.path);
+            git('worktree', 'add', checkout.path, checkout.branch);
+          } else {
+            git('worktree', 'move', checkout.path, saved);
+            await symlink(saved, checkout.path, 'dir');
+          }
+          return true;
+        } });
+        assert.deepEqual(results, [{ path: checkout.path, removed: false, reason: 'checkout changed since cleanup eligibility' }]);
+        assert.equal(await realpath(checkout.path), change === 'alias' ? saved : checkout.path);
+        assert.equal(git('-C', checkout.path, 'rev-parse', 'HEAD').trim(), mergedHead);
+        assert.equal(git('-C', checkout.path, 'branch', '--show-current').trim(), change === 'branch' ? 'unmerged' : checkout.branch);
+        if (change !== 'branch') assert.equal(await realpath(saved), saved);
+      });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+});
+
+test('cleanup skips a branch changed during the PR lookup without confirmation', async () => {
+  const { home, repo, git } = await repoFixture('pi-cleanup-lookup-');
+  try {
+    const trees = new Worktrees(repo, { home, herdr: false });
+    const checkout = await trees.open('task');
+    const head = git('rev-parse', 'HEAD').trim();
+    const gh = mergedPrGh(head).replace('#!/bin/sh\n', `#!/bin/sh\ngit -C '${checkout.path}' switch -c unmerged >/dev/null 2>&1 || exit 1\n`);
+    await withFakeBin(home, 'gh', gh, async () => {
+      let confirmations = 0;
+      const results = await trees.cleanup({ confirm: async () => { confirmations++; return true; } });
+      assert.deepEqual(results, [{ path: checkout.path, removed: false, reason: 'checkout changed since cleanup eligibility' }]);
+      assert.equal(confirmations, 0);
+      assert.equal(await realpath(checkout.path), checkout.path);
+      assert.equal(git('-C', checkout.path, 'branch', '--show-current').trim(), 'unmerged');
+    });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('cleanup still rechecks dirty files after confirmation and force still permits them', async t => {
+  for (const force of [false, true]) await t.test(`force=${force}`, async () => {
+    const { home, repo, git } = await repoFixture('pi-cleanup-dirty-');
+    try {
+      const trees = new Worktrees(repo, { home, herdr: false });
+      const checkout = await trees.open('task');
+      await withFakeBin(home, 'gh', mergedPrGh(git('rev-parse', 'HEAD').trim()), async () => {
+        const results = await trees.cleanup({ force, confirm: async () => { await writeFile(join(checkout.path, 'new-work'), 'dirty'); return true; } });
+        assert.deepEqual(results, [force ? { path: checkout.path, removed: true } : { path: checkout.path, removed: false, reason: 'dirty' }]);
+        if (force) await assert.rejects(realpath(checkout.path), { code: 'ENOENT' });
+        else assert.equal(await readFile(join(checkout.path, 'new-work'), 'utf8'), 'dirty');
+      });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+});
+
+test('explicit remove still permits a clean commit during confirmation', async () => {
+  const { home, repo, git } = await repoFixture('pi-remove-commit-');
+  try {
+    const trees = new Worktrees(repo, { home, herdr: false });
+    const checkout = await trees.open('task');
+    const originalHead = git('rev-parse', 'HEAD').trim();
+    const result = await trees.remove(checkout.path, { confirm: async () => {
+      git('-C', checkout.path, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-m', 'unmerged work');
+      return true;
+    } });
+    assert.deepEqual(result, { removed: true });
+    await assert.rejects(realpath(checkout.path), { code: 'ENOENT' });
+    assert.notEqual(git('rev-parse', checkout.branch).trim(), originalHead);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 

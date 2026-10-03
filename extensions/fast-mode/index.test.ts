@@ -223,7 +223,117 @@ test('/fast on a model outside the OpenAI Responses paths reports unavailable an
  assert.deepEqual({selections,notices},{selections:0,notices:[['Fast mode is unavailable for this provider path','error']]});
 });
 
-import { AgentSessionRuntime, createAgentSession, createAgentSessionServices, SessionManager, SettingsManager, type CreateAgentSessionRuntimeFactory } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, parseArgs, SessionManager, SettingsManager, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
+
+type SavedThinking=Parameters<SessionManager['appendThinkingLevelChange']>[0];
+const savedFastSession=(dir:string,thinking:SavedThinking|null='high')=>{
+ const manager=SessionManager.create(dir,dir);
+ manager.appendMessage({role:'user',content:'Synthetic saved conversation',timestamp:0});
+ manager.appendMessage({role:'assistant',content:[{type:'text',text:'Synthetic response'}],api:'openai-responses',provider:'openai',model:'gpt-5.5',usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:'stop',timestamp:0});
+ manager.appendModelChange('openai','gpt-5.5~fast');
+ if(thinking!==null){manager.appendThinkingLevelChange('low');manager.appendThinkingLevelChange(thinking);}
+ return manager.getSessionFile()!;
+};
+const openFastSession=async(dir:string,file:string,reason:SessionStartEvent['reason'])=>{
+ const credentials=new InMemoryCredentialStore();
+ await credentials.modify('openai',async()=>({type:'api_key',key:'synthetic-fast-session-key'}));
+ const modelRuntime=await ModelRuntime.create({modelsPath:null,credentials,modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
+ await modelRuntime.refresh({allowNetwork:false,providers:['openai']});
+ const settingsManager=SettingsManager.inMemory({defaultProvider:'openai',defaultModel:'gpt-4.1',defaultThinkingLevel:'medium'});
+ const resourceLoader=new DefaultResourceLoader({cwd:dir,agentDir:dir,settingsManager,extensionFactories:[fastMode],noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,systemPrompt:''});
+ await resourceLoader.reload();
+ const sessionManager=SessionManager.open(file);
+ const thinkingLevel=reason==='startup'?parseArgs(process.argv.slice(2)).thinking:undefined;
+ const {session}=await createAgentSession({cwd:dir,agentDir:dir,modelRuntime,settingsManager,sessionManager,resourceLoader,tools:[],thinkingLevel,sessionStartEvent:{type:'session_start',reason}});
+ try {
+  assert.equal(session.model?.id,'gpt-4.1');
+  assert.equal(session.thinkingLevel,'off');
+  if(thinkingLevel!==undefined)session.setThinkingLevel(session.thinkingLevel);
+  const errors:unknown[]=[];
+  await session.bindExtensions({onError:error=>errors.push(error)});
+  assert.deepEqual(errors,[]);
+  return session;
+ }catch(error){session.dispose();throw error;}
+};
+
+for(const reason of ['startup','resume'] as const) {
+ test(`${reason} restores fast reasoning and preserves it across a fresh disk resume`,async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'pi-fast-saved-thinking-'));
+  try {
+   const file=savedFastSession(dir);
+   for(const startReason of [reason,'resume'] as const) {
+    const session=await openFastSession(dir,file,startReason);
+    try {
+     assert.equal(session.model?.id,'gpt-5.5~fast');
+     assert.equal(session.thinkingLevel,'high');
+     assert.equal(SessionManager.open(file).buildSessionContext().thinkingLevel,'high');
+    }finally{session.dispose();}
+   }
+  }finally{await rm(dir,{recursive:true,force:true});}
+ });
+}
+
+
+test('startup thinking flags override saved reasoning and the override survives a fresh resume',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-fast-startup-thinking-'));
+ const argv=process.argv;
+ try {
+  const cases:[string[],SavedThinking][]=[
+   [['--thinking','low'],'low'],
+   [['--thinking','off'],'off'],
+   [['--thinking','low','--thinking','medium'],'medium'],
+   [['--thinking','low','--thinking','invalid'],'low'],
+   [['--','--thinking','low'],'high'],
+  ];
+  for(const [args,expected] of cases) {
+   const file=savedFastSession(dir);
+   process.argv=[...argv.slice(0,2),...args];
+   const session=await openFastSession(dir,file,'startup');
+   try {
+    assert.equal(session.model?.id,'gpt-5.5~fast');
+    assert.equal(session.thinkingLevel,expected);
+    assert.equal(SessionManager.open(file).buildSessionContext().thinkingLevel,expected);
+   }finally{session.dispose();}
+   process.argv=[...argv.slice(0,2),'--thinking','xhigh'];
+   const resumed=await openFastSession(dir,file,'resume');
+   try {assert.equal(resumed.thinkingLevel,expected);}finally{resumed.dispose();}
+  }
+ }finally{process.argv=argv;await rm(dir,{recursive:true,force:true});}
+});
+
+test('saved off and sessions without reasoning metadata retain off after fast restoration',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-fast-default-thinking-'));
+ try {
+  for(const saved of ['off',null] as const) {
+   const file=savedFastSession(dir,saved);
+   const session=await openFastSession(dir,file,'resume');
+   try {
+    assert.equal(session.model?.id,'gpt-5.5~fast');
+    assert.equal(session.thinkingLevel,'off');
+    assert.equal(SessionManager.open(file).buildSessionContext().thinkingLevel,'off');
+   }finally{session.dispose();}
+  }
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('reasoning on a sibling branch does not override the resumed fast branch',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-fast-branch-thinking-'));
+ try {
+  const file=savedFastSession(dir);
+  const manager=SessionManager.open(file);
+  const active=manager.getLeafId()!;
+  manager.appendThinkingLevelChange('off');
+  manager.branch(active);
+  manager.appendCustomEntry('synthetic-active-branch',{});
+  const session=await openFastSession(dir,file,'resume');
+  try {
+   assert.equal(session.thinkingLevel,'high');
+   assert.equal(SessionManager.open(file).buildSessionContext().thinkingLevel,'high');
+  }finally{session.dispose();}
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+import { AgentSessionRuntime, createAgentSessionServices, type CreateAgentSessionRuntimeFactory } from '@earendil-works/pi-coding-agent';
 
 test('forking a saved fast branch restores its alias in a fresh runtime',async(t)=>{
  for(const position of ['at','before'] as const)await t.test(position,async()=>{

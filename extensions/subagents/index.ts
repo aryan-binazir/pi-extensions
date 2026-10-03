@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { ExtensionEditorComponent, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { assertChildTask, delegationScope, assertWorkflowRead } from './scope.ts';
@@ -264,7 +264,8 @@ export default function subagents(pi: ExtensionAPI): void {
               const cleanup = () => controller.signal.removeEventListener('abort', abort);
               const finish = (value?: string) => { cleanup(); done(value); };
               const abort = () => finish();
-              const editor = Object.assign(new ExtensionEditorComponent(tui, keybindings, title, source, finish, abort), {dispose: cleanup});
+              const externalEditor = SettingsManager.create(ctx.cwd, getAgentDir(), {projectTrusted: ctx.isProjectTrusted?.() === true}).getExternalEditorCommand();
+              const editor = Object.assign(new ExtensionEditorComponent(tui, keybindings, title, source, finish, abort, undefined, externalEditor), {dispose: cleanup});
               controller.signal.addEventListener('abort', abort, {once: true});
               if (controller.signal.aborted) abort();
               return editor;

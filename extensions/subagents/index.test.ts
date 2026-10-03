@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { realpath, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -288,4 +288,36 @@ for (const approval of ['execution', 'replay', 'cached child extensions']) {
         }
       }));
   }
+}
+
+
+for (const trusted of [false, true]) {
+  test(`source review external editor respects ${trusted ? 'trusted project' : 'global'} settings`, async () =>
+    withHost({prefix: 'workflow-external-'}, async host => {
+      const script = join(host.cwd, 'editor.cjs');
+      await writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(join(host.cwd, 'editor-used'))}, process.argv[2]);`);
+      const command = `${process.execPath} ${script}`;
+      await writeFile(join(host.agentDir, 'settings.json'), JSON.stringify({externalEditor: `${command} global`}));
+      await mkdir(join(host.cwd, '.pi'));
+      await writeFile(join(host.cwd, '.pi', 'settings.json'), JSON.stringify({externalEditor: `${command} project`}));
+      const mode = interactiveUI(host);
+      host.ctx.isProjectTrusted = () => trusted;
+      let restarted = false;
+      mode.ui.stop = () => {};
+      mode.ui.start = () => { restarted = true; };
+      mode.keybindings.matches = (data: string, action: string) => data === '\x07' && action === 'app.editor.external';
+      host.ctx.ui.confirm = async () => true;
+      const run = host.execute('workflow', {source: 'return 1;', timeout: 5000});
+      const dialog = await until(() => mode.focus instanceof ExtensionEditorComponent && mode.focus, 'source review');
+      dialog.handleInput('\x07');
+      try {
+        await until(() => restarted, 'the synthetic external editor to finish');
+        assert.equal(await readFile(join(host.cwd, 'editor-used'), 'utf8'), trusted ? 'project' : 'global');
+        dialog.handleInput('\r');
+        assert.equal((await run).details, 1);
+      } finally {
+        dialog.handleInput('\x1b');
+        await run.catch(() => {});
+      }
+    }));
 }

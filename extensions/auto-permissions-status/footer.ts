@@ -75,7 +75,9 @@ export function permissionFooter(
         if (totals[key]) stats.push(`${prefix}${tokens(totals[key])}`);
       }
       if ((totals.cacheRead || totals.cacheWrite) && cacheHit !== undefined) stats.push(`CH${cacheHit.toFixed(1)}%`);
-      const subscription = ctx.model && (ctx.model.provider === 'kimi-coding' || ctx.modelRegistry.isUsingOAuth(ctx.model));
+      const subscription = ctx.model && (ctx.model.provider === 'kimi-coding'
+        || (ctx.modelRegistry.isUsingOAuth(ctx.model)
+          && ctx.modelRegistry.getProvider(ctx.model.provider)?.auth.oauth?.isSubscription === true));
       if (totals.cost || subscription) stats.push(`$${totals.cost.toFixed(3)}${subscription ? ' (sub)' : ''}`);
       const usage = ctx.getContextUsage();
       const percent = usage?.percent;

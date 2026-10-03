@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { ExtensionEditorComponent, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { assertChildTask, delegationScope, assertWorkflowRead } from './scope.ts';
@@ -87,7 +87,7 @@ export default function subagents(pi: ExtensionAPI): void {
   };
   const createRegistry = () => new SubagentRegistry({
     allowedTools: () => delegationScope(parent()).tools,
-    authorize: async task => { await assertChildTask(task, { parent: parent(), approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request) : undefined }); },
+    authorize: async (task, signal) => { await assertChildTask(task, { parent: parent(), approve: context?.hasUI ? async request => await context!.ui.confirm('Approve local child extensions', request, {signal}) : undefined }); },
     invocation: task => {
       if (context && task.configProvenance) {
         if (task.configProvenance.config !== configFor(context).identity) throw new Error('Subagent configuration or trust changed while queued; resubmit task');
@@ -259,11 +259,20 @@ export default function subagents(pi: ExtensionAPI): void {
             return resolveProfile(task, config, selectionContext);
           },
           approve: ctx.hasUI ? async source => {
-            const reviewed = await abortable(ctx.ui.editor('Review workflow TypeScript; submit unchanged source to continue', source), controller.signal);
+            const title = 'Review workflow TypeScript; submit unchanged source to continue';
+            const reviewed = await abortable(ctx.mode === 'tui' ? ctx.ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+              const cleanup = () => controller.signal.removeEventListener('abort', abort);
+              const finish = (value?: string) => { cleanup(); done(value); };
+              const abort = () => finish();
+              const editor = Object.assign(new ExtensionEditorComponent(tui, keybindings, title, source, finish, abort), {dispose: cleanup});
+              controller.signal.addEventListener('abort', abort, {once: true});
+              if (controller.signal.aborted) abort();
+              return editor;
+            }) : ctx.ui.editor(title, source), controller.signal);
             return reviewed === source && await ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.', {signal: controller.signal});
           } : undefined,
-          validateTask: async task => { await assertChildTask(task, { parent: parent(), approve: ctx.hasUI ? request => ctx.ui.confirm('Approve workflow child extensions', request) : undefined }); },
-          approveReplay: ctx.hasUI ? stages => ctx.ui.confirm('Replay previously successful stages?', `These stages will NOT run again: ${stages.join(', ')}. Approve only if their outputs and side effects remain valid in the current workspace.`) : async () => false,
+          validateTask: async task => { await assertChildTask(task, { parent: parent(), approve: ctx.hasUI ? request => ctx.ui.confirm('Approve workflow child extensions', request, {signal: controller.signal}) : undefined }); },
+          approveReplay: ctx.hasUI ? stages => ctx.ui.confirm('Replay previously successful stages?', `These stages will NOT run again: ${stages.join(', ')}. Approve only if their outputs and side effects remain valid in the current workspace.`, {signal: controller.signal}) : async () => false,
           authorizeRead: path => assertWorkflowRead(parent(), path),
           spawn: async (task, taskSignal) => {
             taskSignal.throwIfAborted();

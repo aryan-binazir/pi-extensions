@@ -3,6 +3,9 @@ import { realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { InteractiveMode, ExtensionEditorComponent, initTheme } from '@earendil-works/pi-coding-agent';
+import { Container } from '@earendil-works/pi-tui';
+import type { Host } from './test-support.ts';
 import { until, withHost } from './test-support.ts';
 
 const echoArgs = `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()})}],usage:{input:3,output:4}}}));`;
@@ -139,3 +142,150 @@ test('a child launches with discovery disabled and receives a dash-prefixed brie
     assert.deepEqual(argv.filter(arg => arg.startsWith('--no-') || arg === '--').concat(argv.at(-1)!),
       ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--', '--version']);
   }));
+
+initTheme('dark', false);
+
+function interactiveUI({ctx}: Host) {
+  const mode: any = Object.create(InteractiveMode.prototype);
+  let draft = 'parent draft';
+  mode.editor = {getText: () => draft, setText: (text: string) => { draft = text; }, focused: true};
+  mode.focus = mode.editor;
+  mode.editorContainer = new Container();
+  mode.editorContainer.addChild(mode.editor);
+  mode.keybindings = {matches: () => false};
+  Object.defineProperty(mode, 'settingsManager', {value: {getExternalEditorCommand: () => undefined}});
+  mode.ui = {
+    terminal: {rows: 24, columns: 80, write() {}},
+    setFocus: (component: any) => { mode.focus.focused = false; mode.focus = component; component.focused = true; },
+    requestRender() {}, getSize: () => ({columns: 80, rows: 24}),
+  };
+  ctx.mode = 'tui';
+  ctx.ui.editor = mode.showExtensionEditor.bind(mode);
+  ctx.ui.custom = mode.showExtensionCustom.bind(mode);
+  ctx.ui.confirm = mode.showExtensionConfirm.bind(mode);
+  return mode;
+}
+
+for (const tool of ['workflow', 'subagent']) {
+  for (const stop of ['timeout', 'owner', 'cancel all', 'shutdown']) {
+    test(`${tool} approval closes and restores main editor focus on ${stop}`, async () =>
+      withHost({prefix: 'subagent-dialog-'}, async host => {
+        const mode = interactiveUI(host);
+        const controller = new AbortController();
+        const extension = join(host.cwd, 'child.ts');
+        await writeFile(extension, 'export default () => {};');
+        const params = tool === 'workflow' ? {source: 'return 1;'} : {task: 'read', preset: 'reader', extensions: [extension]};
+        const run = host.execute(tool, {...params, timeout: stop === 'timeout' ? 150 : 5000}, controller.signal).then(
+          () => { throw new Error('Unapproved operation succeeded'); }, error => error,
+        );
+        await until(() => mode.focus !== mode.editor, 'the approval to mount');
+        const dialog = mode.focus;
+        assert.equal(dialog.focused, true);
+        if (stop === 'owner') controller.abort();
+        if (stop === 'cancel all') await host.execute('subagent_cancel', {id: 'all'});
+        if (stop === 'shutdown') await host.shutdown();
+        const error = await run;
+        assert.match(String(error), /aborted|deadline|cancelled|shut down/i);
+        try {
+          assert.deepEqual(mode.editorContainer.children, [mode.editor]);
+          assert.equal(mode.focus, mode.editor);
+          assert.equal(mode.editor.focused, true);
+          assert.equal(mode.editor.getText(), 'parent draft');
+          if (dialog instanceof ExtensionEditorComponent) {
+            dialog.handleInput('\r');
+            await Promise.resolve();
+            assert.equal(mode.focus, mode.editor, 'late submission cannot reopen a dialog');
+          }
+          assert.deepEqual((await host.execute('subagent_status')).details, []);
+        } finally {
+          dialog.handleInput('\x1b');
+        }
+      }));
+  }
+}
+
+for (const edit of ['unchanged', 'changed', 'cancelled']) {
+  test(`TUI workflow source review ${edit} preserves explicit approval`, async () =>
+    withHost({prefix: 'workflow-source-'}, async host => {
+      const mode = interactiveUI(host);
+      host.ctx.ui.custom = async (factory: any) => {
+        const review = mode.showExtensionCustom(factory);
+        const dialog = await until(() => mode.focus instanceof ExtensionEditorComponent && mode.focus, 'source review');
+        assert.equal(dialog.editor.getText(), 'return 1;');
+        assert.equal(dialog.editor.focused, true);
+        if (edit === 'changed') dialog.handleInput('x');
+        dialog.handleInput(edit === 'cancelled' ? '\x1b' : '\r');
+        return review;
+      };
+      let confirmations = 0;
+      host.ctx.ui.confirm = async () => { confirmations++; return true; };
+      const run = host.execute('workflow', {source: 'return 1;'});
+      if (edit === 'unchanged') {
+        assert.equal((await run).details, 1);
+        assert.equal(confirmations, 1);
+      } else {
+        await assert.rejects(run, /explicit source approval/);
+        assert.equal(confirmations, 0);
+      }
+      assert.equal(mode.focus, mode.editor);
+    }));
+}
+
+test('cancellation before custom source review mounts retains main editor focus', async () =>
+  withHost({prefix: 'workflow-premount-'}, async host => {
+    const mode = interactiveUI(host);
+    const controller = new AbortController();
+    host.ctx.ui.custom = (factory: any) => mode.showExtensionCustom(async (...args: any[]) => {
+      controller.abort();
+      return factory(...args);
+    });
+    await assert.rejects(host.execute('workflow', {source: 'return 1;'}, controller.signal), /aborted/);
+    await Promise.resolve();
+    assert.deepEqual(mode.editorContainer.children, [mode.editor]);
+    assert.equal(mode.focus, mode.editor);
+  }));
+
+for (const approval of ['execution', 'replay', 'cached child extensions']) {
+  for (const stop of ['timeout', 'owner']) {
+    test(`workflow ${approval} confirmation restores main editor focus on ${stop}`, async () =>
+      withHost({prefix: 'workflow-confirm-', pi: echoArgs}, async host => {
+        const mode = interactiveUI(host);
+        const extension = join(host.cwd, 'child.ts');
+        await writeFile(extension, 'export default () => {};');
+        const source = approval === 'cached child extensions'
+          ? `return await api.spawn({task:'read',preset:'reader',extensions:[${JSON.stringify(extension)}]},'stage');`
+          : "return await api.checkpoint('stage', async () => 1);";
+        host.ctx.ui.custom = async (factory: any) => {
+          const review = mode.showExtensionCustom(factory);
+          const dialog = await until(() => mode.focus instanceof ExtensionEditorComponent && mode.focus, 'source review');
+          dialog.handleInput('\r');
+          return review;
+        };
+        host.ctx.ui.confirm = async () => true;
+        if (approval !== 'execution') await host.execute('workflow', {source});
+        const before = (await host.execute('subagent_status')).details.length;
+        host.ctx.ui.confirm = (title: string, message: string, opts: any) => {
+          const wait = approval === 'execution' ? title.startsWith('Execute')
+            : approval === 'replay' ? title.startsWith('Replay') : title.startsWith('Approve workflow child');
+          return wait ? mode.showExtensionConfirm(title, message, opts) : Promise.resolve(true);
+        };
+        const controller = new AbortController();
+        const run = host.execute('workflow', {source, timeout: stop === 'timeout' ? 1000 : 5000}, controller.signal).then(
+          () => { throw new Error('Unapproved operation succeeded'); }, error => error,
+        );
+        const dialog = await until(() => mode.extensionSelector, 'workflow confirmation');
+        assert.equal(mode.focus, dialog);
+        if (stop === 'owner') controller.abort();
+        assert.match(String(await run), /aborted|approval declined/);
+        try {
+          assert.deepEqual(mode.editorContainer.children, [mode.editor]);
+          assert.equal(mode.focus, mode.editor);
+          assert.equal(mode.editor.getText(), 'parent draft');
+          dialog.handleInput('\r');
+          assert.equal((await host.execute('subagent_status')).details.length, before);
+        } finally {
+          dialog.handleInput('\x1b');
+        }
+      }));
+  }
+}

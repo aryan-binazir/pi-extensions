@@ -64,7 +64,7 @@ interface RegistryOptions {
   concurrency?: number;
   allowedTools?: () => string[];
   invocation?: (spec: ValidTask) => { command: string; args: string[]; env?: NodeJS.ProcessEnv; supervised?: boolean };
-  authorize?: (spec: ValidTask) => Promise<void>;
+  authorize?: (spec: ValidTask, signal: AbortSignal) => Promise<void>;
   onUpdate?: (task: TaskResult) => void;
   onComplete?: (task: TaskResult) => void;
 }
@@ -154,7 +154,7 @@ export class SubagentRegistry {
     try {
       validated = await abortable(validateTask(spec, this.options.allowedTools?.()), admissionSignal);
       admissionSignal.throwIfAborted();
-      await abortable(this.options.authorize?.(validated), admissionSignal);
+      await abortable(this.options.authorize?.(validated, admissionSignal), admissionSignal);
       admissionSignal.throwIfAborted();
       if (Date.now() >= deadlineAt) throw new Error('Task admission deadline exceeded');
     } finally { clearTimeout(timer); }

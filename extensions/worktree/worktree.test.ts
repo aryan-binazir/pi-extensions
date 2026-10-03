@@ -365,6 +365,18 @@ test('/worktree falls back to local main or master when origin/HEAD is dangling'
   }
 });
 
+test('new branches fall back to main when the remote default points to a tree', async () => {
+  const { home, repo, git } = await repoFixture('pi-worktree-noncommit-');
+  try {
+    const trees = new Worktrees(repo, { home, herdr: false });
+    const mainHead = git('rev-parse', 'HEAD').trim();
+    git('update-ref', 'refs/remotes/origin/default', git('rev-parse', 'HEAD^{tree}').trim());
+    git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/default');
+    const checkout = await trees.open('feature');
+    assert.equal(git('-C', checkout.path, 'rev-parse', 'HEAD').trim(), mainHead);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 test('/worktree <name> --branch creates the checkout, activates it and persists the switch', async () => {
   const { home, repo } = await repoFixture('pi-worktree-command-');
   const h = commandHost(repo, 'command-open');

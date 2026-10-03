@@ -652,7 +652,7 @@ export class ViEditor extends CustomEditor {
       return;
     }
     data = decodeKittyPrintable(data) ?? data;
-    if ((data.length !== 1 || data.charCodeAt(0) < 32) && !matchesKey(data, "ctrl+r")) {
+    if (!/^[^\x00-\x1f\x7f-\x9f]+$/u.test(data) && !matchesKey(data, "ctrl+r")) {
       this.baseInput(data);
       return;
     }
@@ -673,6 +673,12 @@ export class ViEditor extends CustomEditor {
       this.resetPending();
       this.register = '"';
       this.cursorShape();
+      return;
+    }
+    if (!/^[\x20-\x7e]$/.test(data)) {
+      this.discardArgument = false;
+      this.resetPending();
+      this.register = '"';
       return;
     }
     if (this.prefix === "i" || this.prefix === "a") {

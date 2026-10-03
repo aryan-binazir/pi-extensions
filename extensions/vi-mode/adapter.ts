@@ -215,12 +215,24 @@ export function installEditorHandoff(): void {
       return showCustom.call(this, factory, options);
     const text = source.getText();
     const payloads = readPastes(source);
+    const expanded = expandPastes(source, text);
+    const getText = source.getText;
+    const captureExpandedDraft = () => {
+      source.getText = getText;
+      return expanded;
+    };
+    source.getText = captureExpandedDraft;
     try {
       return await showCustom.call(this, factory, options);
     } finally {
-      if (this.editor === source && source.getText() === text) {
-        writePastes(source, payloads);
-        source.onChange?.(text);
+      if (source.getText === captureExpandedDraft) source.getText = getText;
+      if (this.editor === source && source.getExpandedText() === expanded) {
+        if (source.getText() === text) {
+          writePastes(source, payloads);
+          source.onChange?.(text);
+        } else {
+          restoreRawDraft(source, text, payloads);
+        }
       }
     }
   };

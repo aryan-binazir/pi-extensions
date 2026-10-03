@@ -65,6 +65,59 @@ test('boolean values, repeated flags, and short clusters follow gh option semant
   });
 });
 
+test('flags before command words still enforce draft creation and administrator merge rules', async () => {
+  await withGuard(enabled, async call => {
+    for (const command of [
+      'gh pr --title Fix create --body Details',
+      'gh --title=Fix pr create --body Details',
+      'gh pr --draft=false create --title Fix --body Details',
+      'gh pr --body Note merge 42 --admin --squash',
+      'gh pr --admin=true merge 42 --squash',
+      'gh --admin=true pr merge 42 --squash',
+    ]) assert.equal((await call(command))?.block, true, command);
+  });
+});
+
+test('reordered options retain values, boolean precedence, and command selection', async () => {
+  await withGuard(enabled, async call => {
+    for (const command of [
+      'gh --title pr pr create',
+      'gh pr --body merge create',
+      'gh pr --body create merge 42 --admin',
+      'gh pr --body merge merge 42 --admin',
+      'gh pr --body -- merge 42 --admin',
+      'gh pr --admin merge merge --squash',
+      'gh pr -tcreate create', 'gh pr -t Fix new',
+      'gh pr -ftFix create', 'gh pr -d=false create',
+      'gh --draft=true pr create --draft=false',
+      'gh pr --admin=false merge 42 --admin',
+      'gh --help pr --title Fix create --help=false',
+      'gh pr --web=false create --web --draft',
+      'gh pr --title --draft create',
+      'gh pr --body --help merge 42 --admin',
+      'gh pr create -- --draft',
+      '"gh" "pr" --title "Fix" "create"',
+    ]) assert.equal((await call(command))?.block, true, command);
+    for (const command of [
+      'gh pr --title Fix create --draft',
+      'gh --draft=false pr --draft=true create',
+      'gh pr --body Note merge 42 --admin=false',
+      'gh pr --body --admin merge 42',
+      'gh --admin=true pr merge 42 --admin=false',
+      'gh pr --help=false create --help',
+      'gh pr --web=true create --web=false --draft',
+      'gh --repo pr pr --title merge create --draft',
+      'gh pr -Rcreate --body merge merge 42 --admin=false',
+      'gh pr -fd create', 'gh pr -tmerge create -d',
+      'gh pr --body create view',
+      'gh pr --body merge view',
+      'gh -- pr create', 'gh pr -- create',
+      'gh pr --body Note merge -- --admin',
+      'echo "gh pr --admin=true merge"',
+    ]) assert.equal(await call(command), undefined, command);
+  });
+});
+
 test('config is opt-in, independently switches rules, and reports invalid settings on Bash only', async () => {
   await withGuard(undefined, async call => assert.equal(await call('gh pr create'), undefined));
   await withGuard({ requireDraftPr: false, blockAdminMerge: true }, async (call, path) => {

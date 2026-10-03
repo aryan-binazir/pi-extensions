@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Message } from "@earendil-works/pi-ai";
+import { normalizeContext, type Message } from "@earendil-works/pi-ai";
 import {
   buildSessionContext,
   convertToLlm,
@@ -198,7 +198,7 @@ export default function btw(pi: ExtensionAPI) {
                   ...model,
                   ...(auth.baseUrl ? { baseUrl: auth.baseUrl } : {}),
                 },
-                { systemPrompt, messages, tools: [] },
+                normalizeContext({ systemPrompt, messages, tools: [] }),
                 {
                   apiKey: auth.apiKey,
                   headers: auth.headers,

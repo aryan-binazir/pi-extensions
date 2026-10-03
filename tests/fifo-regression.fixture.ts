@@ -1,4 +1,4 @@
-import type {ExtensionAPI, ExtensionContext, ToolDefinition} from '@earendil-works/pi-coding-agent';
+import type {ExtensionAPI, ExtensionContext, ExtensionToolContext, ToolDefinition} from '@earendil-works/pi-coding-agent';
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {mkdtemp, rm, writeFile, symlink, rename} from 'node:fs/promises';
@@ -17,7 +17,8 @@ subagents({
   registerCommand: () => {},
   on: (name: string, handler: () => Promise<void> | void) => { events.set(name, handler); },
 } as unknown as ExtensionAPI);
-const execute = (source:string, timeout=1000) => tools.get('workflow')!.execute('fifo',{source,timeout},undefined,undefined,ctx as unknown as ExtensionContext);
+const toolContext: ExtensionToolContext = Object.assign(ctx as unknown as ExtensionContext, {tools: [], executeTool: async () => { throw new Error('No nested tools in this fixture'); }});
+const execute = (source:string, timeout=1000) => tools.get('workflow')!.execute('fifo',{source,timeout},undefined,undefined,toolContext);
 try {
   execFileSync('mkfifo',[join(cwd,'pipe')]);
   await assert.rejects(execute('return await api.readFile("pipe");'), /regular file/);

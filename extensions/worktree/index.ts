@@ -1,6 +1,7 @@
 import { createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { getActiveCwd, resolveToolPath, setActiveCwd } from './routing.ts';
 const entryType = 'agent-workflows:worktree';
 const routedTools = new Set(['read', 'write', 'edit', 'grep', 'find', 'ls']);
@@ -57,6 +58,7 @@ export default function worktree(pi: ExtensionAPI): void {
     const input = event.input as { path?: unknown };
     if (typeof input.path === 'string') input.path = resolveToolPath(input.path, activeCwd(ctx));
     else if (input.path === undefined && directoryTools.has(event.toolName)) input.path = activeCwd(ctx);
+    if (typeof input.path === 'string' && /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/.test(input.path)) input.path = pathToFileURL(input.path).href;
   });
   const bashMetadata = createBashToolDefinition(process.cwd());
   pi.registerTool({

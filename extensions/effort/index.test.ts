@@ -1,9 +1,24 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import {
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+  type CreateAgentSessionRuntimeFactory,
+} from "@earendil-works/pi-coding-agent";
 import effort from "./index.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 function host(t: TestContext, defaults = { model: "test", level: "high" }) {
+  const sessionId = randomUUID();
   let thinkingLevel = defaults.level;
   const commands: Record<string, any> = {};
   const hooks: Record<string, any> = {};
@@ -45,7 +60,10 @@ function host(t: TestContext, defaults = { model: "test", level: "high" }) {
     mode: "tui",
     model,
     modelRegistry: { find: () => model },
-    sessionManager: { getSessionFile: () => "/synthetic/session" },
+    sessionManager: {
+      getSessionId: () => sessionId,
+      getSessionFile: () => "/synthetic/session",
+    },
     ui: {
       notify: (m: string) => notices.push(m),
       custom: (f: any) =>
@@ -128,6 +146,100 @@ test("new-session handoff applies only on replacement runtime and leaves default
   assert.equal(later.pi.getThinkingLevel(), "high");
   assert.deepEqual(later.changes, []);
 });
+
+test("in-memory effort handoff changes only its replacement and waits for it", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-effort-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const notices: string[] = [];
+  const errors: unknown[] = [];
+  let startAuth!: () => void;
+  let releaseAuth!: () => void;
+  const authStarted = new Promise<void>((resolve) => { startAuth = resolve; });
+  const authRelease = new Promise<void>((resolve) => { releaseAuth = resolve; });
+  t.after(() => releaseAuth());
+  let delayReplacement = false;
+  const factory: CreateAgentSessionRuntimeFactory = async ({ sessionManager, sessionStartEvent }) => {
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(),
+      modelsPath: null, refreshOnCreate: false, allowModelNetwork: false,
+    });
+    await modelRuntime.setRuntimeApiKey("openai", "fixture-key");
+    const services = await createAgentSessionServices({
+      cwd, agentDir: cwd, modelRuntime,
+      settingsManager: SettingsManager.inMemory({ defaultThinkingLevel: "high" }),
+      resourceLoaderOptions: {
+        extensionFactories: [effort], noExtensions: true, noContextFiles: true,
+        noSkills: true, noThemes: true, noPromptTemplates: true,
+      },
+    });
+    const result = await createAgentSessionFromServices({
+      services, sessionManager, sessionStartEvent,
+      model: modelRuntime.getModel("openai", "gpt-5.5"), thinkingLevel: "high", noTools: "all",
+    });
+    if (delayReplacement) {
+      const checkAuth = modelRuntime.checkAuth.bind(modelRuntime);
+      t.mock.method(modelRuntime, "checkAuth", async (...args: Parameters<typeof checkAuth>) => {
+        startAuth();
+        await authRelease;
+        return checkAuth(...args);
+      });
+    }
+    return { ...result, services, diagnostics: services.diagnostics };
+  };
+  async function runtime() {
+    const h = await createAgentSessionRuntime(factory, {
+      cwd, agentDir: cwd, sessionManager: SessionManager.inMemory(cwd),
+    });
+    t.after(() => h.dispose());
+    const bind = async () => {
+      const runner = h.session.extensionRunner;
+      await h.session.bindExtensions({
+        mode: "tui", onError: (error) => errors.push(error),
+        commandContextActions: {
+          newSession: (options) => h.newSession(options), waitForIdle: async () => {},
+          fork: (id, options) => h.fork(id, options),
+          switchSession: (path, options) => h.switchSession(path, options),
+          navigateTree: async () => ({ cancelled: true }), reload: async () => {},
+        },
+      });
+      runner.setUIContext({ ...runner.createContext().ui, notify: (message) => notices.push(message) }, "tui");
+    };
+    h.setRebindSession(bind);
+    await bind();
+    return h;
+  }
+  const unrelated = await runtime();
+  const target = await runtime();
+  const oldId = target.session.sessionManager.getSessionId();
+  const unrelatedModel = unrelated.session.model;
+  const unrelatedBranch = unrelated.session.sessionManager.getBranch();
+  assert.notEqual(oldId, unrelated.session.sessionManager.getSessionId());
+  assert.equal(target.session.sessionFile, undefined);
+  assert.equal(unrelated.session.sessionFile, undefined);
+  const runner = target.session.extensionRunner;
+  delayReplacement = true;
+  let completed = false;
+  const pending = runner.getCommand("effort")!.handler("new low", runner.createCommandContext()).then(() => {
+    completed = true;
+  });
+  try {
+    await authStarted;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(completed, false);
+    assert.deepEqual(notices, []);
+  } finally {
+    releaseAuth();
+    await pending;
+  }
+  assert.notEqual(target.session.sessionManager.getSessionId(), oldId);
+  assert.equal(target.session.sessionFile, undefined);
+  assert.equal(target.session.thinkingLevel, "low");
+  assert.deepEqual(notices, ["Temporary openai/gpt-5.5 · low"]);
+  assert.equal(unrelated.session.model, unrelatedModel);
+  assert.equal(unrelated.session.thinkingLevel, "high");
+  assert.deepEqual(unrelated.session.sessionManager.getBranch(), unrelatedBranch);
+  assert.deepEqual(errors, []);
+});
 test("cancelled slider and unsupported level do not change thinking", async (t) => {
   const h = host(t);
   const result = h.commands.effort.handler("", h.ctx);
@@ -208,12 +320,12 @@ test("an unacknowledged replacement session times out without applying effort", 
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const old = host(t);
   const unrelated = host(t, { model: "saved-model", level: "high" });
-  unrelated.ctx.sessionManager.getSessionFile = () => "/synthetic/unrelated";
+  unrelated.ctx.sessionManager.getSessionFile = () => undefined;
   const notices: string[] = [];
   old.ctx.newSession = async ({ withSession }: any) => {
     old.hooks.session_shutdown();
     await withSession({
-      sessionManager: { getSessionFile: () => "/synthetic/missing" },
+      sessionManager: { getSessionId: () => "missing-session", getSessionFile: () => undefined },
       ui: { notify: (message: string) => notices.push(message) },
     });
     return { cancelled: false };

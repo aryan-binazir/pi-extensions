@@ -15,13 +15,13 @@ project file or full-session history. `todo_write` replaces a normalized list an
 permits at most one in-progress task. Restoration follows the selected branch on
 startup, resume, fork, reload and tree navigation.
 
-Each user turn persists the stale-turn count; reminders strengthen at three and
-six unchanged turns, and repeating an identical declaration does not reset that
-count. We retain per-user-turn custom-entry persistence to preserve the counter
-precisely across resume and tree navigation. The counter itself is never injected
-into the system prompt; reminder text changes only at the three/six-turn
-thresholds or when the declared list changes, avoiding per-turn prompt-prefix
-churn.
+Delivered user messages advance the stale-turn count, including queued steering
+and follow-up messages. The count is saved when provider context is composed,
+after its user messages enter the selected branch, with an end-of-run fallback.
+Reminders strengthen at three and six unchanged messages, and repeating an
+identical declaration does not reset the count. Each provider request gets a
+current reminder in request-only context. Reminders do not enter saved history
+or the system prompt, and completion or clearing removes them on the next request.
 
 Completion is only a tool caller's declaration, never inferred from assistant
 prose or tool activity. All-completed lists remain in history but clear the widget

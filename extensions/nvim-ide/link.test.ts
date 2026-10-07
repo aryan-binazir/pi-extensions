@@ -338,6 +338,45 @@ test('a mention sent before initialize identifies the server still includes row 
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
+test('relative sends before initialization cannot be rebound to a later workspace', async () => {
+  let finishInitialize: (() => void) | undefined;
+  let root = '/original';
+  let rootLookups = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  server.on('connection', socket => socket.on('message', raw => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === 'initialize') {
+      socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'at_mentioned', params: { filePath: 'relative.ts', lineStart: 0, lineEnd: 0 } }));
+      socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'at_mentioned', params: { filePath: '/original/absolute.ts', lineStart: 0, lineEnd: 0 } }));
+      finishInitialize = () => socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { serverInfo: { name: 'claudecode-neovim' } } }));
+    } else if (message.method === 'tools/call') {
+      rootLookups++;
+      socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify({ rootPath: root }) }] } }));
+    }
+  }));
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${port}.lock`), lockFile());
+    link.start();
+    await until(() => !!finishInitialize);
+    root = '/replacement';
+    finishInitialize!();
+    await until(() => link.connected && link.state.mentions === 2);
+    const batch = await link.prepareMentions();
+    assert.deepEqual(batch.mentions.map(mention => mention.filePath), ['/original/absolute.ts']);
+    assert.equal(batch.undelivered, 1);
+    assert.equal(rootLookups, 0, 'the newer workspace is not used to guess ownership');
+  } finally {
+    await link.stop();
+    for (const socket of server.clients) socket.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('mention row conversion follows initialized identity across reconnects, not the lock label', async () => {
   let serverName: string | undefined = 'claudecode-neovim';
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: (info: { req: { headers: Record<string, unknown> } }) => info.req.headers['x-claude-code-ide-authorization'] === token });
@@ -440,6 +479,30 @@ test('bounded send queues protect prepared sends and report rejected new arrival
     await ide.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('overlapping preparations acknowledge dropped sends with a monotonic watermark', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    for (let i = 0; i < 51; i++) ide.broadcast('at_mentioned', { filePath: `/w/old-${i}.ts` });
+    await link.call('getWorkspaceFolders');
+    const first = await link.prepareMentions(), overlapping = await link.prepareMentions();
+    assert.equal(first.dropped, 1);
+    first.acknowledge();
+    for (let i = 0; i < 51; i++) ide.broadcast('at_mentioned', { filePath: `/w/new-${i}.ts` });
+    await link.call('getWorkspaceFolders');
+    overlapping.acknowledge();
+    const next = await link.prepareMentions();
+    assert.equal(next.dropped, 1, 'an older acknowledgement cannot erase newer overflow');
+    next.acknowledge();
+    assert.equal((await link.prepareMentions()).dropped, 0);
+  } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
 test('relative sends capture the live editor root at receipt, without waiting for a turn', async () => {

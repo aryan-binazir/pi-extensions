@@ -86,6 +86,7 @@ export class IdeLink {
   private zeroBasedMentionLines = false;
   private pendingMentions: unknown[] = [];
   private droppedMentions = 0;
+  private acknowledgedDrops = 0;
   constructor(private readonly options: LinkOptions) {}
 
   get state(): LinkState { return { connected: this.connected, ideName: this.lock?.ideName, port: this.lock?.port, selection: this.selection, mentions: this.mentions.length }; }
@@ -110,14 +111,15 @@ export class IdeLink {
   async prepareMentions(): Promise<{ mentions: Mention[]; undelivered: number; dropped: number; acknowledge: () => void }> {
     const taken = [...this.mentions];
     for (const item of taken) this.preparedMentions.add(item);
-    const dropped = this.droppedMentions;
+    const dropWatermark = this.droppedMentions;
+    const dropped = dropWatermark - this.acknowledgedDrops;
     let acknowledged = false;
     await Promise.all(taken.map(item => item.ready));
     const mentions = taken.flatMap(item => item.mention ? [item.mention] : []);
     return { mentions, undelivered: taken.length - mentions.length, dropped, acknowledge: () => {
       if (acknowledged) return;
       acknowledged = true;
-      this.droppedMentions = Math.max(0, this.droppedMentions - dropped);
+      this.acknowledgedDrops = Math.max(this.acknowledgedDrops, dropWatermark);
       const before = this.mentions.length;
       for (const item of taken) this.preparedMentions.delete(item);
       this.mentions = this.mentions.filter(mention => !taken.includes(mention));
@@ -178,7 +180,7 @@ export class IdeLink {
           const serverInfo = result && typeof result === 'object' && 'serverInfo' in result ? result.serverInfo : undefined;
           this.zeroBasedMentionLines = !!serverInfo && typeof serverInfo === 'object' && 'name' in serverInfo && serverInfo.name === 'claudecode-neovim';
           this.notify('notifications/initialized'); this.ready = true;
-          for (const params of this.pendingMentions) this.handleNotification('at_mentioned', params);
+          for (const params of this.pendingMentions) this.handleNotification('at_mentioned', params, false);
           this.pendingMentions = []; trace?.('ready'); this.emit();
         })
         .catch(error => { trace?.(`initialize failed ${error.message}`); socket.terminate(); });
@@ -272,7 +274,7 @@ export class IdeLink {
     if (message.error) item.reject(new Error(typeof message.error.message === 'string' ? message.error.message : 'IDE request failed'));
     else item.resolve(message.result);
   }
-  private handleNotification(method: string, params: unknown): void {
+  private handleNotification(method: string, params: unknown, resolveRelative = true): void {
     const data = (params ?? {}) as Record<string, unknown>;
     if (method === 'selection_changed') {
       const range = (data.selection ?? {}) as Partial<Selection>;
@@ -299,7 +301,7 @@ export class IdeLink {
       const mention = { filePath: data.filePath, lineStart: line(data.lineStart), lineEnd: line(data.lineEnd) };
       const item: QueuedMention = { ready: Promise.resolve() };
       if (isAbsolute(mention.filePath)) item.mention = mention;
-      else item.ready = this.liveWorkspaceRoot().then(root => {
+      else if (resolveRelative) item.ready = this.liveWorkspaceRoot().then(root => {
         if (root) item.mention = { ...mention, filePath: resolve(root, mention.filePath) };
       });
       this.mentions.push(item);

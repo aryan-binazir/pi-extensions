@@ -275,6 +275,36 @@ test('an explicit editor open takes priority over a pending automatic follow', a
   });
 });
 
+test('a disconnected explicit open cancels the old destination before reporting no editor', async () => {
+  await withConnectedIde(async ({ ide, fire, commands, tools, ctx, status }) => {
+    await commands.get('vim').handler('reconnect', ctx);
+    await fire('tool_execution_start', { toolCallId: 'queued', toolName: 'write', args: { path: 'old.ts' } }, ctx);
+    await fire('tool_execution_end', { toolCallId: 'queued', toolName: 'write', isError: false, result: {} }, ctx);
+    await assert.rejects(tools.get('nvim_open').execute('explicit', { path: 'new.ts' }, undefined, undefined, ctx), /No editor connected/);
+    await until(() => status.at(-1) === 'Neovim ✓');
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await tools.get('nvim_diagnostics').execute('barrier', {}, undefined, undefined, ctx);
+    assert.deepEqual(ide.calls.filter(call => call.name === 'openFile'), []);
+  });
+});
+
+test('a successful explicit open starts a new automatic failure episode', async () => {
+  await withConnectedIde(async ({ fire, tools, ctx, notices }) => {
+    for (const path of ['bad1.ts', 'bad2.ts']) {
+      if (path === 'bad2.ts') await tools.get('nvim_open').execute('explicit', { path: 'good.ts' }, undefined, undefined, ctx);
+      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
+      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
+      await new Promise(resolve => setTimeout(resolve, 150));
+      await tools.get('nvim_diagnostics').execute('barrier', {}, undefined, undefined, ctx);
+    }
+    assert.equal(notices.filter(notice => notice.includes('Could not reveal')).length, 2);
+  }, (call, reply) => {
+    if (call.name !== 'openFile' || !String(call.arguments.filePath).includes('bad')) return false;
+    reply({ content: [{ type: 'text', text: 'Cannot reveal' }], isError: true });
+    return true;
+  });
+});
+
 test('follow off cancels queued destinations and ignores late replies from a stalled jump', async () => {
   let lateReply: ((result: unknown) => void) | undefined;
   await withConnectedIde(async ({ ide, fire, commands, ctx, notices }) => {

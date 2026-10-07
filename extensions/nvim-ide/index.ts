@@ -159,11 +159,13 @@ export default function nvimIde(pi: ExtensionAPI): void {
     promptSnippet: 'Open a file at a line range in the connected editor',
     parameters: Type.Object({ path: Type.String(), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }),
     async execute(_id, params, signal, _update, context) {
-      const ide = need();
       cancelFollow();
+      const ide = need();
       const args: Record<string, unknown> = { filePath: resolveToolPath(params.path, activeCwd(context)), preview: false, makeFrontmost: true };
       if (params.startLine) { args.startLine = params.startLine; args.endLine = params.endLine ?? params.startLine; }
-      return { content: [{ type: 'text' as const, text: await ide.call('openFile', args, signal) }], details: undefined };
+      const text = await ide.call('openFile', args, signal);
+      if (link === ide) followFailed = false;
+      return { content: [{ type: 'text' as const, text }], details: undefined };
     },
   });
 

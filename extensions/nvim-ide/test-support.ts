@@ -2,9 +2,12 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 export const token = 'a3f1c2d4e5f60718293a4b5c6d7e8f90';
 
-export function fakeIde(onClient?: (socket: WebSocket) => void) {
+export type IdeCall = { name: string; arguments: any };
+export type CallResponder = (call: IdeCall, reply: (result: unknown) => void, socket: WebSocket) => boolean;
+
+export function fakeIde(onClient?: (socket: WebSocket) => void, onCall?: CallResponder) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: (info: { req: { headers: Record<string, unknown> } }) => info.req.headers['x-claude-code-ide-authorization'] === token });
-  const calls: { name: string; arguments: any }[] = [];
+  const calls: IdeCall[] = [];
   server.on('connection', socket => {
     onClient?.(socket);
     socket.on('message', raw => {
@@ -13,6 +16,7 @@ export function fakeIde(onClient?: (socket: WebSocket) => void) {
       if (message.method === 'initialize') reply({ protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'claudecode-neovim', version: '0.0.0' } });
       else if (message.method === 'tools/call') {
         calls.push(message.params);
+        if (onCall?.(message.params, reply, socket)) return;
         if (message.params.name === 'boom') reply({ content: [{ type: 'text', text: 'nope' }], isError: true });
         else if (message.params.name === 'slow') return;
         else reply({ content: [{ type: 'text', text: `${message.params.name}(${JSON.stringify(message.params.arguments)})` }] });

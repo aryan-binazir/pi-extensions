@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { createEditTool, createWriteTool } from '@earendil-works/pi-coding-agent';
 import nvimIde, { editorContext, statusText } from './index.ts';
 import { maxSelectionChars } from './link.ts';
-import { fakeIde, token, until } from './test-support.ts';
+import { fakeIde, token, until, type CallResponder } from './test-support.ts';
 import { setActiveCwd } from '../worktree/routing.ts';
 
 type Handler = (event: any, ctx: any) => any;
@@ -25,7 +25,13 @@ function fakePi() {
     registerTool: (tool: any) => tools.set(tool.name, tool),
     registerCommand: (name: string, options: any) => commands.set(name, options),
   };
-  const fire = async (event: string, payload: any, ctx: any) => { let result: any; for (const handler of handlers.get(event) ?? []) result = (await handler({ type: event, ...payload }, ctx)) ?? result; return result; };
+  const fire = async (event: string, payload: any, ctx: any) => {
+    const dispatched = { type: event, systemPromptOptions: { sections: {} }, ...payload };
+    let result: any;
+    for (const handler of handlers.get(event) ?? []) result = (await handler(dispatched, ctx)) ?? result;
+    const section = dispatched.systemPromptOptions.sections.editor_context;
+    return section ? { systemPrompt: `${payload.systemPrompt}\n\n${section}`, forcedSystemPrompt: result?.systemPrompt } : result;
+  };
   return { api, fire, tools, commands };
 }
 function fakeCtx(cwd: string) {
@@ -36,8 +42,8 @@ function fakeCtx(cwd: string) {
 
 type Connected = { ide: ReturnType<typeof fakeIde>; project: string } & ReturnType<typeof fakePi> & ReturnType<typeof fakeCtx>;
 
-async function withConnectedIde(body: (harness: Connected) => Promise<void>): Promise<void> {
-  const ide = fakeIde();
+async function withConnectedIde(body: (harness: Connected) => Promise<void>, onCall?: CallResponder): Promise<void> {
+  const ide = fakeIde(undefined, onCall);
   await once(ide.server, 'listening');
   const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const project = join(root, 'project');
@@ -88,6 +94,71 @@ test('a connected editor registers its tools and reports the selection in the st
   });
 });
 
+test('editor context is a deterministic request snapshot, not a forced leading prompt', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx, status }) => {
+    const options = { sections: {} as Record<string, string> };
+    ide.broadcast('selection_changed', { text: 'line2', filePath: join(project, 'a.ts'), selection: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 }, isEmpty: false } });
+    await until(() => status.at(-1) === 'Neovim ✓ a.ts:2 ▮');
+    assert.deepEqual(options.sections, {}, 'unsubmitted editor notifications do not write prompt sections');
+    const first = await fire('before_agent_start', { systemPrompt: 'BASE', systemPromptOptions: options }, ctx);
+    assert.match(options.sections.editor_context, /Selected lines 2-2:\n```\nline2\n```/);
+    assert.equal(first.forcedSystemPrompt, undefined);
+    const nextOptions = { sections: {} as Record<string, string> };
+    await fire('before_agent_start', { systemPrompt: 'BASE', systemPromptOptions: nextOptions }, ctx);
+    assert.equal(nextOptions.sections.editor_context, options.sections.editor_context);
+  });
+});
+
+test('editor sends are acknowledged only after the submitted snapshot is assigned', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    ide.broadcast('at_mentioned', { filePath: join(project, 'a.ts'), lineStart: 1, lineEnd: 1 });
+    await settle();
+    const sections = new Proxy({}, { set() { throw new Error('request preparation failed'); } });
+    await assert.rejects(fire('before_agent_start', { systemPrompt: 'BASE', systemPromptOptions: { sections } }, ctx), /request preparation failed/);
+    const retry = await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.ok(retry.systemPrompt.includes('User sent from editor:'), 'failed preparation retains the send');
+    assert.ok(retry.systemPrompt.includes('line2'));
+    const next = await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.ok(!next.systemPrompt.includes('User sent from editor:'), 'a successful snapshot consumes its own sends');
+  });
+});
+
+test('submitted absolute editor sends remain available after the editor disconnects', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx, status }) => {
+    ide.broadcast('at_mentioned', { filePath: join(project, 'a.ts'), lineStart: 0, lineEnd: 0 });
+    await settle();
+    await ide.close();
+    await until(() => status.at(-1) === undefined);
+    const turn = await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.ok(turn?.systemPrompt.includes('User sent from editor:'), 'a disconnect does not discard an explicitly sent file');
+    assert.ok(turn.systemPrompt.includes('line1'));
+    assert.equal(await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx), undefined);
+  });
+});
+
+test('unresolvable editor sends are reported once rather than silently discarded or guessed', async () => {
+  await withConnectedIde(async ({ ide, fire, ctx, notices }) => {
+    ide.broadcast('at_mentioned', { filePath: 'unresolved.ts', lineStart: 0, lineEnd: 0 });
+    await settle();
+    const turn = await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.ok(!turn.systemPrompt.includes('unresolved.ts'), 'the model must not guess a relative editor path');
+    assert.ok(notices.some(notice => notice.includes('1 editor send could not be resolved')));
+    await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.equal(notices.length, 1, 'the failed send is reported once for its submitted batch');
+  });
+});
+
+test('a large live selection is explicitly marked as incomplete after receipt', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx, status }) => {
+    ide.broadcast('selection_changed', { text: 'x'.repeat(maxSelectionChars - 1) + '😀tail', filePath: join(project, 'a.ts'), selection: { start: { line: 0, character: 0 }, end: { line: 0, character: 50006 }, isEmpty: false } });
+    await until(() => status.at(-1) === 'Neovim ✓ a.ts:1 ▮');
+    const turn = await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    assert.match(turn.systemPrompt, /truncated selection/);
+    assert.doesNotMatch(turn.systemPrompt, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u, 'clipping does not split a surrogate pair');
+    assert.doesNotMatch(turn.systemPrompt, /tail/);
+  });
+});
+
 test('follow after edit opens the changed file, and /vim follow turns it off', async () => {
   await withConnectedIde(async ({ ide, project, fire, commands, ctx, notices }) => {
     await fire('tool_execution_start', { toolCallId: 't1', toolName: 'edit', args: { path: 'a.ts', edits: [] } }, ctx);
@@ -115,6 +186,154 @@ test('follow after edit opens the changed file, and /vim follow turns it off', a
     assert.equal(notices.at(-1), 'Editor follows pi edits: off', 'an unrecognised argument only reports the current setting');
     await commands.get('vim').handler('follow on', ctx);
     assert.equal(notices.at(-1), 'Editor follows pi edits: on');
+  });
+});
+
+test('a burst of edits reveals only the latest destination', async () => {
+  await withConnectedIde(async ({ ide, fire, ctx }) => {
+    for (const path of ['first.ts', 'middle.ts', 'latest.ts']) {
+      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
+      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
+    }
+    await until(() => ide.calls.length > 0);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.deepEqual(ide.calls.map(call => call.arguments.filePath.split('/').at(-1)), ['latest.ts']);
+  });
+});
+
+test('the latest edit made during a reconnect is revealed when the editor becomes ready', async () => {
+  await withConnectedIde(async ({ ide, fire, commands, ctx, status }) => {
+    await commands.get('vim').handler('reconnect', ctx);
+    assert.equal(status.at(-1), undefined);
+    for (const path of ['older.ts', 'latest.ts']) {
+      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
+      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
+    }
+    await until(() => status.at(-1) === 'Neovim ✓');
+    await until(() => ide.calls.length > 0);
+    assert.deepEqual(ide.calls.map(call => call.arguments.filePath.split('/').at(-1)), ['latest.ts']);
+  });
+});
+
+test('a follow interrupted before its reply is replayed after reconnecting', async () => {
+  let attempts = 0;
+  await withConnectedIde(async ({ ide, fire, commands, ctx, status, notices }) => {
+    await fire('tool_execution_start', { toolCallId: 'edit', toolName: 'write', args: { path: 'a.ts' } }, ctx);
+    await fire('tool_execution_end', { toolCallId: 'edit', toolName: 'write', isError: false, result: {} }, ctx);
+    await until(() => status.at(-1) === undefined);
+    await commands.get('vim').handler('reconnect', ctx);
+    await until(() => attempts === 2);
+    assert.equal(ide.calls.length, 2);
+    assert.equal(ide.calls[0].arguments.filePath, ide.calls[1].arguments.filePath);
+    assert.ok(!notices.some(notice => notice.includes('Could not reveal')));
+  }, (call, _reply, socket) => {
+    if (call.name !== 'openFile') return false;
+    attempts++;
+    if (attempts === 1) { socket.terminate(); return true; }
+    return false;
+  });
+});
+
+test('follow errors warn once per failure episode and do not automatically retry', async () => {
+  await withConnectedIde(async ({ ide, fire, ctx, notices }) => {
+    for (const [i, path] of ['bad1.ts', 'bad2.ts', 'good.ts', 'bad3.ts'].entries()) {
+      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
+      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
+      await until(() => ide.calls.length === i + 1);
+      await settle();
+      assert.equal(notices.filter(notice => notice.includes('Could not reveal')).length, i === 3 ? 2 : 1);
+    }
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(ide.calls.length, 4, 'connected tool errors do not retry themselves');
+  }, (call, reply) => {
+    if (!String(call.arguments.filePath).includes('bad')) return false;
+    reply({ content: [{ type: 'text', text: 'File cannot be opened' }], isError: true });
+    return true;
+  });
+});
+
+test('a stalled follow expires within five seconds so the newer edit can be revealed', async () => {
+  await withConnectedIde(async ({ ide, fire, ctx, notices }) => {
+    for (const path of ['stalled.ts', 'newer.ts']) {
+      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
+      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
+      if (path === 'stalled.ts') await until(() => ide.calls.length === 1);
+    }
+    await until(() => ide.calls.length === 2, 6500);
+    assert.equal(ide.calls[1].arguments.filePath.split('/').at(-1), 'newer.ts');
+    assert.equal(notices.filter(notice => notice.includes('Could not reveal')).length, 1);
+  }, call => String(call.arguments.filePath).endsWith('stalled.ts'));
+});
+
+test('an explicit editor open takes priority over a pending automatic follow', async () => {
+  await withConnectedIde(async ({ ide, fire, tools, ctx }) => {
+    await fire('tool_execution_start', { toolCallId: 'edit', toolName: 'write', args: { path: 'automatic.ts' } }, ctx);
+    await fire('tool_execution_end', { toolCallId: 'edit', toolName: 'write', isError: false, result: {} }, ctx);
+    await tools.get('nvim_open').execute('open', { path: 'explicit.ts' }, undefined, undefined, ctx);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.deepEqual(ide.calls.map(call => call.arguments.filePath.split('/').at(-1)), ['explicit.ts']);
+  });
+});
+
+test('follow off cancels queued destinations and ignores late replies from a stalled jump', async () => {
+  let lateReply: ((result: unknown) => void) | undefined;
+  await withConnectedIde(async ({ ide, fire, commands, ctx, notices }) => {
+    const edit = async (path: string) => {
+      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
+      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
+    };
+    await edit('stalled.ts');
+    await until(() => lateReply !== undefined);
+    await edit('queued.ts');
+    await commands.get('vim').handler('follow off', ctx);
+    await edit('while-off.ts');
+    await commands.get('vim').handler('follow on', ctx);
+    await edit('fresh.ts');
+    await until(() => ide.calls.length === 2);
+    lateReply!({ content: [{ type: 'text', text: 'late failure' }], isError: true });
+    await edit('final.ts');
+    await until(() => ide.calls.length === 3);
+    assert.deepEqual(ide.calls.map(call => call.arguments.filePath.split('/').at(-1)), ['stalled.ts', 'fresh.ts', 'final.ts']);
+    assert.ok(!notices.some(notice => notice.includes('Could not reveal')));
+  }, (call, reply) => {
+    if (!String(call.arguments.filePath).endsWith('stalled.ts')) return false;
+    lateReply = reply;
+    return true;
+  });
+});
+
+test('session replacement clears queued follows and sends and paints the new session status', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    ide.broadcast('at_mentioned', { filePath: join(project, 'a.ts') });
+    await settle();
+    await fire('tool_execution_start', { toolCallId: 'old', toolName: 'write', args: { path: 'old-session.ts' } }, ctx);
+    await fire('tool_execution_end', { toolCallId: 'old', toolName: 'write', isError: false, result: {} }, ctx);
+    const next = fakeCtx(project);
+    await fire('session_start', {}, next.ctx);
+    await until(() => next.status.includes('Neovim ✓'));
+    const turn = await fire('before_agent_start', { systemPrompt: 'BASE' }, next.ctx);
+    assert.ok(!turn.systemPrompt.includes('User sent from editor:'));
+    await fire('tool_execution_start', { toolCallId: 'fresh', toolName: 'write', args: { path: 'new-session.ts' } }, next.ctx);
+    await fire('tool_execution_end', { toolCallId: 'fresh', toolName: 'write', isError: false, result: {} }, next.ctx);
+    await until(() => ide.calls.length === 1);
+    assert.equal(ide.calls[0].arguments.filePath.split('/').at(-1), 'new-session.ts');
+  });
+});
+
+test('an expired disconnected destination is not replayed ahead of a fresh edit', async t => {
+  await withConnectedIde(async ({ ide, fire, commands, ctx, status }) => {
+    t.mock.timers.enable({ apis: ['Date'], now: 0 });
+    await commands.get('vim').handler('reconnect', ctx);
+    await fire('tool_execution_start', { toolCallId: 'stale', toolName: 'write', args: { path: 'stale.ts' } }, ctx);
+    await fire('tool_execution_end', { toolCallId: 'stale', toolName: 'write', isError: false, result: {} }, ctx);
+    t.mock.timers.setTime(31000);
+    await until(() => status.at(-1) === 'Neovim ✓');
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await fire('tool_execution_start', { toolCallId: 'fresh', toolName: 'write', args: { path: 'fresh.ts' } }, ctx);
+    await fire('tool_execution_end', { toolCallId: 'fresh', toolName: 'write', isError: false, result: {} }, ctx);
+    await until(() => ide.calls.length > 0);
+    assert.deepEqual(ide.calls.map(call => call.arguments.filePath.split('/').at(-1)), ['fresh.ts']);
+    t.mock.timers.reset();
   });
 });
 
@@ -242,7 +461,7 @@ test('editor context renders selection, cursor and mentions, and nothing when di
   const cursor = editorContext({ connected: true, mentions: 0, selection: { text: '', filePath: '/g.ts', start: { line: 0, character: 0 }, end: { line: 0, character: 0 }, isEmpty: true } }, [{ mention: { filePath: '/h.ts', lineStart: 2, lineEnd: 3 }, text: 'a\nb' }, { mention: { filePath: '/dir' } }]);
   assert.match(cursor!, /Active file: \/g\.ts \(cursor at line 1\)/);
   assert.match(cursor!, /User sent from editor: \/h\.ts lines 2-3\n```\na\nb\n```/);
-  assert.match(cursor!, /User sent from editor: \/dir$/);
+  assert.match(cursor!, /User sent from editor: \/dir$/m);
 });
 
 test('status text shows connection, active file, cursor line or selected range', () => {
@@ -307,6 +526,24 @@ test('a mention past the line cap is clipped in the body but keeps the requested
     await settle();
     const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
     assert.match(turn.systemPrompt, /User sent from editor: .*big\.ts lines 1-2500\n```\n(?:L\d+\n){1999}L2000\n```/);
+    assert.match(turn.systemPrompt, /truncated: showing lines 1-2000 of requested 1-2500/);
+  });
+});
+
+test('a submitted editor snapshot has one shared budget while retaining send references', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    for (const file of ['first.ts', 'second.ts', 'third.ts']) {
+      await writeFile(join(project, file), 'SOURCE_' + file + ':' + 'x'.repeat(60000));
+      ide.broadcast('at_mentioned', { filePath: join(project, file), lineStart: 0, lineEnd: 0 });
+    }
+    await settle();
+    const options = { sections: {} as Record<string, string> };
+    await fire('before_agent_start', { systemPrompt: 'BASE', systemPromptOptions: options }, ctx);
+    const snapshot = options.sections.editor_context;
+    assert.ok(snapshot.length <= 100000, `snapshot exceeded shared budget: ${snapshot.length}`);
+    for (const file of ['first.ts', 'second.ts', 'third.ts']) assert.ok(snapshot.includes(`User sent from editor: ${join(project, file)} lines 1-1`));
+    assert.ok(snapshot.includes('SOURCE_first.ts:'));
+    assert.ok(snapshot.includes('context budget'));
   });
 });
 

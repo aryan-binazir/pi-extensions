@@ -1,0 +1,11 @@
+# 013: Save editor context as request snapshots and bound live follow
+
+Status: accepted. Supersedes the context delivery and follow semantics in [ADR 012](012-nvim-ide.md); its transport, discovery and no-approval decisions remain unchanged.
+
+Editor notifications stay in memory. At a submitted turn, inject one deterministic `editor_context` prompt section through Pi's structured prompt options, rather than replacing the leading prompt. Ar explicitly chose to save editor context when passed with a request, not to record every cursor movement or unsubmitted selection. Pi persists request snapshots and section changes in its append-only session history; they can appear in forks and exports, and compaction does not erase the original disk history. The 100,000-character budget is per snapshot, not a lifetime retention limit. Cache-prefix preservation depends on the model's support for mid-conversation system updates, not just on this extension.
+
+Resolve relative sends against the originating socket's live workspace at receipt, not against Pi's directory, cached lock folders or a later editor. Failed resolution is reported on submission rather than silently guessed. Acknowledge a prepared batch only after assigning its request section, removing its original entries by identity so newer arrivals survive. Resolved absolute sends can be submitted after a disconnect. The acknowledgement is a request-preparation boundary, not proof of provider acceptance; Pi has no extension callback proving delivery of the assembled prompt to the provider.
+
+Automatic follow is a single-flight, latest-wins queue with a fixed 100 ms coalescing window, a five-second request deadline and a 30-second replay lifetime. Queue edits while disconnected only after this session has connected to an editor. A lost reply permits harmless at-least-once replay; connected tool errors are not retried automatically. Turning follow off, explicit opens, session replacement and shutdown clear pending navigation and invalidate late callbacks. Cancellation cannot undo `openFile` already received by the editor.
+
+The [living editor-link specification](../nvim-ide.md) defines the limits and commands. Implementation is typechecked against pinned Pi 0.99.1 and follows the Pi 1.0.2 extension contracts; both expose structured `systemPromptOptions.sections`.

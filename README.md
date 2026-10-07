@@ -53,7 +53,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
 | [Guard](#guard-setup-for-agents) | Blocks non-draft PR creation and administrator merges in recognizable Bash `gh` calls. |
 | Auto Permissions status | Displays the separately installed Bash-approval plugin's status. |
-| [Neovim IDE](docs/adr/012-nvim-ide.md) | Connects to claudecode.nvim like Claude Code does: selection and `:ClaudeCodeSend` context, editor tools, jumps to pi edits. |
+| [Neovim IDE](docs/nvim-ide.md) | Connects to claudecode.nvim: bounded request snapshots, reliable editor sends, editor tools, and coalesced live follow with reconnect replay. |
 
 See [session/editor behavior and worktree boundaries](docs/extension-behavior.md)
 for operational details. Prompt stash's shortcut applies only to the main editor;

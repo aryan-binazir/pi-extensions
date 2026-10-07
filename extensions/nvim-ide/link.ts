@@ -9,7 +9,7 @@ const loadWs = () => (wsModule ??= import('ws').then(m => m.default));
 const OPEN = 1, CLOSED = 3;
 
 interface Position { line: number; character: number }
-interface Selection { text: string; filePath: string; start: Position; end: Position; isEmpty: boolean }
+interface Selection { text: string; filePath: string; start: Position; end: Position; isEmpty: boolean; truncated?: boolean }
 export interface Mention { filePath: string; lineStart?: number; lineEnd?: number }
 export interface Lock { port: number; authToken: string; workspaceFolders: string[]; ideName: string; mtimeMs: number }
 export interface LinkState { connected: boolean; ideName?: string; port?: number; selection?: Selection; mentions: number }
@@ -53,6 +53,7 @@ export function chooseLock(locks: Lock[], cwd: string, envPort = process.env.CLA
   return best?.lock;
 }
 
+interface QueuedMention { mention?: Mention; ready: Promise<void> }
 interface Pending { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 type Content = { type: string; text?: string }[];
 
@@ -75,10 +76,12 @@ export class IdeLink {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private selection?: Selection;
-  private mentions: Mention[] = [];
+  private mentions: QueuedMention[] = [];
+  private workspaceLookup?: { socket: WebSocket; root: Promise<string | undefined> };
   private ready = false;
   private zeroBasedMentionLines = false;
   private pendingMentions: unknown[] = [];
+  private droppedMentions = 0;
   constructor(private readonly options: LinkOptions) {}
 
   get state(): LinkState { return { connected: this.ready, ideName: this.lock?.ideName, port: this.lock?.port, selection: this.selection, mentions: this.mentions.length }; }
@@ -100,20 +103,42 @@ export class IdeLink {
     });
   }
   reconnect(): void { const socket = this.socket; this.drop(new Error('reconnecting')); socket?.terminate(); void this.attempt(); }
+  async prepareMentions(): Promise<{ mentions: Mention[]; undelivered: number; dropped: number; acknowledge: () => void }> {
+    const taken = [...this.mentions];
+    const dropped = this.droppedMentions;
+    let acknowledged = false;
+    await Promise.all(taken.map(item => item.ready));
+    const mentions = taken.flatMap(item => item.mention ? [item.mention] : []);
+    return { mentions, undelivered: taken.length - mentions.length, dropped, acknowledge: () => {
+      if (acknowledged) return;
+      acknowledged = true;
+      this.droppedMentions = Math.max(0, this.droppedMentions - dropped);
+      const before = this.mentions.length;
+      this.mentions = this.mentions.filter(mention => !taken.includes(mention));
+      if (before !== this.mentions.length) this.emit();
+    } };
+  }
   async takeMentions(): Promise<Mention[]> {
-    const taken = this.mentions;
-    this.mentions = [];
-    if (taken.length) this.emit();
-    if (taken.every(mention => isAbsolute(mention.filePath))) return taken;
+    const batch = await this.prepareMentions();
+    batch.acknowledge();
+    return batch.mentions;
+  }
+
+  private liveWorkspaceRoot(): Promise<string | undefined> {
     const socket = this.socket;
-    let root: string | undefined;
-    try {
-      const workspace: unknown = JSON.parse(await this.call('getWorkspaceFolders'));
+    if (!socket) return Promise.resolve(undefined);
+    if (this.workspaceLookup?.socket === socket) return this.workspaceLookup.root;
+    const root = this.call('getWorkspaceFolders', {}, AbortSignal.timeout(1000)).then(text => {
+      const workspace: unknown = JSON.parse(text);
       if (this.socket === socket && workspace && typeof workspace === 'object'
         && 'rootPath' in workspace && typeof workspace.rootPath === 'string' && isAbsolute(workspace.rootPath)
-        && !('success' in workspace && workspace.success === false)) root = workspace.rootPath;
-    } catch {}
-    return taken.flatMap(mention => isAbsolute(mention.filePath) ? [mention] : root ? [{ ...mention, filePath: resolve(root, mention.filePath) }] : []);
+        && !('success' in workspace && workspace.success === false)) return workspace.rootPath;
+      return undefined;
+    }).catch(() => undefined).finally(() => {
+      if (this.workspaceLookup?.root === root) this.workspaceLookup = undefined;
+    });
+    this.workspaceLookup = { socket, root };
+    return root;
   }
 
   async call(name: string, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<string> {
@@ -142,7 +167,7 @@ export class IdeLink {
       return;
     }
     this.socket = socket;
-    socket.on('message', data => this.receive(data.toString()));
+    socket.on('message', data => { if (this.socket === socket) this.receive(data.toString()); });
     socket.on('error', error => trace?.(`socket error ${error.message}`));
     socket.on('close', (code, reason) => { trace?.(`close ${code} ${reason} current=${this.socket === socket}`); if (this.socket === socket) { this.drop(new Error('IDE disconnected')); this.schedule(this.options.retryMs ?? 15000); } });
     socket.once('open', () => {
@@ -209,8 +234,9 @@ export class IdeLink {
     trace?.(`drop ${error.message}`);
     const wasReady = this.ready;
     this.socket?.removeAllListeners('close');
+    this.droppedMentions += this.pendingMentions.length;
     this.socket = undefined; this.ready = false; this.zeroBasedMentionLines = false; this.pendingMentions = []; this.lock = undefined; this.selection = undefined;
-    this.mentions = this.mentions.filter(mention => isAbsolute(mention.filePath));
+    this.workspaceLookup = undefined;
     for (const item of this.pending.values()) item.reject(error);
     if (wasReady) this.emit();
   }
@@ -252,20 +278,27 @@ export class IdeLink {
       const range = (data.selection ?? {}) as Partial<Selection>;
       if (typeof data.filePath !== 'string' || !isPosition(range.start) || !isPosition(range.end)) return;
       const raw = typeof data.text === 'string' ? data.text : '';
-      const text = raw.length > maxSelectionChars ? raw.slice(0, maxSelectionChars) : raw;
-      this.selection = { text, filePath: data.filePath, start: range.start, end: range.end, isEmpty: range.isEmpty === true || text.length === 0 };
+      let text = raw.slice(0, maxSelectionChars);
+      if (raw.length > text.length && /[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+      this.selection = { text, filePath: data.filePath, start: range.start, end: range.end, isEmpty: range.isEmpty === true || text.length === 0, ...(text.length < raw.length ? { truncated: true } : {}) };
       this.emit();
     } else if (method === 'at_mentioned') {
       if (typeof data.filePath !== 'string') return;
       if (!this.ready) {
-        if (this.pendingMentions.length >= 50) this.pendingMentions.shift();
+        if (this.pendingMentions.length >= 50) { this.pendingMentions.shift(); this.droppedMentions++; }
         this.pendingMentions.push(params);
         return;
       }
       const offset = this.zeroBasedMentionLines ? 1 : 0;
       const line = (value: unknown) => typeof value === 'number' && Number.isInteger(value) && value >= 1 - offset ? value + offset : undefined;
-      if (this.mentions.length >= 50) this.mentions.shift();
-      this.mentions.push({ filePath: data.filePath, lineStart: line(data.lineStart), lineEnd: line(data.lineEnd) });
+      if (this.mentions.length >= 50) { this.mentions.shift(); this.droppedMentions++; }
+      const mention = { filePath: data.filePath, lineStart: line(data.lineStart), lineEnd: line(data.lineEnd) };
+      const item: QueuedMention = { ready: Promise.resolve() };
+      if (isAbsolute(mention.filePath)) item.mention = mention;
+      else item.ready = this.liveWorkspaceRoot().then(root => {
+        if (root) item.mention = { ...mention, filePath: resolve(root, mention.filePath) };
+      });
+      this.mentions.push(item);
       this.emit();
     }
   }

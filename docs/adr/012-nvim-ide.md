@@ -1,6 +1,6 @@
 # 012: Connect to the editor through the Claude Code IDE protocol
 
-Status: accepted.
+Status: accepted. Context delivery and follow semantics are superseded by [ADR 013](013-editor-request-snapshots.md); transport, discovery and the no-approval decision remain unchanged.
 
 ## Decision
 

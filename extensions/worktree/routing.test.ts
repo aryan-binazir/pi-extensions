@@ -64,9 +64,10 @@ test('restored active checkout routes shell and relative files while preserving 
     let output = '';
     await user.operations.exec('pwd', original, { onData: (data: Buffer) => output += data.toString() });
     assert.equal(output.trim(), active);
-    assert.equal(
-      handlers.before_agent_start({ systemPrompt: 'base' }, ctx).systemPrompt,
-      `base\n\nActive worktree directory: ${active}. Built-in bash, user shell, and relative file tools use this directory. Absolute paths are unchanged. Pi's original session directory remains ${original}; session storage, loaded context/resources, and arbitrary extension internals are not relocated. Subagents resolve defaults against the active worktree. Inspect this checkout's instructions before editing.`,
+    const options = { sections: {} as Record<string, string> };
+    assert.equal(handlers.before_agent_start({ systemPromptOptions: options }, ctx), undefined);
+    assert.equal(options.sections.active_worktree,
+      `Active worktree directory: ${active}. Built-in bash, user shell, and relative file tools use this directory. Absolute paths are unchanged. Pi's original session directory remains ${original}; session storage, loaded context/resources, and arbitrary extension internals are not relocated. Subagents resolve defaults against the active worktree. Inspect this checkout's instructions before editing.`,
     );
     await handlers.session_shutdown({}, ctx); assert.equal(getActiveCwd(original, 'synthetic'), original);
     ctx.sessionManager.getBranch = () => [];

@@ -10,6 +10,12 @@ import { WebSocketServer } from 'ws';
 import { IdeLink, chooseLock, maxSelectionChars, readLocks, type Lock, type LinkState } from './link.ts';
 import { fakeIde, token, until } from './test-support.ts';
 
+async function submittedMentions(link: IdeLink) {
+  const batch = await link.prepareMentions();
+  batch.acknowledge();
+  return batch.mentions;
+}
+
 const lockFile = (overrides: Record<string, unknown> = {}) => JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token, ...overrides });
 
 test('lock files: parse, skip dead pids and junk, choose by workspace then env', async () => {
@@ -102,7 +108,7 @@ test('connects with the token, tracks selection and mentions, calls tools, recon
     ide.broadcast('at_mentioned', { filePath: '/w/project', lineStart: null, lineEnd: null });
     await until(() => link.state.mentions === 2);
     assert.equal(link.state.selection?.filePath, '/w/project/b.ts', 'a malformed selection_changed leaves the last good selection in place');
-    assert.deepEqual(await link.takeMentions(), [{ filePath: '/w/project/c.ts', lineStart: 3, lineEnd: 9 }, { filePath: '/w/project', lineStart: undefined, lineEnd: undefined }]);
+    assert.deepEqual(await submittedMentions(link), [{ filePath: '/w/project/c.ts', lineStart: 3, lineEnd: 9 }, { filePath: '/w/project', lineStart: undefined, lineEnd: undefined }]);
     assert.equal(link.state.mentions, 0);
 
     assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
@@ -328,8 +334,47 @@ test('a mention sent before initialize identifies the server still includes row 
     await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
     link.start();
     await until(() => link.connected && link.state.mentions === 1);
-    assert.deepEqual(await link.takeMentions(), [{ filePath: '/w/a.ts', lineStart: 1, lineEnd: 1 }]);
+    assert.deepEqual(await submittedMentions(link), [{ filePath: '/w/a.ts', lineStart: 1, lineEnd: 1 }]);
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('relative sends before initialization cannot be rebound to a later workspace', async () => {
+  let finishInitialize: (() => void) | undefined;
+  let root = '/original';
+  let rootLookups = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  server.on('connection', socket => socket.on('message', raw => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === 'initialize') {
+      socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'at_mentioned', params: { filePath: 'relative.ts', lineStart: 0, lineEnd: 0 } }));
+      socket.send(JSON.stringify({ jsonrpc: '2.0', method: 'at_mentioned', params: { filePath: '/original/absolute.ts', lineStart: 0, lineEnd: 0 } }));
+      finishInitialize = () => socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { serverInfo: { name: 'claudecode-neovim' } } }));
+    } else if (message.method === 'tools/call') {
+      rootLookups++;
+      socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify({ rootPath: root }) }] } }));
+    }
+  }));
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${port}.lock`), lockFile());
+    link.start();
+    await until(() => !!finishInitialize);
+    root = '/replacement';
+    finishInitialize!();
+    await until(() => link.connected && link.state.mentions === 2);
+    const batch = await link.prepareMentions();
+    assert.deepEqual(batch.mentions.map(mention => mention.filePath), ['/original/absolute.ts']);
+    assert.equal(batch.undelivered, 1);
+    assert.equal(rootLookups, 0, 'the newer workspace is not used to guess ownership');
+  } finally {
+    await link.stop();
+    for (const socket of server.clients) socket.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('mention row conversion follows initialized identity across reconnects, not the lock label', async () => {
@@ -366,8 +411,126 @@ test('mention row conversion follows initialized identity across reconnects, not
       const ranges = name === 'claudecode-neovim'
         ? [[1, 1], [2, 3], [1, undefined], [undefined, undefined], [undefined, undefined], [undefined, undefined]]
         : [[undefined, undefined], [1, 2], [undefined, undefined], [undefined, undefined], [undefined, undefined], [undefined, undefined]];
-      assert.deepEqual(await link.takeMentions(), ranges.map(([lineStart, lineEnd]) => ({ filePath: '/w/a.ts', lineStart, lineEnd })));
+      assert.deepEqual(await submittedMentions(link), ranges.map(([lineStart, lineEnd]) => ({ filePath: '/w/a.ts', lineStart, lineEnd })));
     }
+  } finally {
+    await link.stop();
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('prepared editor sends survive until acknowledgement and never consume newer sends', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    ide.broadcast('at_mentioned', { filePath: '/w/first.ts' });
+    await until(() => link.state.mentions === 1);
+    const first = await link.prepareMentions();
+    assert.deepEqual(first.mentions, [{ filePath: '/w/first.ts', lineStart: undefined, lineEnd: undefined }]);
+    assert.equal(link.state.mentions, 1, 'preparing is not delivery');
+    ide.broadcast('at_mentioned', { filePath: '/w/newer.ts' });
+    await until(() => link.state.mentions === 2);
+    link.reconnect();
+    await until(() => link.connected);
+    assert.equal(link.state.mentions, 2, 'absolute sends survive a reconnect');
+    first.acknowledge();
+    first.acknowledge();
+    assert.deepEqual((await link.prepareMentions()).mentions.map(item => item.filePath), ['/w/newer.ts']);
+  } finally {
+    await link.stop();
+    await ide.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('bounded send queues protect prepared sends and report rejected new arrivals', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    for (let i = 0; i < 51; i++) ide.broadcast('at_mentioned', { filePath: `/w/${i}.ts` });
+    await until(() => link.state.mentions === 50);
+    const first = await link.prepareMentions();
+    assert.equal(first.dropped, 1);
+    assert.equal(first.mentions[0].filePath, '/w/1.ts');
+    ide.broadcast('at_mentioned', { filePath: '/w/newer.ts' });
+    await link.call('getWorkspaceFolders');
+    const held = await link.prepareMentions();
+    assert.equal(held.mentions[0].filePath, '/w/1.ts', 'a pending snapshot is not evicted while its request is prepared');
+    assert.ok(!held.mentions.some(mention => mention.filePath === '/w/newer.ts'));
+    first.acknowledge();
+    first.acknowledge();
+    const next = await link.prepareMentions();
+    assert.deepEqual(next.mentions, []);
+    assert.equal(next.dropped, 1, 'the rejected new arrival is reported, not an already delivered send');
+  } finally {
+    await link.stop();
+    await ide.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('overlapping preparations acknowledge dropped sends with a monotonic watermark', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    for (let i = 0; i < 51; i++) ide.broadcast('at_mentioned', { filePath: `/w/old-${i}.ts` });
+    await link.call('getWorkspaceFolders');
+    const first = await link.prepareMentions(), overlapping = await link.prepareMentions();
+    assert.equal(first.dropped, 1);
+    first.acknowledge();
+    for (let i = 0; i < 51; i++) ide.broadcast('at_mentioned', { filePath: `/w/new-${i}.ts` });
+    await link.call('getWorkspaceFolders');
+    overlapping.acknowledge();
+    const next = await link.prepareMentions();
+    assert.equal(next.dropped, 1, 'an older acknowledgement cannot erase newer overflow');
+    next.acknowledge();
+    assert.equal((await link.prepareMentions()).dropped, 0);
+  } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('relative sends capture the live editor root at receipt, without waiting for a turn', async () => {
+  let root = '/sent-from';
+  let lookups = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  server.on('connection', socket => socket.on('message', raw => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }));
+    else if (message.method === 'tools/call') {
+      lookups++;
+      socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: JSON.stringify({ success: true, rootPath: root }) }] } }));
+    }
+  }));
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${port}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    for (const client of server.clients) client.send(JSON.stringify({ jsonrpc: '2.0', method: 'at_mentioned', params: { filePath: 'chosen.ts' } }));
+    await until(() => lookups === 1, 1000);
+    root = '/changed-after-send';
+    const batch = await link.prepareMentions();
+    assert.deepEqual(batch.mentions.map(mention => mention.filePath), ['/sent-from/chosen.ts']);
+    assert.equal(lookups, 1, 'preparing a request performs no new workspace lookup');
   } finally {
     await link.stop();
     for (const client of server.clients) client.terminate();
@@ -394,7 +557,7 @@ test('mentions never fall back to Pi cwd or stale lock folders when live workspa
   await once(server, 'listening');
   const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const port = (server.address() as { port: number }).port;
-  const link = new IdeLink({ cwd: '/w/nested', lockDir: dir, alive: () => true, requestTimeoutMs: 100 });
+  const link = new IdeLink({ cwd: '/w/nested', lockDir: dir, alive: () => true, requestTimeoutMs: 3000 });
   const send = (filePath: string) => {
     for (const client of server.clients) client.send(JSON.stringify({ jsonrpc: '2.0', method: 'at_mentioned', params: { filePath, lineStart: 2, lineEnd: 3 } }));
   };
@@ -407,32 +570,35 @@ test('mentions never fall back to Pi cwd or stale lock folders when live workspa
       send('selected.ts');
       send(absolute.filePath);
       await until(() => link.state.mentions === 2);
-      assert.deepEqual(await link.takeMentions(), [absolute], response);
-      assert.deepEqual(await link.takeMentions(), []);
+      assert.deepEqual(await submittedMentions(link), [absolute], response);
+      assert.deepEqual(await submittedMentions(link), []);
     }
     response = '{"success":true,"rootPath":"/w"}';
     isError = true;
     send('selected.ts');
     send(absolute.filePath);
     await until(() => link.state.mentions === 2);
-    assert.deepEqual(await link.takeMentions(), [absolute], 'tool errors preserve absolute mentions only');
+    assert.deepEqual(await submittedMentions(link), [absolute], 'tool errors preserve absolute mentions only');
     isError = false;
     answer = false;
+    const before = requests;
     send('selected.ts');
     await until(() => link.state.mentions === 1);
-    const before = requests;
-    const pending = link.takeMentions();
+    const pending = submittedMentions(link);
     await until(() => requests === before + 1);
     send(absolute.filePath);
-    await until(() => link.state.mentions === 1);
-    assert.deepEqual(await pending, [], 'a timeout never returns a relative path');
-    assert.deepEqual(await link.takeMentions(), [absolute], 'new notifications belong to the next batch');
+    await until(() => link.state.mentions === 2);
+    let lookupFinished = false;
+    void pending.then(() => { lookupFinished = true; });
+    await until(() => lookupFinished, 2000);
+    assert.deepEqual(await pending, [], 'the one-second workspace deadline beats the three-second RPC timeout');
+    assert.deepEqual(await submittedMentions(link), [absolute], 'new notifications belong to the next batch');
     assert.equal(requests, before + 1, 'absolute-only batches do not need the editor root');
 
     send('selected.ts');
     send(absolute.filePath);
     await until(() => link.state.mentions === 2);
-    const interrupted = link.takeMentions();
+    const interrupted = submittedMentions(link);
     let finished = false;
     void interrupted.then(() => { finished = true; });
     await until(() => requests === before + 2);
@@ -445,7 +611,7 @@ test('mentions never fall back to Pi cwd or stale lock folders when live workspa
     send(absolute.filePath);
     await until(() => link.state.mentions === 2);
     await link.stop();
-    assert.deepEqual(await link.takeMentions(), [absolute], 'relative mentions cannot survive into a replacement editor');
+    assert.deepEqual(await submittedMentions(link), [absolute], 'relative mentions cannot survive into a replacement editor');
   } finally {
     await link.stop();
     for (const client of server.clients) client.terminate();

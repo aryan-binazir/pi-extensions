@@ -17,9 +17,11 @@ function runtime(initial: any[] = [], colored = false) {
   let branch = initial;
   let widget: string[] | undefined;
   let component: Component | undefined;
+  let shortcut: string | undefined;
+  let toggle: (ctx: ExtensionContext) => Promise<void> | void;
   const warnings: string[] = [];
   const hooks = new Map<string, (event: any, ctx: any) => any>();
-  todo({ registerTool: (value: ToolDefinition) => { tool = value; }, on: (name: string, callback: any) => hooks.set(name, callback), appendEntry: (customType: string, data: unknown) => branch.push({ type: 'custom', customType, data }) } as unknown as ExtensionAPI);
+  todo({ registerTool: (value: ToolDefinition) => { tool = value; }, registerShortcut: (key: string, options: { handler: typeof toggle }) => { shortcut = key; toggle = options.handler; }, on: (name: string, callback: any) => hooks.set(name, callback), appendEntry: (customType: string, data: unknown) => branch.push({ type: 'custom', customType, data }) } as unknown as ExtensionAPI);
   const theme = { fg: (_color: string, text: string) => colored ? `\x1b[34m${text}\x1b[39m` : text };
   const ctx = { hasUI: true, sessionManager: { getBranch: () => branch }, ui: { setWidget: (_key: string, value: ((tui: unknown, theme: unknown) => Component) | undefined) => { component = value?.(undefined, theme); widget = component?.render(40); }, notify: (message: string) => { warnings.push(message); } } } as unknown as ExtensionContext;
   const toolContext: ExtensionToolContext = {...ctx, tools: [], executeTool: async () => { throw new Error('No nested tools in this fixture'); }};
@@ -29,8 +31,36 @@ function runtime(initial: any[] = [], colored = false) {
     const result = await hook('context');
     return result?.messages.at(-1)?.content;
   };
-  return { turn, reminder: async () => (await hook('context'))?.messages.at(-1)?.content, call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, toolContext), hook, branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, render: (width: number) => component?.render(width) ?? [], warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
+  return { turn, reminder: async () => (await hook('context'))?.messages.at(-1)?.content, call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, toolContext), hook, branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, render: (width: number) => component?.render(width) ?? [], toggle: () => toggle(ctx), shortcut: () => shortcut, warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
 }
+
+test('compact summary prioritizes the current task and toggles without changing saved progress', async () => {
+  const app = runtime();
+  assert.equal(app.shortcut(), 'alt+t');
+  await app.call([{ content: 'Done', status: 'completed' }, { content: 'Next', status: 'pending' }, { content: 'Current', status: 'in_progress' }]);
+  assert.deepEqual(app.widget(), ['Todos 1/3 · alt+t · Current']);
+  const saved = app.branch();
+  const reminder = await app.reminder();
+  await app.toggle();
+  assert.match(app.widget()!.join('\n'), /Todo — declared progress · alt\+t/);
+  assert.match(app.widget()!.join('\n'), /✓ Done[\s\S]*○ Next[\s\S]*→ Current/);
+  await app.hook('session_tree');
+  assert.ok(app.widget()!.length > 1);
+  await app.toggle();
+  assert.deepEqual(app.widget(), ['Todos 1/3 · alt+t · Current']);
+  assert.deepEqual(app.branch(), saved);
+  assert.equal(await app.reminder(), reminder);
+  await app.call([{ content: 'Done', status: 'completed' }, { content: 'Next', status: 'pending' }]);
+  assert.deepEqual(app.widget(), ['Todos 1/2 · alt+t · Next']);
+  await app.toggle();
+  await app.call([{ content: 'Done', status: 'completed' }]);
+  assert.equal(app.widget(), undefined);
+  await app.toggle();
+  assert.equal(app.widget(), undefined);
+  const resumed = runtime(saved);
+  await resumed.hook('session_start');
+  assert.deepEqual(resumed.widget(), ['Todos 1/3 · alt+t · Current']);
+});
 
 test('todo updates fit narrow main-screen frames and remain visible after resizing', async t => {
   for (const width of [1, 2, 3, 4, 5, 6, 7, 8, 80]) {
@@ -55,14 +85,19 @@ test('todo updates fit narrow main-screen frames and remain visible after resizi
       screen.start();
       await app.call([{ content: 'A', status: 'pending' }]);
       screen.renderNow();
-      for (const content of ['B', '🧪', '界', 'क्ष्म', 'क्क्क्क']) {
-        await app.call([{ content, status: 'pending' }]);
-        assert.doesNotThrow(() => screen.renderNow(), `changed frame at ${width} columns: ${content}`);
-        const frame = app.render(width);
-        assert.ok(frame.every(line => visibleWidth(line) <= width), `frame fits ${width} columns`);
-        if (width < 6) assert.deepEqual(frame, []);
-        else assert.ok(frame.length > 0);
+      for (const expanded of [false, true]) {
+        if (expanded) await app.toggle();
+        for (const content of ['B', '🧪', '界', 'क्ष्म', 'क्क्क्क', 'Long task '.repeat(50)]) {
+          await app.call([{ content, status: 'pending' }]);
+          assert.doesNotThrow(() => screen.renderNow(), `changed frame at ${width} columns: ${content}`);
+          const frame = app.render(width);
+          assert.ok(frame.every(line => visibleWidth(line) <= width), `frame fits ${width} columns`);
+          if (width < 6) assert.deepEqual(frame, []);
+          else assert.ok(frame.length > 0);
+          if (!expanded && width >= 6) assert.equal(frame.length, 1);
+        }
       }
+      await app.call([{ content: 'क्क्क्क', status: 'pending' }]);
       assert.deepEqual(app.render(0), []);
       terminal.columns = 40;
       writes = '';
@@ -88,7 +123,7 @@ test('todo replacement normalizes list, enforces one active task and restores se
   await app.call([{ content: 'Different branch', status: 'pending' }]);
   app.switchTo(saved); await app.hook('session_tree');
   assert.match(app.widget()!.join('\n'), /Implement feature/);
-  assert.ok(app.widget()!.every(line => line.length === 40), 'border spans the render width');
+  assert.equal(app.widget()!.length, 1);
   assert.doesNotMatch(app.widget()!.join('\n'), /Different/);
   app.switchTo([]); await app.hook('session_start'); assert.equal(app.widget(), undefined);
   const resumed = runtime(saved); await resumed.hook('session_start'); assert.match(resumed.widget()!.join('\n'), /Implement feature/);
@@ -146,6 +181,8 @@ test('todo accepts 100 tasks and rejects an oversized replacement without changi
   const app = runtime();
   const tasks = Array.from({ length: 100 }, (_, index) => ({ content: `Task ${index + 1}`, status: 'pending' }));
   await app.call(tasks);
+  assert.deepEqual(app.widget(), ['Todos 0/100 · alt+t · Task 1']);
+  await app.toggle();
   assert.match(app.widget()!.join('\n'), /Task 100/);
   const before = app.branch();
   await assert.rejects(app.call([...tasks, { content: 'Task 101', status: 'pending' }]), /100/);
@@ -161,11 +198,11 @@ test('repeated branch switches restore each branch and still warn once per inval
   const second = [broken, snapshot('Alpha', 2), snapshot('Gamma', 3)];
   for (let pass = 0; pass < 3; pass++) {
     app.switchTo(first); await app.hook('session_tree');
-    assert.deepEqual(app.widget(), ['╭──────────────────────────────────────╮', '│ Todo — declared progress             │', '│ ○ Beta                               │', '╰──────────────────────────────────────╯']);
+    assert.deepEqual(app.widget(), ['Todos 0/1 · alt+t · Beta']);
     assert.equal(app.warnings().length, pass * 2 + 1);
     assert.equal(app.warnings().at(-1), 'Skipped 2 invalid or unsupported todo snapshots: Unsupported todo snapshot');
     app.switchTo(second); await app.hook('session_tree');
-    assert.deepEqual(app.widget(), ['╭──────────────────────────────────────╮', '│ Todo — declared progress             │', '│ ○ Gamma                              │', '╰──────────────────────────────────────╯']);
+    assert.deepEqual(app.widget(), ['Todos 0/1 · alt+t · Gamma']);
     assert.equal(app.warnings().length, pass * 2 + 2);
     assert.equal(app.warnings().at(-1), 'Skipped 1 invalid or unsupported todo snapshot: Unsupported todo snapshot');
   }

@@ -9,7 +9,7 @@ import { setActiveCwd } from '../extensions/worktree/routing.ts';
 const root = resolve(import.meta.dirname, '..');
 const expected = new Map<string, { tools: string[]; commands: string[]; shortcuts: string[] }>([
   ['questionnaire', {tools: ['questionnaire'], commands: [], shortcuts: []}],
-  ['todo', {tools: ['todo_write'], commands: [], shortcuts: []}],
+  ['todo', {tools: ['todo_write'], commands: [], shortcuts: ['alt+t']}],
   ['effort', {tools: [], commands: ['effort'], shortcuts: []}],
   ['btw', {tools: [], commands: ['btw', 'side'], shortcuts: []}],
   ['vi-mode', {tools: [], commands: [], shortcuts: []}],

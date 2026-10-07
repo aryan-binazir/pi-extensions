@@ -41,7 +41,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | Extension | What it does |
 | --- | --- |
 | Questionnaire | Interactive questions through the `questionnaire` tool. |
-| Todo | Session-backed task lists and stale-progress reminders. |
+| Todo | Compact task summary; `alt+t` toggles the full list. Session-backed progress and stale-progress reminders. |
 | Effort | `/effort` changes reasoning; `/effort new` starts a temporary model/effort session. |
 | BTW | `/btw` or `/side` opens a private, tool-free side conversation. |
 | Vi mode | Modal editor with motions, operators, registers, and undo. |

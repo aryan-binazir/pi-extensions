@@ -5,11 +5,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
-import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore, type TranscriptContext } from '@earendil-works/pi-ai';
 import nvimIde from './index.ts';
 import { fakeIde, token, until } from './test-support.ts';
 
-test('real Pi requests persist the included editor snapshot, not unsubmitted notifications', async () => {
+for (const composition of ['isolated', 'package'] as const) test(`real Pi ${composition} requests persist only submitted editor snapshots`, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'pi-editor-snapshot-'));
   const previous = process.env.CLAUDE_CONFIG_DIR;
   let initialized = false;
@@ -24,16 +24,19 @@ test('real Pi requests persist the included editor snapshot, not unsubmitted not
     process.env.CLAUDE_CONFIG_DIR = cwd;
     const agentDir = join(cwd, 'agent');
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
-    const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, extensionFactories: [nvimIde], noExtensions: true, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true });
+    const packageRoot = join(import.meta.dirname, '../..');
+    const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager: composition === 'package' ? SettingsManager.inMemory({ ...settingsManager.getGlobalSettings(), packages: [packageRoot] }) : settingsManager, extensionFactories: composition === 'isolated' ? [nvimIde] : undefined, noExtensions: composition === 'isolated', noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true });
     await loader.reload();
     const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
     const provider = fauxProvider({ provider: 'editor-request-snapshots', tokensPerSecond: Infinity });
     const requests: string[] = [];
-    provider.setResponses([context => { requests.push(JSON.stringify(context.messages)); return fauxAssistantMessage('Acknowledged'); }]);
+    const response = (context: TranscriptContext) => { requests.push(JSON.stringify(context.messages)); return fauxAssistantMessage('Acknowledged'); };
+    provider.setResponses([response, response]);
     runtime.registerNativeProvider(provider.provider);
     const manager = SessionManager.create(cwd, join(cwd, 'sessions'));
     ({ session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader: loader, modelRuntime: runtime, sessionManager: manager, model: provider.getModel(), noTools: 'builtin' }));
     await session.bindExtensions({});
+    session.setActiveToolsByName(['nvim_context', 'subagent', 'workflow']);
     await until(() => initialized);
     const errors: unknown[] = [];
     session.extensionRunner!.onError(error => errors.push(error));
@@ -48,12 +51,21 @@ test('real Pi requests persist the included editor snapshot, not unsubmitted not
     await session.prompt('Use the current selection');
     assert.equal(requests.length, 1);
     assert.ok(requests[0].includes('INCLUDED_IN_REQUEST'));
+    if (composition === 'package') {
+      assert.ok(requests[0].includes('Active worktree directory:'));
+      assert.ok(requests[0].includes('Default profile'));
+    }
     assert.ok(!requests[0].includes('NEVER_SUBMITTED'));
     await select('AFTER_REQUEST_UNSUBMITTED');
     const persisted = JSON.stringify(SessionManager.open(manager.getSessionFile()!).getBranch());
     assert.ok(persisted.includes('INCLUDED_IN_REQUEST'));
     assert.ok(!persisted.includes('NEVER_SUBMITTED'));
     assert.ok(!persisted.includes('AFTER_REQUEST_UNSUBMITTED'));
+    await session.extensionRunner!.emit({ type: 'session_shutdown', reason: 'quit' });
+    await session.prompt('Continue without an editor');
+    assert.equal(requests.length, 2);
+    assert.ok(!session.systemPrompt.includes('INCLUDED_IN_REQUEST'));
+    assert.ok(!session.systemPrompt.includes('<editor_context>'));
     assert.deepEqual(errors, []);
   } finally {
     await session?.extensionRunner?.emit({ type: 'session_shutdown', reason: 'quit' });

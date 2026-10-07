@@ -113,9 +113,11 @@ Bundled profiles are `research` (Luna medium), `implement-small` (Astra low),
 Guidance on which one to choose lives in the shared
 [`APPEND_SYSTEM.md`](../APPEND_SYSTEM.md); use the
 [symlink setup](agent-setup.md#global-system-prompt-append-agent-setup) to load it
-globally. The extension separately appends the effective profile catalog to the
-parent's system prompt through a hook that calls the same resolver as the
-read-only CLI—no subprocess is launched during prompt setup.
+globally. The extension contributes the effective profile catalog through the structured
+`subagent_profiles` prompt section, using the same resolver as the read-only
+CLI—no subprocess is launched during prompt setup. It does not force-replace the
+system prompt, so other sections such as active-worktree notices and submitted
+editor snapshots remain visible to providers.
 
 Inspect the configuration from this checkout:
 

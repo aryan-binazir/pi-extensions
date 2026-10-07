@@ -117,17 +117,20 @@ async function packageSession(run: (h: { session: any; runner: any; temp: string
   }
 }
 
-test('todo composes request context while subagents and worktree append to the system prompt', async () => packageSession(async ({session, runner, temp}) => {
+test('todo context composes with structured subagent and worktree prompt sections', async () => packageSession(async ({session, runner, temp}) => {
   await session.getToolDefinition('todo_write')!.execute('t1', {todos: [{content: 'Composed task', status: 'pending'}]}, undefined, undefined, runner.createToolContext('t1', undefined));
   const checkout = join(temp, 'checkout'); await mkdir(checkout);
   const sessionId = session.sessionManager.getSessionId();
   setActiveCwd(temp, checkout, sessionId);
   try {
-    const result = await runner.emitBeforeAgentStart('hi', undefined, {forceSystemPrompt: 'BASE_PROMPT'});
+    const result = await runner.emitBeforeAgentStart('hi', undefined, {customPrompt: 'BASE_PROMPT'});
     const context = await runner.emitContext([]);
     assert.match(context.at(-1)!.content, /\[pending\] Composed task/);
-    assert.doesNotMatch(result.systemPromptOptions.forceSystemPrompt!, /Composed task/);
-    assert.match(result.systemPromptOptions.forceSystemPrompt!, /^BASE_PROMPT\n\n[\s\S]*Default profile \(used when profile is omitted\): implement[\s\S]*Active worktree directory: /);
+    assert.equal(result.systemPromptOptions.forceSystemPrompt, undefined);
+    assert.equal(result.systemPromptOptions.customPrompt, 'BASE_PROMPT');
+    assert.match(result.systemPromptOptions.sections.subagent_profiles, /Default profile \(used when profile is omitted\): implement/);
+    assert.match(result.systemPromptOptions.sections.active_worktree, /Active worktree directory:/);
+    assert.doesNotMatch(JSON.stringify(result.systemPromptOptions.sections), /Composed task/);
   } finally { setActiveCwd(temp, undefined, sessionId); }
 }));
 

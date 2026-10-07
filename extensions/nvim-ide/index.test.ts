@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getEventListeners, once } from 'node:events';
@@ -235,16 +235,16 @@ test('a follow interrupted before its reply is replayed after reconnecting', asy
 });
 
 test('follow errors warn once per failure episode and do not automatically retry', async () => {
-  await withConnectedIde(async ({ ide, fire, ctx, notices }) => {
+  await withConnectedIde(async ({ ide, fire, tools, ctx, notices }) => {
     for (const [i, path] of ['bad1.ts', 'bad2.ts', 'good.ts', 'bad3.ts'].entries()) {
       await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
       await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
-      await until(() => ide.calls.length === i + 1);
-      await settle();
+      await until(() => ide.calls.filter(call => call.name === 'openFile').length === i + 1);
+      await tools.get('nvim_diagnostics').execute('barrier', {}, undefined, undefined, ctx);
       assert.equal(notices.filter(notice => notice.includes('Could not reveal')).length, i === 3 ? 2 : 1);
     }
     await new Promise(resolve => setTimeout(resolve, 150));
-    assert.equal(ide.calls.length, 4, 'connected tool errors do not retry themselves');
+    assert.equal(ide.calls.filter(call => call.name === 'openFile').length, 4, 'connected tool errors do not retry themselves');
   }, (call, reply) => {
     if (!String(call.arguments.filePath).includes('bad')) return false;
     reply({ content: [{ type: 'text', text: 'File cannot be opened' }], isError: true });
@@ -452,13 +452,13 @@ test('session without an editor: no status, no prompt injection, shutdown is cle
   }
 });
 
-test('editor context renders selection, cursor and mentions, and nothing when disconnected', () => {
-  assert.equal(editorContext({ connected: false, mentions: 0 }, []), undefined);
-  const withSelection = editorContext({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'x'.repeat(maxSelectionChars + 1), filePath: '/f.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 2 }, isEmpty: false } }, []);
+test('editor context renders selection, cursor and mentions, and nothing when disconnected', async () => {
+  assert.equal((await editorContext({ connected: false, mentions: 0 }, [])).text, undefined);
+  const withSelection = (await editorContext({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'x'.repeat(maxSelectionChars), truncated: true, filePath: '/f.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 2 }, isEmpty: false } }, [])).text;
   assert.match(withSelection!, /^# Editor context \(Neovim\)/);
   assert.match(withSelection!, /Selected lines 5-7:/);
-  assert.match(withSelection!, /…\[truncated\]/);
-  const cursor = editorContext({ connected: true, mentions: 0, selection: { text: '', filePath: '/g.ts', start: { line: 0, character: 0 }, end: { line: 0, character: 0 }, isEmpty: true } }, [{ mention: { filePath: '/h.ts', lineStart: 2, lineEnd: 3 }, text: 'a\nb' }, { mention: { filePath: '/dir' } }]);
+  assert.match(withSelection!, /truncated selection/);
+  const cursor = (await editorContext({ connected: true, mentions: 0, selection: { text: '', filePath: '/g.ts', start: { line: 0, character: 0 }, end: { line: 0, character: 0 }, isEmpty: true } }, [{ mention: { filePath: '/h.ts', lineStart: 2, lineEnd: 3 }, text: 'a\nb' }, { mention: { filePath: '/dir' } }])).text;
   assert.match(cursor!, /Active file: \/g\.ts \(cursor at line 1\)/);
   assert.match(cursor!, /User sent from editor: \/h\.ts lines 2-3\n```\na\nb\n```/);
   assert.match(cursor!, /User sent from editor: \/dir$/m);
@@ -527,6 +527,37 @@ test('a mention past the line cap is clipped in the body but keeps the requested
     const turn = await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx);
     assert.match(turn.systemPrompt, /User sent from editor: .*big\.ts lines 1-2500\n```\n(?:L\d+\n){1999}L2000\n```/);
     assert.match(turn.systemPrompt, /truncated: showing lines 1-2000 of requested 1-2500/);
+  });
+});
+
+test('the truncation note names the actual final line shown after reserving references', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    await writeFile(join(project, 'long.ts'), Array.from({ length: 1900 }, (_, index) => `L${index + 1}:` + 'x'.repeat(65)).join('\n'));
+    ide.broadcast('at_mentioned', { filePath: join(project, 'long.ts'), lineStart: 0, lineEnd: 1899 });
+    await settle();
+    const turn = await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    const body = /```\n([\s\S]*?)\n```/.exec(turn.systemPrompt)![1];
+    const lastLine = Number(/L(\d+):[^\n]*$/.exec(body)![1]);
+    assert.ok(turn.systemPrompt.includes(`showing lines 1-${lastLine}`), 'the reported range matches the displayed source');
+    assert.equal((turn.systemPrompt.match(/\[truncated:/g) ?? []).length, 1, 'one budget produces one truncation notice');
+  });
+});
+
+test('range reads stay bounded on a huge single-line regular file', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx }) => {
+    const path = join(project, 'huge.txt');
+    await writeFile(path, '');
+    await truncate(path, 600_000_000);
+    ide.broadcast('at_mentioned', { filePath: path, lineStart: 0, lineEnd: 0 });
+    await settle();
+    const options = { sections: {} as Record<string, string> };
+    await fire('before_agent_start', { systemPrompt: 'BASE', systemPromptOptions: options }, ctx);
+    assert.ok(options.sections.editor_context.length <= 100000);
+    assert.ok(options.sections.editor_context.includes('truncated: showing lines 1-1'));
+    ide.broadcast('at_mentioned', { filePath: path, lineStart: 1, lineEnd: 1 });
+    await settle();
+    await fire('before_agent_start', { systemPrompt: 'BASE', systemPromptOptions: options }, ctx);
+    assert.ok(options.sections.editor_context.includes('source scan limit reached'));
   });
 });
 

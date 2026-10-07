@@ -33,7 +33,11 @@ function fixture(run: (f: any) => Promise<void>) {
         put: (path: string, value: unknown) => writeFile(path, JSON.stringify(value)),
         direct,
         workflow: async (input: any) => (await execute('workflow', {source: `return await api.spawn(${JSON.stringify(input)},'stage');`})).details,
-        prompt: async () => (await hooks.get('before_agent_start')({systemPrompt: 'parent'}, ctx)).systemPrompt,
+        prompt: async () => {
+          const options = {sections: {} as Record<string, string>};
+          await hooks.get('before_agent_start')({systemPromptOptions: options}, ctx);
+          return options.sections.subagent_profiles;
+        },
         reload: async () => { await host.shutdown({reason: 'reload'}); await host.start({reason: 'reload'}); },
       });
     } finally {

@@ -10,6 +10,12 @@ import { WebSocketServer } from 'ws';
 import { IdeLink, chooseLock, maxSelectionChars, readLocks, type Lock, type LinkState } from './link.ts';
 import { fakeIde, token, until } from './test-support.ts';
 
+async function submittedMentions(link: IdeLink) {
+  const batch = await link.prepareMentions();
+  batch.acknowledge();
+  return batch.mentions;
+}
+
 const lockFile = (overrides: Record<string, unknown> = {}) => JSON.stringify({ pid: 1, transport: 'ws', workspaceFolders: ['/w'], ideName: 'Neovim', authToken: token, ...overrides });
 
 test('lock files: parse, skip dead pids and junk, choose by workspace then env', async () => {
@@ -102,7 +108,7 @@ test('connects with the token, tracks selection and mentions, calls tools, recon
     ide.broadcast('at_mentioned', { filePath: '/w/project', lineStart: null, lineEnd: null });
     await until(() => link.state.mentions === 2);
     assert.equal(link.state.selection?.filePath, '/w/project/b.ts', 'a malformed selection_changed leaves the last good selection in place');
-    assert.deepEqual(await link.takeMentions(), [{ filePath: '/w/project/c.ts', lineStart: 3, lineEnd: 9 }, { filePath: '/w/project', lineStart: undefined, lineEnd: undefined }]);
+    assert.deepEqual(await submittedMentions(link), [{ filePath: '/w/project/c.ts', lineStart: 3, lineEnd: 9 }, { filePath: '/w/project', lineStart: undefined, lineEnd: undefined }]);
     assert.equal(link.state.mentions, 0);
 
     assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
@@ -328,7 +334,7 @@ test('a mention sent before initialize identifies the server still includes row 
     await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
     link.start();
     await until(() => link.connected && link.state.mentions === 1);
-    assert.deepEqual(await link.takeMentions(), [{ filePath: '/w/a.ts', lineStart: 1, lineEnd: 1 }]);
+    assert.deepEqual(await submittedMentions(link), [{ filePath: '/w/a.ts', lineStart: 1, lineEnd: 1 }]);
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -366,7 +372,7 @@ test('mention row conversion follows initialized identity across reconnects, not
       const ranges = name === 'claudecode-neovim'
         ? [[1, 1], [2, 3], [1, undefined], [undefined, undefined], [undefined, undefined], [undefined, undefined]]
         : [[undefined, undefined], [1, 2], [undefined, undefined], [undefined, undefined], [undefined, undefined], [undefined, undefined]];
-      assert.deepEqual(await link.takeMentions(), ranges.map(([lineStart, lineEnd]) => ({ filePath: '/w/a.ts', lineStart, lineEnd })));
+      assert.deepEqual(await submittedMentions(link), ranges.map(([lineStart, lineEnd]) => ({ filePath: '/w/a.ts', lineStart, lineEnd })));
     }
   } finally {
     await link.stop();
@@ -405,7 +411,7 @@ test('prepared editor sends survive until acknowledgement and never consume newe
   }
 });
 
-test('bounded send queues report overflow without acknowledging arrivals outside the snapshot', async () => {
+test('bounded send queues protect prepared sends and report rejected new arrivals', async () => {
   const ide = fakeIde();
   await once(ide.server, 'listening');
   const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
@@ -420,13 +426,15 @@ test('bounded send queues report overflow without acknowledging arrivals outside
     assert.equal(first.dropped, 1);
     assert.equal(first.mentions[0].filePath, '/w/1.ts');
     ide.broadcast('at_mentioned', { filePath: '/w/newer.ts' });
-    await until(() => link.state.mentions === 50 && ide.server.clients.size === 1);
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await link.call('getWorkspaceFolders');
+    const held = await link.prepareMentions();
+    assert.equal(held.mentions[0].filePath, '/w/1.ts', 'a pending snapshot is not evicted while its request is prepared');
+    assert.ok(!held.mentions.some(mention => mention.filePath === '/w/newer.ts'));
     first.acknowledge();
     first.acknowledge();
     const next = await link.prepareMentions();
-    assert.deepEqual(next.mentions.map(mention => mention.filePath), ['/w/newer.ts']);
-    assert.equal(next.dropped, 1, 'acknowledging twice does not erase a newer overflow warning');
+    assert.deepEqual(next.mentions, []);
+    assert.equal(next.dropped, 1, 'the rejected new arrival is reported, not an already delivered send');
   } finally {
     await link.stop();
     await ide.close();
@@ -486,7 +494,7 @@ test('mentions never fall back to Pi cwd or stale lock folders when live workspa
   await once(server, 'listening');
   const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const port = (server.address() as { port: number }).port;
-  const link = new IdeLink({ cwd: '/w/nested', lockDir: dir, alive: () => true, requestTimeoutMs: 100 });
+  const link = new IdeLink({ cwd: '/w/nested', lockDir: dir, alive: () => true, requestTimeoutMs: 3000 });
   const send = (filePath: string) => {
     for (const client of server.clients) client.send(JSON.stringify({ jsonrpc: '2.0', method: 'at_mentioned', params: { filePath, lineStart: 2, lineEnd: 3 } }));
   };
@@ -499,32 +507,35 @@ test('mentions never fall back to Pi cwd or stale lock folders when live workspa
       send('selected.ts');
       send(absolute.filePath);
       await until(() => link.state.mentions === 2);
-      assert.deepEqual(await link.takeMentions(), [absolute], response);
-      assert.deepEqual(await link.takeMentions(), []);
+      assert.deepEqual(await submittedMentions(link), [absolute], response);
+      assert.deepEqual(await submittedMentions(link), []);
     }
     response = '{"success":true,"rootPath":"/w"}';
     isError = true;
     send('selected.ts');
     send(absolute.filePath);
     await until(() => link.state.mentions === 2);
-    assert.deepEqual(await link.takeMentions(), [absolute], 'tool errors preserve absolute mentions only');
+    assert.deepEqual(await submittedMentions(link), [absolute], 'tool errors preserve absolute mentions only');
     isError = false;
     answer = false;
     const before = requests;
     send('selected.ts');
     await until(() => link.state.mentions === 1);
-    const pending = link.takeMentions();
+    const pending = submittedMentions(link);
     await until(() => requests === before + 1);
     send(absolute.filePath);
     await until(() => link.state.mentions === 2);
-    assert.deepEqual(await pending, [], 'a timeout never returns a relative path');
-    assert.deepEqual(await link.takeMentions(), [absolute], 'new notifications belong to the next batch');
+    let lookupFinished = false;
+    void pending.then(() => { lookupFinished = true; });
+    await until(() => lookupFinished, 2000);
+    assert.deepEqual(await pending, [], 'the one-second workspace deadline beats the three-second RPC timeout');
+    assert.deepEqual(await submittedMentions(link), [absolute], 'new notifications belong to the next batch');
     assert.equal(requests, before + 1, 'absolute-only batches do not need the editor root');
 
     send('selected.ts');
     send(absolute.filePath);
     await until(() => link.state.mentions === 2);
-    const interrupted = link.takeMentions();
+    const interrupted = submittedMentions(link);
     let finished = false;
     void interrupted.then(() => { finished = true; });
     await until(() => requests === before + 2);
@@ -537,7 +548,7 @@ test('mentions never fall back to Pi cwd or stale lock folders when live workspa
     send(absolute.filePath);
     await until(() => link.state.mentions === 2);
     await link.stop();
-    assert.deepEqual(await link.takeMentions(), [absolute], 'relative mentions cannot survive into a replacement editor');
+    assert.deepEqual(await submittedMentions(link), [absolute], 'relative mentions cannot survive into a replacement editor');
   } finally {
     await link.stop();
     for (const client of server.clients) client.terminate();

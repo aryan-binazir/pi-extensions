@@ -164,7 +164,7 @@ export default function subagents(pi: ExtensionAPI): void {
     let guidance: string;
     try { guidance = profileGuidance(configFor(ctx), ctx); }
     catch (error) { guidance = `Subagent delegation is unavailable: ${String(error)}`; }
-    return {systemPrompt: `${event.systemPrompt}\n\n${guidance}`};
+    event.systemPromptOptions.sections.subagent_profiles = guidance;
   });
   pi.on('session_start', (_event, ctx) => {
     context = ctx;

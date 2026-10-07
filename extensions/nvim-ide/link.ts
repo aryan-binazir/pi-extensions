@@ -3,10 +3,14 @@ import { homedir } from 'node:os';
 import { appendFileSync, watch, type FSWatcher } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type WebSocket from 'ws';
+import { maxSelectionChars, prefix } from './text.ts';
+export { maxSelectionChars } from './text.ts';
 
 let wsModule: Promise<typeof WebSocket> | undefined;
 const loadWs = () => (wsModule ??= import('ws').then(m => m.default));
 const OPEN = 1, CLOSED = 3;
+const maxQueuedSends = 50;
+const workspaceLookupTimeoutMs = 1000;
 
 interface Position { line: number; character: number }
 interface Selection { text: string; filePath: string; start: Position; end: Position; isEmpty: boolean; truncated?: boolean }
@@ -14,7 +18,6 @@ export interface Mention { filePath: string; lineStart?: number; lineEnd?: numbe
 export interface Lock { port: number; authToken: string; workspaceFolders: string[]; ideName: string; mtimeMs: number }
 export interface LinkState { connected: boolean; ideName?: string; port?: number; selection?: Selection; mentions: number }
 
-export const maxSelectionChars = 50_000;
 const traceFile = process.env.NVIM_IDE_TRACE;
 const trace = traceFile ? (message: string) => { try { appendFileSync(traceFile, `${new Date().toISOString()} ${message}\n`); } catch {} } : undefined;
 const defaultLockDir = (): string => join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'ide');
@@ -77,6 +80,7 @@ export class IdeLink {
   private readonly pending = new Map<number, Pending>();
   private selection?: Selection;
   private mentions: QueuedMention[] = [];
+  private readonly preparedMentions = new Set<QueuedMention>();
   private workspaceLookup?: { socket: WebSocket; root: Promise<string | undefined> };
   private ready = false;
   private zeroBasedMentionLines = false;
@@ -84,8 +88,8 @@ export class IdeLink {
   private droppedMentions = 0;
   constructor(private readonly options: LinkOptions) {}
 
-  get state(): LinkState { return { connected: this.ready, ideName: this.lock?.ideName, port: this.lock?.port, selection: this.selection, mentions: this.mentions.length }; }
-  get connected(): boolean { return this.ready; }
+  get state(): LinkState { return { connected: this.connected, ideName: this.lock?.ideName, port: this.lock?.port, selection: this.selection, mentions: this.mentions.length }; }
+  get connected(): boolean { return this.ready && this.socket?.readyState === OPEN; }
 
   start(): void { if (this.started) return; this.started = true; this.watchParent(); this.watchLocks(); void this.attempt(); }
   async stop(): Promise<void> {
@@ -105,6 +109,7 @@ export class IdeLink {
   reconnect(): void { const socket = this.socket; this.drop(new Error('reconnecting')); socket?.terminate(); void this.attempt(); }
   async prepareMentions(): Promise<{ mentions: Mention[]; undelivered: number; dropped: number; acknowledge: () => void }> {
     const taken = [...this.mentions];
+    for (const item of taken) this.preparedMentions.add(item);
     const dropped = this.droppedMentions;
     let acknowledged = false;
     await Promise.all(taken.map(item => item.ready));
@@ -114,21 +119,16 @@ export class IdeLink {
       acknowledged = true;
       this.droppedMentions = Math.max(0, this.droppedMentions - dropped);
       const before = this.mentions.length;
+      for (const item of taken) this.preparedMentions.delete(item);
       this.mentions = this.mentions.filter(mention => !taken.includes(mention));
       if (before !== this.mentions.length) this.emit();
     } };
   }
-  async takeMentions(): Promise<Mention[]> {
-    const batch = await this.prepareMentions();
-    batch.acknowledge();
-    return batch.mentions;
-  }
-
   private liveWorkspaceRoot(): Promise<string | undefined> {
     const socket = this.socket;
     if (!socket) return Promise.resolve(undefined);
     if (this.workspaceLookup?.socket === socket) return this.workspaceLookup.root;
-    const root = this.call('getWorkspaceFolders', {}, AbortSignal.timeout(1000)).then(text => {
+    const root = this.call('getWorkspaceFolders', {}, AbortSignal.timeout(workspaceLookupTimeoutMs)).then(text => {
       const workspace: unknown = JSON.parse(text);
       if (this.socket === socket && workspace && typeof workspace === 'object'
         && 'rootPath' in workspace && typeof workspace.rootPath === 'string' && isAbsolute(workspace.rootPath)
@@ -278,20 +278,24 @@ export class IdeLink {
       const range = (data.selection ?? {}) as Partial<Selection>;
       if (typeof data.filePath !== 'string' || !isPosition(range.start) || !isPosition(range.end)) return;
       const raw = typeof data.text === 'string' ? data.text : '';
-      let text = raw.slice(0, maxSelectionChars);
-      if (raw.length > text.length && /[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+      const text = prefix(raw, maxSelectionChars);
       this.selection = { text, filePath: data.filePath, start: range.start, end: range.end, isEmpty: range.isEmpty === true || text.length === 0, ...(text.length < raw.length ? { truncated: true } : {}) };
       this.emit();
     } else if (method === 'at_mentioned') {
       if (typeof data.filePath !== 'string') return;
       if (!this.ready) {
-        if (this.pendingMentions.length >= 50) { this.pendingMentions.shift(); this.droppedMentions++; }
+        if (this.pendingMentions.length >= maxQueuedSends) { this.pendingMentions.shift(); this.droppedMentions++; }
         this.pendingMentions.push(params);
         return;
       }
       const offset = this.zeroBasedMentionLines ? 1 : 0;
       const line = (value: unknown) => typeof value === 'number' && Number.isInteger(value) && value >= 1 - offset ? value + offset : undefined;
-      if (this.mentions.length >= 50) { this.mentions.shift(); this.droppedMentions++; }
+      if (this.mentions.length >= maxQueuedSends) {
+        const evict = this.mentions.findIndex(item => !this.preparedMentions.has(item));
+        this.droppedMentions++;
+        if (evict < 0) { this.emit(); return; }
+        this.mentions.splice(evict, 1);
+      }
       const mention = { filePath: data.filePath, lineStart: line(data.lineStart), lineEnd: line(data.lineEnd) };
       const item: QueuedMention = { ready: Promise.resolve() };
       if (isAbsolute(mention.filePath)) item.mention = mention;

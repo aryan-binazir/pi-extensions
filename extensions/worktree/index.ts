@@ -79,7 +79,9 @@ export default function worktree(pi: ExtensionAPI & { getSettings?: () => ShellS
   pi.on('user_bash', (_event, ctx) => {
     return { operations: { exec: (command, _cwd, options) => createLocalBashOperations({ shellPath: shellSettings(ctx).getShellPath() }).exec(command, activeCwd(ctx), options) } };
   });
-  pi.on('before_agent_start', (event, ctx) => ({ systemPrompt: `${event.systemPrompt}\n\n${activeWorktreeNotice(activeCwd(ctx), ctx.cwd)}` }));
+  pi.on('before_agent_start', (event, ctx) => {
+    event.systemPromptOptions.sections.active_worktree = activeWorktreeNotice(activeCwd(ctx), ctx.cwd);
+  });
   pi.registerCommand('worktree', {
     description: 'Worktree: <name> [--branch branch] [--base ref], list, original, remove <path> [--force], cleanup [--force]',
     async handler(args, ctx) {

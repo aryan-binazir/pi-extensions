@@ -29,7 +29,7 @@ export function fakeIde(onClient?: (socket: WebSocket) => void, onCall?: CallRes
 }
 
 export const until = (check: () => boolean, ms = 3000) => new Promise<void>((resolve, reject) => {
-  const start = Date.now();
-  const tick = () => check() ? resolve() : Date.now() - start > ms ? reject(new Error('timeout')) : setTimeout(tick, 10);
+  const start = performance.now();
+  const tick = () => check() ? resolve() : performance.now() - start > ms ? reject(new Error('timeout')) : setTimeout(tick, 10);
   tick();
 });

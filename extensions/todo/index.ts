@@ -34,6 +34,7 @@ function parse(data: unknown): Snapshot {
 export default function todo(pi: ExtensionAPI): void {
   let state: Snapshot = { version: 1, todos: [], staleTurns: 0 };
   let dirty = false;
+  let expanded = false;
   const persist = () => {
     if (!dirty) return;
     pi.appendEntry(entryType, clone(state));
@@ -45,11 +46,14 @@ export default function todo(pi: ExtensionAPI): void {
     if (!active()) { ctx.ui.setWidget('interactive-tools:todo', undefined); return; }
     ctx.ui.setWidget('interactive-tools:todo', (_tui, theme) => {
       const blue = (text: string) => theme.fg('border', text);
-      const lines = ['Todo — declared progress', ...state.todos.map(item => `${blue(item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○')} ${item.content}`)];
+      const current = state.todos.find(item => item.status === 'in_progress') ?? state.todos.find(item => item.status === 'pending');
+      const summary = `Todos ${state.todos.filter(item => item.status === 'completed').length}/${state.todos.length} · ${blue('alt+t')} · ${current?.content ?? ''}`;
+      const lines = [`Todo — declared progress · ${blue('alt+t')}`, ...state.todos.map(item => `${blue(item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○')} ${item.content}`)];
       return {
         invalidate() {},
         render(width: number) {
           if (width < 6) return [];
+          if (!expanded) return [truncateToWidth(summary, width)];
           const inner = width - 4;
           return [
             blue(`╭${'─'.repeat(inner + 2)}╮`),
@@ -60,6 +64,13 @@ export default function todo(pi: ExtensionAPI): void {
       };
     });
   };
+  pi.registerShortcut('alt+t', {
+    description: 'Toggle compact/full todo list',
+    handler(ctx) {
+      expanded = !expanded;
+      paint(ctx);
+    },
+  });
   let tip: object | undefined;
   let tipState: Snapshot | undefined;
   let tipSkipped = 0;

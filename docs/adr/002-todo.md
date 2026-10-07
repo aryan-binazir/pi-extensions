@@ -15,6 +15,11 @@ project file or full-session history. `todo_write` replaces a normalized list an
 permits at most one in-progress task. Restoration follows the selected branch on
 startup, resume, fork, reload and tree navigation.
 
+The widget defaults to a single truncated line with completed/total counts, an
+`alt+t` hint and the in-progress task, or the first pending task. `alt+t` toggles
+the full bordered list with the same hint. The view choice lasts until reload
+and does not change saved progress or reminders.
+
 Delivered user messages advance the stale-turn count, including queued steering
 and follow-up messages. Each accounting snapshot follows its user message on
 the selected branch. Pending counts are saved at the next user delivery or when

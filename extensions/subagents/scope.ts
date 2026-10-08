@@ -3,7 +3,8 @@ import { isAbsolute, relative, sep } from 'node:path';
 
 export const READ_TOOLS = ['read', 'grep', 'find', 'ls'];
 export const ALL_TOOLS = [...READ_TOOLS, 'write', 'edit', 'bash'];
-interface DelegationScope { cwd: string; tools: string[] }
+export type ConnectorGrants = Record<string, 'read' | 'write'>;
+interface DelegationScope { cwd: string; tools: string[]; delegatedTools?: ConnectorGrants; registeredTools?: string[]; callableTools?: string[]; builtinTools?: string[] }
 
 export function insideRoot(canonicalRoot: string, canonicalPath: string): boolean {
   const rel = relative(canonicalRoot, canonicalPath);
@@ -11,8 +12,33 @@ export function insideRoot(canonicalRoot: string, canonicalPath: string): boolea
 }
 
 export function delegationScope(parent: DelegationScope) {
-  const tools = ALL_TOOLS.filter(tool => parent.tools.includes(tool));
-  return { tools, replayIdentity: JSON.stringify({ version: 1, cwd: parent.cwd, tools }) };
+  const connectors = Object.entries(parent.delegatedTools ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .filter(([name]) => parent.tools.includes(name) && parent.callableTools?.includes(name) && !parent.builtinTools?.includes(name));
+  const tools = [...ALL_TOOLS.filter(tool => parent.tools.includes(tool)), ...connectors.map(([name]) => name)];
+  const readTools = [...READ_TOOLS.filter(tool => tools.includes(tool)), ...connectors.filter(([, grant]) => grant === 'read').map(([name]) => name)];
+  return {tools, readTools, replayIdentity: JSON.stringify(connectors.length ? {version: 2, cwd: parent.cwd, tools, readTools} : {version: 1, cwd: parent.cwd, tools})};
+}
+
+export function assertToolSelection(tools: string[], parent: DelegationScope): void {
+  const unavailable: string[] = [], disallowed: string[] = [], uncallable: string[] = [], denied: string[] = [], builtin: string[] = [];
+  const allowed = delegationScope(parent).tools;
+  for (const name of tools) {
+    if (!ALL_TOOLS.includes(name) && parent.registeredTools) {
+      if (parent.builtinTools?.includes(name)) {builtin.push(name); continue;}
+      if (!parent.registeredTools.includes(name)) {unavailable.push(name); continue;}
+      if (!Object.hasOwn(parent.delegatedTools ?? {}, name)) {disallowed.push(name); continue;}
+      if (!parent.callableTools?.includes(name)) {uncallable.push(name); continue;}
+    }
+    if (!allowed.includes(name)) denied.push(name);
+  }
+  const errors = [
+    unavailable.length && `Unavailable child tools: ${unavailable.join(', ')}. Register these tools in the parent and /reload.`,
+    builtin.length && `Pi core tools cannot receive connector grants: ${builtin.join(', ')}. Use the supported built-in child tools.`,
+    disallowed.length && `Disallowed connector tools: ${disallowed.join(', ')}. Add exact read/write grants to user-scoped subagents.json and /reload.`,
+    uncallable.length && `Connector tools are not callable in the parent: ${uncallable.join(', ')}. Enable a callable tool exposure in Pi and /reload.`,
+    denied.length && `Explicit child tools exceed parent permissions: ${denied.join(', ')}. Activate these tools in the parent before delegating. For Pi MCP, set the selected tools' toolExposure to direct in user-scoped mcp.json and /reload.`,
+  ].filter(Boolean);
+  if (errors.length) throw new Error(errors.join('\n'));
 }
 
 function sensitiveComponent(name: string) {
@@ -27,8 +53,7 @@ export async function assertWorkspacePath(root: string, path: string): Promise<v
 
 export async function assertChildTask(task: { cwd: string; tools: string[]; extensions?: string[] }, options: { parent: DelegationScope; approve?: (request: string) => Promise<boolean> }): Promise<void> {
   await assertWorkspacePath(options.parent.cwd, task.cwd);
-  const allowed = delegationScope(options.parent).tools;
-  if (task.tools.some(tool => !allowed.includes(tool))) throw new Error('Child tools exceed parent permissions');
+  assertToolSelection(task.tools, options.parent);
   if (task.extensions?.length) {
     for (const extension of task.extensions) {
       if (!isAbsolute(extension)) throw new Error('Child extensions must be absolute local paths');

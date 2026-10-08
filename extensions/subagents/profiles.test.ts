@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import {createHash} from 'node:crypto';
 import { InMemoryCredentialStore, InMemoryModelsStore } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { assertTaskFields, loadProfiles, profileGuidance, profileLocation, resolveProfile } from './profiles.ts';
@@ -142,3 +143,27 @@ test('symlinked or non-regular settings files are rejected rather than followed'
   await rm(global); await mkdir(global);
   assert.throws(load, /expected a regular file/);
 }));
+
+test('connector grants are exact user-scoped read/write policy and change configuration identity', async () => fixture(async ({load, global, local, put}) => {
+  const initial = load();
+  await put(global, {delegatedTools: {claude_jira_get_issue: 'read', claude_jira_update_issue: 'write'}});
+  const granted = load();
+  assert.deepEqual({...granted.delegatedTools}, {claude_jira_get_issue: 'read', claude_jira_update_issue: 'write'});
+  assert.notEqual(granted.identity, initial.identity);
+  await put(local, {delegatedTools: {claude_jira_update_issue: 'read'}});
+  assert.throws(load, /grants are allowed only in user-scoped subagents.json/);
+  assert.equal(load(false).delegatedTools.claude_jira_update_issue, 'write');
+}));
+
+test('settings without connector grants retain the persisted profile identity', async () => fixture(async ({load}) => {
+  const {defaultProfile, profiles, provenance, sources, local, identity} = load();
+  const legacy = {defaultProfile, profiles, provenance, sources, local};
+  assert.equal(identity, createHash('sha256').update(JSON.stringify(legacy)).digest('hex'));
+}));
+
+for (const grants of [null, [], {read: 'read'}, {powershell: 'read'}, {codemode: 'read'}, {tool_search: 'read'}, {workflow: 'read'}, {'claude_jira_*': 'read'}, {'jira,other': 'read'}, {jira: 'read-only'}, {jira: true}, Object.fromEntries(Array.from({length: 65}, (_, i) => [`jira_${i}`, 'read']))]) {
+  test(`invalid connector grant policy fails closed: ${JSON.stringify(grants)}`, async () => fixture(async ({load, global, put}) => {
+    await put(global, {delegatedTools: grants});
+    assert.throws(load, /delegatedTools.*Fix settings and \/reload/);
+  }));
+}

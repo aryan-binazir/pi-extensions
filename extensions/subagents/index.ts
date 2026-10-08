@@ -135,6 +135,7 @@ export default function subagents(pi: ExtensionAPI): void {
     const names = (task.tools ?? []).filter(name => !ALL_TOOLS.includes(name));
     let bridge: ConnectorBridge | undefined;
     if (names.length) {
+      const spawningCwd = parent().cwd;
       assertToolSelection(names, parent());
       if (typeof ctx.executeTool !== 'function' || !ctx.tools || names.some(name => !ctx.tools.some(tool => tool.name === name))) throw new Error(`Parent Pi cannot execute delegated tools: ${names.join(', ')}. Requires Pi 0.99.1+ tools/executeTool support.`);
       const definitions = pi.getAllTools();
@@ -145,6 +146,7 @@ export default function subagents(pi: ExtensionAPI): void {
         }),
         execute: async (name, args, callSignal) => {
           callSignal.throwIfAborted();
+          if (parent().cwd !== spawningCwd) throw new Error('Subagent parent workspace changed; resubmit task');
           if (task.configProvenance?.config !== configFor(ctx).identity) throw new Error('Subagent delegation configuration changed; resubmit task');
           assertToolSelection([name], parent());
           if (task.preset === 'reader' && !delegationScope(parent()).readTools.includes(name)) throw new Error(`Reader preset cannot grant write tools: ${name}`);

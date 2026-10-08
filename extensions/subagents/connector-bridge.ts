@@ -116,7 +116,7 @@ export default async function connectorTools(pi: ExtensionAPI): Promise<void> {
   const close = () => {
     try {peer.send({type: 'done'});} catch {peer.close();}
   };
-  pi.on('agent_end', close);
+  pi.on('agent_settled', close);
   pi.on('session_shutdown', close);
   let tools: Definition[];
   try { tools = await definitions; }

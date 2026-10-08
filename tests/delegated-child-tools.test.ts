@@ -9,6 +9,7 @@ import {Type} from 'typebox';
 import subagents from '../extensions/subagents/index.ts';
 import {until} from '../extensions/subagents/test-support.ts';
 import {SubagentRegistry} from '../extensions/subagents/registry.ts';
+import {setActiveCwd} from '../extensions/worktree/routing.ts';
 
 const read = 'claude_jira_get_issue', write = 'claude_jira_update_issue';
 const request = (name = read, args: Record<string, unknown> = {issueKey: 'BBA-42'}, delay = 0) => JSON.stringify({name, args, delay});
@@ -40,6 +41,7 @@ async function fixture(run: (f: any) => Promise<void>, options: any = {}) {
   };
   try {
     await mkdir(agentDir);
+    await writeFile(join(agentDir, 'settings.json'), JSON.stringify({retry: {enabled: true, maxRetries: 1, baseDelayMs: 1}, compaction: {enabled: false}}));
     await writeFile(join(cwd, 'pi'), options.binary
       ? `#!/bin/sh\nexec '${options.binary.replace(/'/g, "'\\''")}' "$@"\n`
       : `#!${process.execPath}\nimport(${JSON.stringify(new URL('./fixtures/delegated-child.mjs', import.meta.url).href)}).catch(error=>{console.error(error);process.exitCode=1;});`);
@@ -113,6 +115,39 @@ test('real Pi executable delegates connectors and preserves parent denials', {sk
   }
   assert.equal(calls.length, 1);
 }, {binary: process.env.PI_SUBAGENT_TEST_BINARY}));
+
+for (const [runtime, binary] of [['SDK', undefined], ['installed Pi', process.env.PI_SUBAGENT_TEST_BINARY]] as const) {
+  test(`connector remains callable after automatic retry in ${runtime} child`, {skip: runtime === 'installed Pi' && !binary}, async () => fixture(async ({execute, completed, calls}) => {
+    const child = await execute('subagent', {
+      task: JSON.stringify({name: read, args: {issueKey: 'BBA-42'}, retry: true}), tools: [read],
+      ...(binary ? {extensions: [new URL('./fixtures/delegated-provider.mjs', import.meta.url).pathname]} : {}),
+    });
+    const task = await completed(child.details.id);
+    assert.equal(task.status, 'succeeded', JSON.stringify(task));
+    const output = JSON.parse(task.output);
+    assert.equal(output.results[0].isError, false);
+    assert.match(output.results[0].content[0].text, /Fixture issue/);
+    assert.equal(calls.length, 1);
+  }, {binary}));
+}
+
+test('switching the parent workspace revokes connector calls even with identical settings', async () => fixture(async ({cwd, execute, completed, calls, session}) => {
+  const first = join(cwd, 'first-workspace'), other = join(cwd, 'other-workspace'), gate = join(cwd, 'call-ready');
+  await mkdir(first); await mkdir(other);
+  const sessionId = session.sessionManager.getSessionId();
+  try {
+    setActiveCwd(cwd, first, sessionId);
+    const child = await execute('subagent', {task: JSON.stringify({name: read, args: {issueKey: 'BBA-42'}, waitFor: gate}), tools: [read]});
+    setActiveCwd(cwd, other, sessionId);
+    await writeFile(gate, 'ready');
+    const task = await completed(child.details.id);
+    assert.equal(task.status, 'succeeded', JSON.stringify(task));
+    const output = JSON.parse(task.output);
+    assert.equal(output.results[0].isError, true);
+    assert.match(output.results[0].content[0].text, /parent workspace changed.*resubmit task/);
+    assert.equal(calls.length, 0);
+  } finally {setActiveCwd(cwd, undefined, sessionId);}
+}));
 
 test('an explicitly granted connector executes in a real background child after another parent turn', async () => fixture(async ({execute, completed, parentTurn, calls, hooks, secret}) => {
   const launched = await parentTurn('subagent', {task: request(read, {issueKey: 'BBA-42'}, 300), preset: 'reader', tools: ['read', read]});

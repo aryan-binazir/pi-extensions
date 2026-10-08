@@ -144,8 +144,9 @@ The delegation contract is:
 
 Node and Bun children use the same private descriptor. Bun uses filesystem
 streams because its socket constructor cannot read an inherited socket descriptor.
-The child closes the parent connection when its delegated turn ends, releasing
-Bun's descriptor reader. Initialization fails after five seconds without metadata.
+The child closes the parent connection when its delegated run settles, after
+automatic retries and context recovery, releasing Bun's descriptor reader.
+Initialization fails after five seconds without metadata.
 
 Without connector grants, existing profile and workflow identities remain
 compatible. Enabling or reclassifying grants, activating tools, changing profile

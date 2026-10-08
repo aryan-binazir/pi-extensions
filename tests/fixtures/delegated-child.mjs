@@ -34,7 +34,7 @@ if (request.attack || request.protocol) {
   process.exit(0);
 }
 const cwd = process.cwd(), agentDir = process.env.PI_CODING_AGENT_DIR;
-const settingsManager = SettingsManager.inMemory({});
+const settingsManager = SettingsManager.inMemory({retry: {enabled: true, maxRetries: 1, baseDelayMs: 1}, compaction: {enabled: false}});
 const resourceLoader = new DefaultResourceLoader({cwd, agentDir, settingsManager, additionalExtensionPaths: extensions, noExtensions: true, noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true});
 await resourceLoader.reload();
 if (resourceLoader.getExtensions().errors.length) throw new Error('Child extension loading failed: ' + JSON.stringify(resourceLoader.getExtensions().errors));
@@ -45,16 +45,20 @@ const {session} = await createAgentSession({cwd, agentDir, settingsManager, mode
 try {
   await session.bindExtensions({});
   if (request.delay) await new Promise(resolve => setTimeout(resolve, request.delay));
+  if (request.waitFor) while (!await stat(request.waitFor).then(() => true, () => false)) await new Promise(resolve => setTimeout(resolve, 10));
   let turn = 0;
   const executions = [];
   session.agent.streamFunction = () => {
     const results = session.agent.state.messages.filter(message => message.role === 'toolResult');
-    const content = turn++ === 0
+    const attempt = turn++;
+    const retry = request.retry && attempt === 0;
+    const call = attempt === (request.retry ? 1 : 0);
+    const content = retry ? [] : call
       ? [{type: 'toolCall', id: 'child-call', name: request.name, arguments: request.args}]
       : [{type: 'text', text: JSON.stringify({tools: session.getActiveToolNames(), results, executions})}];
-    const message = {role: 'assistant', content, api: 'openai-responses', provider: 'test', model: 'fixture', stopReason: turn === 1 ? 'toolUse' : 'stop', usage: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}}, timestamp: Date.now()};
+    const message = {role: 'assistant', content, api: 'openai-responses', provider: 'test', model: 'fixture', stopReason: retry ? 'error' : call ? 'toolUse' : 'stop', ...(retry ? {errorMessage: '429 rate limit'} : {}), usage: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}}, timestamp: Date.now()};
     const stream = createAssistantMessageEventStream();
-    stream.push({type: 'done', reason: message.stopReason, message});
+    stream.push(retry ? {type: 'error', reason: 'error', error: message} : {type: 'done', reason: message.stopReason, message});
     stream.end(message);
     return stream;
   };
@@ -62,7 +66,7 @@ try {
     if (event.type === 'tool_execution_end') executions.push(event);
     if (event.type === 'message_end' && event.message.role === 'assistant') process.stdout.write(JSON.stringify(event) + '\n');
   });
-  await session.agent.prompt('Execute the fixture request');
+  await session.prompt('Execute the fixture request');
 } finally {
   await session.extensionRunner.emit({type: 'session_shutdown', reason: 'quit'});
   session.dispose();

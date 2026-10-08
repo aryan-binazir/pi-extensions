@@ -6,11 +6,13 @@ import { clampThinkingLevel } from '@earendil-works/pi-ai/compat';
 import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import type { TaskSpec } from './registry.ts';
 import { thinkingLevel, thinkingSuffix } from './thinking.ts';
+import { ALL_TOOLS, type ConnectorGrants } from './scope.ts';
 
 const namePattern = /^[a-z][a-z0-9-]{0,47}$/;
 interface Profile { model: string; thinking: string; description: string; useWhen: string }
 export interface ProfileConfig {
   defaultProfile: string;
+  delegatedTools: ConnectorGrants;
   profiles: Record<string, Profile>;
   provenance: Record<string, string>;
   sources: string[];
@@ -55,11 +57,23 @@ function readSettings(path: string): unknown | undefined {
 export function loadProfiles(cwd: string, trusted: boolean, agentDir = getAgentDir()): ProfileConfig {
   const profiles: Record<string, Profile> = Object.create(null);
   const provenance: Record<string, string> = Object.create(null);
+  const delegatedTools: ConnectorGrants = Object.create(null);
+  const userSettings = join(agentDir, 'subagents.json');
   let defaultProfile = 'implement';
   const sources: string[] = [];
   const merge = (raw: unknown, source: string) => {
     const value = assertObject(raw, source);
-    assertKnownFields(value, ['defaultProfile', 'profiles'], source);
+    assertKnownFields(value, ['defaultProfile', 'profiles', 'delegatedTools'], source);
+    if (value.delegatedTools !== undefined) {
+      if (source !== userSettings) throw new Error('delegatedTools grants are allowed only in user-scoped subagents.json');
+      const grants = assertObject(value.delegatedTools, 'delegatedTools');
+      if (Object.keys(grants).length > 64) throw new Error('delegatedTools allows at most 64 exact names');
+      for (const [name, grant] of Object.entries(grants)) {
+        if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(name) || [...ALL_TOOLS, 'subagent', 'workflow', 'subagent_status', 'subagent_cancel'].includes(name)) throw new Error(`Invalid delegatedTools connector name: ${name}`);
+        if (grant !== 'read' && grant !== 'write') throw new Error(`delegatedTools.${name} must be read or write`);
+        delegatedTools[name] = grant;
+      }
+    }
     if (value.defaultProfile !== undefined) {
       if (typeof value.defaultProfile !== 'string' || !namePattern.test(value.defaultProfile)) throw new Error('defaultProfile must be a profile name');
       defaultProfile = value.defaultProfile; provenance.defaultProfile = source;
@@ -89,7 +103,7 @@ export function loadProfiles(cwd: string, trusted: boolean, agentDir = getAgentD
     profile.description ??= ''; profile.useWhen ??= '';
   }
   if (!Object.hasOwn(profiles, defaultProfile)) throw new Error(`Unknown defaultProfile ${defaultProfile}; fix settings and /reload`);
-  const config = {defaultProfile, profiles, provenance, sources, local: trusted ? 'trusted' as const : 'excluded' as const};
+  const config = {defaultProfile, profiles, delegatedTools, provenance, sources, local: trusted ? 'trusted' as const : 'excluded' as const};
   return {...config, identity: createHash('sha256').update(JSON.stringify(config)).digest('hex')};
 }
 

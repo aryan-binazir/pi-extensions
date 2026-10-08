@@ -17,6 +17,7 @@ interface WorkflowOptions {
   journalDirectory: string;
   policyIdentity: string;
   allowedTools?: () => string[];
+  readTools?: () => string[];
   defaultTask?: Pick<TaskSpec, 'model' | 'thinking'>;
   profileIdentity?: string;
   normalizeTask?: (task: TaskSpec) => TaskSpec;
@@ -223,7 +224,7 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
             throw new Error('Invalid child cwd');
           const inherited = {...options.defaultTask, ...input, cwd: input.cwd ? resolve(cwd, input.cwd) : cwd};
           if (input.thinking === undefined && typeof input.model === 'string') inherited.thinking = thinkingSuffix.exec(input.model)?.[1] ?? options.defaultTask?.thinking;
-          const task = await validateTask(options.normalizeTask ? options.normalizeTask({...input, cwd: inherited.cwd} as unknown as TaskSpec) : inherited as unknown as TaskSpec, options.allowedTools?.());
+          const task = await validateTask(options.normalizeTask ? options.normalizeTask({...input, cwd: inherited.cwd} as unknown as TaskSpec) : inherited as unknown as TaskSpec, options.allowedTools?.(), options.readTools?.());
           if (options.defaultTask && !task.model) throw new Error('A selected parent model or explicit provider/model is required');
           if (!insideRoot(cwd, task.cwd))
             throw new Error('Child cwd escapes workflow cwd');

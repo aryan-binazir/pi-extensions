@@ -67,7 +67,7 @@ if (!Number.isInteger(timeout) || timeout < 10 || timeout > 3600000) {
 const deadline = setTimeout(stop, timeout);
 child = spawn(process.argv[2], process.argv.slice(3), {
   env: process.env,
-  stdio: ['ignore', 'pipe', 'pipe'],
+  stdio: process.env.PI_SUBAGENT_TOOL_BRIDGE === '1' ? ['ignore', 'pipe', 'pipe', 'ignore', 'ignore', 5] : ['ignore', 'pipe', 'pipe'],
 });
 child.stdout.pipe(process.stdout, {end: false});
 child.stderr.pipe(process.stderr, {end: false});

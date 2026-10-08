@@ -1,8 +1,9 @@
 import { join, resolve } from 'node:path';
-import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 import { visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
-import { assertChildTask, delegationScope, assertWorkflowRead } from './scope.ts';
+import { ALL_TOOLS, assertChildTask, assertToolSelection, delegationScope, assertWorkflowRead } from './scope.ts';
+import type {ConnectorBridge} from './connector-bridge.ts';
 import { getActiveCwd } from '../worktree/routing.ts';
 import { piInvocation, SubagentRegistry, TIMEOUT_BOUNDS, type TaskSpec } from './registry.ts';
 import { thinkingPattern } from './thinking.ts';
@@ -55,7 +56,14 @@ export default function subagents(pi: ExtensionAPI): void {
     try { pi.sendMessage({customType: 'subagent-complete', content: JSON.stringify(value), display: true}, {triggerTurn, deliverAs: triggerTurn ? 'followUp' : 'nextTurn'}); }
     catch (error) { registry.notificationFailed(pending.map(task => task.id), error); }
   };
-  const parent = () => ({ cwd: getActiveCwd(context?.cwd ?? process.cwd(), context?.sessionManager.getSessionId()), tools: pi.getActiveTools() });
+  const parent = () => {
+    const registered = pi.getAllTools?.();
+    return {
+      cwd: getActiveCwd(context?.cwd ?? process.cwd(), context?.sessionManager.getSessionId()), tools: pi.getActiveTools(), delegatedTools: snapshot?.delegatedTools,
+      registeredTools: registered?.map(tool => tool.name),
+      callableTools: registered?.filter(tool => !['model-only', 'hidden'].includes(tool.exposure ?? 'direct')).map(tool => tool.name),
+    };
+  };
   const collapsedBriefById = new Map<string, string>();
   const brief = (id: string, task: string) => {
     let label = collapsedBriefById.get(id);
@@ -94,6 +102,7 @@ export default function subagents(pi: ExtensionAPI): void {
   };
   const createRegistry = () => new SubagentRegistry({
     allowedTools: () => delegationScope(parent()).tools,
+    readTools: () => delegationScope(parent()).readTools,
     authorize: async (task, signal) => {
       const ctx = context;
       await assertChildTask(task, { parent: parent(), approve: ctx?.hasUI ? request => withApprovalUI(ctx, signal, () => ctx.ui.confirm('Approve local child extensions', request, {signal})) : undefined });
@@ -121,8 +130,30 @@ export default function subagents(pi: ExtensionAPI): void {
     latestReport = sanitizeTrackerReport(report);
     if (context?.hasUI) context.ui.setStatus('subagent-tracker', trackerFooter(report, process.stdout.columns));
   });
-  const trackedSpawn = async (task: TaskSpec, signal?: AbortSignal, owner: 'parent' | 'workflow' = 'parent') => {
-    const handle = await registry.spawn(task, signal, owner);
+  const trackedSpawn = async (task: TaskSpec, ctx: ExtensionToolContext, signal?: AbortSignal, owner: 'parent' | 'workflow' = 'parent') => {
+    const names = (task.tools ?? []).filter(name => !ALL_TOOLS.includes(name));
+    let bridge: ConnectorBridge | undefined;
+    if (names.length) {
+      assertToolSelection(names, parent());
+      if (typeof ctx.executeTool !== 'function' || !ctx.tools || names.some(name => !ctx.tools.some(tool => tool.name === name))) throw new Error(`Parent Pi cannot execute delegated tools: ${names.join(', ')}. Requires Pi 0.99.1+ tools/executeTool support.`);
+      const definitions = pi.getAllTools();
+      bridge = {
+        tools: names.map(name => {
+          const tool = definitions.find(tool => tool.name === name)!;
+          return {name: tool.name, description: tool.description, parameters: tool.parameters, annotations: tool.annotations, namespace: tool.namespace};
+        }),
+        execute: async (name, args, callSignal) => {
+          callSignal.throwIfAborted();
+          if (task.configProvenance?.config !== configFor(ctx).identity) throw new Error('Subagent delegation configuration changed; resubmit task');
+          assertToolSelection([name], parent());
+          if (task.preset === 'reader' && !delegationScope(parent()).readTools.includes(name)) throw new Error(`Reader preset cannot grant write tools: ${name}`);
+          if (!ctx.tools.some(tool => tool.name === name)) throw new Error(`Connector tool is no longer callable in the parent: ${name}`);
+          const outcome = await ctx.executeTool(name, args, {signal: callSignal});
+          return {...outcome.result, isError: outcome.isError};
+        },
+      };
+    }
+    const handle = await registry.spawn(task, signal, owner, bridge);
     renderActiveAgents();
     if (!shuttingDown && !cancellingAll) tracker.update();
     const invalidate = () => { if (!shuttingDown && !cancellingAll) tracker.invalidate(); };
@@ -156,6 +187,7 @@ export default function subagents(pi: ExtensionAPI): void {
   };
   const normalize = (task: Omit<TaskSpec, 'cwd'> & {cwd?: string}, ctx: ExtensionContext, config = configFor(ctx)): TaskSpec => {
     assertTaskFields(task);
+    if (Array.isArray(task.tools) && task.tools.every(name => typeof name === 'string')) assertToolSelection(task.tools, parent());
     if (task.cwd !== undefined && typeof task.cwd !== 'string') throw new Error('Invalid child cwd');
     return resolveProfile({...task, cwd: resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), task.cwd ?? '.')}, config, ctx);
   };
@@ -213,14 +245,14 @@ export default function subagents(pi: ExtensionAPI): void {
     return {cancelled};
   };
   const registerSubagent = (config?: ProfileConfig) => pi.registerTool({
-    name: 'subagent', label: 'Subagent', description: 'Start a background Pi agent with only an explicit task brief, a validated workspace, and bounded tools. Returns task ID immediately; completion is pushed into this conversation. Context separation is not an OS sandbox. Same-directory writers serialize. Explicit child extensions may contribute hooks and commands; their custom tools are excluded by the built-in tool allowlist.' + (config ? ` Profiles: ${Object.keys(config.profiles).join(', ')}; default: ${config.defaultProfile}.` : ''), parameters: taskSchema,
+    name: 'subagent', label: 'Subagent', description: 'Start a background Pi agent with an explicit task brief, validated workspace, and bounded tools. Returns task ID immediately; completion is pushed here. Built-in defaults stay within parent permissions. Connector tools must be requested explicitly in tools, have exact read/write grants in user-scoped subagents.json delegatedTools, and be active and callable in the parent. Reader presets reject write grants. Selected connectors execute through parent permission checks via child proxies; connector credentials stay in the parent. Requires Pi 0.99.1+ tools/executeTool support. Explicit child extensions require approval and cannot add tools outside the selected names. Context separation is not an OS sandbox. Same-directory writers serialize.' + (config ? ` Profiles: ${Object.keys(config.profiles).join(', ')}; default: ${config.defaultProfile}. Connector grants: ${Object.entries(config.delegatedTools).map(([name, grant]) => `${name} (${grant})`).join(', ') || 'none'}.` : ''), parameters: taskSchema,
     promptGuidelines: [completionGuidance, 'The subagent extension automatically runs a shared report-only Luna tracker. Do not launch or poll a watcher; worker results arrive directly, independently of tracker reports.'],
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
       context = ctx;
       const task = normalize(params, ctx);
       if (!task.model) throw new Error('A selected parent model or explicit provider/model is required');
-      const handle = await trackedSpawn(task, signal);
+      const handle = await trackedSpawn(task, ctx, signal);
       return result({ id: handle.id, status: 'queued', notification: completionGuidance });
     },
   });
@@ -245,7 +277,7 @@ export default function subagents(pi: ExtensionAPI): void {
     async execute(_id, params) { return result(await cancelTasks(params.id)); },
   });
   pi.registerTool({
-    name: 'workflow', label: 'TypeScript workflow', description: 'Compile and run an explicitly user-approved TypeScript async function body. api exposes spawn(task, stableStageLabel), parallel(array of async functions), retry(attempts, async function), checkpoint(key, async function), bounded readFile(path,maxBytes). Successful stages replay only with identical approved source, cwd, and tool scope. api.spawn accepts the same task/profile/model/thinking/preset/tools/extensions/cwd/timeout as subagent. Requires interactive source review.',
+    name: 'workflow', label: 'TypeScript workflow', description: 'Compile and run an explicitly user-approved TypeScript async function body. api exposes spawn(task, stableStageLabel), parallel(array of async functions), retry(attempts, async function), checkpoint(key, async function), bounded readFile(path,maxBytes). Successful stages replay only with identical approved source, cwd, and tool scope. api.spawn accepts the same task/profile/model/thinking/preset/tools/extensions/cwd/timeout and connector delegation contract as subagent. Connector tools need explicit tools selection, exact read/write grants in user-scoped subagents.json delegatedTools, and active/callable parent permissions. Reader presets reject write grants. Requires interactive source review.',
     parameters: Type.Object({ source: Type.String({ minLength: 1, maxLength: 64000 }), timeout: Type.Optional(Type.Integer(TIMEOUT_BOUNDS)) }),
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
@@ -262,10 +294,12 @@ export default function subagents(pi: ExtensionAPI): void {
           source: params.source, cwd, timeout: params.timeout, signal: controller.signal,
           journalDirectory: join(getAgentDir(), 'workflow-journals'), policyIdentity: delegationScope(parent()).replayIdentity,
           allowedTools: () => delegationScope(parent()).tools,
+          readTools: () => delegationScope(parent()).readTools,
           defaultTask: {model: ctx.model && `${ctx.model.provider}/${ctx.model.id}`, thinking: ctx.thinkingLevel},
           profileIdentity: config.identity,
           normalizeTask: task => {
             if (configFor(ctx).identity !== config.identity || getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()) !== cwd) throw new Error('Workflow configuration or workspace changed; restart workflow');
+            if (Array.isArray(task.tools) && task.tools.every(name => typeof name === 'string')) assertToolSelection(task.tools, parent());
             return resolveProfile(task, config, selectionContext);
           },
           approve: ctx.hasUI ? async source => {
@@ -302,7 +336,7 @@ export default function subagents(pi: ExtensionAPI): void {
           authorizeRead: path => assertWorkflowRead(parent(), path),
           spawn: async (task, taskSignal) => {
             taskSignal.throwIfAborted();
-            const handle = await trackedSpawn(task, taskSignal, 'workflow');
+            const handle = await trackedSpawn(task, ctx, taskSignal, 'workflow');
             const cancel = () => registry.cancel(handle.id);
             taskSignal.addEventListener('abort', cancel, { once: true });
             if (taskSignal.aborted) cancel();

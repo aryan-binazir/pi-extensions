@@ -55,6 +55,85 @@ Reporting:
   children. Journal persistence failure returns control for reconciliation rather
   than repeating unjournaled effects.
 
+### Connector delegation
+
+Connector delegation requires Pi 0.99.1 or newer with `ExtensionToolContext.tools`
+and `executeTool`. Configure exact parent tool names in the user-scoped
+`${PI_CODING_AGENT_DIR:-~/.pi/agent}/subagents.json`. Preserve any existing profile
+settings in that file. For example:
+
+```json
+{
+  "delegatedTools": {
+    "claude_jira_get_issue": "read",
+    "claude_jira_get_issue_comments": "read",
+    "claude_jira_search_issues": "read"
+  }
+}
+```
+
+Run `/reload`, then select the tools explicitly in `subagent` or workflow
+`api.spawn`:
+
+```ts
+await api.spawn({
+  task: "Read the issue and comments, then summarize the evidence.",
+  profile: "research",
+  preset: "reader",
+  tools: ["read", "claude_jira_get_issue", "claude_jira_get_issue_comments",
+    "claude_jira_search_issues"]
+}, "jira-research");
+```
+
+Use the exact names available in your parent session. The example names come
+from the reported Claude connector; Pi's native MCP tools can have different
+names. This setting grants delegation only. It does not configure a connector,
+activate a tool, or authenticate it. Keep personal MCP servers and credentials
+in Pi's user-scoped `mcp.json`; this extension does not edit that file. Settings
+from other subagent implementations do not apply here.
+
+The delegation contract is:
+
+- A connector must have an exact `read` or `write` grant, be explicitly selected,
+  be active in the parent, and be callable through the parent's `executeTool` API.
+  Hidden and model-only tools cannot be forwarded. Deferred/codemode tools still
+  need to be active for delegation, even if another parent tool can call them.
+- Grants belong only in user-scoped `subagents.json`. Project settings and model
+  profiles cannot add or reclassify grants. Wildcards are unsupported. At most
+  64 connector names are allowed, each with 1–128 letters, digits, underscores,
+  dots, or hyphens. Built-in and subagent control tools cannot receive grants.
+- `read` is the operator's explicit classification, not an inferred guarantee
+  from a name or connector annotation. Review what the tool does before granting
+  it. The `reader` preset rejects `write` grants and built-in `bash`, `write`, and
+  `edit`. Model profiles do not grant permissions. Omitting `tools` keeps the
+  existing built-in defaults; it never adds connectors implicitly.
+- Unavailable, ungranted, inactive, or uncallable tools fail before spawning,
+  with the offending names and corrective steps. Queue admission, launch, each
+  forwarded call, and cached workflow stages recheck the applicable permissions.
+- A bundled child extension registers proxies for only the selected connectors,
+  before any explicitly approved child extensions. A private inherited descriptor
+  carries definitions, arguments, and results through the existing supervisor.
+  There is no socket server or generated connector configuration. Connector
+  callbacks, authentication, and permission hooks remain in the parent.
+- Parent permission blocks and connector failures keep their `isError` flag.
+  Messages are limited to 1 MiB and 32 outstanding requests per child. Oversized
+  results fail explicitly. Cancellation, timeout, transport loss, child exit, and
+  shutdown abort task-scoped parent requests. A connector must honor its signal
+  to stop an in-flight external operation. Pi permission dialogs may remain until
+  their own hook resolves; an aborted request cannot then execute the connector.
+- Children remain separate processes, not OS sandboxes. They retain the existing
+  inherited environment and filesystem behavior. The bridge does not copy
+  connector credentials into briefs, logs, settings, or repository files.
+
+Pi 0.99.1 permits calls through the captured parent context after a background
+spawn has returned. Its nested-call records can miss those late calls, usage
+accounting can be incomplete, and nested call IDs can restart after another
+parent turn. Workflow calls remain inside their originating tool invocation.
+The extension keeps the parent execution pipeline intact and does not patch
+Pi's transcript bookkeeping. See the separate
+[continuation investigation](subagent-continuation.md) for reproduction steps
+and what remains unverified.
+
 ### Workflows
 
 Workflows require a separate Node executable on `PATH` (22.19+ in the 22.x series,
@@ -174,7 +253,9 @@ value on the next reload. A missing global file uses bundled defaults.
 
 Accepted schema:
 
-- Only `defaultProfile` and `profiles` are accepted at the top level. Each profile
+- `defaultProfile` and `profiles` are accepted in either settings file.
+  `delegatedTools` is accepted only in the user-scoped file, as described above.
+  Each profile
   accepts `model`, `thinking`, `description` and `useWhen`; new profiles require
   model and thinking, and text fields default empty.
 - Names use lowercase letters, digits and hyphens, start with a letter, and have at

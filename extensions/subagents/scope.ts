@@ -4,7 +4,7 @@ import { isAbsolute, relative, sep } from 'node:path';
 export const READ_TOOLS = ['read', 'grep', 'find', 'ls'];
 export const ALL_TOOLS = [...READ_TOOLS, 'write', 'edit', 'bash'];
 export type ConnectorGrants = Record<string, 'read' | 'write'>;
-interface DelegationScope { cwd: string; tools: string[]; delegatedTools?: ConnectorGrants; registeredTools?: string[]; callableTools?: string[] }
+interface DelegationScope { cwd: string; tools: string[]; delegatedTools?: ConnectorGrants; registeredTools?: string[]; callableTools?: string[]; builtinTools?: string[] }
 
 export function insideRoot(canonicalRoot: string, canonicalPath: string): boolean {
   const rel = relative(canonicalRoot, canonicalPath);
@@ -12,18 +12,19 @@ export function insideRoot(canonicalRoot: string, canonicalPath: string): boolea
 }
 
 export function delegationScope(parent: DelegationScope) {
-  const connectors = Object.entries(parent.delegatedTools ?? {}).sort(([a], [b]) => a.localeCompare(b))
-    .filter(([name]) => parent.tools.includes(name) && parent.callableTools?.includes(name));
+  const connectors = Object.entries(parent.delegatedTools ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .filter(([name]) => parent.tools.includes(name) && parent.callableTools?.includes(name) && !parent.builtinTools?.includes(name));
   const tools = [...ALL_TOOLS.filter(tool => parent.tools.includes(tool)), ...connectors.map(([name]) => name)];
   const readTools = [...READ_TOOLS.filter(tool => tools.includes(tool)), ...connectors.filter(([, grant]) => grant === 'read').map(([name]) => name)];
-  return {tools, readTools, replayIdentity: JSON.stringify({version: 2, cwd: parent.cwd, tools, readTools})};
+  return {tools, readTools, replayIdentity: JSON.stringify(connectors.length ? {version: 2, cwd: parent.cwd, tools, readTools} : {version: 1, cwd: parent.cwd, tools})};
 }
 
 export function assertToolSelection(tools: string[], parent: DelegationScope): void {
-  const unavailable: string[] = [], disallowed: string[] = [], uncallable: string[] = [], denied: string[] = [];
+  const unavailable: string[] = [], disallowed: string[] = [], uncallable: string[] = [], denied: string[] = [], builtin: string[] = [];
   const allowed = delegationScope(parent).tools;
   for (const name of tools) {
     if (!ALL_TOOLS.includes(name) && parent.registeredTools) {
+      if (parent.builtinTools?.includes(name)) {builtin.push(name); continue;}
       if (!parent.registeredTools.includes(name)) {unavailable.push(name); continue;}
       if (!Object.hasOwn(parent.delegatedTools ?? {}, name)) {disallowed.push(name); continue;}
       if (!parent.callableTools?.includes(name)) {uncallable.push(name); continue;}
@@ -32,9 +33,10 @@ export function assertToolSelection(tools: string[], parent: DelegationScope): v
   }
   const errors = [
     unavailable.length && `Unavailable child tools: ${unavailable.join(', ')}. Register these tools in the parent and /reload.`,
+    builtin.length && `Pi core tools cannot receive connector grants: ${builtin.join(', ')}. Use the supported built-in child tools.`,
     disallowed.length && `Disallowed connector tools: ${disallowed.join(', ')}. Add exact read/write grants to user-scoped subagents.json and /reload.`,
     uncallable.length && `Connector tools are not callable in the parent: ${uncallable.join(', ')}. Enable a callable tool exposure in Pi and /reload.`,
-    denied.length && `Explicit child tools exceed parent permissions: ${denied.join(', ')}. Activate these tools in the parent before delegating.`,
+    denied.length && `Explicit child tools exceed parent permissions: ${denied.join(', ')}. Activate these tools in the parent before delegating. For Pi MCP, set the selected tools' toolExposure to direct in user-scoped mcp.json and /reload.`,
   ].filter(Boolean);
   if (errors.length) throw new Error(errors.join('\n'));
 }

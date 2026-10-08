@@ -61,7 +61,8 @@ export default function subagents(pi: ExtensionAPI): void {
     return {
       cwd: getActiveCwd(context?.cwd ?? process.cwd(), context?.sessionManager.getSessionId()), tools: pi.getActiveTools(), delegatedTools: snapshot?.delegatedTools,
       registeredTools: registered?.map(tool => tool.name),
-      callableTools: registered?.filter(tool => !['model-only', 'hidden'].includes(tool.exposure ?? 'direct')).map(tool => tool.name),
+      callableTools: registered?.filter(tool => ['direct', 'deferred', 'codemode', 'codemode-deferred'].includes(tool.exposure ?? 'direct')).map(tool => tool.name),
+      builtinTools: registered?.filter(tool => tool.sourceInfo?.path.startsWith('builtin:') && tool.sourceInfo.path !== 'builtin:mcp').map(tool => tool.name),
     };
   };
   const collapsedBriefById = new Map<string, string>();

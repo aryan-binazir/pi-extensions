@@ -8,6 +8,7 @@ import {createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, 
 import {Type} from 'typebox';
 import subagents from '../extensions/subagents/index.ts';
 import {until} from '../extensions/subagents/test-support.ts';
+import {SubagentRegistry} from '../extensions/subagents/registry.ts';
 
 const read = 'claude_jira_get_issue', write = 'claude_jira_update_issue';
 const request = (name = read, args: Record<string, unknown> = {issueKey: 'BBA-42'}, delay = 0) => JSON.stringify({name, args, delay});
@@ -39,7 +40,9 @@ async function fixture(run: (f: any) => Promise<void>, options: any = {}) {
   };
   try {
     await mkdir(agentDir);
-    await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nimport(${JSON.stringify(new URL('./fixtures/delegated-child.mjs', import.meta.url).href)}).catch(error=>{console.error(error);process.exitCode=1;});`);
+    await writeFile(join(cwd, 'pi'), options.binary
+      ? `#!/bin/sh\nexec '${options.binary.replace(/'/g, "'\\''")}' "$@"\n`
+      : `#!${process.execPath}\nimport(${JSON.stringify(new URL('./fixtures/delegated-child.mjs', import.meta.url).href)}).catch(error=>{console.error(error);process.exitCode=1;});`);
     await chmod(join(cwd, 'pi'), 0o700);
     await writeFile(join(agentDir, 'models.json'), JSON.stringify({providers: {test: {baseUrl: 'http://127.0.0.1:1', api: 'openai-responses', apiKey: 'synthetic', models: [{id: 'fixture', name: 'Fixture', reasoning: true, contextWindow: 100000, maxTokens: 1000}]}}}));
     const settingsPath = join(agentDir, 'subagents.json');
@@ -58,7 +61,13 @@ async function fixture(run: (f: any) => Promise<void>, options: any = {}) {
     await session.bindExtensions({uiContext: {confirm: async () => true, editor: async (_title: string, source: string) => source, setWidget() {}, setStatus() {}, notify() {}} as any});
     const runner = session.extensionRunner!;
     const context = runner.createToolContext('fixture-parent', undefined);
-    toolContext = Object.defineProperties(Object.create(context), {hasUI: {value: true}, ui: {value: {...context.ui, confirm: async () => true, editor: async (_title: string, source: string) => source, setWidget() {}, setStatus() {}, notify() {}}}});
+    toolContext = Object.defineProperties(Object.create(context), {
+      hasUI: {value: true}, ui: {value: {...context.ui, confirm: async () => true, editor: async (_title: string, source: string) => source, setWidget() {}, setStatus() {}, notify() {}}},
+      executeTool: {value: async (name: string, input: any, callOptions: any) => {
+        try {return await context.executeTool(name, input, callOptions);}
+        finally {options.executionDone?.(name);}
+      }},
+    });
     const execute = (name: string, params: any = {}, signal?: AbortSignal) => session!.getToolDefinition(name)!.execute(name, params, signal, undefined, toolContext) as Promise<any>;
     let promptCount = 0;
     const parentTurn = async (name?: string, params?: any) => {
@@ -76,7 +85,9 @@ async function fixture(run: (f: any) => Promise<void>, options: any = {}) {
     const completed = async (id: string) => until(async () => {
       const task = (await execute('subagent_status', {id})).details;
       return ['queued', 'running'].includes(task.status) ? undefined : task;
-    }, 'the delegated child to complete', 10000);
+    }, 'the delegated child to complete', 10000).catch(async error => {
+      throw new Error(`${error.message}: ${JSON.stringify((await execute('subagent_status', {id})).details)}`);
+    });
     await run({cwd, agentDir, session, execute, calls, hooks, completed, parentTurn, secret, settings, settingsPath, reload: async () => {await runner.emit({type: 'session_shutdown', reason: 'reload'}); await runner.emit({type: 'session_start', reason: 'reload'});}});
   } finally {
     await session?.extensionRunner?.emit({type: 'session_shutdown', reason: 'quit'});
@@ -86,6 +97,22 @@ async function fixture(run: (f: any) => Promise<void>, options: any = {}) {
     await rm(cwd, {recursive: true, force: true});
   }
 }
+
+test('real Pi executable delegates connectors and preserves parent denials', {skip: !process.env.PI_SUBAGENT_TEST_BINARY}, async () => fixture(async ({execute, completed, calls}) => {
+  for (const issueKey of ['BBA-42', 'DENIED']) {
+    const child = await execute('subagent', {
+      task: request(read, {issueKey}), tools: ['read', read],
+      extensions: [new URL('./fixtures/delegated-provider.mjs', import.meta.url).pathname],
+    });
+    const task = await completed(child.details.id);
+    assert.equal(task.status, 'succeeded', JSON.stringify(task));
+    const output = JSON.parse(task.output);
+    assert.deepEqual(output.tools.sort(), ['read', read].sort());
+    assert.equal(output.results[0].isError, issueKey === 'DENIED');
+    assert.match(output.results[0].content[0].text, issueKey === 'DENIED' ? /Parent connector permission denied/ : /Fixture issue/);
+  }
+  assert.equal(calls.length, 1);
+}, {binary: process.env.PI_SUBAGENT_TEST_BINARY}));
 
 test('an explicitly granted connector executes in a real background child after another parent turn', async () => fixture(async ({execute, completed, parentTurn, calls, hooks, secret}) => {
   const launched = await parentTurn('subagent', {task: request(read, {issueKey: 'BBA-42'}, 300), preset: 'reader', tools: ['read', read]});
@@ -113,6 +140,43 @@ test('forged child requests cannot invoke a parent tool outside that child selec
   assert.equal(calls.length, 0);
 }));
 
+test('an empty connector bridge error settles the child call normally', async () => fixture(async ({cwd}) => {
+  const registry = new SubagentRegistry({allowedTools: () => [read], readTools: () => [read]});
+  try {
+    const child = await registry.spawn({task: request(), cwd, model: 'test/fixture', tools: [read], timeout: 3000}, undefined, 'parent', {
+      tools: [{name: read, description: 'Fixture connector', parameters: Type.Object({issueKey: Type.String()})}],
+      execute: async () => {throw new Error('');},
+    });
+    const task = await child.done;
+    assert.equal(task.status, 'succeeded', JSON.stringify(task));
+    const result = JSON.parse(task.output).results[0];
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Connector execution failed/);
+  } finally {await registry.shutdown();}
+}));
+
+test('cancelled uncooperative connector calls retain their execution slots without breaking the bridge', async () => {
+  let release!: (value: any) => void;
+  const held = new Promise(resolve => {release = resolve;});
+  try {
+    await fixture(async ({cwd, execute, completed, calls}) => {
+      const gate = join(cwd, 'calls-entered');
+      const call = (id: number) => ({type: 'call', id, name: read, args: {issueKey: 'BBA-42'}});
+      const child = await execute('subagent', {tools: [read], task: JSON.stringify({
+        protocol: Array.from({length: 32}, (_, i) => call(i + 1)), gate,
+        afterGate: [{type: 'cancel', id: 1}, call(33)], finishId: 33,
+      })});
+      await until(() => calls.length === 32, 'all parent requests to enter the connector', 10000);
+      await writeFile(gate, 'ready');
+      const task = await completed(child.details.id);
+      assert.equal(task.status, 'succeeded', JSON.stringify(task));
+      assert.match(JSON.parse(task.output).error, /Too many outstanding connector requests/);
+      assert.equal(calls.length, 32);
+      assert.equal(calls[0].signal.aborted, true);
+    }, {connector: async () => held});
+  } finally {release({content: [{type: 'text', text: 'Released'}], details: {}});}
+});
+
 test('read connectors overlap a writer while queued connector writes recheck parent permissions', async () => fixture(async ({execute, calls, completed, session}) => {
   const first = await execute('subagent', {task: request(write), tools: [write]});
   await until(() => calls.length === 1, 'the first connector writer to start', 10000);
@@ -137,6 +201,16 @@ test('unsupported connector definitions fail before any child is admitted', asyn
   assert.deepEqual((await execute('subagent_status')).details, []);
 }, {description: 'x'.repeat(1024 * 1024)}));
 
+test('oversized structured connector data keeps its bounded visible result callable', async () => fixture(async ({execute, completed}) => {
+  const child = await execute('subagent', {task: request(), tools: [read]});
+  const task = await completed(child.details.id);
+  assert.equal(task.status, 'succeeded', JSON.stringify(task));
+  const output = JSON.parse(task.output);
+  assert.equal(output.results[0].isError, false);
+  assert.equal(output.results[0].content[0].text, 'Visible connector result');
+  assert.equal(output.executions[0].result.structuredContent, undefined);
+}, {connector: async () => ({content: [{type: 'text', text: 'Visible connector result'}], details: {}, structuredContent: {raw: 'x'.repeat(1024 * 1024)}})}));
+
 test('cancelling a child aborts its connector request in the parent', async () => fixture(async ({execute, calls}) => {
   const child = await execute('subagent', {task: request(), tools: [read]});
   await until(() => calls.length > 0, 'the parent-hosted connector request to start', 10000);
@@ -152,6 +226,8 @@ test('cancelling a child aborts its connector request in the parent', async () =
 
 test('cancelling during a parent permission hook prevents the connector effect', async () => {
   let entered = false, release!: () => void;
+  let done!: () => void;
+  const settled = new Promise<void>(resolve => {done = resolve;});
   const approval = new Promise<void>(resolve => {release = resolve;});
   await fixture(async ({execute, calls}) => {
     const child = await execute('subagent', {task: request(), tools: [read]});
@@ -159,12 +235,33 @@ test('cancelling during a parent permission hook prevents the connector effect',
     try {
       await execute('subagent_cancel', {id: child.details.id});
       release();
-      await new Promise(resolve => setTimeout(resolve, 30));
+      await settled;
       assert.equal(calls.length, 0);
       assert.equal((await execute('subagent_status', {id: child.details.id})).details.status, 'cancelled');
     } finally {release();}
-  }, {permission: async (event: any) => {if (event.toolName === read) {entered = true; await approval;}}});
+  }, {permission: async (event: any) => {if (event.toolName === read) {entered = true; await approval;}}, executionDone: (name: string) => {if (name === read) done();}});
 });
+
+test('child timeout aborts a connector executing in the parent', async () => fixture(async ({execute, calls, completed}) => {
+  const child = await execute('subagent', {task: request(), tools: [read], timeout: 5000});
+  await until(() => calls.length === 1, 'the connector to begin before timeout', 10000);
+  const task = await completed(child.details.id);
+  assert.equal(task.status, 'timed-out');
+  assert.equal(calls[0].signal.aborted, true);
+}, {connector: async (_name: string, _args: unknown, signal: AbortSignal) => new Promise((_resolve, reject) => {
+  const abort = () => reject(new Error('Fixture timeout'));
+  signal.addEventListener('abort', abort, {once: true});
+  if (signal.aborted) abort();
+})}));
+
+test('oversized visible connector results return a normal child tool error', async () => fixture(async ({execute, completed}) => {
+  const child = await execute('subagent', {task: request(), tools: [read]});
+  const task = await completed(child.details.id);
+  assert.equal(task.status, 'succeeded', JSON.stringify(task));
+  const result = JSON.parse(task.output).results[0];
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /exceeds its buffer limit/);
+}, {connector: async () => ({content: [{type: 'text', text: 'x'.repeat(2 * 1024 * 1024)}], details: {}})}));
 
 test('workflow replay rechecks grant removal, reclassification, and active parent permissions', async () => fixture(async ({execute, calls, settings, settingsPath, reload, session}) => {
   const source = `return await api.spawn(${JSON.stringify({task: request(), tools: [read], preset: 'reader'})},'jira');`;

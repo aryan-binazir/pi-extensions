@@ -32,6 +32,10 @@ test('replay identity changes with the workspace or the granted tools', () => {
   assert.notEqual(identity('/workspace', ['read']), identity('/workspace', ['read', 'bash']));
 });
 
+test('builtin-only delegation retains the persisted version-one replay identity', () => {
+  assert.equal(delegationScope({cwd: '/workspace', tools: ['bash', 'read']}).replayIdentity, '{"version":1,"cwd":"/workspace","tools":["read","bash"]}');
+});
+
 test('workspace paths inside the root are allowed and escapes are rejected', async () => workspace(async ({root, inside, outside, file}) => {
   await assertWorkspacePath(root, root);
   await assertWorkspacePath(root, inside);

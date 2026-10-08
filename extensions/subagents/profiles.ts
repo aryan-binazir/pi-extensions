@@ -69,7 +69,7 @@ export function loadProfiles(cwd: string, trusted: boolean, agentDir = getAgentD
       const grants = assertObject(value.delegatedTools, 'delegatedTools');
       if (Object.keys(grants).length > 64) throw new Error('delegatedTools allows at most 64 exact names');
       for (const [name, grant] of Object.entries(grants)) {
-        if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(name) || [...ALL_TOOLS, 'subagent', 'workflow', 'subagent_status', 'subagent_cancel'].includes(name)) throw new Error(`Invalid delegatedTools connector name: ${name}`);
+        if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(name) || [...ALL_TOOLS, 'powershell', 'codemode', 'tool_search', 'subagent', 'workflow', 'subagent_status', 'subagent_cancel'].includes(name)) throw new Error(`Invalid delegatedTools connector name: ${name}`);
         if (grant !== 'read' && grant !== 'write') throw new Error(`delegatedTools.${name} must be read or write`);
         delegatedTools[name] = grant;
       }
@@ -103,8 +103,9 @@ export function loadProfiles(cwd: string, trusted: boolean, agentDir = getAgentD
     profile.description ??= ''; profile.useWhen ??= '';
   }
   if (!Object.hasOwn(profiles, defaultProfile)) throw new Error(`Unknown defaultProfile ${defaultProfile}; fix settings and /reload`);
-  const config = {defaultProfile, profiles, delegatedTools, provenance, sources, local: trusted ? 'trusted' as const : 'excluded' as const};
-  return {...config, identity: createHash('sha256').update(JSON.stringify(config)).digest('hex')};
+  const config = {defaultProfile, profiles, provenance, sources, local: trusted ? 'trusted' as const : 'excluded' as const};
+  const identity = {...config, ...(Object.keys(delegatedTools).length ? {delegatedTools} : {})};
+  return {...config, delegatedTools, identity: createHash('sha256').update(JSON.stringify(identity)).digest('hex')};
 }
 
 function baseModel(model: string): string { return model.replace(/^(openai(?:-codex)?\/.+)~fast$/, '$1'); }

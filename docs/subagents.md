@@ -65,9 +65,9 @@ settings in that file. For example:
 ```json
 {
   "delegatedTools": {
-    "claude_jira_get_issue": "read",
-    "claude_jira_get_issue_comments": "read",
-    "claude_jira_search_issues": "read"
+    "mcp__jira__get_issue": "read",
+    "mcp__jira__get_issue_comments": "read",
+    "mcp__jira__search_issues": "read"
   }
 }
 ```
@@ -80,17 +80,31 @@ await api.spawn({
   task: "Read the issue and comments, then summarize the evidence.",
   profile: "research",
   preset: "reader",
-  tools: ["read", "claude_jira_get_issue", "claude_jira_get_issue_comments",
-    "claude_jira_search_issues"]
+  tools: ["read", "mcp__jira__get_issue", "mcp__jira__get_issue_comments",
+    "mcp__jira__search_issues"]
 }, "jira-research");
 ```
 
-Use the exact names available in your parent session. The example names come
-from the reported Claude connector; Pi's native MCP tools can have different
-names. This setting grants delegation only. It does not configure a connector,
-activate a tool, or authenticate it. Keep personal MCP servers and credentials
-in Pi's user-scoped `mcp.json`; this extension does not edit that file. Settings
-from other subagent implementations do not apply here.
+Pi's built-in MCP names tools `mcp__<server>__<tool>`. The example assumes a server
+named `jira` offering those three tools. Use your parent session's exact names.
+The reported `claude_jira_*` names work only if that integration registers them
+as callable Pi tools. Adapter-only tools cannot be delegated through this API.
+
+MCP defaults to `codemode` exposure, which leaves individual tools inactive.
+In the existing Jira server entry in user-scoped `mcp.json`, expose only the
+selected tools directly, preserving its connection settings and credentials:
+
+```json
+"toolExposure": {
+  "get_issue": "direct",
+  "get_issue_comments": "direct",
+  "search_issues": "direct"
+}
+```
+
+Run `/reload` after changing either file. This extension edits neither file.
+`delegatedTools` grants delegation only; it does not connect or authenticate a
+server. Settings from other subagent implementations do not apply here.
 
 The delegation contract is:
 
@@ -116,14 +130,29 @@ The delegation contract is:
   There is no socket server or generated connector configuration. Connector
   callbacks, authentication, and permission hooks remain in the parent.
 - Parent permission blocks and connector failures keep their `isError` flag.
-  Messages are limited to 1 MiB and 32 outstanding requests per child. Oversized
-  results fail explicitly. Cancellation, timeout, transport loss, child exit, and
+  Messages are limited to 1 MiB and 32 executing requests per child. Optional
+  `structuredContent` is omitted when it would exceed the frame limit; visible
+  content and details still travel. Oversized visible results fail explicitly.
+  Cancelled requests retain their execution slots until the parent call settles.
+  Cancellation, timeout, transport loss, child exit, and
   shutdown abort task-scoped parent requests. A connector must honor its signal
   to stop an in-flight external operation. Pi permission dialogs may remain until
   their own hook resolves; an aborted request cannot then execute the connector.
 - Children remain separate processes, not OS sandboxes. They retain the existing
   inherited environment and filesystem behavior. The bridge does not copy
   connector credentials into briefs, logs, settings, or repository files.
+
+Node and Bun children use the same private descriptor. Bun uses filesystem
+streams because its socket constructor cannot read an inherited socket descriptor.
+The child closes the parent connection when its delegated turn ends, releasing
+Bun's descriptor reader. Initialization fails after five seconds without metadata.
+
+Without connector grants, existing profile and workflow identities remain
+compatible. Enabling or reclassifying grants, activating tools, changing profile
+settings, or switching trusted worktrees can change workflow identity. A new
+identity starts a new journal and can run completed stages again; reconcile prior
+writer results before rerunning. Settings and worktree changes also invalidate
+later connector calls from an already-running child; resubmit that child.
 
 Pi 0.99.1 permits calls through the captured parent context after a background
 spawn has returned. Its nested-call records can miss those late calls, usage

@@ -49,6 +49,35 @@ test('shell quoting and command boundaries distinguish execution from literal te
   });
 });
 
+test('ANSI-C and locale quoting reveal gh flags, and undecoded ANSI-C escapes block gh commands', async () => {
+  await withGuard(enabled, async call => {
+    for (const command of [
+      "gh pr merge $'--admin'", 'gh pr merge $"--admin"', "gh pr merge --ad'min'", "gh pr merge $'--'admin",
+      "gh pr merge $'--admin=true'", 'gh $\'pr\' $"merge" 42 --admin', "$'gh' pr merge --admin",
+      String.raw`gh pr merge --body $'it\'s' --admin`, String.raw`gh pr merge --body $'x\\' --admin`,
+      "gh pr create --draft $'--draft=false'", "gh pr create $'--web' --draft", 'gh pr merge --ad\0min',
+      String.raw`gh pr merge 1 $$'\' --admin #'`,
+      'gh pr merge $1 --admin', 'gh pr create --title "$(git log -1 --format=%s)"',
+    ]) assert.equal((await call(command))?.block, true, command);
+    for (const command of [
+      String.raw`gh pr merge $'--ad\x6din'`, String.raw`gh pr merge $'--ad\155in'`,
+      String.raw`gh pr merge $'--ad\u006din'`, String.raw`gh pr merge $'--ad\0'min`,
+      String.raw`gh pr create --draft --body $'\cA'`, String.raw`gh pr create --draft --title $'\z'`,
+      String.raw`$'\x67h' pr merge --admin`, String.raw`/usr/bin/$'\x67'h pr merge --admin`,
+    ]) assert.deepEqual(await call(command), {
+      block: true, reason: "Guard cannot check numeric, Unicode, control, or unknown $'...' escapes in gh commands. Use plain quotes.",
+    }, command);
+    for (const command of [
+      "gh pr create $'--draft' --title t --body b", 'gh pr create $"--draft"', "gh pr create -$'d'",
+      String.raw`gh pr create --draft --body $'Line 1\nLine 2\t\\ \'q\' \"x\" \? \a\b\e\E\f\r\v'`,
+      "gh pr merge $'--admin=false'", "gh pr merge --admin=$'false'", "gh pr merge --body $'--admin'",
+      String.raw`gh pr merge "$'\x6d'" --squash`, String.raw`gh pr merge \$'--admin'`, "gh pr merge $$'--admin'",
+      String.raw`printf $'\x41\033[0m' && IFS=$'\x1f' read -r a b; gh pr merge 1 --squash`,
+      'gh pr merge $PR --squash', 'gh pr create --draft --title "$TITLE" --body "$(cat body.md)"',
+    ]) assert.equal(await call(command), undefined, command);
+  });
+});
+
 test('boolean values, repeated flags, and short clusters follow gh option semantics', async () => {
   await withGuard(enabled, async call => {
     for (const command of [

@@ -115,9 +115,11 @@ popup is involved. A blocked Bash call is stopped in full before any of it runs.
 
 **Scope is a workflow guardrail, not a sandbox.** It recognizes literal simple
 `gh` commands, absolute paths to `gh`, leading environment assignments, repository
-selection, quoting, comments, and simple `;`, `&&`, `||`, pipe/newline chains.
-It distinguishes flags from title/body values and understands short clusters and
-repeated boolean flags. Help requests are allowed. It does not interpret shell
+selection, quoting (including `$'...'` and `$"..."`), comments, and simple `;`,
+`&&`, `||`, pipe/newline chains. It distinguishes flags from title/body values
+and understands short clusters and repeated boolean flags. Help requests are
+allowed. `gh` commands using numeric, Unicode, control, or unknown `$'...'`
+escapes are blocked rather than decoded. It does not interpret shell
 expansion, substitutions (including `url=$(gh pr create ...)`), heredocs,
 functions, aliases, redirections, scripts, grouping (`(...)`, `{ ...; }`),
 control flow (`if`, loops), `!`, `time`, or wrappers such as `command`, `env`, and

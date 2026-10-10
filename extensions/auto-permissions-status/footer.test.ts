@@ -19,7 +19,7 @@ function fixture() {
   const ctx = {
     model: { id: 'main-model', provider: 'test', reasoning: true, contextWindow: 128000 }, thinkingLevel: 'medium',
     modelRegistry: { isUsingOAuth: () => false }, getContextUsage: () => ({ percent: 12.5, contextWindow: 128000 }),
-    sessionManager: { getCwd: () => '/workspace/project', getSessionName: () => 'Task', getEntries: () => [
+    sessionManager: { getCwd: () => '/workspace/project', getSessionName: () => 'Task', getSessionId: () => 'session', getLeafId: () => 'leaf', getEntries: () => [
       { type: 'message', message: { role: 'assistant', usage } },
       { type: 'message', message: { role: 'toolResult', usage } },
       { type: 'compaction', usage }, { type: 'branch_summary', usage },
@@ -142,4 +142,65 @@ test('subscription labels require explicit provider metadata and OAuth, except f
     assert.match(f.footer.render(140)[1], /no-model$/);
     assert.doesNotMatch(f.footer.render(140)[1], /\(sub\)/);
   });
+});
+
+const assistant = (manager: SessionManager) => manager.appendMessage({ role: 'assistant', content: [], api: 'openai-responses',
+  provider: 'test', model: 'main-model', usage, stopReason: 'stop', timestamp: Date.now() });
+
+test('cache-warm usage entries count toward totals but not the cache-hit rate, like Pi', () => {
+  const f = fixture(), manager = SessionManager.inMemory('/workspace/project');
+  f.ctx.sessionManager = manager;
+  assistant(manager);
+  manager.appendUsage('cache_warm', 'test', 'main-model', { ...usage, input: 500, output: 50, cacheRead: 3000, cost: { ...usage.cost, total: 0.004 } });
+  assert.match(f.footer.render(140)[1], /↑1.5k ↓150 R4.0k CH50.0% \$0.034 /);
+  f.footer.dispose();
+});
+
+test('session stats are reused until the session, leaf, entry count or model changes', () => {
+  const f = fixture(), manager = SessionManager.inMemory('/workspace/project');
+  let scans = 0, estimates = 0;
+  const getEntries = manager.getEntries.bind(manager);
+  manager.getEntries = () => { scans++; return getEntries(); };
+  f.ctx.sessionManager = manager;
+  f.ctx.getContextUsage = () => { estimates++; return { tokens: 1280, percent: 1, contextWindow: f.ctx.model!.contextWindow }; };
+  // Returns the stats row and how many session scans and context estimates the render made.
+  const render = (width = 140) => {
+    const before = [scans, estimates], line = f.footer.render(width)[1];
+    return { line, work: [scans - before[0], estimates - before[1]] };
+  };
+  const first = assistant(manager);
+  assert.deepEqual(render().work, [1, 1]);
+  f.statuses.set('tracker', 'busy');
+  for (const width of [140, 80, 140]) assert.deepEqual(render(width).work, [0, 0]);
+  assert.match(render().line, /\$0.030 1.0%\/128k/);
+  assistant(manager);
+  assert.deepEqual(render().work, [1, 1]);
+  assert.match(render().line, /\$0.060/);
+  manager.branch(first);
+  assert.deepEqual(render().work, [1, 1]);
+  f.ctx.model = { ...f.ctx.model!, contextWindow: 200000 };
+  assert.deepEqual(render().work, [1, 1]);
+  assert.match(render().line, /1.0%\/200k/);
+  assistant(manager); manager.branch(first);
+  assert.deepEqual(render().work, [1, 1]);
+  assert.match(render().line, /\$0.090/);
+  manager.appendCompaction('summary', first, 5000, undefined, false, usage);
+  assert.deepEqual(render().work, [1, 1]);
+  assert.match(render().line, /\$0.120/);
+  manager.newSession();
+  assert.deepEqual(render().work, [1, 1]);
+  assert.doesNotMatch(render().line, /\$/);
+  f.footer.invalidate();
+  assert.deepEqual(render().work, [1, 1]);
+  assert.deepEqual(render().work, [0, 0]);
+  f.footer.dispose();
+});
+
+test('stats follow the entry list length when getEntryCount is unavailable', () => {
+  const f = fixture(), entries = f.ctx.sessionManager.getEntries();
+  f.ctx.sessionManager.getEntries = () => [...entries];
+  assert.match(f.footer.render(140)[1], /\$0.120/);
+  entries.push({ type: 'usage', usage } as never);
+  assert.match(f.footer.render(140)[1], /\$0.150/);
+  f.footer.dispose();
 });

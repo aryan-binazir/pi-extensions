@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
 import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +15,7 @@ import { setActiveCwd } from '../worktree/routing.ts';
 type Handler = (event: any, ctx: any) => any;
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 50));
+beforeEach(() => { delete (globalThis as any)[Symbol.for('pi-interactive:nvim-ide.follow.v1')]; });
 
 function fakePi() {
   const handlers = new Map<string, Handler[]>();
@@ -42,8 +43,8 @@ function fakeCtx(cwd: string) {
 
 type Connected = { ide: ReturnType<typeof fakeIde>; project: string } & ReturnType<typeof fakePi> & ReturnType<typeof fakeCtx>;
 
-async function withConnectedIde(body: (harness: Connected) => Promise<void>, onCall?: CallResponder): Promise<void> {
-  const ide = fakeIde(undefined, onCall);
+async function withConnectedIde(body: (harness: Connected) => Promise<void>, onCall?: CallResponder, serverName?: string): Promise<void> {
+  const ide = fakeIde(undefined, onCall, serverName);
   await once(ide.server, 'listening');
   const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const project = join(root, 'project');
@@ -164,11 +165,11 @@ test('follow after edit opens the changed file, and /vim follow turns it off', a
     await fire('tool_execution_start', { toolCallId: 't1', toolName: 'edit', args: { path: 'a.ts', edits: [] } }, ctx);
     await fire('tool_execution_end', { toolCallId: 't1', toolName: 'edit', isError: false, result: { details: { firstChangedLine: 7 } } }, ctx);
     await until(() => ide.calls.length === 1);
-    assert.deepEqual(ide.calls[0], { name: 'openFile', arguments: { filePath: join(project, 'a.ts'), preview: false, makeFrontmost: true, startLine: 7, endLine: 7 } });
+    assert.deepEqual(ide.calls[0], { name: 'openFile', arguments: { filePath: join(project, 'a.ts'), preview: false, makeFrontmost: false } }, 'a line range would become a Visual selection, and makeFrontmost would take focus');
     await fire('tool_execution_start', { toolCallId: 't2', toolName: 'write', args: { path: join(project, 'b.ts'), content: '' } }, ctx);
     await fire('tool_execution_end', { toolCallId: 't2', toolName: 'write', isError: false, result: {} }, ctx);
     await until(() => ide.calls.length === 2);
-    assert.deepEqual(ide.calls[1].arguments, { filePath: join(project, 'b.ts'), preview: false, makeFrontmost: true }, 'a write with no changed line still opens the file');
+    assert.deepEqual(ide.calls[1].arguments, { filePath: join(project, 'b.ts'), preview: false, makeFrontmost: false }, 'a write with no changed line still opens the file');
     await fire('tool_execution_start', { toolCallId: 't3', toolName: 'edit', args: { path: 'a.ts' } }, ctx);
     await fire('tool_execution_end', { toolCallId: 't3', toolName: 'edit', isError: true, result: {} }, ctx);
     await fire('tool_execution_start', { toolCallId: 't4', toolName: 'bash', args: { command: 'ls' } }, ctx);
@@ -264,6 +265,24 @@ test('a stalled follow expires within five seconds so the newer edit can be reve
     assert.equal(notices.filter(notice => notice.includes('Could not reveal')).length, 1);
   }, call => String(call.arguments.filePath).endsWith('stalled.ts'));
 });
+
+for (const [server, offset] of [['claudecode-neovim', 1], ['another-ide', 0]] as const) {
+  test(`explicit opens select the requested one-based lines on ${server}`, async () => {
+    await withConnectedIde(async ({ ide, tools, ctx }) => {
+      for (const [params, start, end] of [[{ startLine: 1 }, 1, 1], [{ startLine: 3, endLine: 4 }, 3, 4]] as const) {
+        const open = await tools.get('nvim_open').execute('open', { path: 'a.ts', ...params }, undefined, undefined, ctx);
+        assert.deepEqual([ide.calls.at(-1)?.arguments.startLine, ide.calls.at(-1)?.arguments.endLine], [start + offset, end + offset]);
+        assert.equal(open.content[0].text, `Opened file and selected lines ${start} to ${end}`, 'the model sees the lines it asked for');
+      }
+      await tools.get('nvim_open').execute('open', { path: 'a.ts' }, undefined, undefined, ctx);
+      assert.ok(!('startLine' in ide.calls.at(-1)!.arguments));
+    }, (call, reply) => {
+      if (call.name !== 'openFile') return false;
+      reply({ content: [{ type: 'text', text: call.arguments.startLine ? `Opened file and selected lines ${call.arguments.startLine} to ${call.arguments.endLine}` : 'Opened file' }] });
+      return true;
+    }, server);
+  });
+}
 
 test('an explicit editor open takes priority over a pending automatic follow', async () => {
   await withConnectedIde(async ({ ide, fire, tools, ctx }) => {
@@ -400,7 +419,7 @@ test('follow opens the actual files written and edited by Pi with normalized pat
       assert.equal(await readFile(join(routed, 'written.ts'), 'utf8'), 'edited');
       await fire('tool_execution_end', { toolCallId: 'edit-at', toolName: 'edit', result, isError: false }, ctx);
       await until(() => ide.calls.length === cases.length + 1);
-      assert.deepEqual(ide.calls.at(-1)?.arguments, { filePath: join(routed, 'written.ts'), preview: false, makeFrontmost: true, startLine: 1, endLine: 1 });
+      assert.deepEqual(ide.calls.at(-1)?.arguments, { filePath: join(routed, 'written.ts'), preview: false, makeFrontmost: false });
     } finally {
       setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
       if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
@@ -416,7 +435,7 @@ test('editor tools resolve paths, and a closed editor clears status, prompt and 
     assert.match(notices.at(-1)!, new RegExp(`^Editor link: Neovim on port ${ide.port()}, follow on, viewing .*a\\.ts$`));
 
     const open = await tools.get('nvim_open').execute('id', { path: 'a.ts', startLine: 2 }, undefined, undefined, ctx);
-    assert.equal(open.content[0].text, `openFile(${JSON.stringify({ filePath: join(project, 'a.ts'), preview: false, makeFrontmost: true, startLine: 2, endLine: 2 })})`);
+    assert.equal(open.content[0].text, `openFile(${JSON.stringify({ filePath: join(project, 'a.ts'), preview: false, makeFrontmost: true, startLine: 3, endLine: 3 })})`);
     const diagnostics = await tools.get('nvim_diagnostics').execute('id', { path: 'a.ts' }, undefined, undefined, ctx);
     assert.match(diagnostics.content[0].text, /^getDiagnostics\(\{"uri":"file:\/\/.*a\.ts"\}\)$/);
     const all = await tools.get('nvim_diagnostics').execute('id', {}, undefined, undefined, ctx);

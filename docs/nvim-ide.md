@@ -4,15 +4,16 @@ The installed `nvim-ide` extension connects Pi to the existing Claude Code IDE W
 
 ## Live viewing
 
-Successful `edit` and `write` tools in this Pi session reveal the file at its first changed line when available. Relative tool paths use the active worktree. Failed tools, shell changes and delegated-agent edits do not trigger navigation.
+Successful `edit` and `write` tools in this Pi session reveal the file in the editor's main window without moving focus, selecting text or changing the editor's mode. Relative tool paths use the active worktree. Failed tools, shell changes and delegated-agent edits do not trigger navigation.
 
+- Follow shows the file, not the changed line; the cursor stays where Neovim last had it in that file. The protocol's `openFile` has no cursor-only position: claudecode.nvim turns a line or text position into a Visual selection, which the next `x`, `d`, `c` or `p` would act on and Pi would report as the user's selection. Follow also sends `makeFrontmost: false`; the default moves focus to that window, carrying Insert mode into the file or ending terminal mode for a Pi running in `:terminal`. When the focused window is the editor's main window, revealing still replaces its buffer.
 - Follow is on by default. `/vim follow off` disables it and clears queued destinations; `/vim follow on` re-enables it for subsequent edits.
 - Rapid edits share a fixed 100 ms window; only the latest destination is revealed. There is one in-flight request and one replaceable pending destination.
 - A stalled reveal expires after five seconds so newer edits can continue. A connected failure warns once until a later automatic or explicit reveal succeeds; it does not trigger an automatic retry loop.
 - Edits during a disconnect are retained only if this session previously connected. Reconnection replays the latest destination if it is at most 30 seconds old. An acknowledged destination is not replayed, but a lost reply can cause the same location to be revealed again.
-- Explicit `nvim_open` cancels pending automatic navigation before checking connectivity and remains immediate. Follow-off, session replacement and shutdown invalidate late callbacks and clear pending navigation. The follow preference survives session replacement; the pending navigation does not. They cannot undo a request the editor already received.
+- Explicit `nvim_open` cancels pending automatic navigation before checking connectivity and remains immediate. Follow-off, session replacement and shutdown invalidate late callbacks and clear pending navigation. The follow preference lasts for the Pi process, surviving `/new`, `/resume`, `/fork` and `/reload`, and is on again after a restart; the pending navigation does not survive session replacement. They cannot undo a request the editor already received.
 
-`/vim` reports the link, current file and follow setting. `/vim reconnect` forces discovery. `NVIM_IDE_TRACE=/path/to/file` logs transport state transitions for debugging. Without an editor, startup is quiet and idle discovery does not continuously poll a watchable lock directory.
+`/vim` reports the link, current file and follow setting. `/vim reconnect` forces discovery. `NVIM_IDE_TRACE=/path/to/file` logs transport state transitions for debugging. Without an editor, startup is quiet and idle discovery does not poll: it watches the lock directory, or its parent until the directory exists, and falls back to a 15-second poll only after a dropped connection or when neither can be watched.
 
 ## Request context and editor sends
 
@@ -36,7 +37,7 @@ The content is reference data, not instructions. It remains subject to the model
 - `nvim_diagnostics`: language-server diagnostics for a file or all open buffers.
 - `nvim_open`: immediately reveal a file, optionally selecting a one-based line range.
 
-Selections use zero-based LSP positions; `openFile` uses one-based lines. Neovim sends zero-based inclusive mention rows, which the link normalizes after identifying the server.
+Selections use zero-based LSP positions; `openFile` uses one-based lines. Neovim sends zero-based inclusive mention rows, which the link normalizes after identifying the server. claudecode.nvim 2390c6e selects the line above each requested `openFile` line, and nothing for line 1, so `nvim_open` adds one for servers identifying as `claudecode-neovim` and reports the requested lines; a range past the last line is rejected by Neovim.
 
 ```sh
 node --import tsx --test extensions/nvim-ide/index.test.ts extensions/nvim-ide/link.test.ts extensions/nvim-ide/session.test.ts

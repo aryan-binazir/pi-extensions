@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getEventListeners, once } from 'node:events';
@@ -171,13 +171,51 @@ test('discovery survives a lock directory that does not exist yet', async () => 
   await once(ide.server, 'listening');
   const parent = await mkdtemp(join(tmpdir(), 'pi-ide-'));
   const dir = join(parent, 'ide');
-  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 100, alive: () => true });
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 60_000, alive: () => true });
   try {
     link.start();
     await new Promise(r => setTimeout(r, 150));
+    const started = Date.now();
     await mkdir(dir);
     await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
     await until(() => link.connected, 2000);
+    assert.ok(Date.now() - started < 1500, 'the parent watch reports the new directory well before the 60s poll');
+  } finally { await link.stop(); await ide.close(); await rm(parent, { recursive: true, force: true }); }
+});
+
+test('a missing lock directory is left to the parent watch, but polling remains when the parent cannot be watched', async () => {
+  const parent = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const attempts = async (lockDir: string, trace: string) => {
+    const source = `
+      import { IdeLink } from ${JSON.stringify(new URL('./link.ts', import.meta.url).href)};
+      const link = new IdeLink({ cwd: '/w', lockDir: process.argv[1], retryMs: 20 });
+      link.start();
+      await new Promise(resolve => setTimeout(resolve, 400));
+      await link.stop();
+    `;
+    await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', source, lockDir], { env: { ...process.env, NVIM_IDE_TRACE: trace } });
+    return (await readFile(trace, 'utf8')).split('\n').filter(line => line.endsWith(' attempt')).length;
+  };
+  try {
+    const [watched, unwatchable] = await Promise.all([attempts(join(parent, 'ide'), join(parent, 'watched.log')), attempts(join(parent, 'missing', 'ide'), join(parent, 'unwatchable.log'))]);
+    assert.equal(watched, 1, 'only the initial scan');
+    assert.ok(unwatchable >= 5, `${unwatchable} scans`);
+  } finally { await rm(parent, { recursive: true, force: true }); }
+});
+
+test('a lock directory created before the parent watch delivers events is found by a one-time recheck', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
+  const parent = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const dir = join(parent, 'ide');
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 60_000, alive: () => true });
+  try {
+    link.start();
+    (link as any).parentWatcher.close(); // armed but not yet reporting, as macOS FSEvents can be just after watch() returns
+    await new Promise(r => setTimeout(r, 100));
+    await mkdir(dir);
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
+    await until(() => link.connected, 2500);
   } finally { await link.stop(); await ide.close(); await rm(parent, { recursive: true, force: true }); }
 });
 

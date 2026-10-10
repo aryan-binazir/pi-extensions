@@ -195,8 +195,17 @@ export class IdeLink {
     if (this.parentWatcher) return;
     const dir = this.options.lockDir ?? defaultLockDir();
     try {
+      const lost = (reason: string) => {
+        trace?.(`parent watch ${reason}`);
+        if (this.parentWatcher !== watcher) return;
+        watcher.close(); this.parentWatcher = undefined;
+        this.schedule();
+      };
       const watcher = watch(dirname(dir), { persistent: false }, (event, name) => {
-        if (!this.started || event !== 'rename' || (name && name !== basename(dir))) return;
+        if (!this.started || event !== 'rename') return;
+        // Linux names the watched directory itself when it is removed, leaving both watches on dead inodes.
+        if (name === basename(dirname(dir)) && this.parentWatcher === watcher) { this.watcher?.close(); this.watcher = undefined; lost(`removed ${name}`); return; }
+        if (name && name !== basename(dir)) return;
         trace?.(`parent watch ${event} ${name}`);
         this.watcher?.close(); this.watcher = undefined;
         this.watchLocks();
@@ -206,17 +215,12 @@ export class IdeLink {
         }
       });
       this.parentWatcher = watcher;
-      watcher.on('error', error => {
-        trace?.(`parent watch error ${error.message}`);
-        if (this.parentWatcher !== watcher) return;
-        watcher.close(); this.parentWatcher = undefined;
-        this.schedule();
-      });
+      watcher.on('error', error => lost(`error ${error.message}`));
       // FSEvents can start after watch() returns; look once more for a lock directory created in that gap.
       setTimeout(() => {
-        if (!this.started || this.parentWatcher !== watcher || this.watcher || !this.lockDirMissing) return;
+        if (!this.started || this.parentWatcher !== watcher || this.watcher || !this.lockDirMissing || this.socket) return;
         this.watchLocks();
-        if (this.watcher && !this.socket && !this.timer) this.schedule(200);
+        if (this.watcher || !this.lockDirMissing) this.schedule(this.watcher ? 200 : undefined);
       }, 1000).unref();
     } catch {}
   }

@@ -84,7 +84,9 @@ test('the follow preference survives real Pi /new, /resume, /fork and /reload', 
   const followKey = Symbol.for('pi-interactive:nvim-ide.follow.v1');
   delete registry[followKey];
   process.env.CLAUDE_CONFIG_DIR = join(cwd, 'claude');
+  let dispose: (() => Promise<void>) | undefined = undefined;
   t.after(async () => {
+    await dispose?.();
     delete registry[followKey];
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
     await rm(cwd, { recursive: true, force: true });
@@ -96,7 +98,7 @@ test('the follow preference survives real Pi /new, /resume, /fork and /reload', 
     const services = await createAgentSessionServices({ cwd, agentDir, modelRuntime, settingsManager: SettingsManager.inMemory({}), resourceLoaderOptions: { additionalExtensionPaths: [extension], noExtensions: true, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true } });
     return { ...await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent }), services, diagnostics: services.diagnostics };
   }, { cwd, agentDir: join(cwd, 'agent'), sessionManager: SessionManager.create(cwd, join(cwd, 'sessions')) });
-  t.after(() => runtime.dispose());
+  dispose = () => runtime.dispose();
   const notices: string[] = [];
   const errors: unknown[] = [];
   const bind = async () => {

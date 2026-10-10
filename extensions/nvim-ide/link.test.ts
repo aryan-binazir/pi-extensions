@@ -219,6 +219,24 @@ test('a lock directory created before the parent watch delivers events is found 
   } finally { await link.stop(); await ide.close(); await rm(parent, { recursive: true, force: true }); }
 });
 
+test('a removed parent of the missing lock directory is polled until the editor recreates both', async () => {
+  const ide = fakeIde();
+  await once(ide.server, 'listening');
+  const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const dir = join(root, 'claude', 'ide');
+  await mkdir(join(root, 'claude'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 100, alive: () => true });
+  try {
+    link.start();
+    await new Promise(r => setTimeout(r, 1200)); // after the one-time recheck
+    await rm(join(root, 'claude'), { recursive: true });
+    await new Promise(r => setTimeout(r, 100));
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, `${ide.port()}.lock`), lockFile());
+    await until(() => link.connected, 2000);
+  } finally { await link.stop(); await ide.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('discovery survives replacement of an already watched lock directory', async () => {
   const ide = fakeIde();
   await once(ide.server, 'listening');

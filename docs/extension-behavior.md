@@ -25,7 +25,9 @@ markers; motions, selections and edits treat each marker atomically, and undo,
 registers, stash and editor replacement retain its payload. Counts apply to
 motions, operators, doubled line operators, `x`, `p/P` and `nG/ngg`; counts on
 insert entry, visual toggles, text objects and undo/redo are unsupported.
-Registers are lowercase `a-z` and the unnamed register. The exact supported vi
+Registers are lowercase `a-z` and the unnamed register. Unsupported `f`, `F`,
+`t`, `T`, `r`, `m` and `q` cancel pending commands and consume their argument.
+Escape from insert mode also closes the completion popup. The exact supported vi
 command set is documented in [ADR 001](adr/001-editor.md).
 
 ## Worktrees

@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CustomEditor, InteractiveMode } from "@earendil-works/pi-coding-agent";
+import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import { loadExtensions } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 import { KeybindingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 import { initTheme } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { editor, keys } from "./test-support.ts";
 import {
+  cancelAutocomplete,
   clearBaseUndo,
   collapsePaste,
   expandPastes,
@@ -191,6 +193,21 @@ test("projectDisplay leaves safe text and its offsets untouched", () => {
   const { text, offsets } = projectDisplay(raw);
   assert.equal(text, raw);
   assert.deepEqual(offsets, Array.from({ length: raw.length + 1 }, (_, i) => i));
+});
+
+test("cancelAutocomplete closes Pi's popup and rejects an editor without one", async () => {
+  const e = editor(CustomEditor);
+  e.setAutocompleteProvider(new CombinedAutocompleteProvider([{ name: "reload" }], process.cwd()));
+  keys(e, "/re");
+  const deadline = Date.now() + 3000;
+  while (!e.isShowingAutocomplete() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(e.isShowingAutocomplete(), true);
+  cancelAutocomplete(e);
+  assert.equal(e.isShowingAutocomplete(), false);
+  assert.throws(
+    () => cancelAutocomplete({} as unknown as CustomEditor),
+    /Unsupported Pi autocomplete layout/,
+  );
 });
 
 test("clearBaseUndo drops the base editor's own undo history", () => {

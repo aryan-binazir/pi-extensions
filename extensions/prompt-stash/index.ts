@@ -80,7 +80,8 @@ export default function promptStash(pi: ExtensionAPI): void {
         if (opened >= 0) pasting = true;
         else if (closed >= 0) pasting = false;
         boundary = "";
-        for (let size = 2; size < PASTE_START.length; size++) {
+        // Outside a paste, a trailing ESC [ is a complete legacy Alt+[ key, not a split opener.
+        for (let size = pasting ? 2 : 3; size < PASTE_START.length; size++) {
           const tail = chunk.slice(-size);
           if (tail.length === size && (PASTE_START.startsWith(tail) || PASTE_END.startsWith(tail)))
             boundary = tail;

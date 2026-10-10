@@ -2,6 +2,9 @@ import { lstat, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { getAgentDir, isToolCallEventType, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
+// $'...' escapes outside this map become NUL, which no Bash argument can contain, so gh commands holding one are blocked.
+const ansiEscapes: Record<string, string> = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
+
 function commands(source: string): string[][] {
   const result: string[][] = [];
   let words: string[] = [], word = '', quote = '', started = false;
@@ -9,12 +12,20 @@ function commands(source: string): string[][] {
   const flushCommand = () => { flushWord(); if (words.length) result.push(words); words = []; };
   for (let i = 0; i < source.length; i++) {
     const char = source[i], next = source[i + 1];
+    if (quote === '$') {
+      if (char === "'") quote = ''; else if (char !== '\\') word += char; else { word += ansiEscapes[next] ?? '\0'; i++; }
+      continue;
+    }
     if (char === '\\' && quote !== "'" && next !== undefined) {
       if (next === '\n') { i++; continue; }
       if (!quote || ['$', '`', '"', '\\'].includes(next)) { word += next; started = true; i++; continue; }
     }
     if (quote) {
       if (char === quote) quote = ''; else word += char;
+    } else if (char === '$' && next === '$') { // $$ is the PID, so its second $ never opens $'...'.
+      word += '$$'; started = true; i++;
+    } else if (char === '$' && (next === "'" || next === '"')) {
+      quote = next === '"' ? next : '$'; started = true; i++;
     } else if (char === '"' || char === "'") {
       quote = char; started = true;
     } else if (char === '#' && !started) {
@@ -88,10 +99,15 @@ export default function guard(pi: ExtensionAPI) {
       }
       return { block: true, reason: `Fix ${path} before running Bash: ${error instanceof Error ? error.message : String(error)}` };
     }
+    const escaped = event.input.command.includes("$'") || event.input.command.includes('\0');
     for (const words of commands(event.input.command)) {
       let start = 0;
       while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[start] ?? '')) start++;
-      if (basename(words[start] ?? '') !== 'gh') continue;
+      const command = words[start] ?? '';
+      if (basename(command) !== 'gh' && !command.includes('\0')) continue;
+      if (escaped && words.slice(start).some(word => word.includes('\0'))) {
+        return { block: true, reason: "Guard cannot check numeric, Unicode, control, or unknown $'...' escapes in gh commands. Use plain quotes." };
+      }
       const args = words.slice(start + 1), selected: string[] = [];
       for (let level = 0; level < 2; level++) {
         for (let i = 0; i < args.length; i++) {

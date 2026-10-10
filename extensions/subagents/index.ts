@@ -1,6 +1,6 @@
 import { join, resolve } from 'node:path';
 import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext } from '@earendil-works/pi-coding-agent';
-import { visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
+import { truncateToWidth } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { ALL_TOOLS, assertChildTask, assertToolSelection, delegationScope, assertWorkflowRead } from './scope.ts';
 import type {ConnectorBridge} from './connector-bridge.ts';
@@ -71,31 +71,41 @@ export default function subagents(pi: ExtensionAPI): void {
     let label = collapsedBriefById.get(id);
     if (label === undefined) {
       if (collapsedBriefById.size > 1024) collapsedBriefById.clear();
-      label = task.replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
+      label = task.replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 100).replace(/\p{Cs}/gu, '\uFFFD');
       collapsedBriefById.set(id, label);
     }
     return label;
   };
   let paintedPanel: string | undefined;
   let panelPaintKnown = false;
+  // Nine task lines: eight rows cover the default concurrency of eight; the ninth is a row or "… N more".
+  const panelSlots = 9;
   const renderActiveAgents = () => {
     if (!context?.hasUI) return;
-    const active = shuttingDown ? [] : registry.activeTasks();
-    const rows = active.map(task => [task.id.slice(0, 8), task.status, brief(task.id, task.task)]);
-    const rendered = active.length ? JSON.stringify(rows) : undefined;
+    const active = shuttingDown ? [] : registry.activeTasks().sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
+    const total = active.length, running = active.filter(task => task.status === 'running').length;
+    const rows = active.slice(0, panelSlots).map(task => [task.id.slice(0, 8), task.status, brief(task.id, task.task)]);
+    const rendered = total ? JSON.stringify([total, running, rows]) : undefined;
     if (panelPaintKnown && rendered === paintedPanel) return;
     panelPaintKnown = true;
     paintedPanel = rendered;
-    context.ui.setWidget('interactive-tools:subagents', rendered === undefined ? undefined : (_tui, theme) => {
+    context.ui.setWidget('interactive-tools:subagents', rendered === undefined ? undefined : (tui, theme) => {
       const blue = (text: string) => theme.fg('border', text);
-      const lines = [`Subagents · ${rows.length} active`, ...rows.map(([id, status, task]) => `${id} · ${blue(status)} · ${task}`)];
+      const lines = [`Subagents · ${total} active`, ...rows.map(([id, status, task]) => `${id} · ${blue(status)} · ${task}`)];
       return {
         invalidate() {},
         render(width: number) {
-          const inner = Math.max(1, width - 4);
+          if (width < 6) return [];
+          const inner = width - 4;
+          // At most half the terminal from 10 rows (12 lines at 24 rows): taller panels push changes above the viewport,
+          // and pi-tui then redraws the whole session and clears scrollback.
+          const slots = Math.max(2, Math.min(panelSlots, Math.floor((tui?.terminal?.rows || 24) / 2) - 3));
+          const shown = total <= slots ? total : slots - 1;
+          const hiddenRunning = Math.max(0, running - shown), hiddenQueued = total - shown - hiddenRunning;
+          const more = [hiddenRunning && `${hiddenRunning} ${blue('running')}`, hiddenQueued && `${hiddenQueued} ${blue('queued')}`].filter(Boolean).join(' · ');
           return [
             blue(`╭${'─'.repeat(inner + 2)}╮`),
-            ...lines.flatMap(line => wrapTextWithAnsi(line, inner)).map(line => `${blue('│')} ${line}${' '.repeat(Math.max(0, inner - visibleWidth(line)))} ${blue('│')}`),
+            ...[...lines.slice(0, shown + 1), ...(shown < total ? [`… ${total - shown} more · ${more}`] : [])].map(line => `${blue('│')} ${truncateToWidth(line, inner, '…', true)} ${blue('│')}`),
             blue(`╰${'─'.repeat(inner + 2)}╯`),
           ];
         },

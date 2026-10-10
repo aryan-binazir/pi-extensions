@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { PowerKeeper, readPower, startInhibitor, type KeeperOptions } from './power.ts';
+import { inhibitFlags, PowerKeeper, readPower, startInhibitor, type KeeperOptions } from './power.ts';
 import { mkdtemp,mkdir,writeFile,rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -105,7 +105,7 @@ test('missing inhibitor never publishes awake',async()=>{
  await keeper.setAgent(true);await keeper.shutdown();assert.deepEqual(states,[]);
 });
 
-test('unsupported systems never spawn an inhibitor',()=>assert.equal(startInhibitor('win32'),undefined));
+test('unsupported systems never spawn an inhibitor',async()=>assert.equal(await startInhibitor('win32'),undefined));
 
 import { spawn } from 'node:child_process';
 test('Linux inhibitor uses a pipe, and cleanup reaps the real synthetic child',async()=>{
@@ -114,11 +114,13 @@ test('Linux inhibitor uses a pipe, and cleanup reaps the real synthetic child',a
   assert.equal(command,'systemd-inhibit');seen=args;
   assert.equal(args.at(-1),'/bin/cat');child=spawn('/bin/cat',[],options);return child;
  }) as typeof spawn;
- const inhibitor=startInhibitor('linux',launch)!;
+ let changed=()=>{};const confirmed=new Promise<void>(resolve=>{changed=resolve;});
+ const inhibitor=(await startInhibitor('linux',launch,()=>changed(),async()=>['--no-ask-password']))!;
  assert.ok(seen.includes('--what=idle'));assert.ok(!seen.includes('--what=idle:sleep'));assert.ok(seen.includes('--no-ask-password'));
  assert.ok(child!.stdin);
- assert.equal(inhibitor.alive(),true);
- await inhibitor.stop();assert.equal(inhibitor.alive(),false);
+ assert.equal(inhibitor.alive(),true);assert.equal(inhibitor.held?.(),false,'not held until the command echoes');
+ await confirmed;assert.equal(inhibitor.held?.(),true);
+ await inhibitor.stop();assert.equal(inhibitor.alive(),false);assert.equal(inhibitor.held?.(),false);
  assert.notEqual(child!.exitCode,null);
 });
 test('power cache coalesces event reads while a forced check re-reads it',async()=>{
@@ -130,7 +132,7 @@ test('power cache coalesces event reads while a forced check re-reads it',async(
 test('closing owner pipe releases Linux child without a kill signal',async()=>{
  let child:ReturnType<typeof spawn>|undefined;
  const launch:typeof spawn=((_command:string,args:string[],options:any)=>{assert.equal(args.at(-1),'/bin/cat');child=spawn('/bin/cat',[],options);return child;}) as typeof spawn;
- const inhibitor=startInhibitor('linux',launch)!;
+ const inhibitor=(await startInhibitor('linux',launch,()=>{},async()=>[]))!;
  const exited=new Promise<void>(resolve=>child!.once('exit',()=>resolve()));child!.stdin!.end();await exited;
  assert.equal(inhibitor.alive(),false);assert.equal(child!.exitCode,0);await inhibitor.stop();
 });
@@ -139,7 +141,33 @@ test('macOS adapter uses idle-only caffeinate tied to parent PID',async()=>{
   assert.equal(command,'/usr/bin/caffeinate');assert.deepEqual(args,['-i','-w',String(process.pid)]);
   return spawn(process.execPath,['-e','process.stdin.resume()'],options);
  }) as typeof spawn;
- const inhibitor=startInhibitor('darwin',launch)!;await inhibitor.stop();assert.equal(inhibitor.alive(),false);
+ const inhibitor=(await startInhibitor('darwin',launch))!;assert.equal(inhibitor.held?.(),true);await inhibitor.stop();assert.equal(inhibitor.alive(),false);
+});
+test('systemd-inhibit receives --no-ask-password only when its help lists it',async()=>{
+ const v255='  -h --help               Show this help\n     --mode=MODE          One of block or delay\n     --list               List active inhibitors\n';
+ const v257=`${v255}     --no-ask-password    Do not attempt interactive authorization\n`;
+ assert.deepEqual(await inhibitFlags(async()=>({stdout:v255})),[]);
+ assert.deepEqual(await inhibitFlags(async()=>({stdout:v257})),['--no-ask-password']);
+ await assert.rejects(inhibitFlags(async()=>{throw new Error('spawn systemd-inhibit ETIMEDOUT');}));
+ const keeper=new PowerKeeper({power:async()=>'ac',start:changed=>startInhibitor('linux',(()=>assert.fail('launched without a flag check')) as typeof spawn,changed,()=>Promise.reject(new Error('timed out')))});
+ try{await assert.doesNotReject(keeper.setAgent(true));}finally{await keeper.shutdown();}
+});
+test('a helper that exits at once never reports Awake, while a working one does once it holds the lock',{timeout:10000},async()=>{
+ let now=0,launches=0,exit:string[]=['-e','process.exit(1)'];const states:boolean[]=[];let changed=()=>{};
+ const launch=((_command:string,args:string[],options:any)=>{
+  launches++;assert.ok(!args.includes('--no-ask-password'));return spawn(process.execPath,exit,options);
+ }) as typeof spawn;
+ const keeper=new PowerKeeper({now:()=>now,power:async()=>'ac',onChange:awake=>{states.push(awake);changed();},
+  start:onChange=>startInhibitor('linux',launch,()=>{onChange();changed();},async()=>[])});
+ const next=()=>new Promise<void>(resolve=>{changed=resolve;});
+ try{
+  let gone=next();await keeper.setAgent(true);await gone;await keeper.check();
+  now=30000;gone=next();await keeper.check();await gone;await keeper.check();
+  assert.equal(launches,2,'the dead helper is retried after its backoff');assert.deepEqual(states,[]);
+  exit=['-e','process.stdin.pipe(process.stdout)'];now=60000;const held=next();await keeper.check();
+  assert.deepEqual(states,[]);await held;assert.deepEqual(states,[true]);
+ }finally{await keeper.shutdown();}
+ assert.deepEqual(states,[true,false]);
 });
 
 test('missing inhibitor backs off instead of retrying each watchdog tick',async()=>{
@@ -168,7 +196,7 @@ test('the watchdog only ticks while work is pending',async t=>{
  let reads=0,stops=0,ticks=0;
  const idle=async(ms:number)=>{t.mock.timers.tick(ms);await new Promise<void>(resolve=>setImmediate(resolve));};
  const keeper=new PowerKeeper({power:async()=>{reads++;return 'ac';},now:()=>{ticks++;return Date.now();},
-  start:()=>({alive:()=>true,stop:async()=>{stops++;}}),lingerMs:20,checkMs:5,powerCacheMs:0});
+  start:()=>({alive:()=>true,stop:async()=>{stops++;}}),lingerMs:20,checkMs:5,powerPollMs:0});
  try{
   keeper.start();
   const quiet=ticks;await idle(60);
@@ -201,12 +229,89 @@ test('cached supply types follow devices appearing and disappearing',async()=>{
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 
+test('Linux ignores peripheral batteries when deciding whether a machine runs on AC',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-power-scope-'));
+ const fixture=async(name:string,supplies:Record<string,Record<string,string>>)=>{
+  const root=join(dir,name);await mkdir(root);
+  for(const [supply,files] of Object.entries(supplies)){
+   await mkdir(join(root,supply));for(const [file,value] of Object.entries(files))await writeFile(join(root,supply,file),`${value}\n`);
+  }
+  return readPower('linux',root);
+ };
+ const mouse={type:'Battery',scope:'Device'};
+ try{
+  assert.equal(await fixture('desktop',{}),'ac');
+  assert.equal(await fixture('desktop-mouse',{hidpp_battery_0:mouse,hid_headset:mouse}),'ac');
+  assert.equal(await fixture('desktop-type-c',{'ucsi-source-psy-USBC000:001':{type:'USB',scope:'Device',online:'0'}}),'ac');
+  assert.equal(await fixture('laptop-ac',{AC:{type:'Mains',online:'1'},BAT0:{type:'Battery'},hidpp_battery_0:mouse}),'ac');
+  assert.equal(await fixture('laptop-battery',{AC:{type:'Mains',online:'0'},BAT0:{type:'Battery',scope:'System'},hidpp_battery_0:mouse}),'battery');
+  assert.equal(await fixture('laptop-charging-a-device',{BAT0:{type:'Battery'},'source-psy':{type:'USB',scope:'Device',online:'1'}}),'unknown');
+  assert.equal(await fixture('system-battery-without-mains',{ups:{type:'Battery',scope:'System'},hidpp_battery_0:mouse}),'unknown');
+  assert.equal(await fixture('unknown-scope-battery',{BAT0:{type:'Battery',scope:'Unknown'}}),'unknown');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('a supply listed before its attributes exist is rescanned instead of cached',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-power-hotplug-attrs-'));
+ try{
+  await mkdir(join(dir,'hidpp_battery_0'));assert.equal(await readPower('linux',dir),'unknown');
+  await writeFile(join(dir,'hidpp_battery_0/type'),'Battery\n');await writeFile(join(dir,'hidpp_battery_0/scope'),'Device\n');
+  assert.equal(await readPower('linux',dir),'ac');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('a peripheral battery appearing on a desktop keeps it on AC until a system supply appears',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'pi-power-peripheral-'));
+ try{
+  assert.equal(await readPower('linux',dir),'ac');
+  await mkdir(join(dir,'hidpp_battery_0'));await writeFile(join(dir,'hidpp_battery_0/scope'),'Device\n');await writeFile(join(dir,'hidpp_battery_0/type'),'Battery\n');
+  assert.equal(await readPower('linux',dir),'ac');
+  await mkdir(join(dir,'BAT0'));await writeFile(join(dir,'BAT0/type'),'Battery\n');
+  assert.equal(await readPower('linux',dir),'unknown');
+  await rm(join(dir,'BAT0'),{recursive:true});
+  assert.equal(await readPower('linux',dir),'ac');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('starting work reuses a reading under five seconds old and settling never re-reads power',async()=>{
+ let now=0,reads=0;
+ const keeper=new PowerKeeper({now:()=>now,power:async()=>{reads++;return 'ac';},start:()=>({alive:()=>true,stop:async()=>{}})});
+ try{
+  await keeper.setAgent(true);assert.equal(reads,1);
+  now=4000;await keeper.setAgent(false);assert.equal(reads,1);
+  now=4999;await keeper.setAgent(true);assert.equal(reads,1);
+  now=20000;await keeper.setAgent(false);assert.equal(reads,1);
+  now=26000;await keeper.setAgent(true);assert.equal(reads,2);
+  now=27000;await keeper.background('task',true);assert.equal(reads,2);
+ }finally{await keeper.shutdown();}
+});
+test('active work re-reads power every 30 seconds while the watchdog checks the helper every 2',async t=>{
+ t.mock.timers.enable({apis:['setInterval','Date']});
+ let reads=0,starts=0,alive=false;const states:boolean[]=[];
+ const idle=async(ms:number)=>{for(let elapsed=0;elapsed<ms;elapsed+=1000){t.mock.timers.tick(1000);await new Promise<void>(resolve=>setImmediate(resolve));}};
+ const keeper=new PowerKeeper({power:async()=>{reads++;return 'ac';},onChange:awake=>states.push(awake),
+  start:()=>{starts++;alive=true;return {alive:()=>alive,stop:async()=>{alive=false;}};}});
+ try{
+  keeper.start();await keeper.setAgent(true);assert.equal(reads,1);assert.equal(starts,1);
+  await idle(28000);assert.equal(reads,1,'watchdog ticks reuse a fresh reading');
+  await idle(4000);assert.equal(reads,2,'and re-read it once it is 30 seconds old');
+  alive=false;await idle(2000);assert.deepEqual(states,[true,false],'the next tick notices a dead helper');assert.equal(reads,2);
+  await idle(30000);assert.equal(starts,2,'and the helper restarts after its backoff');assert.equal(reads,3);
+ }finally{await keeper.shutdown();}
+});
+test('a failing helper cleanup never rejects a queued check or skips the next one',async()=>{
+ let reads=0,broken=false;
+ const keeper=new PowerKeeper({power:async()=>{reads++;return 'ac';},start:()=>({
+  alive:()=>{if(broken)throw new Error('helper vanished');return true;},stop:async()=>{if(broken)throw new Error('stop failed');}})});
+ try{
+  await keeper.setAgent(true);broken=true;
+  await assert.doesNotReject(keeper.check());assert.equal(reads,2);
+  broken=false;await keeper.check();assert.equal(reads,3);
+ }finally{broken=false;await keeper.shutdown();}
+});
 
 import { createEventBus } from '@earendil-works/pi-coding-agent';
 import autoCaffeinate from './index.ts';
-const wired=(power:'ac'|'battery',start:KeeperOptions['start']=()=>({alive:()=>true,stop:async()=>{}}))=>{
+const wired=(power:'ac'|'battery'|NonNullable<KeeperOptions['power']>,start:KeeperOptions['start']=()=>({alive:()=>true,stop:async()=>{}}))=>{
  const handlers=new Map<string,any>();const status:(string|undefined)[]=[];const bus=createEventBus();
- autoCaffeinate({on:(name:string,handler:any)=>handlers.set(name,handler),events:bus} as any,{power:async()=>power,start});
+ autoCaffeinate({on:(name:string,handler:any)=>handlers.set(name,handler),events:bus} as any,{power:typeof power==='function'?power:async()=>power,start});
  const ctx={hasUI:true,ui:{setStatus:(_key:string,text?:string)=>status.push(text)}};
  return {status,bus,fire:(name:string)=>handlers.get(name)({},ctx),settle:()=>new Promise<void>(resolve=>setImmediate(resolve))};
 };
@@ -226,6 +331,16 @@ test('agent turns on battery never show the machine as held awake',async()=>{
  try{await h.fire('agent_start');await h.settle();await h.fire('agent_settled');await h.settle();assert.deepEqual(h.status,[]);}
  finally{await h.fire('session_shutdown');}
 });
+test('agent events never wait for a power probe, while shutdown waits and starts nothing afterwards',async()=>{
+ let finish=(_power:'ac')=>{};let starts=0;
+ const h=wired(()=>new Promise(resolve=>{finish=resolve;}),()=>{starts++;return {alive:()=>true,stop:async()=>{}};});
+ const blocked=Symbol('blocked');const outcome=(result:unknown)=>Promise.race([Promise.resolve(result),h.settle().then(()=>blocked)]);
+ await h.fire('session_start');
+ assert.notEqual(await outcome(h.fire('agent_start')),blocked);
+ assert.notEqual(await outcome(h.fire('agent_settled')),blocked);
+ const shutdown=h.fire('session_shutdown');assert.equal(await outcome(shutdown),blocked);
+ finish('ac');await shutdown;assert.equal(starts,0);assert.deepEqual(h.status,[]);
+});
 
 test('a helper that fails to spawn never shows Awake in the status bar',{timeout:5000},async()=>{
  const dir=await mkdtemp(join(tmpdir(),'pi-inhibitor-missing-'));
@@ -235,9 +350,9 @@ test('a helper that fails to spawn never shows Awake in the status bar',{timeout
   failed=new Promise(resolve=>launched.once('error',resolve));
   return launched;
  }) as typeof spawn;
- const h=wired('ac',()=>startInhibitor('linux',launch));
+ const h=wired('ac',changed=>startInhibitor('linux',launch,changed,async()=>[]));
  try{
-  await h.fire('session_start');await h.fire('agent_start');
+  await h.fire('session_start');await h.fire('agent_start');await h.settle();
   assert.ok(child);assert.ok(failed);
   assert.equal(child.pid,undefined);
   assert.deepEqual(h.status,[]);

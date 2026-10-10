@@ -210,16 +210,17 @@ Journal storage and retention:
   model/thinking/profile provenance, with stderr clipped to its last 4 KiB. The
   journal records that value, and replay returns it unchanged.
 - A stage record holds at most 1 MiB and a journal at most 32 MiB. Each child
-  reserves 1 MiB before launch; when unfinished stages hold the remaining budget,
-  new children wait. Once completed stages leave less than 1 MiB, `api.spawn`
-  rejects before launching, and a checkpoint that does not fit rejects unrecorded.
-  The script can catch either error; a rerun replays the recorded stages and stops
-  at the same stage without relaunching it. Split the workflow, or have children
-  write bulky results to files.
+  reserves 1 MiB before launch, and each checkpoint its record size; while
+  unfinished stages hold the remaining budget, new ones wait. Once recorded stages
+  leave too little, `api.spawn` rejects before launching and a checkpoint rejects
+  unrecorded. The script can catch either error; a rerun replays the recorded
+  stages and stops at the same stage without relaunching it. Split the workflow,
+  or have children write bulky results to files.
 - Journals stay replayable, including after success, until unused for seven days.
   Beyond the 16 most recently used, journals idle for over two hours are deleted.
   Pruning runs when a workflow starts and skips running workflows. Single-file
-  journals from earlier versions are not replayed and are pruned the same way.
+  journals from earlier versions are not replayed; they are deleted once idle for
+  two hours.
 
 Replay limits:
 

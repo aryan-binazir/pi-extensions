@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -112,39 +113,47 @@ test('an exhausted journal budget rejects stages before launch and checkpoints c
   const journalDirectory = join(cwd, 'journals');
   let launches = 0;
   const options = {
-    source: "let i = 0; try { for (; i < 40; i++) await api.spawn({task: 'stage ' + i}, 's' + i); } catch (error) { let big = 'stored'; try { await api.checkpoint('big', async () => 'x'.repeat(1000000)); } catch (failure) { big = failure.message; } return [i, error.message, big, await api.checkpoint('small', async () => 'fits')]; } return [i, 'completed'];",
+    source: "await api.checkpoint('seed', async () => 1); if (await api.readFile('mode', 8) === 'seed') return 'seeded'; let big = 'stored'; try { await api.checkpoint('big', async () => 'x'.repeat(600000)); } catch (error) { big = error.message; } try { await api.spawn({task: 'next'}, 'next'); return 'launched'; } catch (error) { return [error.message, big, await api.checkpoint('small', async () => 'fits')]; }",
     cwd, journalDirectory, policyIdentity: 'budget', approve: async () => true, approveReplay: async () => true,
-    spawn: async () => { launches++; return 'x'.repeat(1000000); },
+    spawn: async () => { launches++; return 'launched'; },
   };
   try {
+    await writeFile(join(cwd, 'mode'), 'seed');
+    assert.equal(await runWorkflow(options), 'seeded');
+    // Fill the journal on disk, as 33 earlier ~1 MB stages would have.
+    const [identity] = await readdir(journalDirectory);
+    for (let i = 0; i < 33; i++) {
+      const key = `checkpoint:pad${i}`;
+      await writeFile(join(journalDirectory, identity, `${createHash('sha256').update(key).digest('hex')}.json`), JSON.stringify({version: 2, identity, key, signature: 'checkpoint', value: 'x'.repeat(1000000)}), {mode: 0o600});
+    }
+    await writeFile(join(cwd, 'mode'), 'run');
     const first = await runWorkflow(options);
-    const [stage, message, big, small] = first as [number, string, string, string];
-    assert.match(message, /budget exhausted/);
+    const [spawned, big, small] = first as string[];
+    assert.match(spawned, /budget exhausted/);
     assert.match(big, /budget exhausted/);
     assert.equal(small, 'fits');
-    assert.ok(stage > 30 && stage < 34, `failed at stage ${stage}`);
-    assert.equal(launches, stage, 'the failing stage never launched its child');
-    assert.equal((await stageFiles(journalDirectory)).length, stage + 1);
+    assert.equal(launches, 0, 'the over-budget stage never launched its child');
     assert.deepEqual(await runWorkflow(options), first);
-    assert.equal(launches, stage, 'replay does not relaunch any child');
+    assert.equal(launches, 0, 'a rerun stops at the same stage without launching');
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 
-test('concurrent spawns beyond the journal reservations wait instead of failing', async () => {
+test('concurrent spawns and checkpoints beyond the journal reservations wait instead of failing', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'journal-reserve-'));
   let running = 0, peak = 0, open!: () => void;
   const gate = new Promise<void>(resolve => { open = resolve; });
   try {
-    assert.equal(await runWorkflow({
-      source: "return (await Promise.all(Array.from({length: 40}, (_, i) => api.spawn({task: 'parallel ' + i}, 'p' + i)))).length;",
+    await writeFile(join(cwd, 'input'), 'ok');
+    assert.deepEqual(await runWorkflow({
+      source: "const spawns = Promise.all(Array.from({length: 40}, (_, i) => api.spawn({task: 'parallel ' + i}, 'p' + i))); const kept = await api.checkpoint('kept', async () => (await api.readFile('input', 2)) + (await api.readFile('input', 2))); return [(await spawns).length, kept];",
       cwd, journalDirectory: join(cwd, 'journals'), policyIdentity: 'reserve', approve: async () => true,
       spawn: async () => { peak = Math.max(peak, ++running); if (running === 32) setTimeout(open, 100); await gate; running--; return 'small'; },
-    }), 40);
+    }), [40, 'okok']);
     assert.equal(peak, 32);
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 
-test('journal retention prunes stale and excess idle journals, keeping recent and foreign entries', async () => {
+test('journal retention prunes stale, excess idle and legacy journals, keeping recent and foreign entries', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'journal-retention-'));
   const journalDirectory = join(cwd, 'journals');
   const id = (n: number) => n.toString(16).padStart(64, '0');
@@ -157,10 +166,26 @@ test('journal retention prunes stale and excess idle journals, keeping recent an
     await writeFile(join(journalDirectory, `${id(24)}.json`), '{}');
     await age(join(journalDirectory, `${id(24)}.json`), 8 * day);
     await writeFile(join(journalDirectory, `${id(25)}.json`), '{}');
+    await writeFile(join(journalDirectory, `${id(26)}.json`), '{}');
+    await age(join(journalDirectory, `${id(26)}.json`), 3 * hour);
     await writeFile(join(journalDirectory, 'notes.txt'), 'foreign');
     await age(join(journalDirectory, 'notes.txt'), 30 * day);
     await runWorkflow({source: 'return 1;', cwd, journalDirectory, policyIdentity: 'retention', approve: async () => true, spawn: async () => 'unused'});
     assert.deepEqual((await readdir(journalDirectory)).sort(), [...Array.from({length: 18}, (_, n) => id(n)), id(23), `${id(25)}.json`, 'notes.txt'].sort());
+  } finally { await rm(cwd, {recursive: true, force: true}); }
+});
+
+test('single-file journals from earlier versions take no retention slot from replayable ones', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'journal-legacy-'));
+  const journalDirectory = join(cwd, 'journals');
+  const id = (n: number) => n.toString(16).padStart(64, '0');
+  try {
+    await mkdir(journalDirectory);
+    for (let n = 0; n < 16; n++) await writeFile(join(journalDirectory, `${id(n)}.json`), '{}');
+    await mkdir(join(journalDirectory, id(99)));
+    await age(join(journalDirectory, id(99)), 3 * hour);
+    await runWorkflow({source: 'return 1;', cwd, journalDirectory, policyIdentity: 'legacy', approve: async () => true, spawn: async () => 'unused'});
+    assert.equal((await readdir(journalDirectory)).length, 17);
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 

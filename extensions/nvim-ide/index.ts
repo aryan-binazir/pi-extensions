@@ -12,6 +12,10 @@ const statusKey = 'nvim-ide';
 const followWindowMs = 100;
 const followTimeoutMs = 5000;
 const replayAgeMs = 30_000;
+// Session replacement re-runs the factory and /reload re-evaluates this module, so the preference lives for the process.
+const followKey = Symbol.for('pi-interactive:nvim-ide.follow.v1');
+const prefs = globalThis as unknown as Record<symbol, boolean | undefined>;
+const following = () => prefs[followKey] !== false;
 export function statusText(state: LinkState): string | undefined {
   if (!state.connected) return undefined;
   const name = state.ideName ?? 'IDE';
@@ -25,7 +29,6 @@ export function statusText(state: LinkState): string | undefined {
 export default function nvimIde(pi: ExtensionAPI): void {
   let link: IdeLink | undefined;
   let ctx: ExtensionContext | undefined;
-  let follow = true;
   let seenEditor = false;
   let followFailed = false;
   const warn = (message: string) => { try { if (ctx?.hasUI) ctx.ui.notify(message, 'warning'); } catch {} };
@@ -41,11 +44,11 @@ export default function nvimIde(pi: ExtensionAPI): void {
     controller?.abort();
   };
   const scheduleFollow = () => {
-    if (!follow || !pendingFollow || !link?.connected || followTimer || inFlight) return;
+    if (!following() || !pendingFollow || !link?.connected || followTimer || inFlight) return;
     followTimer = setTimeout(() => {
       followTimer = undefined;
       const current = link, destination = pendingFollow;
-      if (!follow || !destination || !current?.connected) return;
+      if (!following() || !destination || !current?.connected) return;
       pendingFollow = undefined;
       if (Date.now() - destination.at > replayAgeMs) return;
       const controller = new AbortController();
@@ -120,11 +123,10 @@ export default function nvimIde(pi: ExtensionAPI): void {
   pi.on('tool_execution_end', event => {
     const path = editPaths.get(event.toolCallId);
     editPaths.delete(event.toolCallId);
-    if (!path || event.isError || !follow || !seenEditor) return;
-    const line = (event.result as { details?: { firstChangedLine?: unknown } })?.details?.firstChangedLine;
-    const args: Record<string, unknown> = { filePath: path, preview: false, makeFrontmost: true };
-    if (Number.isInteger(line)) { args.startLine = line; args.endLine = line; }
-    pendingFollow = { args, at: Date.now() };
+    if (!path || event.isError || !following() || !seenEditor) return;
+    // Reveal only: openFile has no cursor-only position (claudecode.nvim turns lines into a Visual selection the user
+    // never made), and makeFrontmost moves focus, carrying Insert mode into the file or ending terminal mode.
+    pendingFollow = { args: { filePath: path, preview: false, makeFrontmost: false }, at: Date.now() };
     scheduleFollow();
   });
 
@@ -162,9 +164,11 @@ export default function nvimIde(pi: ExtensionAPI): void {
       cancelFollow();
       const ide = need();
       const args: Record<string, unknown> = { filePath: resolveToolPath(params.path, activeCwd(context)), preview: false, makeFrontmost: true };
-      if (params.startLine) { args.startLine = params.startLine; args.endLine = params.endLine ?? params.startLine; }
-      const text = await ide.call('openFile', args, signal);
+      const start = params.startLine, end = params.endLine ?? params.startLine, shift = ide.openFileLineOffset;
+      if (start && end) { args.startLine = start + shift; args.endLine = end + shift; }
+      let text = await ide.call('openFile', args, signal);
       if (link === ide) followFailed = false;
+      if (start && end && shift) text = text.replace(`selected lines ${start + shift} to ${end + shift}`, `selected lines ${start} to ${end}`);
       return { content: [{ type: 'text' as const, text }], details: undefined };
     },
   });
@@ -175,15 +179,15 @@ export default function nvimIde(pi: ExtensionAPI): void {
       const words = args.trim().split(/\s+/).filter(Boolean);
       const say = (message: string, type: 'info' | 'warning' = 'info') => { if (context.hasUI) context.ui.notify(message, type); };
       if (words[0] === 'follow') {
-        if (words[1] === 'on' || words[1] === 'off') follow = words[1] === 'on';
-        if (!follow) cancelFollow();
-        say(`Editor follows pi edits: ${follow ? 'on' : 'off'}`);
+        if (words[1] === 'on' || words[1] === 'off') prefs[followKey] = words[1] === 'on';
+        if (!following()) cancelFollow();
+        say(`Editor follows pi edits: ${following() ? 'on' : 'off'}`);
         return;
       }
       if (words[0] === 'reconnect') { link?.reconnect(); say('Editor link: rediscovering'); return; }
       const state = link?.state;
       if (!state?.connected) { say('Editor link: not connected. Looking for a claudecode.nvim lock file whose workspace contains this directory.', 'warning'); return; }
-      say(`Editor link: ${state.ideName} on port ${state.port}, follow ${follow ? 'on' : 'off'}${state.selection ? `, viewing ${state.selection.filePath}` : ''}`);
+      say(`Editor link: ${state.ideName} on port ${state.port}, follow ${following() ? 'on' : 'off'}${state.selection ? `, viewing ${state.selection.filePath}` : ''}`);
     },
   });
 }

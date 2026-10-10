@@ -5,7 +5,7 @@ export const token = 'a3f1c2d4e5f60718293a4b5c6d7e8f90';
 export type IdeCall = { name: string; arguments: any };
 export type CallResponder = (call: IdeCall, reply: (result: unknown) => void, socket: WebSocket) => boolean;
 
-export function fakeIde(onClient?: (socket: WebSocket) => void, onCall?: CallResponder) {
+export function fakeIde(onClient?: (socket: WebSocket) => void, onCall?: CallResponder, serverName = 'claudecode-neovim') {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: (info: { req: { headers: Record<string, unknown> } }) => info.req.headers['x-claude-code-ide-authorization'] === token });
   const calls: IdeCall[] = [];
   server.on('connection', socket => {
@@ -13,7 +13,7 @@ export function fakeIde(onClient?: (socket: WebSocket) => void, onCall?: CallRes
     socket.on('message', raw => {
       const message = JSON.parse(raw.toString());
       const reply = (result: unknown) => socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
-      if (message.method === 'initialize') reply({ protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'claudecode-neovim', version: '0.0.0' } });
+      if (message.method === 'initialize') reply({ protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: serverName, version: '0.0.0' } });
       else if (message.method === 'tools/call') {
         calls.push(message.params);
         if (onCall?.(message.params, reply, socket)) return;

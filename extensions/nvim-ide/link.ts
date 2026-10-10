@@ -76,6 +76,7 @@ export class IdeLink {
   private timer?: NodeJS.Timeout;
   private watcher?: FSWatcher;
   private parentWatcher?: FSWatcher;
+  private lockDirMissing = false;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private selection?: Selection;
@@ -91,6 +92,9 @@ export class IdeLink {
 
   get state(): LinkState { return { connected: this.connected, ideName: this.lock?.ideName, port: this.lock?.port, selection: this.selection, mentions: this.mentions.length }; }
   get connected(): boolean { return this.ready && this.socket?.readyState === OPEN; }
+  /** The `claudecode-neovim` server (2390c6e) passes one-based openFile lines to nvim_buf_set_mark as `line - 1`, but that API's
+   * rows are one-based too, so it selects the line above (and nothing for line 1). Other servers share the one-based contract. */
+  get openFileLineOffset(): number { return this.zeroBasedMentionLines ? 1 : 0; }
 
   start(): void { if (this.started) return; this.started = true; this.watchParent(); this.watchLocks(); void this.attempt(); }
   async stop(): Promise<void> {
@@ -191,8 +195,17 @@ export class IdeLink {
     if (this.parentWatcher) return;
     const dir = this.options.lockDir ?? defaultLockDir();
     try {
+      const lost = (reason: string) => {
+        trace?.(`parent watch ${reason}`);
+        if (this.parentWatcher !== watcher) return;
+        watcher.close(); this.parentWatcher = undefined;
+        this.schedule();
+      };
       const watcher = watch(dirname(dir), { persistent: false }, (event, name) => {
-        if (!this.started || event !== 'rename' || (name && name !== basename(dir))) return;
+        if (!this.started || event !== 'rename') return;
+        // Linux names the watched directory itself when it is removed, leaving both watches on dead inodes.
+        if (name === basename(dirname(dir)) && this.parentWatcher === watcher) { this.watcher?.close(); this.watcher = undefined; lost(`removed ${name}`); return; }
+        if (name && name !== basename(dir)) return;
         trace?.(`parent watch ${event} ${name}`);
         this.watcher?.close(); this.watcher = undefined;
         this.watchLocks();
@@ -202,12 +215,13 @@ export class IdeLink {
         }
       });
       this.parentWatcher = watcher;
-      watcher.on('error', error => {
-        trace?.(`parent watch error ${error.message}`);
-        if (this.parentWatcher !== watcher) return;
-        watcher.close(); this.parentWatcher = undefined;
-        this.schedule();
-      });
+      watcher.on('error', error => lost(`error ${error.message}`));
+      // FSEvents can start after watch() returns; look once more for a lock directory created in that gap.
+      setTimeout(() => {
+        if (!this.started || this.parentWatcher !== watcher || this.watcher || !this.lockDirMissing || this.socket) return;
+        this.watchLocks();
+        if (this.watcher || !this.lockDirMissing) this.schedule(this.watcher ? 200 : undefined);
+      }, 1000).unref();
     } catch {}
   }
   private watchLocks(): void {
@@ -221,14 +235,16 @@ export class IdeLink {
         watcher.close(); this.watcher = undefined;
         this.schedule();
       });
-    } catch {}
+      this.lockDirMissing = false;
+    } catch (error) { this.lockDirMissing = (error as NodeJS.ErrnoException).code === 'ENOENT'; }
   }
   private schedule(delay?: number): void {
-    trace?.(`schedule ${delay ?? 'default'} timer=${!!this.timer} watcher=${!!this.watcher}`);
+    trace?.(`schedule ${delay ?? 'default'} timer=${!!this.timer} watcher=${!!this.watcher} missing=${this.lockDirMissing}`);
     if (!this.started || this.timer) return;
     if (!this.parentWatcher) this.watchParent();
     if (!this.watcher) this.watchLocks();
-    if (delay === undefined) { if (this.parentWatcher && this.watcher) return; delay = this.options.retryMs ?? 15000; }
+    // The parent watch is armed before each lock-directory attempt, so it reports a directory created after an ENOENT.
+    if (delay === undefined) { if (this.parentWatcher && (this.watcher || this.lockDirMissing)) return; delay = this.options.retryMs ?? 15000; }
     this.timer = setTimeout(() => { this.timer = undefined; void this.attempt(); }, delay);
     this.timer.unref();
   }

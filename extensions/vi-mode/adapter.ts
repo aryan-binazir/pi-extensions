@@ -1,6 +1,7 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import type { Editor } from "@earendil-works/pi-tui";
-export const invalidateTextCache = Symbol("pi-interactive:vi-text-cache");
+// Shared across copies: each extension load and /reload evaluates this file anew, but the handoff patch keeps the first.
+export const invalidateTextCache = Symbol.for("pi-interactive:vi-text-cache");
 
 export function setCursorPosition(editor: Editor, line: number, col: number): void {
   const internal = editor as unknown as {
@@ -188,6 +189,7 @@ export function markViEditor(editor: Editor): void {
   installSinglePassPasteExpansion(editor);
 }
 // Pi 0.85.1 copies getText() without its paste registry before extension shutdown.
+// Installed once per process: /reload keeps the first patch and the helpers it calls, so changes to them need a restart.
 export function installEditorHandoff(): void {
   const prototype = InteractiveMode.prototype as unknown as {
     [handoffInstalled]?: boolean;

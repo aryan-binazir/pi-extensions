@@ -19,9 +19,14 @@ including approval and queue time.
   writers still queue behind one another. No new token or spending quotas are
   imposed.
 - **Panel.** One shared panel above the editor lists queued and running children,
-  including workflow children, with a short ID, status and task brief. Silent
-  children appear immediately; rows disappear on completion or cancellation, and
-  the panel vanishes when empty.
+  including workflow children, with a short ID, status and task brief on one
+  truncated line each, running children first. From 10 terminal rows the panel
+  takes at most half the terminal height: from 24 rows it lists up to nine
+  children, or eight plus a `… N more` line counting hidden running and queued
+  children; shorter terminals list fewer, down to one row and the summary. In the
+  default layout, updates then stay on screen instead of forcing full redraws that
+  clear scrollback. Silent children appear immediately; rows disappear on
+  completion or cancellation, and the panel vanishes when empty.
 - **Results.** Completion is pushed into the parent conversation; output and usage
   remain available through `subagent_status`, which inspects the registry.
 - **Cancellation.** `subagent_cancel` or `/subagents cancel ID` cancels one task.

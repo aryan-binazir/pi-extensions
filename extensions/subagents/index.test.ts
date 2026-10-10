@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { InteractiveMode, ExtensionEditorComponent, CustomEditor, SettingsManager, initTheme } from '@earendil-works/pi-coding-agent';
-import { Container } from '@earendil-works/pi-tui';
+import { Container, visibleWidth } from '@earendil-works/pi-tui';
 import type { Host } from './test-support.ts';
 import { until, withHost } from './test-support.ts';
 
@@ -430,4 +430,58 @@ test('source review cancellation restores synchronously and preserves a replacem
     dialog.handleInput('\r');
     dialog.handleInput('\x1b');
     assert.equal(host.ctx.ui.getEditorText(), 'replacement draft');
+  }));
+
+test('the active panel caps its height, lists running children first, and fits narrow widths', async () =>
+  withHost({prefix: 'subagent-panel-', pi: 'setInterval(()=>{},1000)'}, async ({ctx, execute}) => {
+    let panel: ((tui: unknown, theme: unknown) => {render(width: number): string[]}) | undefined;
+    ctx.ui.setWidget = (_key: string, value?: typeof panel) => { panel = value; };
+    const theme = {fg: (_color: string, text: string) => `\x1b[34m${text}\x1b[39m`};
+    const frame = (width: number, rows = 24) => {
+      const lines = panel!({terminal: {rows}}, theme).render(width);
+      for (const line of lines) assert.equal(visibleWidth(line), width);
+      return lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''));
+    };
+    const spawn = async (task: string, preset = 'reader'): Promise<string> => (await execute('subagent', {task, preset})).details.id;
+    const writer = await spawn('hold', 'writer');
+    const queuedWriter = await spawn('hold', 'writer');
+    const readers = [await spawn(`${'x'.repeat(99)}😀 cut inside the emoji`)];
+    for (let i = 1; i < 18; i++) readers.push(await spawn(`${i} ${'界'.repeat(50)} 🧪`));
+    const ids = (lines: string[]) => lines.map(line => line.slice(2, 10));
+    let lines = frame(80);
+    assert.equal(lines.length, 12, 'header, eight rows and a summary between the borders');
+    assert.match(lines[0], /^╭─+╮$/);
+    assert.match(lines[1], /^│ Subagents · 20 active +│$/);
+    assert.deepEqual(ids(lines.slice(2, 10)), [writer, ...readers.slice(0, 7)].map(id => id.slice(0, 8)));
+    assert.ok(lines.slice(2, 10).every(line => line.includes(' · running · ')));
+    assert.match(lines[10], /^│ … 12 more · 12 queued +│$/);
+    assert.match(lines[11], /^╰─+╯$/);
+    assert.ok(!lines.join('\n').includes(queuedWriter.slice(0, 8)), 'a queued child never displaces a running one');
+    assert.match(frame(200)[3], /x{99}\uFFFD +│$/, 'a brief cut inside an emoji is measured as the terminal shows it');
+    lines = frame(80, 16);
+    assert.equal(lines.length, 8, 'half of a 16-row terminal');
+    assert.match(lines[6], /^│ … 16 more · 4 running · 12 queued +│$/);
+    lines = frame(80, 4);
+    assert.equal(lines.length, 5, 'one row and a summary on a tiny terminal');
+    assert.deepEqual(ids(lines.slice(2, 3)), [writer.slice(0, 8)]);
+    assert.match(lines[3], /^│ … 19 more · 7 running · 12 queued +│$/);
+    for (const width of [6, 20]) {
+      const narrow = frame(width);
+      assert.equal(narrow.length, 12);
+      assert.ok(narrow.slice(1, -1).every(line => line.startsWith('│ ') && line.endsWith(' │')));
+    }
+    assert.deepEqual(panel!({terminal: {rows: 24}}, theme).render(5), []);
+
+    await execute('subagent_cancel', {id: queuedWriter});
+    assert.match(frame(80)[10], /^│ … 11 more · 11 queued +│$/, 'hidden children still repaint the summary');
+    for (const id of readers.slice(8)) await execute('subagent_cancel', {id});
+    lines = frame(80);
+    assert.equal(lines.length, 12, 'nine children fit without a summary');
+    assert.match(lines[1], /^│ Subagents · 9 active +│$/);
+    assert.deepEqual(ids(lines.slice(2, 11)), [writer, ...readers.slice(0, 8)].map(id => id.slice(0, 8)));
+    assert.match(lines[10], / · queued · 7 界/);
+    await execute('subagent_cancel', {id: readers[7]});
+    assert.equal(frame(80).length, 11);
+    await execute('subagent_cancel', {id: 'all'});
+    assert.equal(panel, undefined);
   }));

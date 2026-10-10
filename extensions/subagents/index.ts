@@ -358,7 +358,8 @@ export default function subagents(pi: ExtensionAPI): void {
             try {
               const value = await handle.done;
               if (value.status !== 'succeeded') throw Object.assign(new Error(`Subagent ${value.status}: ${value.error ?? value.stderr}`), {retryable: value.status === 'failed'});
-              return value;
+              // Journaled and replayed as returned: keep only a stderr tail so a stage record stays within its 1 MiB budget.
+              return {...value, stderr: clipJson(value.stderr, 4096, true)};
             } finally {
               taskSignal.removeEventListener('abort', cancel);
             }

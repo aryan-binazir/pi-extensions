@@ -201,6 +201,26 @@ policy permissions and runtime versions. Ordinary user messages do not invalidat
 the journal; current directives still propagate to new children. Failed stages run
 again, and unfinished capability calls prevent a successful workflow result.
 
+Journal storage and retention:
+
+- Each journal is a directory (mode 0700) under
+  `${PI_CODING_AGENT_DIR:-~/.pi/agent}/workflow-journals/`, holding one atomically
+  replaced file (mode 0600) per spawn stage or checkpoint. A write costs one stage.
+- `api.spawn` resolves to the child's status, output, usage, brief, cwd and
+  model/thinking/profile provenance, with stderr clipped to its last 4 KiB. The
+  journal records that value, and replay returns it unchanged.
+- A stage record holds at most 1 MiB and a journal at most 32 MiB. Each child
+  reserves 1 MiB before launch; when unfinished stages hold the remaining budget,
+  new children wait. Once completed stages leave less than 1 MiB, `api.spawn`
+  rejects before launching, and a checkpoint that does not fit rejects unrecorded.
+  The script can catch either error; a rerun replays the recorded stages and stops
+  at the same stage without relaunching it. Split the workflow, or have children
+  write bulky results to files.
+- Journals stay replayable, including after success, until unused for seven days.
+  Beyond the 16 most recently used, journals idle for over two hours are deleted.
+  Pruning runs when a workflow starts and skips running workflows. Single-file
+  journals from earlier versions are not replayed and are pruned the same way.
+
 Replay limits:
 
 - Replay is deliberately opt-in. Resuming requires source approval and an explicit

@@ -86,6 +86,13 @@ function userMessages(context: TranscriptContext) {
   });
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+// Polls until `condition` holds or `timeoutMs` of real time passes. The native provider's first request
+// waits on a lazy SDK import whose duration depends on machine load, so a fixed tick count is not enough.
+// Callers assert afterwards, so a timeout still fails with their message.
+async function waitFor(condition: () => unknown, timeoutMs = 15000) {
+  const deadline = performance.now() + timeoutMs;
+  while (!condition() && performance.now() < deadline) await tick();
+}
 
 const providerUsage = {
   input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
@@ -824,7 +831,7 @@ test("native OpenAI wire retains BTW instructions and inert conversation content
   };
   const pending = h.commands.btw.handler("Synthetic side question", h.ctx);
   try {
-    for (let i = 0; i < 50 && !payload; i++) await tick();
+    await waitFor(() => payload);
     assert.ok(payload, "the actual native provider must serialize a request");
     assert.equal(payload.model, "gpt-5.5");
     assert.deepEqual(payload.input, [
@@ -833,7 +840,7 @@ test("native OpenAI wire retains BTW instructions and inert conversation content
       { role: "user", content: [{ type: "input_text", text: "Synthetic side question" }] },
     ]);
     assert.equal(payload.tools, undefined);
-    for (let i = 0; i < 50 && !h.render().includes("Synthetic side answer"); i++) await tick();
+    await waitFor(() => h.render().includes("Synthetic side answer"));
     assert.match(h.render(), /Synthetic side answer/);
     assert.doesNotMatch(h.render(), /Side request failed/);
   } finally {

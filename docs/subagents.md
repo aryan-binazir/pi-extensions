@@ -44,8 +44,9 @@ Reporting:
 
 - Direct completions and individual cancellations are compact and batched. A batch
   containing only cancellations does not trigger a model turn; cancel-all returns a
-  count and suppresses individual notifications. Workflow stages return only to
-  their awaiting workflow.
+  count and suppresses cancellation notifications, but still pushes completions
+  that finished first or did not end in cancellation. Session shutdown discards
+  pending notifications. Workflow stages return only to their awaiting workflow.
 - Status is paginated (`offset`, `limit`, or `id` with `outputOffset`); the registry
   retains 50 completed results alongside outstanding work. Oversized JSON records
   are skipped and flagged, not treated as a reason to kill an otherwise healthy

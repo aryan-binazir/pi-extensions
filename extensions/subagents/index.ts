@@ -119,7 +119,7 @@ export default function subagents(pi: ExtensionAPI): void {
     onComplete: task => {
       renderActiveAgents();
       if (context?.hasUI && !registry.hasActive()) context.ui.setStatus('subagent-tracker', undefined);
-      if (shuttingDown || cancellingAll || task.owner !== 'parent') return;
+      if (shuttingDown || (cancellingAll && task.status === 'cancelled') || task.owner !== 'parent') return;
       noticeTriggersTurn ||= task.status !== 'cancelled';
       if (notices.length < 16) notices.push(taskView(task, 4096)); else overflowNotices++;
       noticeTimer ??= setTimeout(flushNotices, 250);
@@ -213,13 +213,13 @@ export default function subagents(pi: ExtensionAPI): void {
   const stopReporting = () => {
     tracker.stop();
     if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
-    clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0; noticeTriggersTurn = false;
   };
   const stopAll = async () => {
     shuttingDown = true;
     latestReport = undefined;
     renderActiveAgents();
     stopReporting();
+    clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0; noticeTriggersTurn = false;
     for (const controller of workflows) controller.abort();
     await registry.shutdown();
     await Promise.allSettled(workflowRuns);

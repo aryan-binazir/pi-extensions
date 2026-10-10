@@ -27,6 +27,7 @@ export default function subagents(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let shuttingDown = false;
   let cancellingAll = false;
+  const cancelledByAll = new Set<string>();
   const workflows = new Set<AbortController>();
   const workflowRuns = new Set<Promise<unknown>>();
   let approvalUI: Promise<unknown> = Promise.resolve();
@@ -119,7 +120,7 @@ export default function subagents(pi: ExtensionAPI): void {
     onComplete: task => {
       renderActiveAgents();
       if (context?.hasUI && !registry.hasActive()) context.ui.setStatus('subagent-tracker', undefined);
-      if (shuttingDown || cancellingAll || task.owner !== 'parent') return;
+      if (cancelledByAll.delete(task.id) || shuttingDown || task.owner !== 'parent') return;
       noticeTriggersTurn ||= task.status !== 'cancelled';
       if (notices.length < 16) notices.push(taskView(task, 4096)); else overflowNotices++;
       noticeTimer ??= setTimeout(flushNotices, 250);
@@ -213,13 +214,13 @@ export default function subagents(pi: ExtensionAPI): void {
   const stopReporting = () => {
     tracker.stop();
     if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
-    clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0; noticeTriggersTurn = false;
   };
   const stopAll = async () => {
     shuttingDown = true;
     latestReport = undefined;
     renderActiveAgents();
     stopReporting();
+    clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0; noticeTriggersTurn = false;
     for (const controller of workflows) controller.abort();
     await registry.shutdown();
     await Promise.allSettled(workflowRuns);
@@ -232,6 +233,7 @@ export default function subagents(pi: ExtensionAPI): void {
       const runs = [...workflowRuns];
       const activeWorkflows = [...workflows].filter(controller => !controller.signal.aborted);
       try {
+        for (const task of registry.activeTasks()) cancelledByAll.add(task.id);
         const cancelChildren = registry.cancelAll();
         for (const controller of activeWorkflows) controller.abort();
         const count = await cancelChildren;

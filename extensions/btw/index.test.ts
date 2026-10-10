@@ -830,8 +830,11 @@ test("native OpenAI wire retains BTW instructions and inert conversation content
     };
   };
   const pending = h.commands.btw.handler("Synthetic side question", h.ctx);
+  const failure = /Side request failed|Provider returned no text/;
+  const failed = () => failure.test(h.render());
   try {
-    await waitFor(() => payload);
+    await waitFor(() => payload || failed());
+    assert.doesNotMatch(h.render(), failure);
     assert.ok(payload, "the actual native provider must serialize a request");
     assert.equal(payload.model, "gpt-5.5");
     assert.deepEqual(payload.input, [
@@ -840,9 +843,9 @@ test("native OpenAI wire retains BTW instructions and inert conversation content
       { role: "user", content: [{ type: "input_text", text: "Synthetic side question" }] },
     ]);
     assert.equal(payload.tools, undefined);
-    await waitFor(() => h.render().includes("Synthetic side answer"));
+    await waitFor(() => h.render().includes("Synthetic side answer") || failed());
     assert.match(h.render(), /Synthetic side answer/);
-    assert.doesNotMatch(h.render(), /Side request failed/);
+    assert.doesNotMatch(h.render(), failure);
   } finally {
     h.key("\u001b");
     await pending;

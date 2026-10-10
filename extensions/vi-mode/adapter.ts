@@ -111,6 +111,13 @@ export function clearBaseUndo(editor: Editor): void {
   internal.undoStack.clear();
   internal.snappedFromCursorCol = null;
 }
+// Also clears the pending debounce timer and aborts an in-flight suggestion request.
+export function cancelAutocomplete(editor: Editor): void {
+  const internal = editor as unknown as { cancelAutocomplete?: () => void };
+  if (typeof internal.cancelAutocomplete !== "function")
+    throw new Error("Unsupported Pi autocomplete layout");
+  internal.cancelAutocomplete();
+}
 
 export type PasteState = { pastes: Map<number, string>; counter: number };
 function pasteInternal(editor: Editor) {

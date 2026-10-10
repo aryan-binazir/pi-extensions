@@ -1,4 +1,4 @@
-import { visibleWidth, CURSOR_MARKER } from "@earendil-works/pi-tui";
+import { visibleWidth, CURSOR_MARKER, CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { editor, keys } from "./test-support.ts";
@@ -242,6 +242,27 @@ test("a split paste opener after ordinary text preserves the text and hides term
   withSuffix.handleInput("foo\x1b[20");
   withSuffix.handleInput("0~bar\x1b[201~!");
   assert.equal(withSuffix.getExpandedText(), "foobar!");
+});
+test("a legacy Alt+[ is a complete key and never holds back the next one", () => {
+  const e = editor();
+  e.setText("abc");
+  keys(e, "\x1b0");
+  e.handleInput("\x1b[");
+  e.handleInput("x");
+  assert.equal(e.getExpandedText(), "bc");
+  keys(e, "i");
+  e.handleInput("\x1b[");
+  e.handleInput("y");
+  assert.equal(e.getExpandedText(), "ybc");
+  // A stalled read inside the opener arrives as a fragment followed by single characters.
+  e.setText("");
+  keys(e, "\x1b");
+  for (const chunk of ["\x1b[20", "0", "~", "d", "d", "\x1b[201~"]) e.handleInput(chunk);
+  assert.equal(e.getExpandedText(), "dd");
+  // A fragment whose continuation never arrives is dropped before the next whole paste.
+  e.handleInput("\x1b[2");
+  e.handleInput("\x1b[200~hi\x1b[201~");
+  assert.equal(e.getExpandedText(), "ddhi");
 });
 test("raw tabs and carriage returns render safely in insert, normal and wrapped visual selection", () => {
   const e = editor();
@@ -722,6 +743,31 @@ test("unsupported r, m and q consume DEL and C1 arguments without inserting or s
     }
   }
 });
+test("unsupported f, F, t, T, r, m and q swallow one argument, even u or Ctrl+R, and cancel operators", () => {
+  for (const command of ["f", "F", "t", "T", "df", "ct", "2f", "d2T", "yF", "vt", "r", "m", "q", "dr"]) {
+    for (const argument of ["x", "D", "p", "u", "o", "a", "\x12", "\x1b[27;5;114~", "\x1b[27;2;68~", "\x1b[68;2u"]) {
+      const e = editor();
+      e.setText("alpha beta");
+      keys(e, "\x1b0yiwxxu" + command);
+      e.handleInput(argument);
+      const label = JSON.stringify(command + argument);
+      assert.equal(e.getExpandedText(), "lpha beta", label);
+      assert.ok(!e.render(40).at(-1)!.endsWith(" INSERT "), label);
+      keys(e, "x");
+      assert.equal(e.getExpandedText(), "pha beta", label + " leaves no pending count or operator");
+      e.dispose();
+    }
+  }
+});
+test("a register name is read before undo, and an invalid one cancels the command", () => {
+  const e = editor();
+  e.setText("one\ntwo");
+  keys(e, '\x1bgg"uyyjyy"up');
+  assert.equal(e.getExpandedText(), "one\ntwo\none");
+  keys(e, 'ggd"!w');
+  assert.equal(e.getExpandedText(), "one\ntwo\none");
+  assert.deepEqual(e.getCursor(), { line: 1, col: 0 });
+});
 test("normal mode rejects unsupported printable events and cancels pending commands", () => {
   for (const pending of ["", "d", "di", "g", '"']) {
     for (const input of ["😀", "e\u0301", "👩‍💻", "\x1b[128512u", "rm", "ia", "toString"]) {
@@ -960,6 +1006,36 @@ test("Kitty printables execute vi commands and encoded paste controls decode bef
   assert.equal(e.getExpandedText(), "one\ntwo\tend");
 });
 
+test("xterm modifyOtherKeys printables run vi commands exactly like legacy keys", () => {
+  const encode = (input: string, modifier: number) =>
+    [...input].map((c) => (/[^a-z0-9\x00-\x1f]/.test(c) ? `\x1b[27;${modifier};${c.codePointAt(0)}~` : c));
+  for (const command of ["G", "2G", "ggdG", "D", "C!", "$x", "w^x", "A!", "I!", "O!", "P", "Vjd", "v$d", "ci(!",
+    'ci"!', '"ayy"ap', "rX", "fXx", "dTXx", "2fDx", "ggVGd", "x\x12", "xu"]) {
+    for (const modifier of [2, 66, 130, 194]) {
+      const legacy = editor(), shifted = editor();
+      for (const e of [legacy, shifted]) {
+        e.setText('one (two) "three"\nfour\nfive');
+        keys(e, "\x1bggwyiw");
+      }
+      keys(legacy, command);
+      for (const key of encode(command, modifier)) shifted.handleInput(key);
+      const label = `${JSON.stringify(command)} with modifier ${modifier}`;
+      assert.equal(shifted.getExpandedText(), legacy.getExpandedText(), label);
+      assert.deepEqual(shifted.getCursor(), legacy.getCursor(), label);
+      assert.equal(shifted.render(40).at(-1), legacy.render(40).at(-1), label);
+    }
+  }
+  for (const rejected of ["\x1b[27;6;71~", "\x1b[27;4;71~", "\x1b[27;10;71~", "\x1b[27;2;31~"]) {
+    const e = editor(); e.setText("one\ntwo"); keys(e, "\x1bgg");
+    e.handleInput(rejected);
+    assert.equal(e.getExpandedText(), "one\ntwo", JSON.stringify(rejected));
+    assert.deepEqual(e.getCursor(), { line: 0, col: 0 }, JSON.stringify(rejected));
+  }
+  const e = editor(); e.setText("keep"); keys(e, "\x1b0");
+  e.handleInput("\x1b[200~\x1b[27;2;68~\x1b[201~");
+  assert.equal(e.getExpandedText(), "[27;2;68~keep");
+});
+
 test("unsupported g commands consume their argument without editing", () => {
   for (const command of ["gD", "gC", "gx", "go", "gP", "gd", "gq"]) {
     const e = editor(); e.setText("alpha beta"); keys(e, "\x1b0" + command);
@@ -986,6 +1062,75 @@ test("confirming a slash completion submits the completed command", async () => 
   while (!e.isShowingAutocomplete() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(e.isShowingAutocomplete(), true);
   e.handleInput("\r"); assert.equal(sent, "/btw");
+});
+
+const slashCommands = () => new CombinedAutocompleteProvider([{ name: "reload" }, { name: "resume" }], process.cwd());
+async function popupShown(e: ViEditor): Promise<boolean> {
+  const deadline = Date.now() + 3000;
+  while (!e.isShowingAutocomplete() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  return e.isShowingAutocomplete();
+}
+
+test("one Escape closes slash completion and enters normal mode, so Enter submits the typed draft", async () => {
+  for (const motion of ["", "0", "h", "b", "$"]) {
+    const e = editor();
+    e.setAutocompleteProvider(slashCommands());
+    let sent: string | undefined; e.onSubmit = text => { sent = text; };
+    let interrupts = 0; e.onEscape = () => { interrupts++; };
+    keys(e, "/rel");
+    assert.equal(await popupShown(e), true);
+    e.handleInput("\x1b");
+    assert.equal(e.isShowingAutocomplete(), false);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+    keys(e, motion);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(e.isShowingAutocomplete(), false, motion);
+    e.handleInput("\r");
+    assert.equal(sent, "/rel", motion);
+    assert.equal(interrupts, 0);
+  }
+});
+
+test("Escape cancels a debounced completion request before it can open", async () => {
+  const e = editor();
+  e.setAutocompleteProvider({
+    async getSuggestions(lines, line, col) {
+      const prefix = lines[line].slice(0, col).match(/@\S*$/)?.[0];
+      return prefix ? { prefix, items: [{ value: "@folder/", label: "folder/" }] } : null;
+    },
+    applyCompletion(lines, line, col, item, prefix) {
+      const next = [...lines], start = col - prefix.length;
+      next[line] = next[line].slice(0, start) + item.value + next[line].slice(col);
+      return { lines: next, cursorLine: line, cursorCol: start + item.value.length };
+    },
+  });
+  let sent = ""; e.onSubmit = text => { sent = text; };
+  keys(e, "see @fo\x1b");
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(e.isShowingAutocomplete(), false);
+  e.handleInput("\r");
+  assert.equal(sent, "see @fo");
+});
+
+test("vi motions close a normal-mode completion; Escape closes it like stock, then interrupts", async () => {
+  const e = editor();
+  e.setAutocompleteProvider(slashCommands());
+  let interrupts = 0; e.onEscape = () => { interrupts++; };
+  keys(e, "/rel");
+  await popupShown(e);
+  e.handleInput("\x1b");
+  e.handleInput("\t");
+  assert.equal(await popupShown(e), true);
+  e.handleInput("\x1b");
+  assert.equal(e.isShowingAutocomplete(), false);
+  assert.equal(interrupts, 0);
+  e.handleInput("\t");
+  assert.equal(await popupShown(e), true);
+  keys(e, "0");
+  assert.equal(e.isShowingAutocomplete(), false);
+  e.handleInput("\x1b");
+  assert.equal(interrupts, 1);
+  assert.equal(e.getText(), "/rel");
 });
 
 for (const [command, before, after, expanded] of [

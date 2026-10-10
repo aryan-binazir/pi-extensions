@@ -12,6 +12,7 @@ import {
   projectDisplay,
   renderProjected,
   clearBaseUndo,
+  cancelAutocomplete,
   clampOffset,
   readPastes, writePastes, pasteMarkers, expandPastes, collapsePaste,
   type PasteState, installEditorHandoff, markViEditor, invalidateTextCache, NEEDS_PROJECTION,
@@ -51,6 +52,21 @@ const CONTROLS_EXCEPT_TAB_LF_CR = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
 const CONTROLS_EXCEPT_TAB_LF = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 function safeDraft(text: string): string {
   return text.replace(CONTROLS_EXCEPT_TAB_LF_CR, "");
+}
+const MODIFY_OTHER_KEYS = /^\x1b\[27;(\d+);(\d+)~$/;
+// Mirrors pi-tui's unexported decodePrintableKey: without Kitty, Pi enables xterm modifyOtherKeys.
+function decodePrintable(data: string): string | undefined {
+  const kitty = decodeKittyPrintable(data);
+  const match = kitty === undefined ? MODIFY_OTHER_KEYS.exec(data) : null;
+  if (!match) return kitty;
+  const modifier = (parseInt(match[1], 10) - 1) & ~(64 + 128);
+  const codepoint = parseInt(match[2], 10);
+  if ((modifier & ~1) !== 0 || !Number.isFinite(codepoint) || codepoint < 32) return undefined;
+  try {
+    return String.fromCodePoint(codepoint);
+  } catch {
+    return undefined;
+  }
 }
 type Snapshot = {
   text: string;
@@ -181,8 +197,13 @@ export class ViEditor extends CustomEditor {
       super.handleInput(data);
       this.draft = undefined;
       const historyReset = history !== this.undoHistory;
-      if (before && !historyReset && before.text !== this.text())
+      if (before && !historyReset && before.text !== this.text()) {
         this.checkpoint(before);
+        // A native edit cancels pending commands and arguments, so a following u undoes it.
+        this.discardArgument = false;
+        this.resetPending();
+        this.register = '"';
+      }
     } finally {
       this.draft = undefined;
       this.onSubmit = submit;
@@ -297,6 +318,8 @@ export class ViEditor extends CustomEditor {
     this.cursorTo(s.pos);
   }
   private cursorTo(offset: number): void {
+    // A popup's prefix belongs to the old cursor; Enter or Tab would apply it here.
+    cancelAutocomplete(this);
     const starts = this.starts();
     const end = clampOffset(offset, this.text().length);
     let low = 0,
@@ -567,11 +590,13 @@ export class ViEditor extends CustomEditor {
       const opener = data.indexOf(opening);
       if (opener > 0) {
         this.handleInput(data.slice(0, opener));
+        this.pasteOpening = ""; // A fragment before a complete opener never completes.
         this.handleInput(data.slice(opener));
         return;
       }
       if (opener < 0) {
-        for (let length = Math.min(data.length, opening.length - 1); length > 1; length--) {
+        // Pi delivers whole pastes; a partial opener only follows a stalled read. ESC and ESC [ are keys.
+        for (let length = Math.min(data.length, opening.length - 1); length > 2; length--) {
           if (!opening.startsWith(data.slice(-length))) continue;
           if (data.length > length) this.handleInput(data.slice(0, -length));
           this.pasteOpening = data.slice(-length);
@@ -622,6 +647,7 @@ export class ViEditor extends CustomEditor {
         this.baseInput(data);
         return;
       }
+      cancelAutocomplete(this);
       if (
         this.mode === "insert" &&
         this.insertion &&
@@ -651,9 +677,23 @@ export class ViEditor extends CustomEditor {
       this.baseInput(data);
       return;
     }
-    data = decodeKittyPrintable(data) ?? data;
+    data = decodePrintable(data) ?? data;
     if (!/^[^\x00-\x1f]+$/u.test(data) && !matchesKey(data, "ctrl+r")) {
       this.baseInput(data);
+      return;
+    }
+    // Arguments are consumed before undo/redo so they never run as commands.
+    if (this.discardArgument) {
+      this.discardArgument = false;
+      return;
+    }
+    if (this.registerPending) {
+      this.registerPending = false;
+      if (/^[a-z"]$/.test(data)) this.register = data;
+      else {
+        this.resetPending();
+        this.register = '"';
+      }
       return;
     }
     if (data === "u" || matchesKey(data, "ctrl+r")) {
@@ -669,14 +709,12 @@ export class ViEditor extends CustomEditor {
       this.anchor = 0;
       this.visualScroll = 0;
       this.preferredColumn = undefined;
-      this.discardArgument = false;
       this.resetPending();
       this.register = '"';
       this.cursorShape();
       return;
     }
     if (!/^[\x20-\x7e]$/.test(data)) {
-      this.discardArgument = false;
       this.resetPending();
       this.register = '"';
       return;
@@ -695,23 +733,15 @@ export class ViEditor extends CustomEditor {
       this.register = '"';
       return;
     }
-    if (this.discardArgument) {
-      this.discardArgument = false;
-      return;
-    }
-    if (this.registerPending) {
-      if (/^[a-z"]$/.test(data)) this.register = data;
-      this.registerPending = false;
-      return;
-    }
     if (this.prefix === "g" && data !== "g") {
       this.resetPending();
       return;
     }
-    if ("rmq".includes(data)) {
+    // Unsupported commands that take a character cancel pending state and swallow it.
+    if ("rmqfFtT".includes(data)) {
+      this.resetPending();
+      this.register = '"';
       this.discardArgument = true;
-      this.op = "";
-      this.prefix = "";
       return;
     }
     if (data === '"') {

@@ -115,6 +115,20 @@ test("a paste delimiter split mid-sequence still keeps Ctrl+S out of the stash",
   h.emit("session_shutdown");
 });
 
+for (const EditorClass of [CustomEditor, ViEditor]) {
+  test(`${EditorClass.name}: a legacy Alt+[ outside a paste leaves the next Ctrl+S a stash command`, () => {
+    const h = stashHost(EditorClass);
+    h.editor.setText("draft");
+    h.editor.handleInput("\x1b["); h.editor.handleInput("\x13");
+    assert.equal(h.editor.getExpandedText(), "");
+    assert.match(h.status!, /stash/i);
+    for (const chunk of ["\x1b[200~prefix", "\x13", "suffix\x1b[", "201~"]) h.editor.handleInput(chunk);
+    assert.equal(h.editor.getExpandedText(), "prefixsuffix");
+    h.editor.handleInput("\x13"); assert.equal(h.editor.getExpandedText(), "draft");
+    h.emit("session_shutdown");
+  });
+}
+
 test("install and uninstall retain an existing stock collapsed paste", () => {
   const h = stashHost(); h.emit("session_shutdown");
   const payload = "existing stock paste\n".repeat(100);

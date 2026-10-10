@@ -189,7 +189,7 @@ export function markViEditor(editor: Editor): void {
   installSinglePassPasteExpansion(editor);
 }
 // Pi 0.85.1 copies getText() without its paste registry before extension shutdown.
-// Installed once per process: /reload keeps the first patch, so changes to it need a restart.
+// Installed once per process: /reload keeps the first patch and the helpers it calls, so changes to them need a restart.
 export function installEditorHandoff(): void {
   const prototype = InteractiveMode.prototype as unknown as {
     [handoffInstalled]?: boolean;

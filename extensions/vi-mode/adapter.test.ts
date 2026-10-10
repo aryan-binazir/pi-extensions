@@ -216,7 +216,8 @@ async function loadViMode() {
   assert.deepEqual(errors, []);
   return extensions[0];
 }
-// The first copy installs the once-per-process handoff; editors come from the second, as after /reload.
+// The handoff belongs to whichever copy installed it first (an earlier test's editor or the first load);
+// the second load is never that copy, like vi-mode after /reload.
 let reloaded: ReturnType<typeof loadViMode> | undefined;
 async function reloadedHost() {
   reloaded ??= loadViMode().then(loadViMode);

@@ -1,9 +1,11 @@
-import { parseArgs, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { parseArgs, resolveModelScopeWithDiagnostics, type ExtensionAPI, type ExtensionContext, type ModelRuntime, type ScopedModel } from '@earendil-works/pi-coding-agent';
 import type { Provider as ModelProvider } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { FAST_SUFFIX, withFastModels } from './provider.ts';
 type BranchEntry=ReturnType<ExtensionContext['sessionManager']['getBranch']>[number];
 type ModelChange=Extract<BranchEntry,{type:'model_change'}>;
+// Importing pi-ai's modelsAreEqual at runtime here added about 0.3 ms to each jiti load in A/B runs.
+const same=(a:{provider:string;id:string},b?:{provider:string;id:string})=>a.provider===b?.provider&&a.id===b.id;
 export default function fastMode(pi:ExtensionAPI):void {
  const install=(ctx:ExtensionContext)=>{
   for(const id of ['openai','openai-codex']) {
@@ -17,11 +19,28 @@ export default function fastMode(pi:ExtensionAPI):void {
    if(provider && view) {const wrapped=withFastModels(provider,view);if(wrapped!==provider)pi.registerProvider(wrapped);}
   }
  };
+ // Pi picks a new session's model before session_start registers aliases; redo its saved-default and scope choice.
+ const restoreDefault=async(ctx:ExtensionContext)=>{
+  const args=parseArgs(process.argv.slice(2));const settings=pi.getSettings();
+  const patterns=args.models??settings.enabledModels;
+  // Pi resolves --model first; --provider alone selects nothing.
+  if(args.model!==undefined||(!patterns?.length&&!settings.defaultModel?.endsWith(FAST_SUFFIX)))return;
+  const available={getAvailable:async()=>ctx.modelRegistry.getAvailable()} as unknown as ModelRuntime;
+  const scoped=patterns?.length?(await resolveModelScopeWithDiagnostics(patterns,available)).scopedModels:[];
+  const saved=settings.defaultProvider&&settings.defaultModel?ctx.modelRegistry.find(settings.defaultProvider,settings.defaultModel):undefined;
+  const choice:ScopedModel|undefined=scoped.find(entry=>same(entry.model,saved))??scoped[0]??(saved&&{model:saved});
+  if(!choice?.model.id.endsWith(FAST_SUFFIX)||same(choice.model,ctx.model))return;
+  // 'medium' is Pi's DEFAULT_THINKING_LEVEL.
+  const effort=args.thinking??choice.thinkingLevel??settings.modelThinkingLevels?.[`${choice.model.provider}/${choice.model.id}`]??settings.defaultThinkingLevel??'medium';
+  if(await pi.setModel(choice.model))pi.setThinkingLevel(effort);
+ };
  pi.on('session_start',async(event,ctx)=>{
   install(ctx);
-  if(!['resume','startup','fork'].includes(event.reason))return;
+  if(event.reason==='reload')return;
+  const branch=event.reason==='new'?[]:[...ctx.sessionManager.getBranch()].reverse();
+  // Like Pi, treat /new and branches without context messages as new sessions.
+  if(!branch.some(entry=>['message','custom_message','branch_summary','compaction'].includes(entry.type))){await restoreDefault(ctx);return;}
   if(event.reason==='startup'&&process.argv.some(arg=>/^--(?:model|provider)(?:=|$)/.test(arg)))return;
-  const branch=[...ctx.sessionManager.getBranch()].reverse();
   const previous=branch.find((entry):entry is ModelChange=>entry.type==='model_change');
   if(!previous||!previous.modelId.endsWith(FAST_SUFFIX))return;
   const restored=ctx.modelRegistry.find(previous.provider,previous.modelId);

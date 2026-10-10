@@ -87,7 +87,7 @@ import fastMode from './index.ts';
 test('toggle and resume keep reasoning; other provider paths remain untouched',async()=>{
  const original=openaiProvider();const models=original.getModels();const base=models.find(m=>m.id==='gpt-5.5')!;
  let provider:any=original;let selected:any=base;let effort='high';let command:any;let resume:any;let registrations=0;
- const ctx:any={model:base,modelRegistry:{getRegisteredProviderConfig:()=>undefined,getRegisteredNativeProvider:(id:string)=>id==='openai'&&registrations?provider:undefined,getProvider:(id:string)=>id==='openai'?provider:undefined,find:(id:string,name:string)=>id==='openai'?provider.getModels().find((m:any)=>m.id===name):undefined},sessionManager:{getBranch:()=>[{type:'model_change',provider:'openai',modelId:'gpt-5.5~fast'}]},ui:{notify(){}}};
+ const ctx:any={model:base,modelRegistry:{getRegisteredProviderConfig:()=>undefined,getRegisteredNativeProvider:(id:string)=>id==='openai'&&registrations?provider:undefined,getProvider:(id:string)=>id==='openai'?provider:undefined,find:(id:string,name:string)=>id==='openai'?provider.getModels().find((m:any)=>m.id===name):undefined},sessionManager:{getBranch:()=>[{type:'message'},{type:'model_change',provider:'openai',modelId:'gpt-5.5~fast'}]},ui:{notify(){}}};
  fastMode({registerProvider:(p:any)=>{registrations++;provider=p;},on:(name:string,fn:any)=>{if(name==='session_start')resume=fn;},registerCommand:(_name:string,entry:any)=>{command=entry;},getThinkingLevel:()=>effort,setThinkingLevel:(value:string)=>{effort=value;},setModel:async(value:any)=>{selected=value;ctx.model=value;effort='low';return true;}} as any);
  await command.handler('',ctx);assert.equal(selected.id,'gpt-5.5~fast');assert.equal(effort,'high');
  await command.handler('',ctx);assert.equal(selected.id,'gpt-5.5');assert.equal(effort,'high');
@@ -153,7 +153,7 @@ test('fast installation preserves unique models and reflects models.json refresh
   let command:any;let startup:any;let registrations=0;
   const base=runtime.getModel('openai','gpt-5.5')!;assert.equal(base.name,'Custom model name');
   const ctx:any={model:base,modelRegistry:new ModelRegistry(runtime),ui:{notify(){}}};
-  fastMode({registerProvider:(provider:any)=>{registrations++;runtime.registerNativeProvider(provider);},on:(_name:string,handler:any)=>{startup=handler;},registerCommand:(_name:string,entry:any)=>{command=entry;},getThinkingLevel:()=> 'low',setThinkingLevel:()=>{},setModel:async(model:any)=>{ctx.model=model;return true;}} as any);
+  fastMode({registerProvider:(provider:any)=>{registrations++;runtime.registerNativeProvider(provider);},on:(_name:string,handler:any)=>{startup=handler;},registerCommand:(_name:string,entry:any)=>{command=entry;},getSettings:()=>({}),getThinkingLevel:()=> 'low',setThinkingLevel:()=>{},setModel:async(model:any)=>{ctx.model=model;return true;}} as any);
   await startup({reason:'new'},ctx);
   assert.equal(typeof ctx.modelRegistry.getRegisteredNativeProvider('openai')!.refreshModels,'function','Native wrapper must retain catalog refreshModels rather than use a bare factory');
   const installed=registrations;
@@ -189,7 +189,7 @@ const aliasesUnderConfig=async(config:unknown)=>{
   await writeFile(modelsPath,JSON.stringify({providers:{openai:config}}));
   const runtime=await ModelRuntime.create({modelsPath,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
   let startup:any;
-  fastMode({registerProvider:(provider:any)=>runtime.registerNativeProvider(provider),on:(_name:string,handler:any)=>{startup=handler;},registerCommand:()=>{}} as any);
+  fastMode({registerProvider:(provider:any)=>runtime.registerNativeProvider(provider),on:(_name:string,handler:any)=>{startup=handler;},registerCommand:()=>{},getSettings:()=>({})} as any);
   const registry=new ModelRegistry(runtime);
   await startup({reason:'new'},{modelRegistry:registry});
   await registry.refresh({allowNetwork:false});
@@ -245,7 +245,7 @@ test('fast installation preserves another extension legacy provider registration
  registry.registerProvider('openai',config);
  await registry.refresh({allowNetwork:false});
  let startup:any;
- fastMode({registerProvider:(provider:any)=>registry.registerProvider(provider),on:(_name:string,handler:any)=>{startup=handler;},registerCommand:()=>{}} as any);
+ fastMode({registerProvider:(provider:any)=>registry.registerProvider(provider),on:(_name:string,handler:any)=>{startup=handler;},registerCommand:()=>{},getSettings:()=>({})} as any);
  await startup({reason:'new'},{modelRegistry:registry});
  await registry.refresh({allowNetwork:false});
  assert.deepEqual(registry.getRegisteredProviderConfig('openai'),config);
@@ -274,7 +274,7 @@ test('alias derivation tracks the live base model list rather than a stale snaps
 const savedAlias=(onSelect:(model:any)=>void)=>{
  const original=openaiProvider();const base=original.getModels().find(m=>m.id==='gpt-5.5')!;
  let provider:any=original;let registrations=0;let startup:any;
- const ctx:any={model:base,modelRegistry:{getRegisteredProviderConfig:()=>undefined,getRegisteredNativeProvider:(id:string)=>id==='openai'&&registrations?provider:undefined,getProvider:(id:string)=>id==='openai'?provider:undefined,find:(id:string,name:string)=>id==='openai'?provider.getModels().find((m:any)=>m.id===name):undefined},sessionManager:{getBranch:()=>[{type:'model_change',provider:'openai',modelId:'gpt-5.5~fast'}]},ui:{notify(){}}};
+ const ctx:any={model:base,modelRegistry:{getRegisteredProviderConfig:()=>undefined,getRegisteredNativeProvider:(id:string)=>id==='openai'&&registrations?provider:undefined,getProvider:(id:string)=>id==='openai'?provider:undefined,find:(id:string,name:string)=>id==='openai'?provider.getModels().find((m:any)=>m.id===name):undefined},sessionManager:{getBranch:()=>[{type:'message'},{type:'model_change',provider:'openai',modelId:'gpt-5.5~fast'}]},ui:{notify(){}}};
  fastMode({registerProvider:(p:any)=>{registrations++;provider=p;},on:(name:string,fn:any)=>{if(name==='session_start')startup=fn;},registerCommand:()=>{},getThinkingLevel:()=>'high',setThinkingLevel:()=>{},setModel:async(value:any)=>{onSelect(value);ctx.model=value;return true;}} as any);
  return {ctx,startup};
 };
@@ -458,6 +458,81 @@ test('forking a saved fast branch restores its alias in a fresh runtime',async(t
    assert.equal(runtime.session.model?.id,'gpt-5.5');
    assert.equal((await runtime.newSession()).cancelled,false);
    assert.equal(runtime.session.model?.id,'gpt-5.5');
+  }finally{await runtime?.dispose();await rm(cwd,{recursive:true,force:true});}
+ });
+});
+
+import { resolveCliModel, resolveModelScopeWithDiagnostics } from '@earendil-works/pi-coding-agent';
+import { modelsAreEqual } from '@earendil-works/pi-ai';
+
+// Mirrors Pi's main.js createRuntime: --model, --models/enabledModels and --thinking are resolved before aliases exist.
+const defaultRuntime=async(cwd:string,settings:Parameters<typeof SettingsManager.inMemory>[0],sessionManager=SessionManager.inMemory(cwd))=>{
+ const create:CreateAgentSessionRuntimeFactory=async(options)=>{
+  const credentials=new InMemoryCredentialStore();
+  await credentials.modify('openai',async()=>({type:'api_key',key:'fixture-key'}));
+  const modelRuntime=await ModelRuntime.create({modelsPath:null,credentials,modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
+  await modelRuntime.refresh({allowNetwork:false,providers:['openai']});
+  const settingsManager=SettingsManager.inMemory(settings);
+  const services=await createAgentSessionServices({cwd,agentDir:cwd,modelRuntime,settingsManager,resourceLoaderOptions:{extensionFactories:[fastMode],noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true}});
+  const args=parseArgs(process.argv.slice(2));
+  const patterns=args.models??settingsManager.getEnabledModels();
+  const scopedModels=patterns?.length?(await resolveModelScopeWithDiagnostics(patterns,modelRuntime)).scopedModels:[];
+  const saved=modelRuntime.getModel(settingsManager.getDefaultProvider()??'',settingsManager.getDefaultModel()??'');
+  const scoped=options.sessionManager.buildSessionContext().messages.length?undefined:scopedModels.find(entry=>modelsAreEqual(entry.model,saved))??scopedModels[0];
+  const model=args.model?resolveCliModel({cliProvider:args.provider,cliModel:args.model,cliThinking:args.thinking,modelRuntime}).model:scoped?.model;
+  const result=await createAgentSession({...services,sessionManager:options.sessionManager,sessionStartEvent:options.sessionStartEvent,model,thinkingLevel:args.thinking??(args.model?undefined:scoped?.thinkingLevel),scopedModels,tools:[]});
+  const errors:string[]=[];
+  await result.session.bindExtensions({onError:error=>errors.push(error.error)});
+  assert.deepEqual(errors,[]);
+  return {...result,services,diagnostics:[]};
+ };
+ const initial=await create({cwd,agentDir:cwd,sessionManager,sessionStartEvent:{type:'session_start',reason:'startup'}});
+ return new AgentSessionRuntime(initial.session,initial.services,create);
+};
+const selections=async(settings:Parameters<typeof SettingsManager.inMemory>[0],args:string[]=[])=>{
+ const cwd=await mkdtemp(join(tmpdir(),'pi-fast-default-'));
+ const argv=process.argv;process.argv=[...argv.slice(0,2),...args];
+ let runtime:AgentSessionRuntime|undefined;
+ try {
+  runtime=await defaultRuntime(cwd,settings);
+  const startup=`${runtime.session.model?.id}:${runtime.session.thinkingLevel}`;
+  assert.equal((await runtime.newSession()).cancelled,false);
+  return [startup,`${runtime.session.model?.id}:${runtime.session.thinkingLevel}`];
+ }finally{process.argv=argv;await runtime?.dispose();await rm(cwd,{recursive:true,force:true});}
+};
+const fastDefault={defaultProvider:'openai',defaultModel:'gpt-5.5~fast'};
+
+test('a saved fast default selects its alias for new sessions with Pi reasoning precedence',async()=>{
+ assert.deepEqual(await selections(fastDefault),['gpt-5.5~fast:medium','gpt-5.5~fast:medium']);
+ assert.deepEqual(await selections({...fastDefault,defaultThinkingLevel:'high'}),['gpt-5.5~fast:high','gpt-5.5~fast:high']);
+ assert.deepEqual(await selections({...fastDefault,defaultThinkingLevel:'high',modelThinkingLevels:{'openai/gpt-5.5~fast':'low'}}),['gpt-5.5~fast:low','gpt-5.5~fast:low']);
+ assert.deepEqual(await selections({...fastDefault,defaultThinkingLevel:'high'},['--thinking','off']),['gpt-5.5~fast:off','gpt-5.5~fast:off']);
+});
+
+test('enabledModels keep Pi scope precedence once fast aliases exist',async()=>{
+ assert.deepEqual(await selections({...fastDefault,enabledModels:['openai/gpt-4.1','openai/gpt-5.5~fast']}),['gpt-5.5~fast:medium','gpt-5.5~fast:medium']);
+ assert.deepEqual(await selections({enabledModels:['openai/gpt-5.5~fast:high','openai/gpt-4.1']}),['gpt-5.5~fast:high','gpt-5.5~fast:high']);
+ assert.deepEqual(await selections({...fastDefault,enabledModels:['openai/gpt-4.1']}),['gpt-4.1:off','gpt-4.1:off']);
+ assert.deepEqual(await selections({...fastDefault,enabledModels:['openai/gpt-4.1']},['--models','openai/gpt-4.1,openai/gpt-5.5~fast']),['gpt-5.5~fast:medium','gpt-5.5~fast:medium']);
+});
+
+test('an explicit --model keeps new sessions off the saved fast default',async()=>{
+ assert.deepEqual(await selections(fastDefault,['--model','openai/gpt-4.1']),['gpt-4.1:off','gpt-4.1:off']);
+ assert.deepEqual(await selections(fastDefault,['--provider','openai']),['gpt-5.5~fast:medium','gpt-5.5~fast:medium'],'Pi ignores --provider without --model');
+ assert.deepEqual(await selections({defaultProvider:'openai',defaultModel:'gpt-4.1'},['--model','openai/gpt-5.5~fast']),['gpt-5.5~fast:medium','gpt-5.5~fast:medium']);
+});
+
+test('a saved fast default leaves existing sessions on their saved model',async(t)=>{
+ for(const kind of ['message','custom message'] as const)await t.test(kind,async()=>{
+  const cwd=await mkdtemp(join(tmpdir(),'pi-fast-default-existing-'));
+  let runtime:AgentSessionRuntime|undefined;
+  try {
+   const sessionManager=SessionManager.inMemory(cwd);
+   sessionManager.appendModelChange('openai','gpt-4.1');
+   if(kind==='message')sessionManager.appendMessage({role:'user',content:'Saved ordinary branch',timestamp:Date.now()});
+   else sessionManager.appendCustomMessageEntry('synthetic-notice','Saved ordinary branch',true);
+   runtime=await defaultRuntime(cwd,fastDefault,sessionManager);
+   assert.equal(runtime.session.model?.id,'gpt-4.1');
   }finally{await runtime?.dispose();await rm(cwd,{recursive:true,force:true});}
  });
 });

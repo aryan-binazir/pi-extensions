@@ -1,7 +1,7 @@
 import { isAbsolute, relative, sep } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import type { Usage } from '@earendil-works/pi-ai';
-import type { ExtensionContext, ReadonlyFooterDataProvider, Theme } from '@earendil-works/pi-coding-agent';
+import type { ContextUsage, ExtensionContext, ReadonlyFooterDataProvider, Theme } from '@earendil-works/pi-coding-agent';
 import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 export const STATUS_KEY = 'auto-permissions-status';
@@ -33,10 +33,42 @@ export function permissionFooter(
   let disposed = false;
   let cacheKey: string | undefined;
   let cacheLines: string[] = [];
+  let memo: { sm: ExtensionContext['sessionManager']; id: string; leaf: string | null; count: number; model: ExtensionContext['model'];
+    totals: Record<'input' | 'output' | 'cacheRead' | 'cacheWrite' | 'cost', number>;
+    cacheHit: number | undefined; usage: ContextUsage | undefined } | undefined;
+  // Usage totals and context usage scan the whole session, but the footer renders every frame. Like
+  // Pi's footer, reuse them until the session, leaf, entry count or model changes: entries are
+  // append-only and every append moves the leaf. Pi also keys on a virtual model's routed model,
+  // which extensions cannot see. It follows the latest response, so only a model catalog refresh
+  // between responses can leave its context window stale, until the next entry or leaf move.
+  const sessionStats = (ctx: ExtensionContext) => {
+    const sm = ctx.sessionManager, id = sm.getSessionId(), leaf = sm.getLeafId(), model = ctx.model;
+    // ReadonlySessionManager omits getEntryCount, but Pi hands extensions its SessionManager.
+    const count = (sm as { getEntryCount?(): number }).getEntryCount?.() ?? sm.getEntries().length;
+    if (memo?.sm === sm && memo.id === id && memo.leaf === leaf && memo.count === count && memo.model === model) return memo;
+    const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+    let cacheHit: number | undefined;
+    const add = (usage: Usage) => {
+      totals.input += usage.input; totals.output += usage.output;
+      totals.cacheRead += usage.cacheRead; totals.cacheWrite += usage.cacheWrite;
+      totals.cost += usage.cost.total;
+    };
+    for (const entry of sm.getEntries()) {
+      if (entry.type === 'usage') add(entry.usage);
+      else if (entry.type === 'message' && entry.message.role === 'assistant') {
+        const usage = entry.message.usage;
+        add(usage);
+        const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
+        cacheHit = prompt ? usage.cacheRead / prompt * 100 : undefined;
+      } else if (entry.type === 'message' && entry.message.role === 'toolResult' && entry.message.usage) add(entry.message.usage);
+      else if ((entry.type === 'compaction' || entry.type === 'branch_summary') && entry.usage) add(entry.usage);
+    }
+    return memo = { sm, id, leaf, count, model, totals, cacheHit, usage: ctx.getContextUsage() };
+  };
   const home = process.env.HOME || process.env.USERPROFILE;
   let rawCwd: string | undefined, homeCwd = '';
   return {
-    invalidate() { cacheKey = undefined; },
+    invalidate() { cacheKey = undefined; memo = undefined; },
     dispose() { if (!disposed) { disposed = true; unsubscribe(); } },
     render(width: number): string[] {
       const ctx = context();
@@ -54,22 +86,7 @@ export function permissionFooter(
       const path = clean(`${cwd}${branch ? ` (${branch})` : ''}${name ? ` • ${name}` : ''}`);
       const statuses = data.getExtensionStatuses();
       const auto = clean(statuses.get(STATUS_KEY) ?? 'Auto: unavailable');
-      const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-      let cacheHit: number | undefined;
-      const add = (usage: Usage) => {
-        totals.input += usage.input; totals.output += usage.output;
-        totals.cacheRead += usage.cacheRead; totals.cacheWrite += usage.cacheWrite;
-        totals.cost += usage.cost.total;
-      };
-      for (const entry of ctx.sessionManager.getEntries()) {
-        if (entry.type === 'message' && entry.message.role === 'assistant') {
-          const usage = entry.message.usage;
-          add(usage);
-          const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
-          cacheHit = prompt ? usage.cacheRead / prompt * 100 : undefined;
-        } else if (entry.type === 'message' && entry.message.role === 'toolResult' && entry.message.usage) add(entry.message.usage);
-        else if ((entry.type === 'compaction' || entry.type === 'branch_summary') && entry.usage) add(entry.usage);
-      }
+      const { totals, cacheHit, usage } = sessionStats(ctx);
       const stats: string[] = [];
       for (const [key, prefix] of [['input', '↑'], ['output', '↓'], ['cacheRead', 'R'], ['cacheWrite', 'W']] as const) {
         if (totals[key]) stats.push(`${prefix}${tokens(totals[key])}`);
@@ -79,7 +96,6 @@ export function permissionFooter(
         || (ctx.modelRegistry.isUsingOAuth(ctx.model)
           && ctx.modelRegistry.getProvider(ctx.model.provider)?.auth.oauth?.isSubscription === true));
       if (totals.cost || subscription) stats.push(`$${totals.cost.toFixed(3)}${subscription ? ' (sub)' : ''}`);
-      const usage = ctx.getContextUsage();
       const percent = usage?.percent;
       const contextLabel = `${percent == null ? '?' : percent.toFixed(1) + '%'}/${tokens(usage?.contextWindow ?? ctx.model?.contextWindow ?? 0)}`;
       stats.push(theme.fg(percent != null && percent > 90 ? 'error' : percent != null && percent > 70 ? 'warning' : 'dim', contextLabel));

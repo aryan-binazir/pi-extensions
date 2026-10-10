@@ -27,6 +27,7 @@ export default function subagents(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let shuttingDown = false;
   let cancellingAll = false;
+  const cancelledByAll = new Set<string>();
   const workflows = new Set<AbortController>();
   const workflowRuns = new Set<Promise<unknown>>();
   let approvalUI: Promise<unknown> = Promise.resolve();
@@ -119,7 +120,7 @@ export default function subagents(pi: ExtensionAPI): void {
     onComplete: task => {
       renderActiveAgents();
       if (context?.hasUI && !registry.hasActive()) context.ui.setStatus('subagent-tracker', undefined);
-      if (shuttingDown || (cancellingAll && task.status === 'cancelled') || task.owner !== 'parent') return;
+      if (cancelledByAll.delete(task.id) || shuttingDown || task.owner !== 'parent') return;
       noticeTriggersTurn ||= task.status !== 'cancelled';
       if (notices.length < 16) notices.push(taskView(task, 4096)); else overflowNotices++;
       noticeTimer ??= setTimeout(flushNotices, 250);
@@ -232,6 +233,7 @@ export default function subagents(pi: ExtensionAPI): void {
       const runs = [...workflowRuns];
       const activeWorkflows = [...workflows].filter(controller => !controller.signal.aborted);
       try {
+        for (const task of registry.activeTasks()) cancelledByAll.add(task.id);
         const cancelChildren = registry.cancelAll();
         for (const controller of activeWorkflows) controller.abort();
         const count = await cancelChildren;

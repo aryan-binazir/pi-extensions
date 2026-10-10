@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
+import { CustomEditor, InteractiveMode } from "@earendil-works/pi-coding-agent";
+import { loadExtensions } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
+import { KeybindingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
+import { initTheme } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { editor, keys } from "./test-support.ts";
 import {
   clearBaseUndo,
@@ -204,4 +208,64 @@ test("clearBaseUndo rejects an editor without Pi's undo stack", () => {
     () => clearBaseUndo({} as unknown as CustomEditor),
     /Unsupported Pi undo layout/,
   );
+});
+
+// Pi's loader evaluates every load, including each after /reload, in a fresh jiti without a module cache.
+async function loadViMode() {
+  const { extensions, errors } = await loadExtensions([fileURLToPath(new URL("./index.ts", import.meta.url))], process.cwd());
+  assert.deepEqual(errors, []);
+  return extensions[0];
+}
+// The first copy installs the once-per-process handoff; editors come from the second, as after /reload.
+let reloaded: ReturnType<typeof loadViMode> | undefined;
+async function reloadedHost() {
+  reloaded ??= loadViMode().then(loadViMode);
+  const start = (await reloaded).handlers.get("session_start")![0];
+  initTheme("dark", false);
+  const app = Object.assign(Object.create(InteractiveMode.prototype), {
+    keybindings: new KeybindingsManager(),
+    editorContainer: { clear() {}, addChild() {} },
+    disposeActiveSelector() {},
+    ui: {
+      terminal: { rows: 30, columns: 80, write() {} },
+      requestRender() {},
+      setFocus() {},
+      getShowHardwareCursor: () => false,
+      setShowHardwareCursor() {},
+    },
+  });
+  app.editor = app.defaultEditor = editor(CustomEditor);
+  const ui = { setEditorComponent: (factory: unknown) => app.setCustomEditorComponent(factory) };
+  return { app, start: () => start({ type: "session_start" }, { hasUI: true, ui } as any) };
+}
+
+test("a vi editor from a reloaded module edits the draft the handoff transferred", async () => {
+  const h = await reloadedHost();
+  h.app.editor.setText("keep this draft\nsecond line");
+  h.start();
+  const vi = h.app.editor;
+  assert.notEqual(vi, h.app.defaultEditor);
+  keys(vi, "\x1bggdd");
+  assert.equal(vi.getText(), "second line", "vi edits the transferred draft, not a stale empty copy");
+  keys(vi, "u");
+  assert.equal(vi.getText(), "keep this draft\nsecond line");
+});
+
+test("a vi editor from a reloaded module edits the draft an inline dialog restored", async () => {
+  const h = await reloadedHost();
+  h.start();
+  const vi = h.app.editor;
+  keys(vi, "Explain this log: ");
+  vi.handleInput(`\x1b[200~${Array.from({ length: 15 }, (_, i) => `line ${i}`).join("\n")}\x1b[201~`);
+  vi.handleInput("\x1b");
+  const draft = vi.getExpandedText();
+  await h.app.showExtensionCustom((_tui: unknown, _theme: unknown, _keys: unknown, done: () => void) => {
+    setImmediate(done);
+    return { render: () => [], handleInput() {}, invalidate() {} };
+  }, { overlay: false });
+  assert.equal(vi.getExpandedText(), draft);
+  keys(vi, "dd");
+  assert.equal(vi.getText(), "");
+  keys(vi, "u");
+  assert.equal(vi.getExpandedText(), draft, "undo restores the draft rather than a stale empty copy");
 });

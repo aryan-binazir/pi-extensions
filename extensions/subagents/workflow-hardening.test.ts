@@ -91,20 +91,20 @@ test('large stage outputs past the old 1 MiB journal total complete and replay i
   let launches = 0;
   let replayed: string[] = [];
   const options = {
-    source: "const seen = []; for (let i = 0; i < 20; i++) { const r = await api.spawn({task: 'stage ' + i}, 's' + i); seen.push([r.id, r.output.length, r.usage.output]); } return [seen, await api.checkpoint('count', async () => seen.length)];",
+    source: "const seen = []; for (let i = 0; i < 5; i++) { const r = await api.spawn({task: 'stage ' + i}, 's' + i); seen.push([r.id, r.output.length, r.usage.output]); } return [seen, await api.checkpoint('count', async () => seen.length)];",
     cwd, journalDirectory, policyIdentity: 'large', approve: async () => true, approveReplay: async (stages: string[]) => { replayed = stages; return true; },
-    spawn: async (task: {task: string}) => ({id: `child-${++launches}`, task: task.task, status: 'succeeded', output: 'x'.repeat(60000), stderr: '', usage: {input: launches, output: launches}}),
+    spawn: async (task: {task: string}) => ({id: `child-${++launches}`, task: task.task, status: 'succeeded', output: 'x'.repeat(250000), stderr: '', usage: {input: launches, output: launches}}),
   };
   try {
     const first = await runWorkflow(options);
-    assert.equal(launches, 20);
+    assert.equal(launches, 5);
     const sizes = await stageFiles(journalDirectory);
-    assert.equal(sizes.length, 21);
-    assert.ok(sizes.every(size => size < 61000), 'each file holds one stage, not the whole journal');
+    assert.equal(sizes.length, 6);
+    assert.ok(sizes.every(size => size < 251000), 'each file holds one stage, not the whole journal');
     assert.ok(sizes.reduce((a, b) => a + b) > 1024 * 1024);
     assert.deepEqual(await runWorkflow(options), first);
-    assert.equal(launches, 20);
-    assert.deepEqual([...replayed].sort(), ['checkpoint:count', ...Array.from({length: 20}, (_, i) => `spawn:s${i}`)].sort());
+    assert.equal(launches, 5);
+    assert.deepEqual([...replayed].sort(), ['checkpoint:count', ...Array.from({length: 5}, (_, i) => `spawn:s${i}`)].sort());
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 
@@ -113,18 +113,22 @@ test('an exhausted journal budget rejects stages before launch and checkpoints c
   const journalDirectory = join(cwd, 'journals');
   let launches = 0;
   const options = {
-    source: "await api.checkpoint('seed', async () => 1); if (await api.readFile('mode', 8) === 'seed') return 'seeded'; let big = 'stored'; try { await api.checkpoint('big', async () => 'x'.repeat(600000)); } catch (error) { big = error.message; } try { await api.spawn({task: 'next'}, 'next'); return 'launched'; } catch (error) { return [error.message, big, await api.checkpoint('small', async () => 'fits')]; }",
+    source: "await api.checkpoint('seed', async () => 1); if (await api.readFile('mode', 8) === 'seed') return 'seeded'; let big = 'stored'; try { await api.checkpoint('big', async () => 'x'.repeat(1000)); } catch (error) { big = error.message; } try { await api.spawn({task: 'next'}, 'next'); return 'launched'; } catch (error) { return [error.message, big, await api.checkpoint('small', async () => 'fits')]; }",
     cwd, journalDirectory, policyIdentity: 'budget', approve: async () => true, approveReplay: async () => true,
     spawn: async () => { launches++; return 'launched'; },
   };
   try {
     await writeFile(join(cwd, 'mode'), 'seed');
     assert.equal(await runWorkflow(options), 'seeded');
-    // Fill the journal on disk, as 33 earlier ~1 MB stages would have.
+    // Fill the 32 MiB journal on disk to within 300 bytes, as earlier stages would have.
     const [identity] = await readdir(journalDirectory);
-    for (let i = 0; i < 33; i++) {
+    const record = (key: string, value: string) => JSON.stringify({version: 2, identity, key, signature: 'checkpoint', value});
+    let used = (await stageFiles(journalDirectory)).reduce((a, b) => a + b);
+    for (let i = 0; used < 32 * 1024 * 1024 - 300; i++) {
       const key = `checkpoint:pad${i}`;
-      await writeFile(join(journalDirectory, identity, `${createHash('sha256').update(key).digest('hex')}.json`), JSON.stringify({version: 2, identity, key, signature: 'checkpoint', value: 'x'.repeat(1000000)}), {mode: 0o600});
+      const data = record(key, 'x'.repeat(Math.min(1024 * 1024, 32 * 1024 * 1024 - 300 - used) - record(key, '').length));
+      await writeFile(join(journalDirectory, identity, `${createHash('sha256').update(key).digest('hex')}.json`), data, {mode: 0o600});
+      used += data.length;
     }
     await writeFile(join(cwd, 'mode'), 'run');
     const first = await runWorkflow(options);

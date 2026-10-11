@@ -25,11 +25,21 @@ process event are removed during shutdown and installed by the new runtime.
 
 BTW serializes Pi's compacted context into inert text and invokes the selected
 provider's public `streamSimple` with resolved Pi authentication and `tools: []`.
-It does not create an agent or execute tool requests. It preserves tool result
+It does not create a Pi agent or execute model-requested tools. It preserves tool result
 text, current system prompt, and an in-memory bounded followup history. Closing
 aborts the request and discards all local conversation state; no answer is added
 to the main session. It caps snapshot and system text at 96,000 characters each,
 side history at 64,000, questions at 16,000, and answers at 32,000 / 4,096 tokens.
+Claude bridge requests retain the complete system prompt so the provider can
+recognize its captured parent prompt and project it into Claude Code's preset.
+They use short cache retention: bridge 0.9.2 interprets `none` as a summarizer
+request and forwards the system prompt verbatim instead of projecting it.
+Other providers keep uncached requests and the system-text cap. The bridge's
+normal path needs a main-agent prompt capture since the last prompt change;
+extensions that change the prompt before the bridge captures it can prevent
+matching. It loads Claude Code user/project settings, so configured hooks run
+for each BTW request, and it may retain Claude Code transcripts on disk. Closing
+BTW discards local overlay state, not provider-managed storage.
 The current system prompt excludes later context/payload mutations by other
 extensions, as documented by Pi; it is a snapshot, not a second agent turn.
 

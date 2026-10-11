@@ -3,7 +3,7 @@ import { test, type TestContext } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createAgentSession, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { AgentSessionRuntime, createAgentSession, type CreateAgentSessionRuntimeFactory, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type FauxResponseFactory } from '@earendil-works/pi-ai';
 import { CombinedAutocompleteProvider, Container } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
@@ -22,11 +22,11 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [], enabled = true) {
+async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [], enabled = true, before: ((pi: ExtensionAPI) => void)[] = []) {
   const cwd = await mkdtemp(join(tmpdir(), 'pi-escape-continue-'));
   const agentDir = join(cwd, 'agent');
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, steeringMode: 'one-at-a-time', followUpMode: 'one-at-a-time', doubleEscapeAction: 'none' });
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, extensionFactories: [...enabled ? [escapeContinue] : [], ...extra], noExtensions: true, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true });
+  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, extensionFactories: [...before, ...enabled ? [escapeContinue] : [], ...extra], noExtensions: true, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true });
   await resourceLoader.reload();
   assert.deepEqual(resourceLoader.getExtensions().errors, []);
   const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
@@ -62,10 +62,13 @@ async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [
   await app.bindCurrentSessionExtensions();
   const errors: unknown[] = [];
   session.extensionRunner!.onError(error => errors.push(error));
+  let retired = false;
   t.after(async () => {
     await session.abort();
-    await session.extensionRunner!.emit({ type: 'session_shutdown', reason: 'quit' });
-    session.dispose();
+    if (!retired) {
+      await session.extensionRunner!.emit({ type: 'session_shutdown', reason: 'quit' });
+      session.dispose();
+    }
     await rm(cwd, { recursive: true, force: true });
     assert.deepEqual(errors, []);
   });
@@ -76,7 +79,8 @@ async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [
     else if (!options?.signal?.aborted) await new Promise<void>(resolve => options?.signal?.addEventListener('abort', () => resolve(), { once: true }));
     return fauxAssistantMessage('Cancelled response');
   };
-  return { session, provider, app, notices, users, blocked, settingsManager };
+  const services = { cwd, agentDir, settingsManager, modelRuntime, resourceLoader, diagnostics: [] };
+  return { session, provider, app, notices, users, blocked, settingsManager, services, retire: () => { retired = true; } };
 }
 
 test('Escape aborts the current run and starts the queued follow-up without touching the draft', async t => {
@@ -538,6 +542,194 @@ test('replacing the host with another real session prevents delayed handoff into
   assert.deepEqual(old.session.getFollowUpMessages(), ['Next']);
   assert.deepEqual(replacement.users(), []);
   assert.equal(replacement.provider.state.callCount, 0);
+});
+
+test('manual input cancels a promoted preflight before either completion order can commit it', async t => {
+  for (const order of ['promoted-first', 'manual-first']) await t.test(order, async t => {
+    const promotedPreparing = deferred(), manualPreparing = deferred(), releasePromoted = deferred(), releaseManual = deferred();
+    const h = await fixture(t, [pi => pi.on('before_agent_start', async event => {
+      if (event.prompt === 'Next') { promotedPreparing.resolve(); await releasePromoted.promise; }
+      if (event.prompt === 'Manual') { manualPreparing.resolve(); await releaseManual.promise; }
+    })]);
+    t.after(() => { releasePromoted.resolve(); releaseManual.resolve(); });
+    const first = deferred(), manualStarted = deferred();
+    h.provider.setResponses([h.blocked(first), h.blocked(manualStarted)]);
+    const running = h.session.prompt('Original');
+    await first.promise;
+    await h.session.followUp('Next');
+    h.app.editor.handleInput('\x1b');
+    await promotedPreparing.promise;
+    await h.session.sendCustomMessage({ customType: 'notification', content: 'Keep this result', display: false }, { deliverAs: 'nextTurn' });
+    h.app.flushPendingBashComponents = () => {};
+    h.app.setupEditorSubmitHandler();
+    let manual!: Promise<void>;
+    h.app.onInputCallback = (text: string) => { manual = h.session.prompt(text).then(() => {}); };
+    await h.app.defaultEditor.onSubmit('Manual');
+    await manualPreparing.promise;
+    if (order === 'promoted-first') releasePromoted.resolve();
+    else releaseManual.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    releasePromoted.resolve(); releaseManual.resolve();
+    await manualStarted.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.session.isStreaming, true, 'the live provider still belongs to the manual run');
+    assert.deepEqual(h.users(), ['Original', 'Manual']);
+    assert.ok(h.session.messages.some(message => message.role === 'custom' && message.customType === 'notification' && message.content === 'Keep this result'));
+    assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
+    h.session.clearQueue();
+    h.app.editor.handleInput('\x1b');
+    await manual;
+    await running;
+    assert.equal(h.session.agent.signal, undefined);
+  });
+});
+
+test('programmatic abort cancels a held handoff and uses stock queue-to-editor behavior', async t => {
+  const h = await fixture(t);
+  const first = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  h.provider.setResponses([h.blocked(first, release), fauxAssistantMessage('Must not start')]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.setText('Draft');
+  h.app.editor.handleInput('\x1b');
+  h.session.extensionRunner!.createContext().abort();
+  const draft = h.app.editor.getText();
+  release.resolve();
+  assert.equal(draft, 'Next\n\nDraft');
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.users(), ['Original']);
+  assert.equal(h.provider.state.callCount, 1);
+  assert.equal(h.session.pendingMessageCount, 0);
+});
+
+test('stock dequeue sees held messages and does not duplicate them after cancellation settles', async t => {
+  const h = await fixture(t);
+  const first = deferred(), release = deferred();
+  const image = { type: 'image' as const, mimeType: 'image/png', data: 'stock-dequeue-image' };
+  h.provider.setResponses([h.blocked(first, release), fauxAssistantMessage('Must not start')]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.steer('Steering', [image]);
+  await h.session.followUp('Follow-up');
+  h.app.editor.setText('Draft');
+  h.app.editor.handleInput('\x1b');
+  h.app.showStatus = (message: string) => h.notices.push(message);
+  h.app.handleDequeue();
+  const draft = h.app.editor.getText();
+  release.resolve();
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(draft, 'Steering\n\nFollow-up\n\nDraft');
+  assert.equal(h.app.editor.getText(), draft);
+  assert.ok(h.notices.includes('Restored 2 queued messages to editor'));
+  assert.equal(h.session.pendingMessageCount, 0);
+  assert.deepEqual(h.session.agent.peekQueuedMessages(), []);
+  assert.equal(h.provider.state.callCount, 1);
+});
+
+test('accepted runtime replacement retires a handoff before an earlier async shutdown handler yields', async t => {
+  const shutdown = deferred(), releaseShutdown = deferred();
+  const h = await fixture(t, [], true, [pi => pi.on('session_shutdown', async () => {
+    shutdown.resolve();
+    await releaseShutdown.promise;
+  })]);
+  const create: CreateAgentSessionRuntimeFactory = async options => {
+    await h.services.resourceLoader.reload();
+    const result = await createAgentSession({
+      ...h.services, sessionManager: options.sessionManager, sessionStartEvent: options.sessionStartEvent,
+      model: h.provider.getModel(), noTools: 'builtin',
+    });
+    return { ...result, services: h.services, diagnostics: [] };
+  };
+  const runtime = new AgentSessionRuntime(h.session, h.services, create);
+  runtime.setRebindSession(async session => {
+    h.app.session = session;
+    await h.app.bindCurrentSessionExtensions();
+  });
+  const first = deferred(), release = deferred();
+  h.provider.setResponses([h.blocked(first, release), fauxAssistantMessage('Must not start')]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput('\x1b');
+  const replacement = runtime.newSession();
+  release.resolve();
+  try {
+    await shutdown.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.provider.state.callCount, 1, 'no outgoing provider starts during accepted teardown');
+    assert.deepEqual(h.users(), ['Original']);
+    assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
+  } finally {
+    releaseShutdown.resolve();
+    await replacement;
+    h.retire();
+    await runtime.dispose();
+  }
+  await running;
+  assert.notEqual(runtime.session, h.session);
+  assert.deepEqual(runtime.session.messages, []);
+});
+
+test('interactive quit retires a handoff before terminal drain or async shutdown handlers', async t => {
+  const h = await fixture(t);
+  const runtime = new AgentSessionRuntime(h.session, h.services, async () => { throw new Error('Quit must not replace the runtime'); });
+  const first = deferred(), release = deferred(), draining = deferred(), releaseDrain = deferred();
+  h.provider.setResponses([h.blocked(first, release), fauxAssistantMessage('Must not start')]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput('\x1b');
+  h.app.themeController = { disableAutoSync() {} };
+  h.app.stop = () => {};
+  h.app.ui.terminal.drainInput = async () => { draining.resolve(); await releaseDrain.promise; };
+  h.app.runtimeHost = { dispose: async () => { await runtime.dispose(); h.retire(); } };
+  const exit = process.exit, expectedExit = new Error('Expected interactive quit');
+  process.exit = () => { throw expectedExit; };
+  const quitting = h.app.shutdown().catch((error: unknown) => { assert.equal(error, expectedExit); });
+  release.resolve();
+  try {
+    await draining.promise;
+    await running;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.provider.state.callCount, 1);
+    assert.deepEqual(h.users(), ['Original']);
+  } finally {
+    release.resolve(); releaseDrain.resolve();
+    try { await quitting; } finally { process.exit = exit; }
+  }
+});
+
+test('a cancelled runtime replacement leaves the held handoff eligible to continue', async t => {
+  const h = await fixture(t, [pi => pi.on('session_before_switch', () => ({ cancel: true }))]);
+  const runtime = new AgentSessionRuntime(h.session, h.services, async () => { throw new Error('Cancelled replacement must not create a runtime'); });
+  const first = deferred(), release = deferred(), promoted = deferred();
+  h.provider.setResponses([h.blocked(first, release), h.blocked(promoted)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput('\x1b');
+  const result = await runtime.newSession();
+  release.resolve();
+  assert.deepEqual(result, { cancelled: true });
+  await promoted.promise;
+  assert.deepEqual(h.users(), ['Original', 'Next']);
+  h.app.editor.handleInput('\x1b');
+  await h.session.waitForIdle();
+  await running;
+});
+
+test('compatibility warning remains once per session across reload', async t => {
+  const h = await fixture(t);
+  for (let index = 0; index < 2; index++) {
+    h.app.defaultEditor.onEscape = undefined;
+    await h.app.bindCurrentSessionExtensions();
+    await h.session.extensionRunner!.emit({ type: 'session_shutdown', reason: 'reload' });
+  }
+  assert.equal(h.notices.filter(message => /unsupported Pi internals/.test(message)).length, 1);
 });
 
 test('rebinding the UI wraps Escape only once', async t => {

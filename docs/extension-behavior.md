@@ -44,13 +44,18 @@ A second Escape while cancellation or prompt preparation is pending stops the
 handoff. A held-queue count is visible during cancellation, and stopping shows
 an immediate notice. Queued messages and attachments stay waiting; they are
 picked up by a later submitted prompt. Queues are memory-only, not durable
-session entries. Reload or session shutdown cancels a pending handoff; it never
-starts in the replacement session.
+session entries. A manual submission during prompt preparation takes precedence
+and cancels the handoff before either prompt commits. Accepted session replacement
+or quit retires the handoff before asynchronous teardown; a cancelled replacement
+leaves it eligible to continue. Reload also cancels a pending handoff.
 
 Autocomplete, dialogs, compaction and retry backoff keep their own Escape
 handling. Vi mode keeps insert/visual-mode Escape; only a clean normal-mode
-Escape reaches the interrupt handler. Programmatic `ctx.abort()` is unchanged.
-The extension is inert in RPC, JSON and print modes.
+Escape reaches the interrupt handler. Programmatic `ctx.abort()` and stock dequeue
+cancel a held handoff and restore its queued text using Pi's normal editor behavior;
+this is text-only, unlike second-Escape retention of attachments and custom messages.
+Direct `session.abort()` stops the handoff without dequeuing it. The extension is
+inert in RPC, JSON and print modes.
 
 Promotion uses Pi's normal prompt preflight, including `before_agent_start` and
 image normalization, without repeating skill/template expansion. Third-party
@@ -60,7 +65,7 @@ again. If preflight rejects or handles the prompt without starting it, the
 queue is kept waiting with a notice.
 
 The compatibility adapter uses guarded interactive-handler and prepared-queue
-internals, tested against Pi 0.99.1. Cancellation is checked at Pi's final
+internals, tested against Pi 0.99.1 and smoke-tested with the installed Pi 1.0.2 TUI. Cancellation is checked at Pi's final
 asynchronous image-preparation boundary, before prompt options and next-turn
 notifications are committed. The normal preflight observer is never used to
 throw after commit. An unsupported layout warns once per session

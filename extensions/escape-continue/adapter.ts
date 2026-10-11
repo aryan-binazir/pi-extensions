@@ -5,12 +5,14 @@ type Message = ReturnType<AgentSession['agent']['peekQueuedMessages']>[number];
 type UserMessage = Extract<Message, { role: 'user' }>;
 type Mode = 'steer' | 'followUp';
 type Host = { session: AgentSession; defaultEditor?: CustomEditor };
-type Handoff = { cancel(): void; capture(mode: Mode, message: Message): void; restoreAtContext(): void };
+type Handoff = { cancel(stopRun?: boolean): void; capture(mode: Mode, message: Message): void; restoreAtContext(): void; takeQueue(): { steering: string[]; followUp: string[] } };
 type Registration = { ctx: ExtensionContext; pending?: Handoff; warned: boolean };
 type Checkpoint = { session: AgentSession; check(): void };
 type Adapter = {
   active: WeakMap<ExtensionContext['sessionManager'], Registration>;
   checkpoints: AsyncLocalStorage<Checkpoint>;
+  rawAborts: WeakMap<AgentSession, () => Promise<void>>;
+  warnedSessions: WeakSet<ExtensionContext['sessionManager']>;
   supported: boolean;
   attach(host: Host, state: Adapter): void;
   interrupt(host: Host, original: () => void, state: Adapter): void;
@@ -25,7 +27,7 @@ const installed = Symbol.for('pi-interactive:escape-continue-adapter');
 const wrapped = Symbol.for('pi-interactive:escape-continue-handler');
 const checkpointed = Symbol.for('pi-interactive:escape-continue-preflight');
 const intercepted = Symbol.for('pi-interactive:escape-continue-queue');
-type Prototype = { bindCurrentSessionExtensions(this: Host): Promise<void>; [installed]?: Adapter };
+type Prototype = { bindCurrentSessionExtensions(this: Host): Promise<void>; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; [installed]?: Adapter };
 class CancelledHandoff extends Error {}
 class SupersededHandoff extends Error {}
 
@@ -48,13 +50,34 @@ function textParts(message: UserMessage): string[] {
 function isUser(message: Message): message is UserMessage { return message.role === 'user'; }
 function marked(fn: unknown, key: symbol): boolean { return typeof fn === 'function' && (fn as unknown as Record<symbol, boolean>)[key] === true; }
 
-function warn(registration: Registration): void {
-  if (registration.warned) return;
+function warn(registration: Registration, state: Adapter): void {
+  if (registration.warned || state.warnedSessions.has(registration.ctx.sessionManager)) return;
   registration.warned = true;
+  state.warnedSessions.add(registration.ctx.sessionManager);
   registration.ctx.ui.notify('Escape Continue: unsupported Pi internals; using normal Escape behavior.', 'warning');
 }
 
+function abortRun(session: AgentSession, state: Adapter): Promise<void> {
+  return state.rawAborts.get(session)?.() ?? session.abort();
+}
+
 function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter): void {
+  if (!state.rawAborts.has(session)) {
+    const abort = session.abort.bind(session);
+    const clear = session.clearQueue.bind(session);
+    state.rawAborts.set(session, abort);
+    session.abort = () => {
+      state.active.get(session.sessionManager)?.pending?.cancel(false);
+      return abort();
+    };
+    session.clearQueue = () => {
+      const pending = state.active.get(session.sessionManager)?.pending;
+      pending?.cancel(false);
+      const held = pending?.takeQueue();
+      const queued = clear();
+      return held ? { steering: [...held.steering, ...queued.steering], followUp: [...held.followUp, ...queued.followUp] } : queued;
+    };
+  }
   const normalize = layout.preflight._normalizePromptImages;
   if (!marked(normalize, checkpointed)) {
     // Pi 0.99.1/1.0.2 commits next-turn messages and prompt options after this final async preflight boundary.
@@ -84,10 +107,10 @@ function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter)
 function attach(host: Host, state: Adapter): void {
   const original = host.defaultEditor?.onEscape;
   const registration = state.active.get(host.session.sessionManager);
-  if (typeof original !== 'function') { if (registration) warn(registration); return; }
+  if (!state.supported || typeof original !== 'function') { if (registration) warn(registration, state); return; }
   const layout = queueLayout(host.session);
   if (layout) wireSession(host.session, layout, state);
-  else if (registration) warn(registration);
+  else if (registration) warn(registration, state);
   if (marked(original, wrapped)) return;
   const handler = () => state.interrupt(host, original, state);
   Object.defineProperty(handler, wrapped, { value: true });
@@ -100,7 +123,7 @@ function interrupt(host: Host, original: () => void, state: Adapter): void {
   if (registration?.pending) return registration.pending.cancel();
   if (!registration || !session.isStreaming || session.isCompacting) return original();
   const layout = queueLayout(session);
-  if (!layout) { warn(registration); return original(); }
+  if (!layout) { warn(registration, state); return original(); }
   const held = { steer: [...layout.agent.steeringQueue.messages], followUp: [...layout.agent.followUpQueue.messages] };
   const selected = [...held.steer, ...held.followUp].find(isUser);
   if (!selected) return original();
@@ -127,11 +150,12 @@ function interrupt(host: Host, original: () => void, state: Adapter): void {
     layout.display._emitQueueUpdate();
   };
   const handoff: Handoff = {
-    cancel() {
+    cancel(stopRun = true) {
+      if (cancelled) return;
       cancelled = true;
       showHeld();
       if (current()) registration.ctx.ui.notify('Escape Continue stopped; queued messages and attachments kept waiting.', 'info');
-      if (starting && session.isStreaming) void session.abort();
+      if (stopRun && starting && session.isStreaming) void abortRun(session, state);
     },
     capture(mode, message) {
       held[mode].push(message);
@@ -148,6 +172,14 @@ function interrupt(host: Host, original: () => void, state: Adapter): void {
       release();
       restore();
     },
+    takeQueue() {
+      const texts = (messages: Message[]) => messages.filter(isUser).filter(message => !delivered || message !== selected).map(message => textParts(message).join(''));
+      const result = { steering: texts(held.steer), followUp: texts(held.followUp) };
+      restored = true;
+      release();
+      if (current()) registration.ctx.ui.notify('Escape Continue: held queued text returned to Pi; normal dequeue/abort attachment handling applies.', 'info');
+      return result;
+    },
   };
   registration.pending = handoff;
   showHeld();
@@ -158,11 +190,11 @@ function interrupt(host: Host, original: () => void, state: Adapter): void {
   const resume = async () => {
     let unsubscribe: (() => void) | undefined;
     try {
-      await session.abort();
+      await abortRun(session, state);
       check();
       unsubscribe = session.subscribe(event => {
         if (!starting) return;
-        if (event.type === 'agent_start' && cancelled) void session.abort();
+        if (event.type === 'agent_start' && cancelled) void abortRun(session, state);
         if (event.type === 'message_start' && event.message.role === 'user') delivered = true;
       });
       const images = typeof selected.content === 'string' ? undefined : selected.content.filter(part => part.type === 'image');
@@ -191,13 +223,26 @@ export function install(): Adapter {
   let state = prototype[installed];
   if (!state) {
     const bind = prototype.bindCurrentSessionExtensions;
-    state = { active: new WeakMap(), checkpoints: new AsyncLocalStorage(), supported: typeof bind === 'function', attach, interrupt };
+    state = { active: new WeakMap(), checkpoints: new AsyncLocalStorage(), rawAborts: new WeakMap(), warnedSessions: new WeakSet(), supported: typeof bind === 'function', attach, interrupt };
     const shared = state;
     if (shared.supported) prototype.bindCurrentSessionExtensions = async function () {
       await bind.call(this);
       shared.attach(this, shared);
     };
     Object.defineProperty(prototype, installed, { value: shared });
+  }
+  state.rawAborts ??= new WeakMap();
+  state.warnedSessions ??= new WeakSet();
+  const shutdown = prototype.shutdown;
+  if (typeof shutdown !== 'function') state.supported = false;
+  else if (!marked(shutdown, wrapped)) {
+    const shared = state;
+    const stop = function (this: Host, options?: { fromSignal?: boolean }) {
+      shared.active.get(this.session.sessionManager)?.pending?.cancel();
+      return shutdown.call(this, options);
+    };
+    Object.defineProperty(stop, wrapped, { value: true });
+    prototype.shutdown = stop;
   }
   state.attach = attach;
   state.interrupt = interrupt;
@@ -209,7 +254,12 @@ export function enable(ctx: ExtensionContext, state: Adapter): void {
   previous?.pending?.cancel();
   const registration: Registration = { ctx, warned: previous?.warned ?? false };
   state.active.set(ctx.sessionManager, registration);
-  if (!state.supported) warn(registration);
+  if (!state.supported) warn(registration, state);
+}
+
+export function cancelForInput(ctx: ExtensionContext, state: Adapter): void {
+  const owned = state.checkpoints.getStore()?.session.sessionManager === ctx.sessionManager;
+  if (ctx.isIdle() && !owned) state.active.get(ctx.sessionManager)?.pending?.cancel(false);
 }
 
 export function restoreQueuesAtContext(ctx: ExtensionContext, state: Adapter): void {

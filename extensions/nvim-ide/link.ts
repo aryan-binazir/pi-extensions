@@ -61,7 +61,8 @@ interface Pending { resolve: (value: unknown) => void; reject: (error: Error) =>
 type Content = { type: string; text?: string }[];
 
 interface LinkOptions {
-  cwd: string;
+  /** A getter follows the active worktree. */
+  cwd: string | (() => string);
   onChange?: (state: LinkState) => void;
   lockDir?: string;
   retryMs?: number;
@@ -112,6 +113,14 @@ export class IdeLink {
     });
   }
   reconnect(): void { const socket = this.socket; this.drop(new Error('reconnecting')); socket?.terminate(); void this.attempt(); }
+  /** Moves to the best editor for the current cwd, e.g. one just opened in a newly active worktree. */
+  async retarget(): Promise<void> {
+    if (!this.started) return;
+    if (!this.socket) { if (this.timer) { clearTimeout(this.timer); this.timer = undefined; } this.schedule(0); return; }
+    const best = chooseLock(await readLocks(this.options.lockDir ?? defaultLockDir(), this.options.alive), this.cwd());
+    if (this.started && this.socket && best && best.port !== this.lock?.port) this.reconnect();
+  }
+  private cwd(): string { return typeof this.options.cwd === 'string' ? this.options.cwd : this.options.cwd(); }
   async prepareMentions(): Promise<{ mentions: Mention[]; undelivered: number; dropped: number; acknowledge: () => void }> {
     const taken = [...this.mentions];
     for (const item of taken) this.preparedMentions.add(item);
@@ -157,7 +166,7 @@ export class IdeLink {
   private async attempt(): Promise<void> {
     if (!this.started || this.socket) return;
     trace?.('attempt');
-    const lock = chooseLock(await readLocks(this.options.lockDir ?? defaultLockDir(), this.options.alive), this.options.cwd);
+    const lock = chooseLock(await readLocks(this.options.lockDir ?? defaultLockDir(), this.options.alive), this.cwd());
     if (!this.started || this.socket) return;
     trace?.(`lock ${lock ? lock.port : 'none'}`);
     if (!lock) { this.schedule(); return; }
@@ -227,7 +236,7 @@ export class IdeLink {
   private watchLocks(): void {
     if (this.watcher) return;
     try {
-      const watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (event, name) => { trace?.(`watch ${event} ${name} socket=${!!this.socket} timer=${!!this.timer}`); if (!this.started || this.socket || (name && !name.endsWith('.lock'))) return; if (this.timer) { clearTimeout(this.timer); this.timer = undefined; } this.schedule(200); });
+      const watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (event, name) => { trace?.(`watch ${event} ${name} socket=${!!this.socket} timer=${!!this.timer}`); if (!this.started || (name && !name.endsWith('.lock'))) return; if (this.socket) { void this.retarget(); return; } if (this.timer) { clearTimeout(this.timer); this.timer = undefined; } this.schedule(200); });
       this.watcher = watcher;
       watcher.on('error', error => {
         trace?.(`watch error ${error.message}`);

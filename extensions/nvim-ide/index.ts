@@ -89,7 +89,8 @@ export default function nvimIde(pi: ExtensionAPI): void {
     seenEditor = false;
     followFailed = false;
     await previous?.stop();
-    const current = new IdeLink({ cwd: context.cwd, onChange: state => {
+    const cwd = context.cwd, sessionId = context.sessionManager.getSessionId();
+    const current = new IdeLink({ cwd: () => getActiveCwd(cwd, sessionId), onChange: state => {
       if (link !== current) return;
       if (state.connected) seenEditor = true;
       paint(state);
@@ -103,6 +104,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
   pi.on('before_agent_start', async event => {
     const current = link;
     if (!current) return;
+    void current.retarget();
     const batch = await current.prepareMentions();
     const notices: string[] = [];
     if (batch.undelivered) notices.push(`${batch.undelivered} editor send${batch.undelivered === 1 ? '' : 's'} could not be resolved. Re-send the file from the editor.`);

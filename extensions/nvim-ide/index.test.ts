@@ -720,3 +720,52 @@ test('relative editor mentions read the live editor root from a child Pi directo
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('an editor opened in the active worktree takes over the link', async () => {
+  await withConnectedIde(async ({ ide, project, tools, ctx }) => {
+    const worktree = join(project, '..', 'worktree');
+    await mkdir(worktree);
+    const editor = fakeIde();
+    await once(editor.server, 'listening');
+    setActiveCwd(project, worktree, ctx.sessionManager.getSessionId());
+    try {
+      await writeFile(join(process.env.CLAUDE_CONFIG_DIR!, 'ide', `${editor.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [worktree], ideName: 'Neovim', authToken: token }));
+      await until(() => editor.server.clients.size === 1);
+      await until(() => ide.server.clients.size === 0);
+      await tools.get('nvim_context').execute('id', {}, undefined, undefined, ctx);
+      assert.ok(editor.calls.some(call => call.name === 'getWorkspaceFolders'));
+    } finally {
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      await editor.close();
+    }
+  });
+});
+
+test('switching to a worktree whose editor is already open links it on the next turn', async () => {
+  const editor = fakeIde();
+  await once(editor.server, 'listening');
+  const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const project = join(root, 'project'), worktree = join(root, 'worktree');
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const pi = fakePi();
+  const { ctx, status } = fakeCtx(project);
+  try {
+    await mkdir(join(root, 'ide'), { recursive: true });
+    await mkdir(project); await mkdir(worktree);
+    await writeFile(join(root, 'ide', `${editor.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [worktree], ideName: 'Neovim', authToken: token }));
+    process.env.CLAUDE_CONFIG_DIR = root;
+    nvimIde(pi.api as any);
+    await pi.fire('session_start', {}, ctx);
+    await settle();
+    assert.equal(editor.server.clients.size, 0);
+    setActiveCwd(project, worktree, ctx.sessionManager.getSessionId());
+    await pi.fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    await until(() => status.includes('Neovim ✓'));
+  } finally {
+    setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+    await pi.fire('session_shutdown', {}, ctx);
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+    await editor.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

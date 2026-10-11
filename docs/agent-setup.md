@@ -24,8 +24,8 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
    Escape Continue, Bash approvals, Guard, Claude bridge, and each configured or
-   requested optional feature. For Escape Continue, verify its selected
-   entrypoint resolves and follow [its setup](#escape-continue). Check external
+   requested optional feature. For Escape Continue, compare selected entrypoints
+   with [its configuration requirements](#escape-continue), read-only. Check external
    package pins and their documented config;
    for Bash approvals, check the reviewer settings and status-extension selection;
    for Guard, check its selected entrypoint, readable rules link, and that both

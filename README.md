@@ -54,7 +54,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | BTW | `/btw` or `/side` opens a private, tool-free side conversation. |
 | Vi mode | Modal editor with motions, operators, registers, and undo. |
 | Prompt stash | `Ctrl+S` stashes or swaps the main editor draft. |
-| [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape stops the active run and starts the next queued message; an empty queue means stop. |
+| [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape stops the active run and starts the next queued user message; no queued user message means stop. |
 | [Subagents](docs/subagents.md) | Background workers, model profiles, approved TypeScript workflows. |
 | [Worktree](docs/extension-behavior.md#worktrees) | `/worktree` routes shell and relative file tools to another checkout. |
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |

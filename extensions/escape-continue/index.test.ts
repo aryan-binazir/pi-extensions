@@ -4,10 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgentSession, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore, type FauxResponseFactory } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type FauxResponseFactory } from '@earendil-works/pi-ai';
 import { CombinedAutocompleteProvider, Container } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
-import { fauxToolCall } from '@earendil-works/pi-ai';
 import viMode from '../vi-mode/index.ts';
 import stash from '../prompt-stash/index.ts';
 import { editor } from '../vi-mode/test-support.ts';
@@ -400,6 +399,145 @@ test('autocomplete Escape closes suggestions without interrupting or promoting',
   h.app.editor.handleInput('\x1b');
   await h.session.waitForIdle();
   await running;
+});
+
+test('preflight cancellation preserves next-turn notifications and the idle system prompt', async t => {
+  const preparing = deferred(), release = deferred();
+  const h = await fixture(t, [pi => pi.on('before_agent_start', async event => {
+    if (event.prompt === 'Next') { preparing.resolve(); await release.promise; return { systemPrompt: 'Cancelled prompt override' }; }
+  })]);
+  t.after(() => release.resolve());
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first)]);
+  const baseline = h.session.systemPrompt;
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.sendCustomMessage({ customType: 'notification', content: 'Worker finished', display: false }, { deliverAs: 'nextTurn' });
+  await h.session.followUp('Next');
+  h.app.editor.handleInput('\x1b');
+  await preparing.promise;
+  h.app.editor.handleInput('\x1b');
+  release.resolve();
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.session.systemPrompt, baseline);
+  h.session.clearQueue();
+  h.provider.setResponses([fauxAssistantMessage('Later reply')]);
+  await h.session.prompt('Later');
+  assert.ok(h.session.messages.some(message => message.role === 'custom' && message.customType === 'notification' && message.content === 'Worker finished'));
+});
+
+test('new steering entered during cancellation stays after older held steering and out of the promoted request', async t => {
+  const h = await fixture(t);
+  const first = deferred(), release = deferred(), promoted = deferred();
+  t.after(() => release.resolve());
+  h.provider.setResponses([h.blocked(first, release), h.blocked(promoted)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.steer('Older A');
+  await h.session.steer('Older B');
+  h.app.editor.handleInput('\x1b');
+  await h.session.steer('Newer N');
+  release.resolve();
+  await promoted.promise;
+  assert.deepEqual(h.users(), ['Original', 'Older A']);
+  assert.deepEqual(h.session.getSteeringMessages(), ['Older B', 'Newer N']);
+  h.session.clearQueue();
+  h.app.editor.handleInput('\x1b');
+  await h.session.waitForIdle();
+  await running;
+});
+
+for (const missing of ['editor', 'handler']) test(`a missing Escape ${missing} warns without breaking UI rebinding`, async t => {
+  const h = await fixture(t);
+  if (missing === 'editor') h.app.defaultEditor = undefined;
+  else h.app.defaultEditor.onEscape = undefined;
+  await assert.doesNotReject(h.app.bindCurrentSessionExtensions());
+  assert.ok(h.notices.some(message => /unsupported Pi internals/.test(message)));
+});
+
+test('second Escape while a tool is still cancelling immediately reports the retained queue', async t => {
+  const first = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const h = await fixture(t);
+  h.provider.setResponses([h.blocked(first, release)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput('\x1b');
+  assert.ok(h.notices.some(message => /1 queued held/.test(message)));
+  h.app.editor.handleInput('\x1b');
+  assert.ok(h.notices.some(message => /stopped; queued messages and attachments kept waiting/.test(message)));
+  release.resolve();
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
+});
+
+test('Escape after preflight starts aborts the promoted run without draining its remaining queue', async t => {
+  const messageStarting = deferred(), release = deferred();
+  const h = await fixture(t, [pi => pi.on('message_start', async event => {
+    if (event.message.role === 'user' && typeof event.message.content !== 'string' && event.message.content.some(part => part.type === 'text' && part.text === 'Next')) {
+      messageStarting.resolve();
+      await release.promise;
+    }
+  })]);
+  t.after(() => release.resolve());
+  const first = deferred();
+  let requestedWithAbort = false;
+  h.provider.setResponses([h.blocked(first), (_context, options) => {
+    requestedWithAbort = options?.signal?.aborted === true;
+    return fauxAssistantMessage('Aborted before processing');
+  }]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.steer('Next');
+  await h.session.steer('Later steering');
+  h.app.editor.handleInput('\x1b');
+  await messageStarting.promise;
+  h.app.editor.handleInput('\x1b');
+  release.resolve();
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  await h.session.waitForIdle();
+  assert.ok(h.provider.state.callCount === 1 || requestedWithAbort, 'no unaborted request is issued');
+  assert.deepEqual(h.users(), ['Original', 'Next']);
+  assert.deepEqual(h.session.getSteeringMessages(), ['Later steering']);
+  assert.ok(h.notices.some(message => /stopped; queued messages/.test(message)));
+});
+
+for (const mode of ['rpc', 'json', 'print'] as const) test(`the extension remains inert when session_start uses ${mode} mode`, async t => {
+  const h = await fixture(t);
+  await h.session.extensionRunner!.emit({ type: 'session_shutdown', reason: 'reload' });
+  await h.session.bindExtensions({ mode });
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput('\x1b');
+  await running;
+  assert.deepEqual(h.users(), ['Original']);
+  assert.equal(h.app.editor.getText(), 'Next');
+});
+
+test('replacing the host with another real session prevents delayed handoff into the replacement', async t => {
+  const old = await fixture(t), replacement = await fixture(t);
+  const first = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  old.provider.setResponses([old.blocked(first, release)]);
+  const running = old.session.prompt('Original');
+  await first.promise;
+  await old.session.followUp('Next');
+  old.app.editor.handleInput('\x1b');
+  old.app.session = replacement.session;
+  release.resolve();
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(old.users(), ['Original']);
+  assert.deepEqual(old.session.getFollowUpMessages(), ['Next']);
+  assert.deepEqual(replacement.users(), []);
+  assert.equal(replacement.provider.state.callCount, 0);
 });
 
 test('rebinding the UI wraps Escape only once', async t => {

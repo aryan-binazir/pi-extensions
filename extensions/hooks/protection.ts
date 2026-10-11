@@ -46,8 +46,7 @@ function mentionsSwitches(command: string): boolean {
     [...assignments, name].some(word => switchesName.test(word)) || args.some((arg, i) => switchesName.test(arg) && !isProse(name, args, i)));
 }
 
-// Best effort: anything beyond plain reads, diffs and commits of the switches is refused.
-function safeBash(command: string): boolean {
+function onlyReadsOrCommits(command: string): boolean {
   if (/[`<>]|\$\(/.test(command)) return false;
   return invocations(command).every(({ assignments, name, args }) => {
     const program = basename(name);
@@ -61,7 +60,7 @@ export function createProtection(configPath: string, known: ReadonlySet<string>)
   return async function protect(call: ToolCall): Promise<string | undefined> {
     if (call.toolName === 'bash' && typeof call.input.command === 'string') {
       const command = call.input.command;
-      if (!mentionsSwitches(command) || safeBash(command)) return;
+      if (!mentionsSwitches(command) || onlyReadsOrCommits(command)) return;
       return 'Agents cannot change personal-settings/hooks.yaml through Bash. Use the write tool to switch hooks on; only the user can switch them off.';
     }
     if ((call.toolName !== 'edit' && call.toolName !== 'write') || typeof call.input.path !== 'string') return;
@@ -69,7 +68,6 @@ export function createProtection(configPath: string, known: ReadonlySet<string>)
     const path = await canonical(requested);
     const live = path === await canonical(configPath);
     if (!live && !requested.endsWith(switchesFile) && !path.endsWith(switchesFile)) return;
-    // Every allowed write keeps the hooks on when it was checked, so no ordering of concurrent writes can switch one off.
     if (call.toolName === 'edit') return `Change ${requested} with the write tool with the whole file. Edits apply to whatever the file holds when they run, so they cannot be checked.`;
 
     let current = '';

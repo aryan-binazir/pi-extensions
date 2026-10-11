@@ -2,7 +2,7 @@ import { basename } from 'node:path';
 import { invocations } from '../shell.ts';
 import type { AdviseHook } from '../types.ts';
 
-// ripgrep 15 options that take a value, so the word after them is that value rather than a flag.
+// ripgrep 15's options that take a value.
 const shortWithValue = 'efEmjgdtTABCMr';
 const longWithValue = new Set([
   '--regexp', '--file', '--encoding', '--max-count', '--threads', '--glob', '--max-depth', '--type', '--type-not',

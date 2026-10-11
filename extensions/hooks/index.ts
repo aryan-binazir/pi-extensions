@@ -14,8 +14,7 @@ export interface HooksOptions {
 const activeCwd = (ctx: ExtensionContext) => getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId());
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const label = (id: string, text: string) => `[hooks: ${id}] ${text}`;
-// Diagnosis and asking the user stay possible while the switches are broken.
-const recoveryTools = new Set(['read', 'grep', 'find', 'ls', 'questionnaire']);
+const usableWhileSwitchesAreBroken = new Set(['read', 'grep', 'find', 'ls', 'questionnaire']);
 const maxGateContinuations = 3;
 const gateMessage = (id: string, text: string) => ({ type: 'custom_message' as const, customType: 'hooks', content: label(id, text), display: true });
 
@@ -51,7 +50,7 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
       try {
         blockers = await switchedOn<BlockHook>('block', ctx);
       } catch (error) {
-        if (recoveryTools.has(event.toolName)) return;
+        if (usableWhileSwitchesAreBroken.has(event.toolName)) return;
         return { block: true, reason: `[hooks] ${configPath} is invalid: ${message(error)}. Ask the user to fix it; agents cannot edit it.` };
       }
       for (const hook of blockers) {
@@ -73,10 +72,9 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
       return { content: [...event.content, ...notes], ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) };
     });
 
-    // Continuations are capped per human prompt; extension-sent input must not reset the cap.
-    let continuations = 0;
-    pi.on('session_start', () => { continuations = 0; });
-    pi.on('input', event => { if (event.source !== 'extension') continuations = 0; });
+    let continuationsThisPrompt = 0;
+    pi.on('session_start', () => { continuationsThisPrompt = 0; });
+    pi.on('input', event => { if (event.source !== 'extension') continuationsThisPrompt = 0; });
     pi.on('agent_before_settle', async (event, ctx) => {
       if (event.outcome !== 'completed') return;
       const gates = await switchedOn<GateHook>('gate', ctx).catch(() => []);
@@ -85,10 +83,10 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
         const { said, failed } = await ask(() => hook.check({ cwd: activeCwd(ctx), signal: ctx.signal }));
         if (failed !== undefined) entries.push(gateMessage(hook.id, `The gate failed and was skipped: ${failed}`));
         if (!said) continue;
-        if (continuations >= maxGateContinuations) {
+        if (continuationsThisPrompt >= maxGateContinuations) {
           return { entries: [...entries, gateMessage(hook.id, `Still not done after ${maxGateContinuations} continuations, so the agent stopped: ${said}`)] };
         }
-        continuations++;
+        continuationsThisPrompt++;
         return { entries: [...entries, gateMessage(hook.id, said)], continue: true };
       }
       if (entries.length > event.entries.length) return { entries };
@@ -96,5 +94,4 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
   };
 }
 
-// The switches come from the same checkout as this code, so code and switches always match.
 export default createHooks({ catalog, configPath: fileURLToPath(new URL('../../personal-settings/hooks.yaml', import.meta.url)) });

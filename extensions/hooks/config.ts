@@ -1,6 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { parseFrontmatter } from '@earendil-works/pi-coding-agent';
 
+const isPlainMapping = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
+
 /** Parses the on/off switches without checking that the hook ids exist. */
 export function parseSwitches(text: string): Map<string, boolean> {
   // Pi exports its YAML parser only through frontmatter, so document markers would end the parsed block early.
@@ -8,8 +11,7 @@ export function parseSwitches(text: string): Map<string, boolean> {
   const { frontmatter, body } = parseFrontmatter(`---\n${text}\n---\n`);
   const keys = Object.keys(frontmatter);
   const hooks = (frontmatter as Record<string, unknown>).hooks ?? {};
-  // Tagged YAML collections such as !!omap and !!set parse to Map or Set, whose entries Object.entries cannot see.
-  if (body || keys.length !== 1 || keys[0] !== 'hooks' || typeof hooks !== 'object' || Object.getPrototypeOf(hooks) !== Object.prototype) {
+  if (body || keys.length !== 1 || keys[0] !== 'hooks' || !isPlainMapping(hooks)) {
     throw new Error('Expected a single top-level "hooks" mapping of hook ids to true or false');
   }
   const switches = new Map<string, boolean>();

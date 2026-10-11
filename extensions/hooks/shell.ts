@@ -1,7 +1,6 @@
 // $'...' escapes outside this map become NUL, which no Bash argument can contain, so hooks can refuse what they cannot decode.
 const ansiEscapes: Record<string, string> = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
 
-/** Splits simple Bash into commands of unquoted words. It does not expand, substitute or interpret redirections. */
 function commands(source: string): string[][] {
   const result: string[][] = [];
   let words: string[] = [], word = '', quote = '', started = false;
@@ -46,7 +45,7 @@ export interface Invocation {
   args: string[];
 }
 
-/** Each simple command with its leading VAR=value assignments separated from the command name. */
+/** Simple Bash commands as unquoted words, with leading VAR=value assignments split off. Expansion, substitution and redirection are not interpreted. */
 export function invocations(source: string): Invocation[] {
   return commands(source).map(words => {
     let start = 0;

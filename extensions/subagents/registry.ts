@@ -453,7 +453,6 @@ export function piInvocation(spec: ValidTask) {
   if (spec.model) args.push('--model', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
   const connectors = spec.tools.some(tool => !ALL_TOOLS.includes(tool));
-  // Hooks load first so their blocks run before any other child extension sees a tool call.
   args.push('-e', spec.hooks);
   if (connectors) args.push('-e', fileURLToPath(new URL('./connector-bridge.ts', import.meta.url)));
   for (const extension of new Set(spec.extensions)) args.push('-e', extension);

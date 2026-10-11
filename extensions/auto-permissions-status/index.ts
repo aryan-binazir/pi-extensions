@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { isBashToolResult, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { findConfigLoader, statusText, type ConfigLoader } from './adapter.ts';
 
 import { permissionFooter, STATUS_KEY as KEY } from './footer.ts';
@@ -72,6 +72,6 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   // A turn or a git/gh command may have opened, merged or closed the PR.
   pi.on('agent_end', () => { prs?.refresh(); });
   pi.on('tool_result', event => {
-    if (event.toolName === 'bash' && /\b(git|gh)\b/.test(String(event.input.command ?? ''))) prs?.refresh();
+    if (isBashToolResult(event) && /\b(git|gh)\b/.test(String(event.input.command ?? ''))) prs?.refresh();
   });
 }

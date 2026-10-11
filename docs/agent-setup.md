@@ -28,8 +28,9 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    their documented config; for Bash approvals, check the reviewer settings;
    for Hooks, check its selected entrypoint is in a stable checkout and loads before
    Auto Permissions, and that no Guard entry or `guard.json` link remains;
-   for the footer, check the status-extension selection and that `gh auth status`
-   reports a signed-in account. For Claude
+   for the footer, check the status-extension selection and `gh` on `PATH`,
+   reporting a failing `gh auth status --active --hostname github.com` as
+   unverified sign-in rather than drift. For Claude
    bridge, use the offline model-list command below, check `provider.plan` is
    `"max"`, and preserve the separate `AskClaude` opt-in.
 4. **Thinking and scoped models:** verify [default thinking](#default-thinking),
@@ -208,8 +209,9 @@ and revise-first behavior for subagent sessions that load the plugin. 0.21.0's
 unattended behavior is opt-in via `PI_AUTO_PERMISSIONS_UNATTENDED=1`; ordinary
 interactive sessions still ask for approval.
 
-Enable this repository's **`auto-permissions-status`** extension with `pi config`
-for a footer indicator; for a local checkout, add the absolute path to
+Enable this repository's **`auto-permissions-status`** extension (required; see
+[footer with PR links](#footer-with-pr-links)) with `pi config`; for a local
+checkout, add the absolute path to
 `extensions/auto-permissions-status/index.ts` to `extensions` in
 `~/.pi/agent/settings.json`. After `/reload` the footer shows
 `Auto: on · Luna low`, `Auto: off`, `Auto: unavailable` (Hank's settings command
@@ -222,8 +224,7 @@ absent guard, edits policy, or makes model calls. Its compact TUI footer puts Au
 on the directory/branch row with token/cache/cost/context usage and the main model
 below; **Pi has one footer slot**, so do not run it alongside another
 custom-footer extension. It restores the default footer on shutdown. The same
-footer links the branch's pull request; see
-[footer with PR links](#footer-with-pr-links).
+footer links the branch's pull request.
 
 ## Footer with PR links
 
@@ -239,23 +240,32 @@ example `pacman -S github-cli` or `brew install gh`), then ask Ar to run
 
 ```sh
 gh --version
-gh auth status
+gh auth status --active --hostname github.com
 ```
+
+The status check contacts GitHub; during the read-only audit a failure means
+sign-in is unverified, not missing setup.
 
 After `/reload`, a branch with a pull request shows its number after the branch:
 `~/repo (branch) #42 • Session`. Open PRs show only the number; draft, merged
-and closed PRs add that word. The number is an OSC 8 hyperlink, so Ctrl-click
-(Cmd-click on macOS) opens the PR in terminals that support hyperlinks; tmux
-also needs `set -as terminal-features ',*:hyperlinks'`. The extension runs
-`gh pr view --json number,url,state,isDraft -- <branch>` in the session
-directory when the footer first shows a branch, after each agent turn, and
-after agent Bash calls that use `git` or `gh`; it does not poll. Without a PR,
-`gh`, sign-in or network, the footer shows no link and no error. It follows
-Pi's branch for the session directory, not a checkout selected mid-session
-with `/worktree`.
+and closed PRs add that word. Where Pi detects hyperlink support the number is
+an OSC 8 link, so Ctrl-click (Cmd-click on macOS) opens the PR; elsewhere it is
+plain text. Inside tmux, also set `set -as terminal-features ',*:hyperlinks'`.
 
-Completion: `auto-permissions-status` is selected and `gh auth status` reports
-a signed-in account. Ask Ar to run `/reload`; a branch with an open PR then
+The extension runs
+`gh pr view --json number,url,state,isDraft,headRefName -- <branch>` in the
+session directory whenever the footer's branch or directory changes, after each
+agent turn, and after agent Bash calls that use `git` or `gh`; it does not poll.
+Commands Ar runs with `!` or `!!` update the link after the next turn or branch
+change. Without a PR, `gh`, sign-in or network, the footer shows no link and no
+error. The PR must come from the same repository and have the same head branch
+name as the local branch, so fork PRs, repositories whose `upstream` remote gh
+picks as the base, and local branches tracking a differently named remote branch
+show no link. The link follows Pi's branch for the session directory, not a
+checkout selected mid-session with `/worktree`.
+
+Completion: `auto-permissions-status` is selected and
+`gh auth status --active --hostname github.com` reports a signed-in account. Ask Ar to run `/reload`; a branch with an open PR then
 shows its number in the footer.
 
 ## Claude bridge (external package)

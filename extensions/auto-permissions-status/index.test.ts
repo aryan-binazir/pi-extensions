@@ -178,7 +178,7 @@ test('the TUI footer links the branch PR and asks gh again after each turn and e
   const asked: string[][] = [];
   const exec: ExtensionAPI['exec'] = async (_command, args) => {
     asked.push(args);
-    return { stdout: JSON.stringify({ number: 42, url: 'https://github.com/owner/repo/pull/42', state: 'OPEN', isDraft: false }), stderr: '', code: 0, killed: false };
+    return { stdout: JSON.stringify({ number: 42, url: 'https://github.com/owner/repo/pull/42', state: 'OPEN', isDraft: false, headRefName: 'feature' }), stderr: '', code: 0, killed: false };
   };
   const h = harness([], exec);
   let factory: Parameters<ExtensionContext['ui']['setFooter']>[0];

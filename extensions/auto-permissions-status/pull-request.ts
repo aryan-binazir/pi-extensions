@@ -1,5 +1,5 @@
 import type { ExecResult, ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { hyperlink } from '@earendil-works/pi-tui';
+import { getCapabilities, hyperlink } from '@earendil-works/pi-tui';
 
 export interface PullRequest { number: number; url: string; state: 'OPEN' | 'CLOSED' | 'MERGED'; isDraft: boolean }
 export interface PullRequests {
@@ -11,10 +11,13 @@ export interface PullRequests {
 }
 
 const stateWords = { MERGED: ' merged', CLOSED: ' closed', OPEN: '' };
-export const pullRequestLabel = (pr: PullRequest) => hyperlink(`#${pr.number}`, pr.url)
+// Like Pi's own links, the number is plain text where the terminal cannot show hyperlinks.
+export const pullRequestLabel = (pr: PullRequest) => (getCapabilities().hyperlinks ? hyperlink(`#${pr.number}`, pr.url) : `#${pr.number}`)
   + (pr.state === 'OPEN' && pr.isDraft ? ' draft' : stateWords[pr.state]);
 
 const states = new Set(['OPEN', 'CLOSED', 'MERGED']);
+const same = (a: PullRequest | undefined, b: PullRequest | undefined) => a === b
+  || (!!a && !!b && a.number === b.number && a.url === b.url && a.state === b.state && a.isDraft === b.isDraft);
 const controls = /[\p{Cc}\p{Cf}]/u;
 const webUrl = (url: unknown) => {
   if (typeof url !== 'string' || controls.test(url) || !URL.canParse(url)) return undefined;
@@ -23,11 +26,12 @@ const webUrl = (url: unknown) => {
 };
 // The footer prints the URL inside a terminal escape sequence, so every field is checked before it is trusted.
 // Pi reports a signal-terminated process as exit code 0, so `killed` must be checked too.
-const parse = (result: ExecResult): PullRequest | undefined => {
+// gh reads a numeric or #N selector as a PR number even after `--`, so the PR must be this branch's.
+const parse = (result: ExecResult, branch: string): PullRequest | undefined => {
   if (result.killed || result.code !== 0) return undefined;
-  const pr = JSON.parse(result.stdout) as Partial<Record<keyof PullRequest, unknown>> | null;
+  const pr = JSON.parse(result.stdout) as Partial<Record<keyof PullRequest | 'headRefName', unknown>> | null;
   const url = webUrl(pr?.url);
-  if (!pr || !url || !Number.isSafeInteger(pr.number) || (pr.number as number) <= 0
+  if (!pr || !url || pr.headRefName !== branch || !Number.isSafeInteger(pr.number) || (pr.number as number) <= 0
     || typeof pr.state !== 'string' || !states.has(pr.state) || typeof pr.isDraft !== 'boolean') return undefined;
   return { number: pr.number as number, url, state: pr.state as PullRequest['state'], isDraft: pr.isDraft };
 };
@@ -45,10 +49,10 @@ export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): 
     // gh is asked about the branch the footer shows, not whatever HEAD is by the time it runs;
     // `--` keeps an odd branch name from being read as a flag.
     // Any failure, whether no PR, no gh, signed out or offline, shows the footer without a link.
-    const args = ['pr', 'view', '--json', 'number,url,state,isDraft', '--', branch];
+    const args = ['pr', 'view', '--json', 'number,url,state,isDraft,headRefName', '--', branch];
     void new Promise<ExecResult>(resolve => resolve(exec('gh', args, { cwd, signal, timeout: 10000 })))
-      .then(parse).catch(() => undefined).then(pr => {
-        if (version !== generation || pr === current) return;
+      .then(result => parse(result, branch)).catch(() => undefined).then(pr => {
+        if (version !== generation || same(pr, current)) return;
         current = pr;
         onChange();
       });

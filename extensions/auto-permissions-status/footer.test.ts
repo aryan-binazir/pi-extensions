@@ -4,7 +4,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { ModelRuntime, ModelRegistry, SessionManager, type ExecResult, type ExtensionAPI, type ExtensionContext, type ReadonlyFooterDataProvider, type Theme } from '@earendil-works/pi-coding-agent';
 import { InMemoryCredentialStore, InMemoryModelsStore, type OAuthCredential } from '@earendil-works/pi-ai';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
-import { getOsc8LinkAtColumn, visibleWidth } from '@earendil-works/pi-tui';
+import { getCapabilities, getOsc8LinkAtColumn, setCapabilities, visibleWidth } from '@earendil-works/pi-tui';
 import { permissionFooter, rightAligned, STATUS_KEY } from './footer.ts';
 import { pullRequests } from './pull-request.ts';
 
@@ -23,7 +23,8 @@ function fakeGh() {
   return { exec, calls };
 }
 const prUrl = 'https://github.com/owner/repo/pull/42';
-const prJson = (fields: object = {}) => JSON.stringify({ number: 42, url: prUrl, state: 'OPEN', isDraft: false, ...fields });
+const prJson = (fields: object = {}) => JSON.stringify({ number: 42, url: prUrl, state: 'OPEN', isDraft: false, headRefName: 'main', ...fields });
+setCapabilities({ ...getCapabilities(), hyperlinks: true });
 
 function fixture(exec?: ExtensionAPI['exec']) {
   const statuses = new Map([[STATUS_KEY, 'Auto: on · Luna low']]);
@@ -51,7 +52,7 @@ test('links the PR number right after the branch once gh reports it', async () =
   const gh = fakeGh(), f = fixture(gh.exec);
   assert.match(f.footer.render(140)[0], /^\/workspace\/project \(main\) • Task\s+Auto: on · Luna low$/);
   assert.deepEqual(gh.calls.map(call => [call.command, call.args, call.options?.cwd]),
-    [['gh', ['pr', 'view', '--json', 'number,url,state,isDraft', '--', 'main'], '/workspace/project']]);
+    [['gh', ['pr', 'view', '--json', 'number,url,state,isDraft,headRefName', '--', 'main'], '/workspace/project']]);
   await gh.calls[0].answer({ stdout: prJson() });
   assert.equal(f.renders(), 1);
   const line = f.footer.render(140)[0], visible = stripVTControlCharacters(line);
@@ -63,6 +64,29 @@ test('links the PR number right after the branch once gh reports it', async () =
   assert.equal(gh.calls.length, 1, 'repeat renders reuse the answer');
   const timeout = gh.calls[0].options?.timeout;
   assert.ok(timeout && timeout > 0 && timeout <= 15000, 'a hung gh cannot hold the lookup open');
+  f.footer.dispose();
+});
+
+test('terminals without hyperlink support get the plain PR number', async () => {
+  const capabilities = getCapabilities();
+  setCapabilities({ ...capabilities, hyperlinks: false });
+  try {
+    const gh = fakeGh(), f = fixture(gh.exec);
+    f.footer.render(140);
+    await gh.calls[0].answer({ stdout: prJson({ isDraft: true }) });
+    const line = f.footer.render(140)[0];
+    assert.match(line, /^\/workspace\/project \(main\) #42 draft • Task\s+Auto/);
+    assert.doesNotMatch(line, /\u001b/);
+    f.footer.dispose();
+  } finally { setCapabilities(capabilities); }
+});
+
+test('a PR for another head branch is not shown, as when gh reads a numeric branch name as a PR number', async () => {
+  const gh = fakeGh(), f = fixture(gh.exec);
+  f.changeBranch('1');
+  const before = f.footer.render(140);
+  await gh.calls[0].answer({ stdout: prJson({ number: 1, headRefName: 'amb/interactive-tools' }) });
+  assert.deepEqual(f.footer.render(140), before);
   f.footer.dispose();
 });
 
@@ -106,7 +130,7 @@ test('narrow footers never exceed the width or leave a PR link open, and the bra
   const gh = fakeGh(), f = fixture(gh.exec);
   f.changeBranch('evil\u001b[2J\u202ebranch');
   f.footer.render(140);
-  await gh.calls[0].answer({ stdout: prJson() });
+  await gh.calls[0].answer({ stdout: prJson({ headRefName: 'evil\u001b[2J\u202ebranch' }) });
   for (let width = 0; width <= 140; width++) {
     const lines = f.footer.render(width);
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `footer at ${width}`);
@@ -131,7 +155,7 @@ test('a branch or cwd change hides the old PR at once, aborts its lookup and ign
   await gh.calls[0].answer({ stdout: prJson() });
   assert.equal(pathRow(f), '/workspace/project (feature) • Task');
   assert.equal(f.renders(), renders, 'a stale answer requests no render');
-  await gh.calls[1].answer({ stdout: prJson({ number: 7, url: 'https://github.com/owner/repo/pull/7' }) });
+  await gh.calls[1].answer({ stdout: prJson({ number: 7, url: 'https://github.com/owner/repo/pull/7', headRefName: 'feature' }) });
   assert.equal(pathRow(f), '/workspace/project (feature) #7 • Task');
   f.changeBranch('feature');
   assert.equal(pathRow(f), '/workspace/project (feature) #7 • Task');
@@ -164,8 +188,12 @@ test('refresh asks again for the shown branch, keeping the current link until gh
   await gh.calls[2].answer({ stdout: prJson({ state: 'MERGED' }) });
   await gh.calls[1].answer({ stdout: prJson({ isDraft: true }) });
   assert.equal(pathRow(f), '/workspace/project (main) #42 merged • Task');
+  const renders = f.renders();
   f.prs!.refresh();
-  await gh.calls[3].answer({ code: 1, stderr: 'error connecting to api.github.com' });
+  await gh.calls[3].answer({ stdout: prJson({ state: 'MERGED' }) });
+  assert.equal(f.renders(), renders, 'an unchanged answer requests no render');
+  f.prs!.refresh();
+  await gh.calls[4].answer({ code: 1, stderr: 'error connecting to api.github.com' });
   assert.equal(pathRow(f), '/workspace/project (main) • Task');
   f.footer.dispose();
 });

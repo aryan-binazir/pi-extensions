@@ -31,7 +31,8 @@ load; helpers and tests are not extensions.
    does not enable the rules.
 5. **Install Claude bridge separately (required).** Follow
    [Claude bridge setup](docs/agent-setup.md#claude-bridge-external-package) for the
-   pinned Agent SDK provider. Only the `AskClaude` delegation tool is optional.
+   pinned Agent SDK provider and its required Max plan setting. Only the `AskClaude`
+   delegation tool is optional.
 6. **Configure the required scoped models.** Follow
    [scoped model setup](docs/agent-setup.md#required-scoped-models), preserving this
    machine's existing model connections.

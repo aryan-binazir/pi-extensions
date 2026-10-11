@@ -28,8 +28,8 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    for Bash approvals, check the reviewer settings and status-extension selection;
    for Guard, check its selected entrypoint, readable rules link, and that both
    `requireDraftPr` and `blockAdminMerge` are enabled. For Claude
-   bridge, use the offline model-list command below and preserve the separate
-   `AskClaude` opt-in.
+   bridge, use the offline model-list command below, check `provider.plan` is
+   `"max"`, and preserve the separate `AskClaude` opt-in.
 4. **Scoped models:** verify every model required by [AGENTS.md](../AGENTS.md)
    is included in the saved scope and resolves in the offline model list. Follow
    [scoped model setup](#required-scoped-models); report missing models as drift.
@@ -201,8 +201,22 @@ pi list
 pi --offline --no-mcp --list-models claude-bridge
 ```
 
-Completion: `pi list` includes `npm:pi-claude-bridge@0.9.2`, and the model list
-includes the `claude-bridge` provider. Ask the user to run `/reload`, then use
+Set the required Max plan by merging this into `~/.pi/agent/claude-bridge.json`
+(or under `PI_CODING_AGENT_DIR`), preserving existing settings such as
+`startupNoticeShown`:
+
+```json
+{
+  "provider": {
+    "plan": "max"
+  }
+}
+```
+
+This advertises Max-plan context limits; it does not authenticate or upgrade a plan.
+
+Completion: `pi list` includes `npm:pi-claude-bridge@0.9.2`, the model list
+includes the `claude-bridge` provider, and `provider.plan` is `"max"`. Ask the user to run `/reload`, then use
 `/model` to select a `claude-bridge/*` model. The bridge uses Claude Code's
 credentials and environment; complete any required sign-in in Claude Code,
 keeping credentials outside this repository. Exported `ANTHROPIC_API_KEY`,
@@ -228,7 +242,4 @@ existing settings:
 After `/reload`, `AskClaude` is available when using a different provider. Its
 default mode is read-only. It uses Claude Code's native tools rather than Pi's
 tool approvals; keep full read/write/bash mode disabled unless explicitly
-requested. Leave plan settings at their defaults unless the user specifies a
-plan; Max users can set `provider.plan` to `"max"` in the same config to advertise
-the appropriate context limits. This setting does not authenticate or upgrade a
-plan.
+requested.

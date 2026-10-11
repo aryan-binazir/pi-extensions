@@ -1,6 +1,6 @@
 # 013: Save editor context as request snapshots and bound live follow
 
-Status: accepted. Supersedes the context delivery and follow semantics in [ADR 012](012-nvim-ide.md); its transport, discovery and no-approval decisions remain unchanged.
+Status: accepted. Supersedes the context delivery and follow semantics in [ADR 012](012-nvim-ide.md); its transport and no-approval decisions remain unchanged. Worktree-aware discovery and sticky connections are documented in the updated ADR 012.
 
 Editor notifications stay in memory. At a submitted turn, inject one deterministic `editor_context` prompt section through Pi's structured prompt options, rather than replacing the leading prompt. The composing worktree and subagents hooks contribute `active_worktree` and `subagent_profiles` sections too; returning a forced `systemPrompt` would suppress all sections in Pi's provider requests while still recording them. Pi persists request snapshots and section changes in its append-only session history; they can appear in forks and exports, and compaction does not erase the original disk history. The 100,000-character budget is per snapshot, not a lifetime retention limit. Cache-prefix preservation depends on the model's support for mid-conversation system updates, not just on this extension.
 

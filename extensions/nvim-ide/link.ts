@@ -44,14 +44,23 @@ export async function readLocks(dir: string, alive: (pid: number) => boolean = p
   return locks;
 }
 
+function matchingDepth(lock: Lock, cwd: string): number {
+  const here = trimSep(resolve(cwd));
+  let depth = -1;
+  for (const folder of lock.workspaceFolders) {
+    if (here === folder || here.startsWith(folder.endsWith(sep) ? folder : folder + sep)) depth = Math.max(depth, folder.length);
+  }
+  return depth;
+}
+
 export function chooseLock(locks: Lock[], cwd: string, envPort = process.env.CLAUDE_CODE_SSE_PORT): Lock | undefined {
   const port = Number(envPort);
   if (Number.isInteger(port)) { const hit = locks.find(lock => lock.port === port); if (hit) return hit; }
-  const here = trimSep(resolve(cwd));
   let best: { lock: Lock; depth: number } | undefined;
-  for (const lock of locks) for (const folder of lock.workspaceFolders) {
-    if (here !== folder && !here.startsWith(folder + sep)) continue;
-    if (!best || folder.length > best.depth || (folder.length === best.depth && lock.mtimeMs > best.lock.mtimeMs)) best = { lock, depth: folder.length };
+  for (const lock of locks) {
+    const depth = matchingDepth(lock, cwd);
+    if (depth < 0) continue;
+    if (!best || depth > best.depth || (depth === best.depth && lock.mtimeMs > best.lock.mtimeMs)) best = { lock, depth };
   }
   return best?.lock;
 }
@@ -73,6 +82,8 @@ interface LinkOptions {
 export class IdeLink {
   private socket?: WebSocket;
   private lock?: Lock;
+  private retargeting?: Promise<void>;
+  private readonly failedLocks = new Map<number, number>();
   private started = false;
   private timer?: NodeJS.Timeout;
   private watcher?: FSWatcher;
@@ -112,15 +123,35 @@ export class IdeLink {
       socket.close();
     });
   }
-  reconnect(): void { const socket = this.socket; this.drop(new Error('reconnecting')); socket?.terminate(); void this.attempt(); }
-  /** Moves to the best editor for the current cwd, e.g. one just opened in a newly active worktree. */
-  async retarget(): Promise<void> {
+  reconnect(): void { this.failedLocks.clear(); const socket = this.socket; this.drop(new Error('reconnecting')); socket?.terminate(); void this.attempt(); }
+  retarget(): Promise<void> {
+    return this.retargeting ??= this.reconsider().finally(() => { this.retargeting = undefined; });
+  }
+  private async reconsider(): Promise<void> {
     if (!this.started) return;
-    if (!this.socket) { if (this.timer) { clearTimeout(this.timer); this.timer = undefined; } this.schedule(0); return; }
-    const best = chooseLock(await readLocks(this.options.lockDir ?? defaultLockDir(), this.options.alive), this.cwd());
-    if (this.started && this.socket && best && best.port !== this.lock?.port) this.reconnect();
+    if (!this.socket) {
+      if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
+      await this.attempt();
+      return;
+    }
+    const socket = this.socket;
+    const locks = await this.availableLocks();
+    if (!this.started || this.socket !== socket) return;
+    const cwd = this.cwd(), best = chooseLock(locks, cwd);
+    const depth = this.lock ? matchingDepth(this.lock, cwd) : -1;
+    if (best?.port === this.lock?.port || (depth >= 0 && (!best || depth >= matchingDepth(best, cwd)))) return;
+    this.drop(new Error('editor workspace changed'));
+    socket.terminate();
+    await this.attempt();
   }
   private cwd(): string { return typeof this.options.cwd === 'string' ? this.options.cwd : this.options.cwd(); }
+  private async availableLocks(): Promise<Lock[]> {
+    const locks = await readLocks(this.options.lockDir ?? defaultLockDir(), this.options.alive);
+    for (const [port, mtime] of this.failedLocks) {
+      if (!locks.some(lock => lock.port === port && lock.mtimeMs === mtime)) this.failedLocks.delete(port);
+    }
+    return locks.filter(lock => this.failedLocks.get(lock.port) !== lock.mtimeMs);
+  }
   async prepareMentions(): Promise<{ mentions: Mention[]; undelivered: number; dropped: number; acknowledge: () => void }> {
     const taken = [...this.mentions];
     for (const item of taken) this.preparedMentions.add(item);
@@ -166,7 +197,7 @@ export class IdeLink {
   private async attempt(): Promise<void> {
     if (!this.started || this.socket) return;
     trace?.('attempt');
-    const lock = chooseLock(await readLocks(this.options.lockDir ?? defaultLockDir(), this.options.alive), this.cwd());
+    const lock = chooseLock(await this.availableLocks(), this.cwd());
     if (!this.started || this.socket) return;
     trace?.(`lock ${lock ? lock.port : 'none'}`);
     if (!lock) { this.schedule(); return; }
@@ -177,15 +208,25 @@ export class IdeLink {
     try {
       socket = new WebSocket(`ws://127.0.0.1:${lock.port}`, { headers: { 'x-claude-code-ide-authorization': lock.authToken }, handshakeTimeout: 3000, perMessageDeflate: false, skipUTF8Validation: true });
     } catch {
+      this.failedLocks.set(lock.port, lock.mtimeMs);
       this.lock = undefined;
-      this.schedule(this.options.retryMs ?? 15000);
+      this.schedule(this.options.retryMs ?? 200);
       return;
     }
     this.socket = socket;
+    let opened = false;
     socket.on('message', data => { if (this.socket === socket) this.receive(data.toString()); });
     socket.on('error', error => trace?.(`socket error ${error.message}`));
-    socket.on('close', (code, reason) => { trace?.(`close ${code} ${reason} current=${this.socket === socket}`); if (this.socket === socket) { this.drop(new Error('IDE disconnected')); this.schedule(this.options.retryMs ?? 15000); } });
+    socket.on('close', (code, reason) => {
+      trace?.(`close ${code} ${reason} current=${this.socket === socket}`);
+      if (this.socket !== socket) return;
+      const initialized = this.ready;
+      if (!opened) this.failedLocks.set(lock.port, lock.mtimeMs);
+      this.drop(new Error('IDE disconnected'));
+      this.schedule(initialized ? this.options.retryMs ?? 15000 : 200);
+    });
     socket.once('open', () => {
+      opened = true;
       trace?.('open');
       this.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'pi-nvim-ide', version: '1' } })
         .then(result => {
@@ -236,7 +277,12 @@ export class IdeLink {
   private watchLocks(): void {
     if (this.watcher) return;
     try {
-      const watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (event, name) => { trace?.(`watch ${event} ${name} socket=${!!this.socket} timer=${!!this.timer}`); if (!this.started || (name && !name.endsWith('.lock'))) return; if (this.socket) { void this.retarget(); return; } if (this.timer) { clearTimeout(this.timer); this.timer = undefined; } this.schedule(200); });
+      const watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (event, name) => {
+        trace?.(`watch ${event} ${name} socket=${!!this.socket} timer=${!!this.timer}`);
+        if (!this.started || (name && !name.endsWith('.lock'))) return;
+        if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
+        this.schedule(200);
+      });
       this.watcher = watcher;
       watcher.on('error', error => {
         trace?.(`watch error ${error.message}`);
@@ -254,7 +300,7 @@ export class IdeLink {
     if (!this.watcher) this.watchLocks();
     // The parent watch is armed before each lock-directory attempt, so it reports a directory created after an ENOENT.
     if (delay === undefined) { if (this.parentWatcher && (this.watcher || this.lockDirMissing)) return; delay = this.options.retryMs ?? 15000; }
-    this.timer = setTimeout(() => { this.timer = undefined; void this.attempt(); }, delay);
+    this.timer = setTimeout(() => { this.timer = undefined; void this.retarget(); }, delay);
     this.timer.unref();
   }
   private drop(error: Error): void {

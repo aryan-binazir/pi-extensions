@@ -68,6 +68,68 @@ test('newest lock wins among equal workspace matches', () => {
   assert.equal(chooseLock(locks, '/w', '')?.port, 2);
 });
 
+test('an equally specific new editor cannot steal a connected link', async () => {
+  const first = fakeIde(), second = fakeIde();
+  await Promise.all([once(first.server, 'listening'), once(second.server, 'listening')]);
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${first.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    const original = [...first.server.clients][0];
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await writeFile(join(dir, `${second.port()}.lock`), lockFile());
+    await link.retarget();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(link.state.port, first.port());
+    assert.equal([...first.server.clients][0], original, 'no reconnect when the incumbent still matches');
+    assert.equal(second.server.clients.size, 0);
+  } finally { await link.stop(); await first.close(); await second.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('an unreachable deeper lock falls back without repeatedly interrupting the matching editor', async () => {
+  const root = fakeIde(), dead = fakeIde();
+  await Promise.all([once(root.server, 'listening'), once(dead.server, 'listening')]);
+  const deadPort = dead.port();
+  await dead.close();
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w/branch', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${root.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    await writeFile(join(dir, `${deadPort}.lock`), lockFile({ workspaceFolders: ['/w/branch'] }));
+    await link.retarget();
+    await until(() => link.connected && link.state.port === root.port());
+    const restored = [...root.server.clients][0];
+    await Promise.all([link.retarget(), link.retarget()]);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal([...root.server.clients][0], restored);
+    assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
+  } finally { await link.stop(); await root.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('repairing a refused deeper lock connects to the more-specific editor', async () => {
+  const root = fakeIde(), branch = fakeIde();
+  await Promise.all([once(root.server, 'listening'), once(branch.server, 'listening')]);
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w/branch', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${root.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    const branchFile = join(dir, `${branch.port()}.lock`);
+    await writeFile(branchFile, lockFile({ workspaceFolders: ['/w/branch'], authToken: 'wrong' }));
+    await link.retarget();
+    await until(() => link.connected && link.state.port === root.port());
+    await writeFile(branchFile, lockFile({ workspaceFolders: ['/w/branch'] }));
+    await until(() => link.connected && link.state.port === branch.port());
+    assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
+    assert.equal(branch.calls.at(-1)?.name, 'getOpenEditors');
+  } finally { await link.stop(); await root.close(); await branch.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
 test('an invalid port lock does not hide a valid IDE lock', async () => {
   const ide = fakeIde();
   await once(ide.server, 'listening');

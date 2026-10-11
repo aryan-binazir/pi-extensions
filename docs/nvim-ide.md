@@ -2,7 +2,7 @@
 
 The installed `nvim-ide` extension connects Pi to the existing Claude Code IDE WebSocket server. Neovim uses claudecode.nvim in server-only mode; no extra Neovim plugin or personal configuration changes are required. Transport and discovery are documented in [ADR 012](adr/012-nvim-ide.md); request snapshots and navigation delivery are documented in [ADR 013](adr/013-editor-request-snapshots.md).
 
-Discovery matches the active worktree, not just the session directory. When a lock appears, or a turn starts, the link moves to the best editor for that directory: the longest matching workspace, then the newest lock. An editor opened in a newly active worktree therefore takes over the link.
+Discovery matches the active worktree. Initial connection chooses the longest matching workspace, then the newest lock. Connected editors stay sticky: lock events and submitted turns switch only to a more-specific workspace, or away from an editor outside the active worktree. With no matching editor, the link clears the previous selection. Unreachable locks are skipped until their file changes or `/vim reconnect` retries them. An explicit `CLAUDE_CODE_SSE_PORT` keeps its editor pinned across worktree switches.
 
 ## Live viewing
 

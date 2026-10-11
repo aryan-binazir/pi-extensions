@@ -104,7 +104,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
   pi.on('before_agent_start', async event => {
     const current = link;
     if (!current) return;
-    void current.retarget();
+    await current.retarget();
     const batch = await current.prepareMentions();
     const notices: string[] = [];
     if (batch.undelivered) notices.push(`${batch.undelivered} editor send${batch.undelivered === 1 ? '' : 's'} could not be resolved. Re-send the file from the editor.`);
@@ -188,7 +188,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
       }
       if (words[0] === 'reconnect') { link?.reconnect(); say('Editor link: rediscovering'); return; }
       const state = link?.state;
-      if (!state?.connected) { say('Editor link: not connected. Looking for a claudecode.nvim lock file whose workspace contains this directory.', 'warning'); return; }
+      if (!state?.connected) { say('Editor link: waiting for claudecode.nvim in the active worktree.', 'warning'); return; }
       say(`Editor link: ${state.ideName} on port ${state.port}, follow ${following() ? 'on' : 'off'}${state.selection ? `, viewing ${state.selection.filePath}` : ''}`);
     },
   });

@@ -130,6 +130,15 @@ from this repository, pinned:
 pi install npm:@hank-warren/pi-auto-permissions@0.21.0
 ```
 
+**Required version: 0.21.0.** During the read-only audit, compare both the
+configured package pin (`pi list` / `settings.json`) and the installed package's
+`package.json` version. After the audit, if either differs, back up settings and
+policy, run the pinned install command above, and follow the upgrade procedure
+below. This specific version repair is preapproved; preserve unrelated settings
+and policy exceptions. A general extensions update does not advance a pinned
+version. Completion requires both versions to be 0.21.0, the compatible footer
+adapter to be installed, config validation to pass, and the user to run `/reload`.
+
 Pi adds `"npm:@hank-warren/pi-auto-permissions@0.21.0"` to the `packages` array in
 `~/.pi/agent/settings.json`, preserving existing extensions. The pin does not
 update itself; review new versions before upgrading. Do not also load the
@@ -145,6 +154,7 @@ missing or ambiguous, ask Ar before writing the config.
   "enabled": true,
   "reviewAllShell": true,
   "rules": ["$defaults"],
+  "reviewConcurrency": 1,
   "reviewer": {
     "provider": "MODEL_CONNECTION",
     "model": "gpt-6-luna",
@@ -161,17 +171,40 @@ missing or ambiguous, ask Ar before writing the config.
 ```
 
 Review is then on by default across sessions: every Bash command goes through the
-rules and, absent a hard deny or an explicit bypass/session approval, Luna review
+rules and, absent a hard deny, trusted-group bypass or session approval, Luna review
 at low reasoning. Complete any required sign-in for the existing model connection
-and make sure `gpt-6-luna` is available; the main agent can use a different model. The
-prefilter was removed in 0.17.0; every guarded command receives a full review.
-`guardianPolicy` takes natural-language preferences: trusted infrastructure in
-`environment`, scoped exceptions in `allow`, restrictions
+and make sure `gpt-6-luna` is available; the main agent can use a different model.
+`reviewConcurrency: 1` preserves serial reviews; the package default is four.
+The prefilter was removed in 0.17.0, so every reviewed command gets full review.
+`guardianPolicy` takes natural-language preferences: trusted
+infrastructure in `environment`, scoped exceptions in `allow`, restrictions
 needing explicit authorization in `softDeny`, unconditional ones in `hardDeny`.
 They supplement the built-in policy and never override deterministic hard denies.
 **Coverage is Bash only, not an OS sandbox:** edits, writes, MCP and desktop tools
 are not gated, this repository's isolated subagents do not inherit the plugin, and
 explicit trusted-group bypasses and session approvals can still bypass review.
+
+### Upgrading from 0.16.2
+
+0.21.0 includes the [long-command approval fix](https://github.com/hank-warren/pi-extensions/pull/63)
+from 0.20.0: a bounded preview, pinned choices, and **Ctrl+O** to view the full
+command with scrolling. The config loader still accepts the existing reviewer,
+`rules`, and `guardianPolicy`; obsolete `reviewer.prefilter`, `standingApprovals`,
+and `ui.placement` settings are ignored. Remove obsolete settings when updating,
+without changing policy or custom rules.
+
+0.17.0 removed the cross-session standing-approvals ledger and its prompt option.
+Existing ledger files are no longer consumed; preserve them for rollback, and do
+not silently copy their contents into `guardianPolicy.allow`. Durable policy
+exceptions require separate user confirmation. Session-scoped prompt decisions
+still persist on resume. Legacy `convention` rules become `deny`; their overrides
+and `request_override` were removed.
+
+0.18.0 added concurrent reviews and codemode-script evidence. Set
+`reviewConcurrency: 1` to preserve serial scheduling. 0.19.0 added RPC approvals
+and revise-first behavior for subagent sessions that load the plugin. 0.21.0's
+unattended behavior is opt-in via `PI_AUTO_PERMISSIONS_UNATTENDED=1`; ordinary
+interactive sessions still ask for approval.
 
 Enable this repository's **`auto-permissions-status`** extension with `pi config`
 for a footer indicator; for a local checkout, add the absolute path to

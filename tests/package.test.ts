@@ -15,6 +15,7 @@ const expected = new Map<string, { tools: string[]; commands: string[]; shortcut
   ['btw', {tools: [], commands: ['btw', 'side'], shortcuts: []}],
   ['vi-mode', {tools: [], commands: [], shortcuts: []}],
   ['prompt-stash', {tools: [], commands: [], shortcuts: []}],
+  ['escape-continue', {tools: [], commands: [], shortcuts: []}],
   ['subagents', {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []}],
   ['worktree', {tools: ['bash'], commands: ['worktree'], shortcuts: []}],
   ['computer-use', {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []}],

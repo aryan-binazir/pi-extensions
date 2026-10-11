@@ -16,16 +16,18 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    and installed manifests to verify the repository package or intended local
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
-   skipped, not missing setup. Bash approvals, Hooks, the footer with PR links,
-   and Claude bridge are required; a missing or disabled component is setup
-   drift, not a skipped optional feature.
+   skipped, not missing setup. Escape Continue, Bash approvals, Hooks, the footer
+   with PR links, and Claude bridge are required; a missing or disabled component
+   is setup drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
    this repository's tracked file in a stable checkout. With Subagents selected,
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
-   Bash approvals, Hooks, the footer with PR links, Claude bridge, and each
-   configured or requested optional feature. Check external package pins and
-   their documented config; for Bash approvals, check the reviewer settings;
+   Escape Continue, Bash approvals, Hooks, the footer with PR links, Claude bridge,
+   and each configured or requested optional feature. For Escape Continue, compare
+   selected entrypoints with [its configuration requirements](#escape-continue),
+   read-only. Check external package pins and their documented config;
+   for Bash approvals, check the reviewer settings;
    for Hooks, check its selected entrypoint is in a stable checkout and loads before
    Auto Permissions, and that no Guard entry or `guard.json` link remains;
    for the footer, check the status-extension selection and `gh` on `PATH`,
@@ -51,6 +53,20 @@ steps, and drift or unverified items, naming the relevant file and README step.
 Ask Ar before repairs or changes to personal settings; continue unrelated work
 when a setup issue does not block it. Keep machine-specific audit results out of
 tracked instructions.
+
+## Escape Continue
+
+Install this repository package using the [README install commands](../README.md#install)
+and enable `escape-continue` with `pi config`. For a local installation, add the
+stable checkout's absolute `extensions/escape-continue/index.ts` path to
+`extensions` in user-scoped `settings.json`. Preserve unrelated selections and
+obtain Ar's approval before changing personal settings.
+
+Completion: the entrypoint exists and is selected, then ask Ar to run `/reload`.
+Selection is a disk check, not evidence of loaded behavior. In the TUI, Escape
+with a queued message should stop the current run and start that message; Escape
+with no queued message should stop. See
+[behavior and compatibility limits](extension-behavior.md#escape-continue).
 
 ## Default thinking
 

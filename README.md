@@ -29,7 +29,10 @@ load; helpers and tests are not extensions.
 4. **Set up Guard**, if wanted: follow [Guard setup](#guard-setup-for-agents) to
    link the tracked rules file directly. Installation alone
    does not enable the rules.
-5. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
+5. **Install Claude bridge separately**, if wanted. Follow
+   [Claude bridge setup](docs/agent-setup.md#claude-bridge-external-package) for the
+   pinned Agent SDK provider and optional `AskClaude` delegation tool.
+6. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
    servers through its built-in MCP support and `~/.pi/agent/mcp.json`.
 
 With Subagents enabled, the system prompt includes **both** the editable selection

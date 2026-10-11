@@ -1,3 +1,7 @@
+# Local agent setup
+
+At the start of each session in this repository, read the [README agent setup checklist](README.md#agent-setup-checklist) and perform the [read-only machine setup verification](docs/agent-setup.md#verify-this-machines-setup). Recheck after setup changes. Report drift or unverified items; preserve optional choices and obtain Ar's approval before changing personal setup.
+
 # MCP configuration
 
 Use Pi's built-in MCP support. Keep personal servers and credentials in the user-scoped `~/.pi/agent/mcp.json`, preserve unrelated server entries when editing it, and ask Ar to run `/reload` afterward.

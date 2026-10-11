@@ -2,11 +2,46 @@
 
 [Back to README](../README.md)
 
-## Global system-prompt append (agent setup)
+The ordered setup checklist is in the
+[README](../README.md#agent-setup-checklist). This page covers machine verification,
+the shared prompt link, and separately installed external packages.
 
-The ordered setup checklist — install, link, optional Bash approvals, reload — is
-in the [README](../README.md#agent-setup-checklist). This page covers the two
-steps that need more than one line: the append-file link and Bash approvals.
+## Verify this machine's setup
+
+Run this read-only audit once per repository session and again after setup
+changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
+`~/.pi/agent`, and use a stable checkout when checking symlinks from a worktree.
+
+1. **Packages and selection:** use `pi list`, resource filters in `settings.json`,
+   and installed manifests to verify the repository package or intended local
+   extension paths exist and selected entrypoints resolve. Preserve the user's
+   selection; optional features that are neither configured nor requested are
+   skipped, not missing setup.
+2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
+   this repository's tracked file in a stable checkout. With Subagents selected,
+   also check its profile catalog is available; the file link alone is insufficient.
+3. **Opted-in features:** follow the corresponding README step for each configured
+   or requested feature. Check external package pins and their documented config;
+   for Bash approvals, check the reviewer settings and status-extension selection;
+   for Guard, check its selected entrypoint and readable rules link. For Claude
+   bridge, use the offline model-list command below and preserve the separate
+   `AskClaude` opt-in.
+4. **MCP and runtime limits:** verify selected MCP support uses Pi's built-in
+   extension and keep server configuration user-scoped. Treat disk configuration
+   and loaded-session state separately: require `/reload` after changes, and mark
+   sign-in, live provider requests, permission enforcement, and MCP connectivity
+   as unverified unless already observed. Configuration checks establish neither
+   credentials nor successful execution.
+
+Keep the audit read-only: inspect only setup-relevant configuration, leave
+credentials untouched, and avoid installation, sign-in, model requests, or MCP
+connections. Completion is a brief report of verified steps, skipped optional
+steps, and drift or unverified items, naming the relevant file and README step.
+Ask Ar before repairs or changes to personal settings; continue unrelated work
+when a setup issue does not block it. Keep machine-specific audit results out of
+tracked instructions.
+
+## Global system-prompt append (agent setup)
 
 [`APPEND_SYSTEM.md`](../APPEND_SYSTEM.md) is the version-controlled source for shared
 cross-project instructions, including editable subagent selection guidance.
@@ -113,3 +148,59 @@ absent guard, edits policy, or makes model calls. Its compact TUI footer puts Au
 on the directory/branch row with token/cache/cost/context usage and the main model
 below; **Pi has one footer slot**, so do not run it alongside another
 custom-footer extension. It restores the default footer on shutdown.
+
+## Claude bridge (external package)
+
+Install [Eli Dickinson's pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge)
+separately from this repository. It uses Anthropic's Claude Agent SDK to run
+Claude Code as a Pi model provider. The reviewed release is pinned:
+
+```sh
+pi install npm:pi-claude-bridge@0.9.2
+```
+
+This adds the package to `~/.pi/agent/settings.json` (or under
+`PI_CODING_AGENT_DIR`), preserving existing packages and the default model. It is
+not bundled with this repository. Review a new release before changing the pin.
+See the [source verification](research/pi-claude-bridge-sdk.md) for the SDK trace
+and verification limits; SDK use alone does not establish subscription billing
+or Anthropic approval.
+
+Verify installation and provider registration without making a model request:
+
+```sh
+pi list
+pi --offline --no-mcp --list-models claude-bridge
+```
+
+Completion: `pi list` includes `npm:pi-claude-bridge@0.9.2`, and the model list
+includes the `claude-bridge` provider. Ask the user to run `/reload`, then use
+`/model` to select a `claude-bridge/*` model. The bridge uses Claude Code's
+credentials and environment; complete any required sign-in in Claude Code,
+keeping credentials outside this repository. Exported `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, or `ANTHROPIC_BASE_URL` can override that authentication
+or endpoint; see upstream's configuration and known issues before changing them.
+
+### Optional AskClaude delegation
+
+The provider is enabled by installation; `AskClaude` remains off by default.
+Enable it only when requested. Merge these settings into
+`~/.pi/agent/claude-bridge.json` (or under `PI_CODING_AGENT_DIR`), preserving any
+existing settings:
+
+```json
+{
+  "askClaude": {
+    "enabled": true,
+    "allowFullMode": false
+  }
+}
+```
+
+After `/reload`, `AskClaude` is available when using a different provider. Its
+default mode is read-only. It uses Claude Code's native tools rather than Pi's
+tool approvals; keep full read/write/bash mode disabled unless explicitly
+requested. Leave plan settings at their defaults unless the user specifies a
+plan; Max users can set `provider.plan` to `"max"` in the same config to advertise
+the appropriate context limits. This setting does not authenticate or upgrade a
+plan.

@@ -14,7 +14,7 @@ uncertainty, coupling, and failure consequences—not task length alone.
 # File search
 
 For read-only searches in bash, use `rg` instead of `grep` and `fd` instead of
-`find`. `rg` searches recursively by default, so do not pass `-R`. Keep searches
-scoped to the narrowest relevant directory. When operating inside a repository,
-search only within that repository unless explicitly told to inspect parent
-directories or the home directory.
+`find`. `rg` searches recursively by default; do not pass `-r`, which means
+`--replace` in `rg`. Keep searches scoped to the narrowest relevant directory.
+When operating inside a repository, search only within that repository unless
+explicitly told to inspect parent directories or the home directory.

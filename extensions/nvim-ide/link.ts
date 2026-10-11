@@ -70,7 +70,6 @@ interface Pending { resolve: (value: unknown) => void; reject: (error: Error) =>
 type Content = { type: string; text?: string }[];
 
 interface LinkOptions {
-  /** A getter follows the active worktree. */
   cwd: string | (() => string);
   onChange?: (state: LinkState) => void;
   lockDir?: string;

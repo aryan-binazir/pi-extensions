@@ -68,6 +68,276 @@ test('newest lock wins among equal workspace matches', () => {
   assert.equal(chooseLock(locks, '/w', '')?.port, 2);
 });
 
+test('an equally specific new editor cannot steal a connected link', async () => {
+  const first = fakeIde(), second = fakeIde();
+  await Promise.all([once(first.server, 'listening'), once(second.server, 'listening')]);
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${first.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    const original = [...first.server.clients][0];
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await writeFile(join(dir, `${second.port()}.lock`), lockFile());
+    await link.retarget();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(link.state.port, first.port());
+    assert.equal([...first.server.clients][0], original, 'no reconnect when the incumbent still matches');
+    assert.equal(second.server.clients.size, 0);
+  } finally { await link.stop(); await first.close(); await second.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('an unreachable deeper lock falls back without repeatedly interrupting the matching editor', async () => {
+  const root = fakeIde(), dead = fakeIde();
+  await Promise.all([once(root.server, 'listening'), once(dead.server, 'listening')]);
+  const deadPort = dead.port();
+  await dead.close();
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w/branch', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${root.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    await writeFile(join(dir, `${deadPort}.lock`), lockFile({ workspaceFolders: ['/w/branch'] }));
+    await link.retarget();
+    await until(() => link.connected && link.state.port === root.port());
+    const restored = [...root.server.clients][0];
+    await Promise.all([link.retarget(), link.retarget()]);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal([...root.server.clients][0], restored);
+    assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
+  } finally { await link.stop(); await root.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('repairing a refused deeper lock connects to the more-specific editor', async () => {
+  const root = fakeIde(), branch = fakeIde();
+  await Promise.all([once(root.server, 'listening'), once(branch.server, 'listening')]);
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const link = new IdeLink({ cwd: '/w/branch', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${root.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    const branchFile = join(dir, `${branch.port()}.lock`);
+    await writeFile(branchFile, lockFile({ workspaceFolders: ['/w/branch'], authToken: 'wrong' }));
+    await link.retarget();
+    await until(() => link.connected && link.state.port === root.port());
+    await writeFile(branchFile, lockFile({ workspaceFolders: ['/w/branch'] }));
+    await until(() => link.connected && link.state.port === branch.port());
+    assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
+    assert.equal(branch.calls.at(-1)?.name, 'getOpenEditors');
+  } finally { await link.stop(); await root.close(); await branch.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('the only matching editor recovers after a temporary WebSocket refusal without a lock update', async () => {
+  let available = false, refusals = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { if (!available) refusals++; return available; } });
+  server.on('connection', socket => socket.on('message', raw => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { capabilities: {}, serverInfo: { name: 'claudecode-neovim' } } }));
+  }));
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 80, alive: () => true });
+  try {
+    await writeFile(join(dir, `${port}.lock`), lockFile());
+    link.start();
+    await until(() => refusals > 0);
+    available = true;
+    await until(() => link.connected);
+    assert.equal(link.state.port, port);
+  } finally {
+    await link.stop();
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('initialize failures keep the ordinary reconnect backoff', async () => {
+  let connections = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  server.on('connection', socket => {
+    connections++;
+    socket.on('message', raw => {
+      const message = JSON.parse(raw.toString());
+      if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'not ready' } }));
+    });
+  });
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 700, alive: () => true });
+  try {
+    await writeFile(join(dir, `${port}.lock`), lockFile());
+    link.start();
+    await until(() => connections === 1);
+    await new Promise(resolve => setTimeout(resolve, 350));
+    assert.equal(connections, 1, 'initialization errors do not use the 200ms fallback retry');
+    await until(() => connections === 2);
+  } finally {
+    await link.stop();
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+for (const failure of ['error', 'timeout'] as const) test(`a deeper editor's initialize ${failure} falls back to a healthy editor`, async () => {
+  let attempts = 0;
+  const broken = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  broken.on('connection', socket => {
+    attempts++;
+    socket.on('message', raw => {
+      const message = JSON.parse(raw.toString());
+      if (failure === 'error' && message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'not ready' } }));
+    });
+  });
+  const healthy = fakeIde();
+  await Promise.all([once(broken, 'listening'), once(healthy.server, 'listening')]);
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (broken.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w/branch', lockDir: dir, retryMs: 80, requestTimeoutMs: 40, alive: () => true });
+  try {
+    await writeFile(join(dir, `${healthy.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    await writeFile(join(dir, `${port}.lock`), lockFile({ workspaceFolders: ['/w/branch'] }));
+    await link.retarget();
+    await until(() => attempts > 0);
+    await until(() => link.connected && link.state.port === healthy.port());
+    await link.retarget();
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(attempts, 1, 'failed initialization is excluded while a healthy fallback exists');
+    assert.equal(link.state.port, healthy.port());
+  } finally {
+    await link.stop(); await healthy.close();
+    for (const client of broken.clients) client.terminate();
+    await new Promise<void>(done => broken.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('unrelated lock updates cannot starve a sole editor retry deadline', async () => {
+  let available = false, refusals = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { if (!available) refusals++; return available; } });
+  server.on('connection', socket => socket.on('message', raw => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { capabilities: {}, serverInfo: { name: 'claudecode-neovim' } } }));
+  }));
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 300, alive: () => true });
+  let noise: Promise<void> | undefined;
+  try {
+    await writeFile(join(dir, `${port}.lock`), lockFile());
+    link.start();
+    await until(() => refusals > 0);
+    available = true;
+    noise = (async () => {
+      for (let i = 0; i < 8; i++) {
+        await writeFile(join(dir, '12345.lock'), lockFile({ workspaceFolders: ['/elsewhere'], revision: i }));
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    })();
+    await until(() => link.connected, 650);
+    assert.equal(link.state.port, port);
+  } finally {
+    await noise;
+    await link.stop();
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('updated incumbent workspace metadata remains sticky against equally specific editors', async () => {
+  const first = fakeIde(), second = fakeIde();
+  await Promise.all([once(first.server, 'listening'), once(second.server, 'listening')]);
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  let cwd = '/w/a';
+  const link = new IdeLink({ cwd: () => cwd, lockDir: dir, alive: () => true });
+  try {
+    const firstFile = join(dir, `${first.port()}.lock`);
+    await writeFile(firstFile, lockFile({ workspaceFolders: ['/w/a'] }));
+    link.start();
+    await until(() => link.connected);
+    cwd = '/w/b';
+    await writeFile(firstFile, lockFile({ workspaceFolders: ['/w/b'] }));
+    await link.retarget();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await writeFile(join(dir, `${second.port()}.lock`), lockFile({ workspaceFolders: ['/w/b'] }));
+    await link.retarget();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(link.state.port, first.port());
+    assert.equal(second.server.clients.size, 0);
+  } finally { await link.stop(); await first.close(); await second.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a populated lock-directory replacement retargets a connected editor', async () => {
+  const first = fakeIde(), deeper = fakeIde();
+  await Promise.all([once(first.server, 'listening'), once(deeper.server, 'listening')]);
+  const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const dir = join(root, 'ide'), replacement = join(root, 'replacement');
+  await mkdir(dir); await mkdir(replacement);
+  const link = new IdeLink({ cwd: '/w/branch', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${first.port()}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    await writeFile(join(replacement, `${deeper.port()}.lock`), lockFile({ workspaceFolders: ['/w/branch'] }));
+    await rename(dir, join(root, 'old'));
+    await rename(replacement, dir);
+    await until(() => link.connected && link.state.port === deeper.port());
+  } finally { await link.stop(); await first.close(); await deeper.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('failed-lock retry expiry preserves a healthy fallback still initializing', async () => {
+  let connections = 0, refusals = 0;
+  const timers = new Set<NodeJS.Timeout>();
+  const healthy = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  healthy.on('connection', socket => {
+    const attempt = ++connections;
+    socket.on('message', raw => {
+      const message = JSON.parse(raw.toString());
+      if (message.method !== 'initialize') return;
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        if (socket.readyState === 1) socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { capabilities: {}, serverInfo: { name: 'claudecode-neovim' } } }));
+      }, attempt === 1 ? 0 : 200);
+      timers.add(timer);
+    });
+  });
+  const refused = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { refusals++; return false; } });
+  await Promise.all([once(healthy, 'listening'), once(refused, 'listening')]);
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const healthyPort = (healthy.address() as { port: number }).port;
+  const refusedPort = (refused.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w/branch', lockDir: dir, retryMs: 60, requestTimeoutMs: 500, alive: () => true });
+  try {
+    await writeFile(join(dir, `${healthyPort}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    await writeFile(join(dir, `${refusedPort}.lock`), lockFile({ workspaceFolders: ['/w/branch'] }));
+    await link.retarget();
+    await until(() => refusals > 0);
+    await until(() => link.connected && link.state.port === healthyPort);
+    assert.equal(connections, 2);
+    assert.equal(refusals, 1);
+  } finally {
+    await link.stop();
+    for (const timer of timers) clearTimeout(timer);
+    for (const server of [healthy, refused]) {
+      for (const client of server.clients) client.terminate();
+      await new Promise<void>(done => server.close(() => done()));
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('an invalid port lock does not hide a valid IDE lock', async () => {
   const ide = fakeIde();
   await once(ide.server, 'listening');

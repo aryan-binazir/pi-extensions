@@ -31,6 +31,8 @@ export default function nvimIde(pi: ExtensionAPI): void {
   let ctx: ExtensionContext | undefined;
   let seenEditor = false;
   let followFailed = false;
+  let workspaceCwd = () => '';
+  let followCwd: string | undefined;
   const warn = (message: string) => { try { if (ctx?.hasUI) ctx.ui.notify(message, 'warning'); } catch {} };
   let pendingFollow: { args: Record<string, unknown>; at: number } | undefined;
   let followTimer: NodeJS.Timeout | undefined;
@@ -39,15 +41,18 @@ export default function nvimIde(pi: ExtensionAPI): void {
     if (followTimer) clearTimeout(followTimer);
     followTimer = undefined;
     pendingFollow = undefined;
+    followCwd = undefined;
     const controller = inFlight;
     inFlight = undefined;
     controller?.abort();
   };
   const scheduleFollow = () => {
+    if (followCwd !== undefined && followCwd !== workspaceCwd()) { cancelFollow(); return; }
     if (!following() || !pendingFollow || !link?.connected || followTimer || inFlight) return;
     followTimer = setTimeout(() => {
       followTimer = undefined;
       const current = link, destination = pendingFollow;
+      if (followCwd !== workspaceCwd()) { cancelFollow(); return; }
       if (!following() || !destination || !current?.connected) return;
       pendingFollow = undefined;
       if (Date.now() - destination.at > replayAgeMs) return;
@@ -73,11 +78,11 @@ export default function nvimIde(pi: ExtensionAPI): void {
     }, followWindowMs);
     followTimer.unref();
   };
-  const editPaths = new Map<string, string>();
+  const editPaths = new Map<string, { path: string; cwd: string }>();
   const activeCwd = (context: ExtensionContext) => getActiveCwd(context.cwd, context.sessionManager.getSessionId());
   let shown: string | undefined;
   const paint = (state: LinkState) => { const text = statusText(state); if (text === shown || !ctx?.hasUI) return; shown = text; ctx.ui.setStatus(statusKey, text); };
-  const need = (): IdeLink => { if (!link?.connected) throw new Error('No editor connected. Start Neovim with claudecode.nvim in this directory.'); return link; };
+  const need = (): IdeLink => { if (!link?.connected) throw new Error('Open Neovim with claudecode.nvim in the active worktree.'); return link; };
 
   pi.on('session_start', async (_event, context) => {
     cancelFollow();
@@ -89,7 +94,9 @@ export default function nvimIde(pi: ExtensionAPI): void {
     seenEditor = false;
     followFailed = false;
     await previous?.stop();
-    const current = new IdeLink({ cwd: context.cwd, onChange: state => {
+    const cwd = context.cwd, sessionId = context.sessionManager.getSessionId();
+    workspaceCwd = () => getActiveCwd(cwd, sessionId);
+    const current = new IdeLink({ cwd: workspaceCwd, onChange: state => {
       if (link !== current) return;
       if (state.connected) seenEditor = true;
       paint(state);
@@ -103,6 +110,8 @@ export default function nvimIde(pi: ExtensionAPI): void {
   pi.on('before_agent_start', async event => {
     const current = link;
     if (!current) return;
+    if (followCwd !== undefined && followCwd !== workspaceCwd()) cancelFollow();
+    await current.retarget();
     const batch = await current.prepareMentions();
     const notices: string[] = [];
     if (batch.undelivered) notices.push(`${batch.undelivered} editor send${batch.undelivered === 1 ? '' : 's'} could not be resolved. Re-send the file from the editor.`);
@@ -118,15 +127,20 @@ export default function nvimIde(pi: ExtensionAPI): void {
   pi.on('tool_execution_start', (event, context) => {
     if (event.toolName !== 'edit' && event.toolName !== 'write') return;
     const path = (event.args as { path?: unknown })?.path;
-    if (typeof path === 'string') editPaths.set(event.toolCallId, resolveToolPath(path, activeCwd(context)));
+    if (typeof path === 'string') {
+      const cwd = activeCwd(context);
+      editPaths.set(event.toolCallId, { path: resolveToolPath(path, cwd), cwd });
+    }
   });
   pi.on('tool_execution_end', event => {
-    const path = editPaths.get(event.toolCallId);
+    const edit = editPaths.get(event.toolCallId);
     editPaths.delete(event.toolCallId);
-    if (!path || event.isError || !following() || !seenEditor) return;
+    if (!edit || event.isError || !following() || !seenEditor) return;
+    if (followCwd !== undefined && followCwd !== edit.cwd) cancelFollow();
+    followCwd = edit.cwd;
     // Reveal only: openFile has no cursor-only position (claudecode.nvim turns lines into a Visual selection the user
     // never made), and makeFrontmost moves focus, carrying Insert mode into the file or ending terminal mode.
-    pendingFollow = { args: { filePath: path, preview: false, makeFrontmost: false }, at: Date.now() };
+    pendingFollow = { args: { filePath: edit.path, preview: false, makeFrontmost: false }, at: Date.now() };
     scheduleFollow();
   });
 
@@ -186,7 +200,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
       }
       if (words[0] === 'reconnect') { link?.reconnect(); say('Editor link: rediscovering'); return; }
       const state = link?.state;
-      if (!state?.connected) { say('Editor link: not connected. Looking for a claudecode.nvim lock file whose workspace contains this directory.', 'warning'); return; }
+      if (!state?.connected) { say('Editor link: waiting for claudecode.nvim in the active worktree.', 'warning'); return; }
       say(`Editor link: ${state.ideName} on port ${state.port}, follow ${following() ? 'on' : 'off'}${state.selection ? `, viewing ${state.selection.filePath}` : ''}`);
     },
   });

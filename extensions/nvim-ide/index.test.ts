@@ -299,7 +299,7 @@ test('a disconnected explicit open cancels the old destination before reporting 
     await commands.get('vim').handler('reconnect', ctx);
     await fire('tool_execution_start', { toolCallId: 'queued', toolName: 'write', args: { path: 'old.ts' } }, ctx);
     await fire('tool_execution_end', { toolCallId: 'queued', toolName: 'write', isError: false, result: {} }, ctx);
-    await assert.rejects(tools.get('nvim_open').execute('explicit', { path: 'new.ts' }, undefined, undefined, ctx), /No editor connected/);
+    await assert.rejects(tools.get('nvim_open').execute('explicit', { path: 'new.ts' }, undefined, undefined, ctx), /Open Neovim with claudecode.nvim in the active worktree/);
     await until(() => status.at(-1) === 'Neovim ✓');
     await new Promise(resolve => setTimeout(resolve, 150));
     await tools.get('nvim_diagnostics').execute('barrier', {}, undefined, undefined, ctx);
@@ -446,9 +446,9 @@ test('editor tools resolve paths, and a closed editor clears status, prompt and 
     await ide.close();
     await until(() => status.at(-1) === undefined);
     assert.equal(await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx), undefined);
-    await assert.rejects(tools.get('nvim_context').execute('id', {}, undefined, undefined, ctx), /No editor connected/);
+    await assert.rejects(tools.get('nvim_context').execute('id', {}, undefined, undefined, ctx), /Open Neovim with claudecode.nvim in the active worktree/);
     await commands.get('vim').handler('', ctx);
-    assert.match(notices.at(-1)!, /not connected/);
+    assert.match(notices.at(-1)!, /waiting for claudecode.nvim in the active worktree/);
   });
 });
 
@@ -717,6 +717,125 @@ test('relative editor mentions read the live editor root from a child Pi directo
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
     for (const client of server.clients) client.terminate();
     await new Promise<void>(done => server.close(() => done()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the switch turn excludes the old editor selection and relinks an existing worktree editor', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx, status }) => {
+    const worktree = join(project, '..', 'worktree');
+    await mkdir(worktree);
+    const editor = fakeIde();
+    await once(editor.server, 'listening');
+    try {
+      await writeFile(join(process.env.CLAUDE_CONFIG_DIR!, 'ide', `${editor.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [worktree], ideName: 'Neovim', authToken: token }));
+      await new Promise(resolve => setTimeout(resolve, 300));
+      ide.broadcast('selection_changed', { text: 'OLD_CHECKOUT_SELECTION', filePath: join(project, 'a.ts'), selection: { start: { line: 0, character: 0 }, end: { line: 0, character: 22 }, isEmpty: false } });
+      await until(() => status.at(-1)?.includes('a.ts') === true);
+      setActiveCwd(project, worktree, ctx.sessionManager.getSessionId());
+      const first = await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+      assert.doesNotMatch(first?.systemPrompt ?? '', /OLD_CHECKOUT_SELECTION/);
+      await until(() => editor.server.clients.size === 1 && ide.server.clients.size === 0);
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+      await until(() => ide.server.clients.size === 1 && editor.server.clients.size === 0);
+    } finally {
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      await editor.close();
+    }
+  });
+});
+
+test('a worktree without a matching editor clears the old checkout selection', async () => {
+  await withConnectedIde(async ({ ide, project, fire, ctx, status }) => {
+    const worktree = join(project, '..', 'worktree');
+    await mkdir(worktree);
+    ide.broadcast('selection_changed', { text: 'STALE_SELECTION', filePath: join(project, 'a.ts'), selection: { start: { line: 0, character: 0 }, end: { line: 0, character: 15 }, isEmpty: false } });
+    await until(() => status.at(-1)?.includes('a.ts') === true);
+    setActiveCwd(project, worktree, ctx.sessionManager.getSessionId());
+    try {
+      const first = await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+      assert.doesNotMatch(first?.systemPrompt ?? '', /STALE_SELECTION/);
+      await until(() => ide.server.clients.size === 0);
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+      await until(() => ide.server.clients.size === 1);
+    } finally { setActiveCwd(project, undefined, ctx.sessionManager.getSessionId()); }
+  });
+});
+
+test('queued follow stays within its originating worktree after a switch', async () => {
+  await withConnectedIde(async ({ project, fire, ctx }) => {
+    const worktree = join(project, '..', 'worktree');
+    await mkdir(worktree);
+    const editor = fakeIde();
+    await once(editor.server, 'listening');
+    try {
+      await writeFile(join(process.env.CLAUDE_CONFIG_DIR!, 'ide', `${editor.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [worktree], ideName: 'Neovim', authToken: token }));
+      await new Promise(resolve => setTimeout(resolve, 300));
+      await fire('tool_execution_start', { toolName: 'write', toolCallId: 'old', args: { path: 'a.ts' } }, ctx);
+      await fire('tool_execution_end', { toolName: 'write', toolCallId: 'old', isError: false }, ctx);
+      setActiveCwd(project, worktree, ctx.sessionManager.getSessionId());
+      await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+      await until(() => editor.server.clients.size === 1);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      assert.equal(editor.calls.filter(call => call.name === 'openFile').length, 0, 'old navigation is canceled, not replayed to the new editor');
+      await fire('tool_execution_start', { toolName: 'write', toolCallId: 'new', args: { path: 'fresh.ts' } }, ctx);
+      await fire('tool_execution_end', { toolName: 'write', toolCallId: 'new', isError: false }, ctx);
+      await until(() => editor.calls.some(call => call.name === 'openFile'));
+      assert.equal(editor.calls.find(call => call.name === 'openFile')?.arguments.filePath, join(worktree, 'fresh.ts'));
+    } finally {
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      await editor.close();
+    }
+  });
+});
+
+test('an editor opened in the active worktree takes over the link', async () => {
+  await withConnectedIde(async ({ ide, project, tools, ctx }) => {
+    const worktree = join(project, '..', 'worktree');
+    await mkdir(worktree);
+    const editor = fakeIde();
+    await once(editor.server, 'listening');
+    setActiveCwd(project, worktree, ctx.sessionManager.getSessionId());
+    try {
+      await writeFile(join(process.env.CLAUDE_CONFIG_DIR!, 'ide', `${editor.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [worktree], ideName: 'Neovim', authToken: token }));
+      await until(() => editor.server.clients.size === 1);
+      await until(() => ide.server.clients.size === 0);
+      await tools.get('nvim_context').execute('id', {}, undefined, undefined, ctx);
+      assert.ok(editor.calls.some(call => call.name === 'getWorkspaceFolders'));
+    } finally {
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      await editor.close();
+    }
+  });
+});
+
+test('switching to a worktree whose editor is already open links it on the next turn', async () => {
+  const editor = fakeIde();
+  await once(editor.server, 'listening');
+  const root = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const project = join(root, 'project'), worktree = join(root, 'worktree');
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const pi = fakePi();
+  const { ctx, status } = fakeCtx(project);
+  try {
+    await mkdir(join(root, 'ide'), { recursive: true });
+    await mkdir(project); await mkdir(worktree);
+    await writeFile(join(root, 'ide', `${editor.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [worktree], ideName: 'Neovim', authToken: token }));
+    process.env.CLAUDE_CONFIG_DIR = root;
+    nvimIde(pi.api as any);
+    await pi.fire('session_start', {}, ctx);
+    await settle();
+    assert.equal(editor.server.clients.size, 0);
+    setActiveCwd(project, worktree, ctx.sessionManager.getSessionId());
+    await pi.fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+    await until(() => status.includes('Neovim ✓'));
+  } finally {
+    setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+    await pi.fire('session_shutdown', {}, ctx);
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+    await editor.close();
     await rm(root, { recursive: true, force: true });
   }
 });

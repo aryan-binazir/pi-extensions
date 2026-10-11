@@ -30,7 +30,8 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    `requireDraftPr` and `blockAdminMerge` are enabled. For Claude
    bridge, use the offline model-list command below, check `provider.plan` is
    `"max"`, and preserve the separate `AskClaude` opt-in.
-4. **Scoped models:** verify every model required by [AGENTS.md](../AGENTS.md)
+4. **Thinking and scoped models:** verify [default thinking](#default-thinking),
+   then verify every model required by [AGENTS.md](../AGENTS.md)
    is included in the saved scope and resolves in the offline model list. Follow
    [scoped model setup](#required-scoped-models); report missing models as drift.
 5. **MCP and runtime limits:** verify selected MCP support uses Pi's built-in
@@ -47,6 +48,17 @@ steps, and drift or unverified items, naming the relevant file and README step.
 Ask Ar before repairs or changes to personal settings; continue unrelated work
 when a setup issue does not block it. Keep machine-specific audit results out of
 tracked instructions.
+
+## Default thinking
+
+Set `"defaultThinkingLevel": "medium"` in user-scoped `settings.json` under the
+resolved agent directory. Preserve the startup provider/model, explicit per-model
+thinking overrides, and unrelated settings. Report a missing or different value
+as drift during the read-only audit; obtain Ar's approval before editing.
+
+Completion: the saved local default is `medium`. Ask Ar to run `/reload` after
+changes; this startup default does not change the current session's effort or
+subagent profile thinking.
 
 ## Required scoped models
 

@@ -313,6 +313,7 @@ export class IdeLink {
     if (!this.started || this.retryTimer) return;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
+      if (this.socket) return;
       this.failedLocks.clear();
       void this.retarget();
     }, this.options.retryMs ?? 15000);

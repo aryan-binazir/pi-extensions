@@ -295,6 +295,49 @@ test('a populated lock-directory replacement retargets a connected editor', asyn
   } finally { await link.stop(); await first.close(); await deeper.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('failed-lock retry expiry preserves a healthy fallback still initializing', async () => {
+  let connections = 0, refusals = 0;
+  const timers = new Set<NodeJS.Timeout>();
+  const healthy = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  healthy.on('connection', socket => {
+    const attempt = ++connections;
+    socket.on('message', raw => {
+      const message = JSON.parse(raw.toString());
+      if (message.method !== 'initialize') return;
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        if (socket.readyState === 1) socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { capabilities: {}, serverInfo: { name: 'claudecode-neovim' } } }));
+      }, attempt === 1 ? 0 : 200);
+      timers.add(timer);
+    });
+  });
+  const refused = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { refusals++; return false; } });
+  await Promise.all([once(healthy, 'listening'), once(refused, 'listening')]);
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const healthyPort = (healthy.address() as { port: number }).port;
+  const refusedPort = (refused.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w/branch', lockDir: dir, retryMs: 60, requestTimeoutMs: 500, alive: () => true });
+  try {
+    await writeFile(join(dir, `${healthyPort}.lock`), lockFile());
+    link.start();
+    await until(() => link.connected);
+    await writeFile(join(dir, `${refusedPort}.lock`), lockFile({ workspaceFolders: ['/w/branch'] }));
+    await link.retarget();
+    await until(() => refusals > 0);
+    await until(() => link.connected && link.state.port === healthyPort);
+    assert.equal(connections, 2);
+    assert.equal(refusals, 1);
+  } finally {
+    await link.stop();
+    for (const timer of timers) clearTimeout(timer);
+    for (const server of [healthy, refused]) {
+      for (const client of server.clients) client.terminate();
+      await new Promise<void>(done => server.close(() => done()));
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('an invalid port lock does not hide a valid IDE lock', async () => {
   const ide = fakeIde();
   await once(ide.server, 'listening');

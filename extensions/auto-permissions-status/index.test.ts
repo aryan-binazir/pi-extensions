@@ -10,15 +10,15 @@ import { findConfigLoader, statusText, type PermissionConfig } from './adapter.t
 
 const config: PermissionConfig = {
   enabled: true, reviewAllShell: true, rules: [{}],
-  reviewer: { provider: 'openai-codex', model: 'gpt-5.6-luna', reasoningEffort: 'low', prefilter: false },
+  reviewer: { provider: 'openai-codex', model: 'gpt-6-luna', reasoningEffort: 'low' },
 };
 const commands = (root: string): ReturnType<ExtensionAPI['getCommands']> => [{
   name: 'auto-permissions', source: 'extension',
-  sourceInfo: { path: join(root, 'index.ts'), source: 'npm:@hank-warren/pi-auto-permissions@0.16.2', scope: 'user', origin: 'package' },
+  sourceInfo: { path: join(root, 'index.ts'), source: 'npm:@hank-warren/pi-auto-permissions@0.21.0', scope: 'user', origin: 'package' },
 }];
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'pi-auto-status-'));
-  await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@hank-warren/pi-auto-permissions', version: '0.16.2', type: 'module' }));
+  await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@hank-warren/pi-auto-permissions', version: '0.21.0', type: 'module' }));
   const file = join(root, 'config.json');
   await writeFile(join(root, 'config.ts'), `import {readFileSync} from 'node:fs';
 export function loadAutoPermissionsConfig() { return JSON.parse(readFileSync(${JSON.stringify(file)}, 'utf8')); }`);
@@ -49,14 +49,16 @@ test('formats on/off, rules-only, empty rules, prefilter and active-model fallba
   assert.equal(statusText({ ...config, reviewer: { ...config.reviewer!, model: '\u001b[31m\nBad\u202e' } }, undefined), 'Auto: on · ??31m?Bad? low');
 });
 
-test('requires loaded command provenance and the supported package version', async () => {
+test('requires loaded command provenance and a supported package version', async () => {
   const f = await fixture();
   try {
     assert.equal(await findConfigLoader([]), undefined);
     assert.deepEqual((await findConfigLoader(commands(f.root)))!(), config);
     const suffixed = commands(f.root); suffixed[0].name += ':2';
     assert.ok(await findConfigLoader(suffixed));
-    await writeFile(join(f.root, 'package.json'), JSON.stringify({ name: '@ogulcancelik/pi-auto-permissions', version: '0.16.2' }));
+    await writeFile(join(f.root, 'package.json'), JSON.stringify({ name: '@hank-warren/pi-auto-permissions', version: '0.16.2' }));
+    assert.deepEqual((await findConfigLoader(commands(f.root)))!(), config);
+    await writeFile(join(f.root, 'package.json'), JSON.stringify({ name: '@ogulcancelik/pi-auto-permissions', version: '0.21.0' }));
     assert.equal(await findConfigLoader(commands(f.root)), undefined);
     await writeFile(join(f.root, 'package.json'), JSON.stringify({ name: '@hank-warren/pi-auto-permissions', version: '99.0.0' }));
     await assert.rejects(findConfigLoader(commands(f.root)), /Unsupported/);

@@ -127,10 +127,10 @@ installed and enabled with the reviewer configuration below. Install it separate
 from this repository, pinned:
 
 ```sh
-pi install npm:@hank-warren/pi-auto-permissions@0.16.2
+pi install npm:@hank-warren/pi-auto-permissions@0.21.0
 ```
 
-Pi adds `"npm:@hank-warren/pi-auto-permissions@0.16.2"` to the `packages` array in
+Pi adds `"npm:@hank-warren/pi-auto-permissions@0.21.0"` to the `packages` array in
 `~/.pi/agent/settings.json`, preserving existing extensions. The pin does not
 update itself; review new versions before upgrading. Do not also load the
 upstream `@ogulcancelik/pi-auto-permissions`: overlapping guards cause duplicate
@@ -149,8 +149,7 @@ missing or ambiguous, ask Ar before writing the config.
     "provider": "MODEL_CONNECTION",
     "model": "gpt-6-luna",
     "reasoningEffort": "low",
-    "timeoutMs": 60000,
-    "prefilter": false
+    "timeoutMs": 60000
   },
   "guardianPolicy": {
     "environment": [],
@@ -162,17 +161,17 @@ missing or ambiguous, ask Ar before writing the config.
 ```
 
 Review is then on by default across sessions: every Bash command goes through the
-rules and, absent a hard deny or an explicit bypass/standing approval, Luna review
+rules and, absent a hard deny or an explicit bypass/session approval, Luna review
 at low reasoning. Complete any required sign-in for the existing model connection
 and make sure `gpt-6-luna` is available; the main agent can use a different model. The
-prefilter stays off because it uses minimal reasoning whatever the full-review
-setting says. `guardianPolicy` takes natural-language preferences: trusted
-infrastructure in `environment`, scoped exceptions in `allow`, restrictions
+prefilter was removed in 0.17.0; every guarded command receives a full review.
+`guardianPolicy` takes natural-language preferences: trusted infrastructure in
+`environment`, scoped exceptions in `allow`, restrictions
 needing explicit authorization in `softDeny`, unconditional ones in `hardDeny`.
 They supplement the built-in policy and never override deterministic hard denies.
 **Coverage is Bash only, not an OS sandbox:** edits, writes, MCP and desktop tools
 are not gated, this repository's isolated subagents do not inherit the plugin, and
-standing approvals can still bypass review.
+explicit trusted-group bypasses and session approvals can still bypass review.
 
 Enable this repository's **`auto-permissions-status`** extension with `pi config`
 for a footer indicator; for a local checkout, add the absolute path to
@@ -181,8 +180,9 @@ for a footer indicator; for a local checkout, add the absolute path to
 `Auto: on · Luna low`, `Auto: off`, `Auto: unavailable` (Hank's settings command
 is not loaded), `Auto: config error` (the package's own validator rejected the
 config), or `Auto: unavailable (adapter)` — the companion's adapter is tested
-against **0.16.2** only. `/auto-permissions` inspects the settings. It reports
-loaded-plugin status, not that any given review will succeed, and never imports an
+against **0.21.0** and retains **0.16.2** compatibility. Other versions are
+reported as unavailable until reviewed. `/auto-permissions` inspects the settings.
+It reports loaded-plugin status, not that any given review will succeed, and never imports an
 absent guard, edits policy, or makes model calls. Its compact TUI footer puts Auto
 on the directory/branch row with token/cache/cost/context usage and the main model
 below; **Pi has one footer slot**, so do not run it alongside another

@@ -34,15 +34,15 @@ notice so known hooks keep running.
 
 Built-in protection, outside the switches, lets agents switch hooks on but never
 off. It covers every `personal-settings/hooks.yaml` resolved through symlinks, so a
-worktree copy may enable a hook its own branch adds. Edits are simulated with Pi's
-edit tool over in-memory operations, preserving its line-ending and fuzzy-matching
-behavior. A change is allowed only if every enabled hook stays enabled, and for the
-live file only if it names existing hooks. Pi checks every call in a parallel batch
-before running any, so each switches file accepts one change at a time until its
-result arrives or the turn ends. Bash that names the file in a path-like word, or
-anywhere alongside a command substitution, may only read, diff, add and commit it,
-without redirections, assignments or options that run programs or write output.
-Spaced `gh` and `git` arguments are titles, bodies and messages, not paths.
+worktree copy may enable a hook its own branch adds. Agents change it only with
+whole-file writes, allowed if every enabled hook stays enabled and, for the live
+file, only existing hooks are named. Edits are refused: Pi checks every call in a
+parallel batch, and nested or subagent calls, before any runs, and an edit applies
+to whatever the file holds by then. Each allowed write keeps every hook that was
+on when it was checked, so no interleaving switches one off. Bash that names the
+file outside a `git` message or `gh` title or body, or anywhere alongside a command
+substitution, may only read, diff, add and commit it, without redirections,
+assignments or options that run programs or write output.
 
 On the Pi 1.0.2 runtime (tests use the 0.99.1 SDK), `tool_call` handlers run in
 load order and stop at the first block, and settings `extensions` entries load

@@ -8,7 +8,7 @@ export interface Harness {
   dir: string;
   configure(yaml: string): Promise<void>;
   emit(event: string, payload: Record<string, unknown>): Promise<any>;
-  call(toolName: string, input: Record<string, unknown>, toolCallId?: string): Promise<any>;
+  call(toolName: string, input: Record<string, unknown>): Promise<any>;
   notices: string[];
 }
 
@@ -30,7 +30,7 @@ export async function withHooks(catalog: Hook[], yaml: string | undefined, body:
       dir,
       configure: text => writeFile(configPath, text),
       emit,
-      call: (toolName, input, toolCallId = 'call') => emit('tool_call', { toolName, toolCallId, input }),
+      call: (toolName, input) => emit('tool_call', { toolName, toolCallId: 'call', input }),
       notices,
     });
   } finally {

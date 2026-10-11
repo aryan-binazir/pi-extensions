@@ -8,7 +8,8 @@ export function parseSwitches(text: string): Map<string, boolean> {
   const { frontmatter, body } = parseFrontmatter(`---\n${text}\n---\n`);
   const keys = Object.keys(frontmatter);
   const hooks = (frontmatter as Record<string, unknown>).hooks ?? {};
-  if (body || keys.length !== 1 || keys[0] !== 'hooks' || typeof hooks !== 'object' || Array.isArray(hooks)) {
+  // Tagged YAML collections such as !!omap and !!set parse to Map or Set, whose entries Object.entries cannot see.
+  if (body || keys.length !== 1 || keys[0] !== 'hooks' || typeof hooks !== 'object' || Object.getPrototypeOf(hooks) !== Object.prototype) {
     throw new Error('Expected a single top-level "hooks" mapping of hook ids to true or false');
   }
   const switches = new Map<string, boolean>();

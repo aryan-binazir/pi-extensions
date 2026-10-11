@@ -29,7 +29,7 @@ async function ask(check: () => Awaitable<string | undefined>): Promise<{ said?:
 
 export function createHooks({ catalog, configPath }: HooksOptions) {
   const known = new Set(catalog.map(hook => hook.id));
-  const protection = createProtection(configPath, known);
+  const protect = createProtection(configPath, known);
   let reportedUnloaded = '';
   const switchedOn = async <T extends Hook>(type: T['type'], ctx: ExtensionContext): Promise<T[]> => {
     const { enabled, unloaded } = await loadSwitches(configPath, known);
@@ -44,7 +44,7 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
   return function hooks(pi: ExtensionAPI) {
     pi.on('tool_call', async (event, ctx) => {
       const call = toolCall(event, ctx);
-      const { said: unprotected, failed: protectionFailed } = await ask(() => protection.check(call, event.toolCallId));
+      const { said: unprotected, failed: protectionFailed } = await ask(() => protect(call));
       if (protectionFailed !== undefined) return { block: true, reason: label('protection', `The check failed, so the call was blocked: ${protectionFailed}`) };
       if (unprotected) return { block: true, reason: label('protection', unprotected) };
       let blockers: BlockHook[];
@@ -62,7 +62,6 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
     });
 
     pi.on('tool_result', async (event, ctx) => {
-      protection.finish(event.toolCallId);
       const advisers = await switchedOn<AdviseHook>('advise', ctx).catch(() => []);
       const call = toolCall(event, ctx);
       const notes = [];
@@ -76,8 +75,7 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
 
     // Continuations are capped per human prompt; extension-sent input must not reset the cap.
     let continuations = 0;
-    pi.on('session_start', () => { continuations = 0; protection.clear(); });
-    pi.on('turn_end', () => protection.clear());
+    pi.on('session_start', () => { continuations = 0; });
     pi.on('input', event => { if (event.source !== 'extension') continuations = 0; });
     pi.on('agent_before_settle', async (event, ctx) => {
       if (event.outcome !== 'completed') return;

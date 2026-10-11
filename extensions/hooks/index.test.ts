@@ -124,6 +124,7 @@ test('a missing or malformed config blocks every tool except reads and questions
     const invalid = [
       undefined, '', 'hooks: [block-echo]\n', 'hooks:\n  block-echo: yes\n', 'other: {}\nhooks: {}\n',
       'hooks:\n  block-echo: true\n  block-echo: false\n', 'hooks: {}\n---\nhooks:\n  block-echo: false\n', '{',
+      'hooks: !!omap\n  - block-echo: true\n', 'hooks: !!set\n  ? block-echo\n',
     ];
     for (const text of invalid) {
       if (text !== undefined) await configure(text);

@@ -97,10 +97,11 @@ Hooks run before Auto Permissions: a blocked call never reaches its reviewer, an
 calls that hooks allow are still reviewed. Subagents load hooks before any other
 child extension and do not start without them.
 
-**Protection.** Agents can switch hooks on but never off. Edit and write calls to
-any `personal-settings/hooks.yaml`, in every checkout and through symlinks, are
-allowed only when every enabled hook stays enabled and the live file names only
-existing hooks, one change at a time; Bash may only read, diff, add and commit it.
+**Protection.** Agents can switch hooks on but never off. They change any
+`personal-settings/hooks.yaml`, in every checkout and through symlinks, only by
+writing the whole file, allowed when every enabled hook stays enabled and the live
+file names only existing hooks. Edits are refused because they apply to whatever
+the file holds when they run. Bash may only read, diff, add and commit it.
 Only the user switches hooks off, removes them, or repairs an invalid file. A
 missing or invalid live file blocks every tool except `read`, `grep`, `find`, `ls`
 and `questionnaire` until the user fixes it.

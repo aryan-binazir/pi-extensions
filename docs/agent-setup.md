@@ -16,16 +16,18 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    and installed manifests to verify the repository package or intended local
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
-   skipped, not missing setup. Claude bridge is required; a missing installation
-   is setup drift, not a skipped optional feature.
+   skipped, not missing setup. Bash approvals, Guard, and Claude bridge are
+   required; a missing or disabled component is setup drift, not a skipped
+   optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
    this repository's tracked file in a stable checkout. With Subagents selected,
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
-   Claude bridge and each configured or requested optional feature. Check external
-   package pins and their documented config;
+   Bash approvals, Guard, Claude bridge, and each configured or requested optional
+   feature. Check external package pins and their documented config;
    for Bash approvals, check the reviewer settings and status-extension selection;
-   for Guard, check its selected entrypoint and readable rules link. For Claude
+   for Guard, check its selected entrypoint, readable rules link, and that both
+   `requireDraftPr` and `blockAdminMerge` are enabled. For Claude
    bridge, use the offline model-list command below and preserve the separate
    `AskClaude` opt-in.
 4. **MCP and runtime limits:** verify selected MCP support uses Pi's built-in
@@ -89,8 +91,9 @@ link. This is an explicit local setup step, not an automatic install hook.
 
 ## Automatic Bash permissions (external package)
 
-This setup uses [Hank Warren's Auto Permissions](https://www.npmjs.com/package/@hank-warren/pi-auto-permissions),
-installed separately from this repository, pinned:
+This setup requires [Hank Warren's Auto Permissions](https://www.npmjs.com/package/@hank-warren/pi-auto-permissions)
+installed and enabled with the reviewer configuration below. Install it separately
+from this repository, pinned:
 
 ```sh
 pi install npm:@hank-warren/pi-auto-permissions@0.16.2

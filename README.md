@@ -21,12 +21,12 @@ load; helpers and tests are not extensions.
    this checkout's [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) into
    `~/.pi/agent/APPEND_SYSTEM.md`. Use a stable checkout; preserve existing files.
    Package installation does **not** create the link.
-3. **Install Bash approvals separately**, if wanted. Follow
+3. **Install Bash approvals separately (required).** Follow
    [Automatic Bash permissions](docs/agent-setup.md#automatic-bash-permissions-external-package)
    to configure Hank Warren's Auto Permissions with `openai-codex/gpt-6-luna`
    at low reasoning. This repo's status extension is only its display companion,
    not the approval engine.
-4. **Set up Guard**, if wanted: follow [Guard setup](#guard-setup-for-agents) to
+4. **Set up Guard (required).** Follow [Guard setup](#guard-setup-for-agents) to
    link the tracked rules file directly. Installation alone
    does not enable the rules.
 5. **Install Claude bridge separately (required).** Follow
@@ -64,6 +64,7 @@ Pi's model/thinking save bindings remain unchanged.
 
 ## Guard setup for agents
 
+Guard is required for this setup, with both tracked rules enabled.
 Enable Guard with `pi config`, or add the stable checkout's
 `extensions/guard/index.ts` to `extensions` in your Pi settings. Preserve other
 entries. Guard reads `$PI_CODING_AGENT_DIR/guard.json` (default

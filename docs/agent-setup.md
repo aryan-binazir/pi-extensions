@@ -16,12 +16,14 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    and installed manifests to verify the repository package or intended local
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
-   skipped, not missing setup.
+   skipped, not missing setup. Claude bridge is required; a missing installation
+   is setup drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
    this repository's tracked file in a stable checkout. With Subagents selected,
    also check its profile catalog is available; the file link alone is insufficient.
-3. **Opted-in features:** follow the corresponding README step for each configured
-   or requested feature. Check external package pins and their documented config;
+3. **Required and opted-in features:** follow the corresponding README step for
+   Claude bridge and each configured or requested optional feature. Check external
+   package pins and their documented config;
    for Bash approvals, check the reviewer settings and status-extension selection;
    for Guard, check its selected entrypoint and readable rules link. For Claude
    bridge, use the offline model-list command below and preserve the separate
@@ -151,8 +153,9 @@ custom-footer extension. It restores the default footer on shutdown.
 
 ## Claude bridge (external package)
 
-Install [Eli Dickinson's pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge)
-separately from this repository. It uses Anthropic's Claude Agent SDK to run
+Installing [Eli Dickinson's pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge)
+is required for this setup. Install it separately from this repository. Only the
+`AskClaude` delegation tool is optional. The bridge uses Anthropic's Claude Agent SDK to run
 Claude Code as a Pi model provider. The reviewed release is pinned:
 
 ```sh

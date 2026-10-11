@@ -258,10 +258,10 @@ session directory whenever the footer's branch or directory changes, after each
 agent turn, and after agent Bash calls that use `git` or `gh`; it does not poll.
 Commands Ar runs with `!` or `!!` update the link after the next turn or branch
 change. Without a PR, `gh`, sign-in or network, the footer shows no link and no
-error. The PR must come from the same repository and have the same head branch
-name as the local branch, so fork PRs, repositories whose `upstream` remote gh
-picks as the base, and local branches tracking a differently named remote branch
-show no link. The link follows Pi's branch for the session directory, not a
+error. gh searches the repository it resolves as the base (it prefers an
+`upstream` remote) for a PR whose head branch has the local branch's name; PRs
+in other repositories, and local branches tracking a differently named remote
+branch, show no link. The link follows Pi's branch for the session directory, not a
 checkout selected mid-session with `/worktree`.
 
 Completion: `auto-permissions-status` is selected and

@@ -11,7 +11,6 @@ export interface PullRequests {
 }
 
 const stateWords = { MERGED: ' merged', CLOSED: ' closed', OPEN: '' };
-// Like Pi's own links, the number is plain text where the terminal cannot show hyperlinks.
 export const pullRequestLabel = (pr: PullRequest) => (getCapabilities().hyperlinks ? hyperlink(`#${pr.number}`, pr.url) : `#${pr.number}`)
   + (pr.state === 'OPEN' && pr.isDraft ? ' draft' : stateWords[pr.state]);
 
@@ -24,7 +23,6 @@ const webUrl = (url: unknown) => {
   const parsed = new URL(url);
   return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : undefined;
 };
-// The footer prints the URL inside a terminal escape sequence, so every field is checked before it is trusted.
 // Pi reports a signal-terminated process as exit code 0, so `killed` must be checked too.
 // gh reads a numeric or #N selector as a PR number even after `--`, so the PR must be this branch's.
 const parse = (result: ExecResult, branch: string): PullRequest | undefined => {
@@ -40,15 +38,11 @@ export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): 
   let key: string | undefined, target: { cwd: string; branch: string } | undefined;
   let current: PullRequest | undefined, controller: AbortController | undefined;
   let generation = 0, disposed = false;
-  // Only the newest lookup may answer; starting one aborts the one before.
   const lookup = () => {
     controller?.abort(); controller = undefined;
     const version = ++generation;
     if (!target) return;
     const { cwd, branch } = target, signal = (controller = new AbortController()).signal;
-    // gh is asked about the branch the footer shows, not whatever HEAD is by the time it runs;
-    // `--` keeps an odd branch name from being read as a flag.
-    // Any failure, whether no PR, no gh, signed out or offline, shows the footer without a link.
     const args = ['pr', 'view', '--json', 'number,url,state,isDraft,headRefName', '--', branch];
     void new Promise<ExecResult>(resolve => resolve(exec('gh', args, { cwd, signal, timeout: 10000 })))
       .then(result => parse(result, branch)).catch(() => undefined).then(pr => {

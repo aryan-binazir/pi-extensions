@@ -11,7 +11,6 @@ import { pullRequests } from './pull-request.ts';
 const theme = { fg: (_color: string, text: string) => text } as Theme;
 const usage = { input: 1000, output: 100, cacheRead: 1000, cacheWrite: 0, totalTokens: 2100,
   cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 } };
-// A stand-in for `gh`: records each call and answers it when the test says so.
 function fakeGh() {
   const calls: { command: string; args: string[]; options: Parameters<ExtensionAPI['exec']>[2]; answer(result: Partial<ExecResult>): Promise<void> }[] = [];
   const exec: ExtensionAPI['exec'] = (command, args, options) => new Promise(resolve => {
@@ -138,6 +137,7 @@ test('narrow footers never exceed the width or leave a PR link open, and the bra
     if (lastLink >= 0) assert.ok(row.startsWith('\u001b]8;;\u001b\\', lastLink), `link closed at ${width}`);
     const visible = stripVTControlCharacters(row), at = visible.indexOf('#');
     if (at >= 0) assert.equal(getOsc8LinkAtColumn(row, at), prUrl, `link target at ${width}`);
+    if (at >= 0) assert.match(visible, /\) #42 /, `the number is whole or absent at ${width}: ${visible}`);
     assert.doesNotMatch(row.replaceAll(`\u001b]8;;${prUrl}\u001b\\`, '').replaceAll('\u001b]8;;\u001b\\', ''), /\u001b(?!\[)|\u001b\[2J|\u202e/);
   }
   assert.match(stripVTControlCharacters(f.footer.render(140)[0]), /\(evil branch\) #42 • Task/);

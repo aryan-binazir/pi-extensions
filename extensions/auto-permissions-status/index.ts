@@ -12,7 +12,6 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   let previous: string | undefined;
   let generation = 0;
   let ownsFooter = false;
-  // Owned by the footer component, which disposes it; kept here so turns and Bash calls can refresh it.
   let prs: PullRequests | undefined;
 
   const refresh = () => {
@@ -69,7 +68,6 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   pi.on('model_select', adopt);
   pi.on('agent_start', adopt);
   pi.on('session_shutdown', stop);
-  // A turn or a git/gh command may have opened, merged or closed the PR.
   pi.on('agent_end', () => { prs?.refresh(); });
   pi.on('tool_result', event => {
     if (isBashToolResult(event) && /\b(git|gh)\b/.test(String(event.input.command ?? ''))) prs?.refresh();

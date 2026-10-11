@@ -85,10 +85,8 @@ export function permissionFooter(
       }
       const cwd = homeCwd;
       const branch = data.getGitBranch(), name = ctx.sessionManager.getSessionName();
-      // The PR link is the one escape sequence the path row keeps, built only from validated gh fields.
-      const pr = pullRequests?.get(raw, branch);
-      const path = clean(`${cwd}${branch ? ` (${branch})` : ''}`) + (pr ? ` ${pullRequestLabel(pr)}` : '')
-        + clean(name ? ` • ${name}` : '');
+      const base = clean(`${cwd}${branch ? ` (${branch})` : ''}`), tail = clean(name ? ` • ${name}` : '');
+      const pr = pullRequests?.get(raw, branch), label = pr && pullRequestLabel(pr);
       const statuses = data.getExtensionStatuses();
       const auto = clean(statuses.get(STATUS_KEY) ?? 'Auto: unavailable');
       const { totals, cacheHit, usage } = sessionStats(ctx);
@@ -107,7 +105,7 @@ export function permissionFooter(
       let model = clean(ctx.model?.id ?? 'no-model');
       if (ctx.model?.reasoning) model += ` • ${ctx.thinkingLevel ?? 'off'}`;
       if (ctx.model && data.getAvailableProviderCount() > 1) model = `(${clean(ctx.model.provider)}) ${model}`;
-      const pathRow = theme.fg('dim', path), autoRow = theme.fg('dim', auto);
+      const pathRow = theme.fg('dim', base + (label ? ` ${label}` : '') + tail), autoRow = theme.fg('dim', auto);
       const statsRow = theme.fg('dim', stats.join(' ')), modelRow = theme.fg('dim', model);
       const other = [...statuses].filter(([key]) => key !== STATUS_KEY).sort(([a], [b]) => a.localeCompare(b));
       const others = other.length ? other.map(([, text]) => clean(text)).join(' ') : undefined;
@@ -115,7 +113,13 @@ export function permissionFooter(
         + `.${modelRow.length}.${others?.length ?? -1}|`
         + pathRow + autoRow + statsRow + modelRow + (others ?? '');
       if (key === cacheKey) return cacheLines;
-      const lines = [rightAligned(pathRow, autoRow, width), rightAligned(statsRow, modelRow, width)];
+      let pathLine = rightAligned(pathRow, autoRow, width);
+      if (label) {
+        const wholeLabel = `${base} ${stripVTControlCharacters(label)}`, shown = stripVTControlCharacters(pathLine);
+        const labelCut = !shown.startsWith(wholeLabel) || ![undefined, ' '].includes(shown[wholeLabel.length]);
+        if (labelCut) pathLine = rightAligned(theme.fg('dim', base + tail), autoRow, width);
+      }
+      const lines = [pathLine, rightAligned(statsRow, modelRow, width)];
       if (others !== undefined) lines.push(truncateToWidth(others, Math.max(0, width), ''));
       cacheKey = key; cacheLines = lines;
       return lines;

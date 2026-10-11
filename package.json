@@ -10,12 +10,14 @@
   ],
   "files": [
     "extensions",
+    "personal-settings",
     "docs",
     "APPEND_SYSTEM.md",
     "README.md"
   ],
   "pi": {
     "extensions": [
+      "./extensions/hooks/index.ts",
       "./extensions/questionnaire/index.ts",
       "./extensions/todo/index.ts",
       "./extensions/effort/index.ts",
@@ -28,14 +30,13 @@
       "./extensions/fast-mode/index.ts",
       "./extensions/auto-caffeinate/index.ts",
       "./extensions/auto-permissions-status/index.ts",
-      "./extensions/nvim-ide/index.ts",
-      "./extensions/guard/index.ts"
+      "./extensions/nvim-ide/index.ts"
     ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "node --import tsx --test extensions/*/*.test.ts tests/*.test.ts",
+    "test": "node --import tsx --test extensions/*/*.test.ts extensions/*/*/*.test.ts tests/*.test.ts",
     "check": "npm run typecheck && npm run lint && npm test"
   },
   "engines": {

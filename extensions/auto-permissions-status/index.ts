@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { findConfigLoader, statusText, type ConfigLoader } from './adapter.ts';
 
 import { permissionFooter, STATUS_KEY as KEY } from './footer.ts';
+import { pullRequests, type PullRequests } from './pull-request.ts';
 
 export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
@@ -11,6 +12,8 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   let previous: string | undefined;
   let generation = 0;
   let ownsFooter = false;
+  // Owned by the footer component, which disposes it; kept here so turns and Bash calls can refresh it.
+  let prs: PullRequests | undefined;
 
   const refresh = () => {
     if (!context?.hasUI) return;
@@ -31,7 +34,7 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
     if (context?.hasUI) context.ui.setStatus(KEY, undefined);
     if (ownsFooter) context?.ui.setFooter(undefined);
     ownsFooter = false;
-    context = undefined; loader = undefined; previous = undefined;
+    context = undefined; loader = undefined; previous = undefined; prs = undefined;
   };
 
   pi.on('session_start', async (_event, ctx) => {
@@ -39,7 +42,11 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
     if (!ctx.hasUI) return;
     context = ctx;
     if (ctx.mode === 'tui') {
-      ctx.ui.setFooter((tui, theme, data) => permissionFooter(() => context ?? ctx, theme, data, () => tui.requestRender()));
+      ctx.ui.setFooter((tui, theme, data) => {
+        const requestRender = () => tui.requestRender();
+        prs = pullRequests((command, args, options) => pi.exec(command, args, options), requestRender);
+        return permissionFooter(() => context ?? ctx, theme, data, requestRender, prs);
+      });
       ownsFooter = true;
     }
     unavailable = 'Auto: unavailable';
@@ -62,4 +69,9 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   pi.on('model_select', adopt);
   pi.on('agent_start', adopt);
   pi.on('session_shutdown', stop);
+  // A turn or a git/gh command may have opened, merged or closed the PR.
+  pi.on('agent_end', () => { prs?.refresh(); });
+  pi.on('tool_result', event => {
+    if (event.toolName === 'bash' && /\b(git|gh)\b/.test(String(event.input.command ?? ''))) prs?.refresh();
+  });
 }

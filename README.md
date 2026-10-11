@@ -29,14 +29,17 @@ load; helpers and tests are not extensions.
 4. **Enable Hooks (required).** Follow [Hooks setup](#hooks) to select the
    extension, load it before Auto Permissions, and remove Guard where it is still
    installed.
-5. **Install Claude bridge separately (required).** Follow
+5. **Enable the footer with PR links (required).** Select this repo's
+   `auto-permissions-status` extension and install the GitHub CLI signed in to
+   GitHub; see [footer setup](docs/agent-setup.md#footer-with-pr-links).
+6. **Install Claude bridge separately (required).** Follow
    [Claude bridge setup](docs/agent-setup.md#claude-bridge-external-package) for the
    pinned Agent SDK provider and its required Max plan setting. Only the `AskClaude`
    delegation tool is optional.
-6. **Configure the required scoped models.** Follow
+7. **Configure the required scoped models.** Follow
    [scoped model setup](docs/agent-setup.md#required-scoped-models), preserving this
    machine's existing model connections.
-7. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
+8. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
    servers through its built-in MCP support and `~/.pi/agent/mcp.json`.
 
 With Subagents enabled, the system prompt includes **both** the editable selection
@@ -59,7 +62,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
-| Auto Permissions status | Displays the separately installed Bash-approval plugin's status. |
+| [Auto Permissions status](docs/agent-setup.md#footer-with-pr-links) | Compact footer with the separately installed Bash-approval plugin's status and a clickable link to the branch's GitHub PR. |
 | [Neovim IDE](docs/nvim-ide.md) | Connects to claudecode.nvim: bounded request snapshots, reliable editor sends, editor tools, and coalesced live follow with reconnect replay. |
 
 See [session/editor behavior and worktree boundaries](docs/extension-behavior.md)

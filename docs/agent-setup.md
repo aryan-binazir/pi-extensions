@@ -16,18 +16,20 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    and installed manifests to verify the repository package or intended local
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
-   skipped, not missing setup. Bash approvals, Hooks, and Claude bridge are
-   required; a missing or disabled component is setup drift, not a skipped
-   optional feature.
+   skipped, not missing setup. Bash approvals, Hooks, the footer with PR links,
+   and Claude bridge are required; a missing or disabled component is setup
+   drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
    this repository's tracked file in a stable checkout. With Subagents selected,
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
-   Bash approvals, Hooks, Claude bridge, and each configured or requested optional
-   feature. Check external package pins and their documented config;
-   for Bash approvals, check the reviewer settings and status-extension selection;
+   Bash approvals, Hooks, the footer with PR links, Claude bridge, and each
+   configured or requested optional feature. Check external package pins and
+   their documented config; for Bash approvals, check the reviewer settings;
    for Hooks, check its selected entrypoint is in a stable checkout and loads before
-   Auto Permissions, and that no Guard entry or `guard.json` link remains. For Claude
+   Auto Permissions, and that no Guard entry or `guard.json` link remains;
+   for the footer, check the status-extension selection and that `gh auth status`
+   reports a signed-in account. For Claude
    bridge, use the offline model-list command below, check `provider.plan` is
    `"max"`, and preserve the separate `AskClaude` opt-in.
 4. **Thinking and scoped models:** verify [default thinking](#default-thinking),
@@ -219,7 +221,42 @@ It reports loaded-plugin status, not that any given review will succeed, and nev
 absent guard, edits policy, or makes model calls. Its compact TUI footer puts Auto
 on the directory/branch row with token/cache/cost/context usage and the main model
 below; **Pi has one footer slot**, so do not run it alongside another
-custom-footer extension. It restores the default footer on shutdown.
+custom-footer extension. It restores the default footer on shutdown. The same
+footer links the branch's pull request; see
+[footer with PR links](#footer-with-pr-links).
+
+## Footer with PR links
+
+This setup requires the `auto-permissions-status` extension above: it owns Pi's
+footer and puts a clickable link to the branch's GitHub pull request after the
+branch name. Do not also install a PR-status or footer package; they compete for
+the one footer slot or have their links stripped.
+
+The link needs the [GitHub CLI](https://cli.github.com/) on `PATH`, signed in to
+the repository's host. Install `gh` with the machine's package manager (for
+example `pacman -S github-cli` or `brew install gh`), then ask Ar to run
+`gh auth login`; agents must not sign in or handle tokens. Verify:
+
+```sh
+gh --version
+gh auth status
+```
+
+After `/reload`, a branch with a pull request shows its number after the branch:
+`~/repo (branch) #42 • Session`. Open PRs show only the number; draft, merged
+and closed PRs add that word. The number is an OSC 8 hyperlink, so Ctrl-click
+(Cmd-click on macOS) opens the PR in terminals that support hyperlinks; tmux
+also needs `set -as terminal-features ',*:hyperlinks'`. The extension runs
+`gh pr view --json number,url,state,isDraft -- <branch>` in the session
+directory when the footer first shows a branch, after each agent turn, and
+after agent Bash calls that use `git` or `gh`; it does not poll. Without a PR,
+`gh`, sign-in or network, the footer shows no link and no error. It follows
+Pi's branch for the session directory, not a checkout selected mid-session
+with `/worktree`.
+
+Completion: `auto-permissions-status` is selected and `gh auth status` reports
+a signed-in account. Ask Ar to run `/reload`; a branch with an open PR then
+shows its number in the footer.
 
 ## Claude bridge (external package)
 

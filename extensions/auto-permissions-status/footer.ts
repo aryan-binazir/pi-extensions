@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from 'node:util';
 import type { Usage } from '@earendil-works/pi-ai';
 import type { ContextUsage, ExtensionContext, ReadonlyFooterDataProvider, Theme } from '@earendil-works/pi-coding-agent';
 import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { pullRequestLabel, type PullRequests } from './pull-request.ts';
 
 export const STATUS_KEY = 'auto-permissions-status';
 // Every escape sequence stripVTControlCharacters removes starts with a Cc code
@@ -28,6 +29,7 @@ export function permissionFooter(
   theme: Theme,
   data: ReadonlyFooterDataProvider,
   requestRender: () => void,
+  pullRequests?: PullRequests,
 ) {
   const unsubscribe = data.onBranchChange(requestRender);
   let disposed = false;
@@ -69,7 +71,7 @@ export function permissionFooter(
   let rawCwd: string | undefined, homeCwd = '';
   return {
     invalidate() { cacheKey = undefined; memo = undefined; },
-    dispose() { if (!disposed) { disposed = true; unsubscribe(); } },
+    dispose() { if (!disposed) { disposed = true; unsubscribe(); pullRequests?.dispose(); } },
     render(width: number): string[] {
       const ctx = context();
       const raw = ctx.sessionManager.getCwd();
@@ -83,7 +85,10 @@ export function permissionFooter(
       }
       const cwd = homeCwd;
       const branch = data.getGitBranch(), name = ctx.sessionManager.getSessionName();
-      const path = clean(`${cwd}${branch ? ` (${branch})` : ''}${name ? ` • ${name}` : ''}`);
+      // The PR link is the one escape sequence the path row keeps, built only from validated gh fields.
+      const pr = pullRequests?.get(raw, branch);
+      const path = clean(`${cwd}${branch ? ` (${branch})` : ''}`) + (pr ? ` ${pullRequestLabel(pr)}` : '')
+        + clean(name ? ` • ${name}` : '');
       const statuses = data.getExtensionStatuses();
       const auto = clean(statuses.get(STATUS_KEY) ?? 'Auto: unavailable');
       const { totals, cacheHit, usage } = sessionStats(ctx);

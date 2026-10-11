@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 import { test } from 'node:test';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import statusExtension from './index.ts';
@@ -28,18 +29,19 @@ export function loadAutoPermissionsConfig() { return JSON.parse(readFileSync(${J
   await writeFile(file, JSON.stringify(fixtureConfig));
   return { root, file, close: () => rm(root, { recursive: true, force: true }) };
 }
-function harness(list: ReturnType<ExtensionAPI['getCommands']> = []) {
+function harness(list: ReturnType<ExtensionAPI['getCommands']> = [], exec?: ExtensionAPI['exec']) {
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   const statuses: (string | undefined)[] = [];
   let discoveryCount = 0;
   statusExtension({
     on: (name: string, hook: (event: unknown, ctx: ExtensionContext) => unknown) => handlers.set(name, hook),
     getCommands: () => { discoveryCount++; return list; },
+    exec,
   } as unknown as ExtensionAPI);
   const ctx = { hasUI: true, ui: { setStatus: (key: string, text: string | undefined) => {
     assert.equal(key, 'auto-permissions-status'); statuses.push(text);
   } } } as unknown as ExtensionContext;
-  return { statuses, ctx, emit: (name: string, context = ctx) => handlers.get(name)!({}, context), discoveryCount: () => discoveryCount };
+  return { statuses, ctx, emit: (name: string, context = ctx, event: object = {}) => handlers.get(name)!(event, context), discoveryCount: () => discoveryCount };
 }
 
 test('formats on/off, rules-only, empty rules, prefilter and active-model fallback', () => {
@@ -169,6 +171,41 @@ test('TUI installs and restores the compact footer; RPC retains its status API',
   await h.emit('session_start', { ...ctx, mode: 'rpc' });
   assert.equal(footers.length, count, 'RPC must not install a TUI footer');
   await h.emit('session_shutdown');
+});
+
+test('the TUI footer links the branch PR and asks gh again after each turn and each git or gh Bash call', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const asked: string[][] = [];
+  const exec: ExtensionAPI['exec'] = async (_command, args) => {
+    asked.push(args);
+    return { stdout: JSON.stringify({ number: 42, url: 'https://github.com/owner/repo/pull/42', state: 'OPEN', isDraft: false, headRefName: 'feature' }), stderr: '', code: 0, killed: false };
+  };
+  const h = harness([], exec);
+  let factory: Parameters<ExtensionContext['ui']['setFooter']>[0];
+  const ctx = { ...h.ctx, mode: 'tui' as const, model: undefined, getContextUsage: () => undefined, modelRegistry: { isUsingOAuth: () => false },
+    sessionManager: { getCwd: () => '/workspace/repo', getSessionName: () => undefined, getSessionId: () => 'session', getLeafId: () => null, getEntries: () => [] },
+    ui: { ...h.ctx.ui, setFooter: (next: typeof factory) => { factory = next; } } } as unknown as ExtensionContext;
+  await h.emit('session_start', ctx);
+  let renders = 0;
+  const data = { getGitBranch: () => 'feature', getAvailableProviderCount: () => 1, getExtensionStatuses: () => new Map(), onBranchChange: () => () => {} };
+  const footer = factory!({ requestRender: () => { renders++; } } as never, { fg: (_color: string, text: string) => text } as never, data);
+  footer.render(120);
+  await new Promise(setImmediate);
+  assert.equal(renders, 1);
+  assert.match(stripVTControlCharacters(footer.render(120)[0]), /^\/workspace\/repo \(feature\) #42\s+Auto: unavailable$/);
+  const bash = (command: string) => h.emit('tool_result', ctx, { type: 'tool_result', toolName: 'bash', input: { command } });
+  await h.emit('agent_end', ctx);
+  assert.equal(asked.length, 2);
+  for (const command of ['git switch -c next', 'gh pr create --draft', 'cd sub && git push']) await bash(command);
+  assert.equal(asked.length, 5);
+  for (const command of ['ls .github', 'echo digit', 'rg legit']) await bash(command);
+  await h.emit('tool_result', ctx, { type: 'tool_result', toolName: 'read', input: { path: 'git' } });
+  assert.equal(asked.length, 5, 'unrelated tool calls ask nothing');
+  await h.emit('session_shutdown', ctx);
+  await h.emit('agent_end', ctx);
+  await bash('git status');
+  assert.equal(asked.length, 5, 'a stopped session asks nothing');
+  footer.dispose?.();
 });
 
 test('shutdown during async discovery prevents late status and timers', async t => {

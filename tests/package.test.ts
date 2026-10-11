@@ -8,6 +8,7 @@ import { setActiveCwd } from '../extensions/worktree/routing.ts';
 
 const root = resolve(import.meta.dirname, '..');
 const expected = new Map<string, { tools: string[]; commands: string[]; shortcuts: string[] }>([
+  ['hooks', {tools: [], commands: [], shortcuts: []}],
   ['questionnaire', {tools: ['questionnaire'], commands: [], shortcuts: []}],
   ['todo', {tools: ['todo_write'], commands: [], shortcuts: ['alt+t']}],
   ['effort', {tools: [], commands: ['effort'], shortcuts: []}],
@@ -21,7 +22,6 @@ const expected = new Map<string, { tools: string[]; commands: string[]; shortcut
   ['auto-caffeinate', {tools: [], commands: [], shortcuts: []}],
   ['auto-permissions-status', {tools: [], commands: [], shortcuts: []}],
   ['nvim-ide', {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['vim'], shortcuts: []}],
-  ['guard', {tools: [], commands: [], shortcuts: []}],
 ]);
 const intended = [...expected.keys()];
 
@@ -95,14 +95,14 @@ test('todo and questionnaire execute in a real headless session behind no tool g
 });
 
 
-async function packageSession(run: (h: { session: any; runner: any; temp: string; agentDir: string }) => Promise<void>): Promise<void> {
+async function packageSession(run: (h: { session: any; runner: any; temp: string; agentDir: string }) => Promise<void>, packages: string[] = [root]): Promise<void> {
   const temp = await mkdtemp(join(tmpdir(), 'pi-package-session-'));
   const agentDir = join(temp, 'agent');
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
-    const settingsManager = SettingsManager.inMemory({packages: [root]});
+    const settingsManager = SettingsManager.inMemory({packages});
     const resourceLoader = new DefaultResourceLoader({cwd: temp, agentDir, settingsManager, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true});
     await resourceLoader.reload();
     const modelRuntime = await ModelRuntime.create({authPath: join(agentDir, 'auth.json'), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false});
@@ -134,17 +134,22 @@ test('todo context composes with structured subagent and worktree prompt section
   } finally { setActiveCwd(temp, undefined, sessionId); }
 }));
 
-test('the guard blocks a non-draft PR through the bash tool that worktree supplies in a real session', async () => packageSession(async ({runner, agentDir}) => {
-  await mkdir(agentDir, {recursive: true});
-  await writeFile(join(agentDir, 'guard.json'), JSON.stringify({requireDraftPr: true, blockAdminMerge: true}));
-  const decision = await runner.emitToolCall({type: 'tool_call', toolName: 'bash', toolCallId: 'g', input: {command: 'gh pr create --title x'}});
-  assert.deepEqual(decision, {block: true, reason: 'Create PRs as drafts. Add --draft; mark ready with gh pr ready after review.'});
-}));
-
-
-test('the guard blocks reordered administrator merge flags through worktree Bash in a real session', async () => packageSession(async ({runner, agentDir}) => {
-  await mkdir(agentDir, {recursive: true});
-  await writeFile(join(agentDir, 'guard.json'), JSON.stringify({requireDraftPr: true, blockAdminMerge: true}));
-  const decision = await runner.emitToolCall({type: 'tool_call', toolName: 'bash', toolCallId: 'g-order', input: {command: 'gh pr --body Note merge 42 --admin --squash'}});
-  assert.deepEqual(decision, {block: true, reason: 'Merge without --admin. Satisfy the repository review and check requirements instead of bypassing them.'});
-}));
+test('hooks block before a later package such as Auto Permissions sees the call, and allowed calls still reach it', async () => {
+  const fixtures = await mkdtemp(join(tmpdir(), 'pi-hooks-order-'));
+  const reviewer = join(fixtures, 'reviewer.ts');
+  const seen = Symbol.for('pi-extensions.test.reviewed-tool-calls');
+  const reviewed = (globalThis as Record<symbol, string[]>)[seen] = [];
+  try {
+    await writeFile(reviewer, `export default pi => pi.on('tool_call', event => { globalThis[Symbol.for('pi-extensions.test.reviewed-tool-calls')].push(event.toolCallId); });\n`);
+    await packageSession(async ({runner}) => {
+      const blocked = await runner.emitToolCall({type: 'tool_call', toolName: 'bash', toolCallId: 'protected', input: {command: 'rm personal-settings/hooks.yaml'}});
+      assert.equal(blocked?.block, true);
+      assert.match(blocked.reason, /^\[hooks: protection\] /);
+      assert.equal(await runner.emitToolCall({type: 'tool_call', toolName: 'bash', toolCallId: 'allowed', input: {command: 'git status'}}), undefined);
+      assert.deepEqual(reviewed, ['allowed']);
+    }, [root, reviewer]);
+  } finally {
+    delete (globalThis as Record<symbol, unknown>)[seen];
+    await rm(fixtures, {recursive: true, force: true});
+  }
+});

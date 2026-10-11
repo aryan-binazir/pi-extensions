@@ -1,30 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
 import { test } from 'node:test';
-import guard from './index.ts';
+import { withHooks } from '../test-support.ts';
+import { catalog } from './index.ts';
 
-async function withGuard(config: unknown, body: (call: (command: string, toolName?: string) => Promise<any>, path: string) => Promise<void>) {
-  const dir = await mkdtemp(join(tmpdir(), 'pi-guard-'));
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = dir;
-  const handlers: Record<string, (...args: any[]) => any> = {};
-  try {
-    const path = join(dir, 'guard.json');
-    if (config !== undefined) await writeFile(path, JSON.stringify(config));
-    guard({ on: (name: string, handler: any) => { handlers[name] = handler; } } as any);
-    await body(async (command, toolName = 'bash') => handlers.tool_call({ type: 'tool_call', toolName, toolCallId: 'test', input: { command } }, {}), path);
-  } finally {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
-    await rm(dir, { recursive: true, force: true });
-  }
+const both = 'hooks:\n  draft-prs: true\n  no-admin-merge: true\n';
+
+async function withGh(body: (call: (command: string) => Promise<any>) => Promise<void>, yaml = both) {
+  await withHooks([...catalog], yaml, ({ call }) => body(command => call('bash', { command })));
 }
 
-const enabled = { requireDraftPr: true, blockAdminMerge: true };
-
 test('draft creation and unrelated commands remain available', async () => {
-  await withGuard(enabled, async call => {
+  await withGh(async call => {
     for (const command of ['gh pr create --draft', 'gh pr create -d', 'gh pr ready', 'git status']) {
       assert.equal(await call(command), undefined, command);
     }
@@ -32,7 +18,7 @@ test('draft creation and unrelated commands remain available', async () => {
 });
 
 test('shell quoting and command boundaries distinguish execution from literal text', async () => {
-  await withGuard(enabled, async call => {
+  await withGh(async call => {
     for (const command of [
       'cd repo && gh pr create', 'echo ok; gh pr merge --admin',
       'gh pr create --title "a --draft title"', 'gh pr create --title --draft',
@@ -50,7 +36,7 @@ test('shell quoting and command boundaries distinguish execution from literal te
 });
 
 test('ANSI-C and locale quoting reveal gh flags, and undecoded ANSI-C escapes block gh commands', async () => {
-  await withGuard(enabled, async call => {
+  await withGh(async call => {
     for (const command of [
       "gh pr merge $'--admin'", 'gh pr merge $"--admin"', "gh pr merge --ad'min'", "gh pr merge $'--'admin",
       "gh pr merge $'--admin=true'", 'gh $\'pr\' $"merge" 42 --admin', "$'gh' pr merge --admin",
@@ -65,7 +51,7 @@ test('ANSI-C and locale quoting reveal gh flags, and undecoded ANSI-C escapes bl
       String.raw`gh pr create --draft --body $'\cA'`, String.raw`gh pr create --draft --title $'\z'`,
       String.raw`$'\x67h' pr merge --admin`, String.raw`/usr/bin/$'\x67'h pr merge --admin`,
     ]) assert.deepEqual(await call(command), {
-      block: true, reason: "Guard cannot check numeric, Unicode, control, or unknown $'...' escapes in gh commands. Use plain quotes.",
+      block: true, reason: "[hooks: draft-prs] Hooks cannot check numeric, Unicode, control, or unknown $'...' escapes in gh commands. Use plain quotes.",
     }, command);
     for (const command of [
       "gh pr create $'--draft' --title t --body b", 'gh pr create $"--draft"', "gh pr create -$'d'",
@@ -79,7 +65,7 @@ test('ANSI-C and locale quoting reveal gh flags, and undecoded ANSI-C escapes bl
 });
 
 test('boolean values, repeated flags, and short clusters follow gh option semantics', async () => {
-  await withGuard(enabled, async call => {
+  await withGh(async call => {
     for (const command of [
       'gh pr create --draft --draft=false', 'gh pr create -d=false',
       'gh pr create -ft--draft', 'gh pr create --web', 'gh pr create --dry-run',
@@ -95,7 +81,7 @@ test('boolean values, repeated flags, and short clusters follow gh option semant
 });
 
 test('flags before command words still enforce draft creation and administrator merge rules', async () => {
-  await withGuard(enabled, async call => {
+  await withGh(async call => {
     for (const command of [
       'gh pr --title Fix create --body Details',
       'gh --title=Fix pr create --body Details',
@@ -108,7 +94,7 @@ test('flags before command words still enforce draft creation and administrator 
 });
 
 test('reordered options retain values, boolean precedence, and command selection', async () => {
-  await withGuard(enabled, async call => {
+  await withGh(async call => {
     for (const command of [
       'gh --title pr pr create',
       'gh pr --body merge create',
@@ -147,26 +133,8 @@ test('reordered options retain values, boolean precedence, and command selection
   });
 });
 
-test('config is opt-in, independently switches rules, and reports invalid settings on Bash only', async () => {
-  await withGuard(undefined, async call => assert.equal(await call('gh pr create'), undefined));
-  await withGuard({ requireDraftPr: false, blockAdminMerge: true }, async (call, path) => {
-    assert.equal(await call('gh pr create'), undefined);
-    assert.equal((await call('gh pr merge --admin'))?.block, true);
-    await writeFile(path, JSON.stringify({ requireDraftPr: true, blockAdminMerge: false }));
-    assert.equal((await call('gh pr create'))?.block, true);
-    assert.equal(await call('gh pr merge --admin'), undefined);
-    for (const invalid of ['{', 'null', '{}', '{"requireDraftPr":"true","blockAdminMerge":true}', '{"requireDraftPr":true,"blockAdminMerge":true,"typo":true}']) {
-      await writeFile(path, invalid);
-      const result = await call('git status');
-      assert.equal(result?.block, true, invalid);
-      assert.match(result.reason, /guard.json/);
-      assert.equal(await call('anything', 'read'), undefined);
-    }
-  });
-});
-
-test('repository selection, assignments, absolute gh paths and the new alias retain the guard', async () => {
-  await withGuard(enabled, async call => {
+test('repository selection, assignments, absolute gh paths and the new alias stay covered', async () => {
+  await withGh(async call => {
     for (const command of ['gh -R org/repo pr create', 'gh pr --repo=org/repo create', 'GH_HOST=github.com /usr/bin/gh pr merge --admin', 'gh pr new', 'gh pr create --help=false']) {
       assert.equal((await call(command))?.block, true, command);
     }
@@ -176,23 +144,8 @@ test('repository selection, assignments, absolute gh paths and the new alias ret
   });
 });
 
-test('short help works, browser creation gives a usable correction, and broken config links block', async () => {
-  await withGuard(enabled, async (call, path) => {
-    assert.equal(await call('gh pr create -h'), undefined);
-    assert.equal(await call('gh pr merge --admin -h'), undefined);
-    for (const command of ['gh pr create --web', 'gh pr create -w --draft']) {
-      assert.deepEqual(await call(command), { block: true, reason: 'gh cannot create drafts with --web. Drop --web/-w and pass --draft.' });
-    }
-    await rm(path);
-    await symlink(join(path, '..', 'missing.json'), path);
-    const result = await call('gh pr create');
-    assert.equal(result?.block, true);
-    assert.match(result.reason, /guard.json.*symlink/);
-  });
-});
-
 test('inherited help flags, mixed web aliases, and literal Bash whitespace keep their semantics', async () => {
-  await withGuard(enabled, async call => {
+  await withGh(async call => {
     for (const command of [
       'gh --help=false pr merge --admin', 'gh pr --help=false merge --admin',
       'gh --help=false pr create', 'gh pr --help=false create',
@@ -207,28 +160,40 @@ test('inherited help flags, mixed web aliases, and literal Bash whitespace keep 
 });
 
 test('administrator merges are blocked without blocking normal merges', async () => {
-  await withGuard(enabled, async call => {
+  await withGh(async call => {
     assert.deepEqual(await call('gh pr merge 42 --admin'), {
-      block: true, reason: 'Merge without --admin. Satisfy the repository review and check requirements instead of bypassing them.',
+      block: true, reason: '[hooks: no-admin-merge] Merge without --admin. Satisfy the repository review and check requirements instead of bypassing them.',
     });
     assert.equal(await call('gh pr merge 42 --squash -d'), undefined);
   });
 });
 
 test('non-draft PR creation is blocked with a corrective instruction', async () => {
-  await withGuard(enabled, async call => {
+  await withGh(async call => {
     assert.deepEqual(await call('gh pr create --title "Fix" --body "Details"'), {
-      block: true, reason: 'Create PRs as drafts. Add --draft; mark ready with gh pr ready after review.',
+      block: true, reason: '[hooks: draft-prs] Create PRs as drafts. Add --draft; mark ready with gh pr ready after review.',
     });
   });
 });
 
-test('the tracked guard.json, linked as the README documents, parses and enables both rules', async () => {
-  await withGuard(undefined, async (call, path) => {
-    await symlink(resolve(import.meta.dirname, 'guard.json'), path);
-    assert.deepEqual(
-      [await call('git status'), (await call('gh pr create'))?.block, (await call('gh pr merge --admin'))?.block],
-      [undefined, true, true],
-    );
+test('each gh rule switches independently and ignores other tools', async () => {
+  await withGh(async call => {
+    assert.equal(await call('gh pr create'), undefined);
+    assert.equal((await call('gh pr merge --admin'))?.block, true);
+  }, 'hooks:\n  no-admin-merge: true\n');
+  await withGh(async call => {
+    assert.equal((await call('gh pr create'))?.block, true);
+    assert.equal(await call('gh pr merge --admin'), undefined);
+  }, 'hooks:\n  draft-prs: true\n');
+  await withHooks([...catalog], both, async ({ call }) => assert.equal(await call('read', { path: 'gh pr create' }), undefined));
+});
+
+test('short help works and browser creation gives a usable correction', async () => {
+  await withGh(async call => {
+    assert.equal(await call('gh pr create -h'), undefined);
+    assert.equal(await call('gh pr merge --admin -h'), undefined);
+    for (const command of ['gh pr create --web', 'gh pr create -w --draft']) {
+      assert.deepEqual(await call(command), { block: true, reason: '[hooks: draft-prs] gh cannot create drafts with --web. Drop --web/-w and pass --draft.' });
+    }
   });
 });

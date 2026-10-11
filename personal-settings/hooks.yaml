@@ -1,0 +1,6 @@
+# Switch hooks on (true) or off (false). Hooks that are not listed are off.
+# Agents may switch hooks on; only the user switches them off.
+hooks:
+  draft-prs: true
+  no-admin-merge: true
+  rg-replace-flag: true

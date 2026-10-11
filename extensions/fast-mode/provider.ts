@@ -1,10 +1,38 @@
-import { clampThinkingLevel, type Api, type Model, type Provider } from '@earendil-works/pi-ai';
-// This helper needs a filesystem runtime dependency; Pi's virtual root alias
-// does not resolve import.meta.resolve or arbitrary package subpaths.
-let buildBaseOptions: typeof import('@earendil-works/pi-ai/api/simple-options').buildBaseOptions | undefined;
-try {
- buildBaseOptions = (await import(new URL('./api/simple-options.js', import.meta.resolve('@earendil-works/pi-ai')).href)).buildBaseOptions;
-} catch { buildBaseOptions = undefined; }
+import { lazyStream, type Api, type Model, type Provider } from '@earendil-works/pi-ai';
+type SimpleOptions=Parameters<Provider['streamSimple']>[2];
+function prioritySimple(original:Provider,model:Model<Api>,context:Parameters<Provider['streamSimple']>[1],options:SimpleOptions) {
+ let reportedTier=false;
+ return lazyStream(model,async()=>{
+  const source=original.streamSimple(model,context,{
+   ...options,
+   async onPayload(payload,current) {
+    const priority={...payload as Record<string,unknown>,service_tier:'priority'};
+    const replacement=await options?.onPayload?.(priority,current);
+    return replacement===undefined?priority:replacement;
+   },
+   async onProviderStreamEvent(data,current) {
+    if(data && typeof data==='object' && 'type' in data && ['response.completed','response.done','response.incomplete'].includes(String(data.type))) {
+     const response='response' in data?data.response:undefined;
+     reportedTier=!!response && typeof response==='object' && 'service_tier' in response && response.service_tier!=null;
+    }
+    await options?.onProviderStreamEvent?.(data,current);
+   },
+  });
+  return {
+   async *[Symbol.asyncIterator]() {
+    for await(const event of source) {
+     if(!reportedTier && (event.type==='done'||event.type==='error')) {
+      const message=event.type==='done'?event.message:event.error;
+      const multiplier=model.id==='gpt-5.5'?2.5:2;
+      const cost=message.usage.cost;
+      for(const key of ['input','output','cacheRead','cacheWrite','total'] as const)cost[key]*=multiplier;
+     }
+     yield event;
+    }
+   },
+  };
+ });
+}
 const WRAPPED=Symbol.for('pi-interactive:fast-provider');
 export const FAST_SUFFIX='~fast';
 type CatalogEntry=Provider extends {getAllModels?:()=>readonly (infer Entry)[]} ? Entry : {id:string;type?:string};
@@ -23,8 +51,6 @@ function supported(model:Model<Api>):boolean {
  return result;
 }
 export function withFastModels(original:Provider,view:Provider=original):CatalogProvider {
- if(!buildBaseOptions)return original;
- const baseOptions=buildBaseOptions;
  if((original as Provider & { [WRAPPED]?: boolean })[WRAPPED] || original.getModels().some(model=>model.id.endsWith(FAST_SUFFIX))) return original;
  const eligible=new Map(view.getModels().filter(supported).map(model=>[model.id,model]));
  const bases=original.getModels();
@@ -67,11 +93,7 @@ export function withFastModels(original:Provider,view:Provider=original):Catalog
   streamSimple(model,context,options){
    const resolved=resolve(model);
    if(!resolved.fast)return original.streamSimple(model,context,options);
-   const level=options?.reasoning?clampThinkingLevel(resolved.model,options.reasoning):undefined;
-   return original.stream(resolved.model,context,{
-    ...baseOptions(resolved.model,context,options,options?.apiKey),
-    toolChoice:options?.toolChoice,reasoningEffort:level==='off'?undefined:level,serviceTier:'priority',
-   });
+   return prioritySimple(original,resolved.model,context,options);
   },
  };
  Object.defineProperty(wrapped,WRAPPED,{value:true});

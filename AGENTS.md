@@ -6,6 +6,8 @@ During setup, ensure the scoped models include `gpt-6.1-sol`, `gpt-6-luna`, and 
 
 Escape Continue is required. During setup, [install and enable it](docs/agent-setup.md#escape-continue), preserving other extension selections.
 
+Repair Auto Permissions version drift using the required pin and upgrade procedure in [Automatic Bash permissions](docs/agent-setup.md#automatic-bash-permissions-external-package). Reporting a mismatch alone is not completion.
+
 # MCP configuration
 
 Use Pi's built-in MCP support. Keep personal servers and credentials in the user-scoped `~/.pi/agent/mcp.json`, preserve unrelated server entries when editing it, and ask Ar to run `/reload` afterward.

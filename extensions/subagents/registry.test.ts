@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { piInvocation, SubagentRegistry, validateTask } from './registry.ts';
 import { assertChildTask } from './scope.ts';
@@ -252,4 +253,20 @@ test('cancellation escalation does not signal the process group again at exit or
     assert.equal((await task.done).status, 'cancelled');
     assert.deepEqual(kill.mock.calls.map(call => call.arguments), [[-pid, 'SIGTERM'], [-pid, 'SIGKILL']]);
   } finally { await registry.shutdown(); }
+});
+
+test('every child loads the hooks extension before any other and refuses to start without it', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'subagent-hooks-'));
+  try {
+    const hooks = fileURLToPath(new URL('../hooks/index.ts', import.meta.url));
+    const extra = join(cwd, 'extra.ts');
+    await writeFile(extra, 'export default () => {};');
+    const spec = await validateTask({task: 'Check', cwd, tools: [], extensions: [extra, hooks]}, []);
+    const args = piInvocation(spec).args;
+    assert.deepEqual(args.flatMap((arg, i) => arg === '-e' ? [args[i + 1]] : []), [await realpath(hooks), await realpath(extra)]);
+    await symlink(join(cwd, 'gone.ts'), join(cwd, 'dangling.ts'));
+    for (const missing of [join(cwd, 'missing.ts'), join(cwd, 'dangling.ts')]) {
+      await assert.rejects(validateTask({task: 'Check', cwd, tools: []}, [], undefined, missing), /Subagents do not start without the hooks extension/);
+    }
+  } finally { await rm(cwd, {recursive: true, force: true}); }
 });

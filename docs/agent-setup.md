@@ -16,20 +16,23 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    and installed manifests to verify the repository package or intended local
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
-   skipped, not missing setup. Escape Continue, Bash approvals, Guard, and Claude
-   bridge are required; a missing or disabled component is setup drift, not a
-   skipped optional feature.
+   skipped, not missing setup. Escape Continue, Bash approvals, Hooks, the footer
+   with PR links, and Claude bridge are required; a missing or disabled component
+   is setup drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
    this repository's tracked file in a stable checkout. With Subagents selected,
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
-   Escape Continue, Bash approvals, Guard, Claude bridge, and each configured or
-   requested optional feature. For Escape Continue, compare selected entrypoints
-   with [its configuration requirements](#escape-continue), read-only. Check external
-   package pins and their documented config;
-   for Bash approvals, check the reviewer settings and status-extension selection;
-   for Guard, check its selected entrypoint, readable rules link, and that both
-   `requireDraftPr` and `blockAdminMerge` are enabled. For Claude
+   Escape Continue, Bash approvals, Hooks, the footer with PR links, Claude bridge,
+   and each configured or requested optional feature. For Escape Continue, compare
+   selected entrypoints with [its configuration requirements](#escape-continue),
+   read-only. Check external package pins and their documented config;
+   for Bash approvals, check the reviewer settings;
+   for Hooks, check its selected entrypoint is in a stable checkout and loads before
+   Auto Permissions, and that no Guard entry or `guard.json` link remains;
+   for the footer, check the status-extension selection and `gh` on `PATH`,
+   reporting a failing `gh auth status --active --hostname github.com` as
+   unverified sign-in rather than drift. For Claude
    bridge, use the offline model-list command below, check `provider.plan` is
    `"max"`, and preserve the separate `AskClaude` opt-in.
 4. **Thinking and scoped models:** verify [default thinking](#default-thinking),
@@ -143,10 +146,19 @@ installed and enabled with the reviewer configuration below. Install it separate
 from this repository, pinned:
 
 ```sh
-pi install npm:@hank-warren/pi-auto-permissions@0.16.2
+pi install npm:@hank-warren/pi-auto-permissions@0.21.0
 ```
 
-Pi adds `"npm:@hank-warren/pi-auto-permissions@0.16.2"` to the `packages` array in
+**Required version: 0.21.0.** During the read-only audit, compare both the
+configured package pin (`pi list` / `settings.json`) and the installed package's
+`package.json` version. After the audit, if either differs, back up settings and
+policy, run the pinned install command above, and follow the upgrade procedure
+below. This specific version repair is preapproved; preserve unrelated settings
+and policy exceptions. A general extensions update does not advance a pinned
+version. Completion requires both versions to be 0.21.0, the compatible footer
+adapter to be installed, config validation to pass, and the user to run `/reload`.
+
+Pi adds `"npm:@hank-warren/pi-auto-permissions@0.21.0"` to the `packages` array in
 `~/.pi/agent/settings.json`, preserving existing extensions. The pin does not
 update itself; review new versions before upgrading. Do not also load the
 upstream `@ogulcancelik/pi-auto-permissions`: overlapping guards cause duplicate
@@ -161,12 +173,12 @@ missing or ambiguous, ask Ar before writing the config.
   "enabled": true,
   "reviewAllShell": true,
   "rules": ["$defaults"],
+  "reviewConcurrency": 1,
   "reviewer": {
     "provider": "MODEL_CONNECTION",
     "model": "gpt-6-luna",
     "reasoningEffort": "low",
-    "timeoutMs": 60000,
-    "prefilter": false
+    "timeoutMs": 60000
   },
   "guardianPolicy": {
     "environment": [],
@@ -178,31 +190,99 @@ missing or ambiguous, ask Ar before writing the config.
 ```
 
 Review is then on by default across sessions: every Bash command goes through the
-rules and, absent a hard deny or an explicit bypass/standing approval, Luna review
+rules and, absent a hard deny, trusted-group bypass or session approval, Luna review
 at low reasoning. Complete any required sign-in for the existing model connection
-and make sure `gpt-6-luna` is available; the main agent can use a different model. The
-prefilter stays off because it uses minimal reasoning whatever the full-review
-setting says. `guardianPolicy` takes natural-language preferences: trusted
+and make sure `gpt-6-luna` is available; the main agent can use a different model.
+`reviewConcurrency: 1` preserves serial reviews; the package default is four.
+The prefilter was removed in 0.17.0, so every reviewed command gets full review.
+`guardianPolicy` takes natural-language preferences: trusted
 infrastructure in `environment`, scoped exceptions in `allow`, restrictions
 needing explicit authorization in `softDeny`, unconditional ones in `hardDeny`.
 They supplement the built-in policy and never override deterministic hard denies.
 **Coverage is Bash only, not an OS sandbox:** edits, writes, MCP and desktop tools
 are not gated, this repository's isolated subagents do not inherit the plugin, and
-standing approvals can still bypass review.
+explicit trusted-group bypasses and session approvals can still bypass review.
 
-Enable this repository's **`auto-permissions-status`** extension with `pi config`
-for a footer indicator; for a local checkout, add the absolute path to
+### Upgrading from 0.16.2
+
+0.21.0 includes the [long-command approval fix](https://github.com/hank-warren/pi-extensions/pull/63)
+from 0.20.0: a bounded preview, pinned choices, and **Ctrl+O** to view the full
+command with scrolling. The config loader still accepts the existing reviewer,
+`rules`, and `guardianPolicy`; obsolete `reviewer.prefilter`, `standingApprovals`,
+and `ui.placement` settings are ignored. Remove obsolete settings when updating,
+without changing policy or custom rules.
+
+0.17.0 removed the cross-session standing-approvals ledger and its prompt option.
+Existing ledger files are no longer consumed; preserve them for rollback, and do
+not silently copy their contents into `guardianPolicy.allow`. Durable policy
+exceptions require separate user confirmation. Session-scoped prompt decisions
+still persist on resume. Legacy `convention` rules become `deny`; their overrides
+and `request_override` were removed.
+
+0.18.0 added concurrent reviews and codemode-script evidence. Set
+`reviewConcurrency: 1` to preserve serial scheduling. 0.19.0 added RPC approvals
+and revise-first behavior for subagent sessions that load the plugin. 0.21.0's
+unattended behavior is opt-in via `PI_AUTO_PERMISSIONS_UNATTENDED=1`; ordinary
+interactive sessions still ask for approval.
+
+Enable this repository's **`auto-permissions-status`** extension (required; see
+[footer with PR links](#footer-with-pr-links)) with `pi config`; for a local
+checkout, add the absolute path to
 `extensions/auto-permissions-status/index.ts` to `extensions` in
 `~/.pi/agent/settings.json`. After `/reload` the footer shows
 `Auto: on · Luna low`, `Auto: off`, `Auto: unavailable` (Hank's settings command
 is not loaded), `Auto: config error` (the package's own validator rejected the
 config), or `Auto: unavailable (adapter)` — the companion's adapter is tested
-against **0.16.2** only. `/auto-permissions` inspects the settings. It reports
-loaded-plugin status, not that any given review will succeed, and never imports an
+against **0.21.0** and retains **0.16.2** compatibility. Other versions are
+reported as unavailable until reviewed. `/auto-permissions` inspects the settings.
+It reports loaded-plugin status, not that any given review will succeed, and never imports an
 absent guard, edits policy, or makes model calls. Its compact TUI footer puts Auto
 on the directory/branch row with token/cache/cost/context usage and the main model
 below; **Pi has one footer slot**, so do not run it alongside another
-custom-footer extension. It restores the default footer on shutdown.
+custom-footer extension. It restores the default footer on shutdown. The same
+footer links the branch's pull request.
+
+## Footer with PR links
+
+This setup requires the `auto-permissions-status` extension above: it owns Pi's
+footer and puts a clickable link to the branch's GitHub pull request after the
+branch name. Do not also install a PR-status or footer package; they compete for
+the one footer slot or have their links stripped.
+
+The link needs the [GitHub CLI](https://cli.github.com/) on `PATH`, signed in to
+the repository's host. Install `gh` with the machine's package manager (for
+example `pacman -S github-cli` or `brew install gh`), then ask Ar to run
+`gh auth login`; agents must not sign in or handle tokens. Verify:
+
+```sh
+gh --version
+gh auth status --active --hostname github.com
+```
+
+The status check contacts GitHub; during the read-only audit a failure means
+sign-in is unverified, not missing setup.
+
+After `/reload`, a branch with a pull request shows its number after the branch:
+`~/repo (branch) #42 • Session`. Open PRs show only the number; draft, merged
+and closed PRs add that word. Where Pi detects hyperlink support the number is
+an OSC 8 link, so Ctrl-click (Cmd-click on macOS) opens the PR; elsewhere it is
+plain text. Inside tmux, also set `set -as terminal-features ',*:hyperlinks'`.
+
+The extension runs
+`gh pr view --json number,url,state,isDraft,headRefName -- <branch>` in the
+session directory whenever the footer's branch or directory changes, after each
+agent turn, and after agent Bash calls that use `git` or `gh`; it does not poll.
+Commands Ar runs with `!` or `!!` update the link after the next turn or branch
+change. Without a PR, `gh`, sign-in or network, the footer shows no link and no
+error. gh searches the repository it resolves as the base (it prefers an
+`upstream` remote) for a PR whose head branch has the local branch's name; PRs
+in other repositories, and local branches tracking a differently named remote
+branch, show no link. The link follows Pi's branch for the session directory, not a
+checkout selected mid-session with `/worktree`.
+
+Completion: `auto-permissions-status` is selected and
+`gh auth status --active --hostname github.com` reports a signed-in account. Ask Ar to run `/reload`; a branch with an open PR then
+shows its number in the footer.
 
 ## Claude bridge (external package)
 

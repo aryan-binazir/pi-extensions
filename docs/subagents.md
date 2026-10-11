@@ -11,6 +11,8 @@ including approval and queue time.
 
 - **Permissions.** Default and preset tools are limited to the parent's active
   permissions; explicit tool requests outside those permissions are rejected.
+- **Hooks.** Every child loads this checkout's [hooks](../README.md#hooks) first,
+  so the same switches and protection apply; a child does not start without them.
 - **Model.** Children default to the `implement` profile:
   **openai-codex/gpt-6-astra, medium**. [Named profiles](#subagent-profiles) select
   model and thinking independently of permissions. Fast aliases use the base model
@@ -131,7 +133,7 @@ The delegation contract is:
   with the offending names and corrective steps. Queue admission, launch, each
   forwarded call, and cached workflow stages recheck the applicable permissions.
 - A bundled child extension registers proxies for only the selected connectors,
-  before any explicitly approved child extensions. A private inherited descriptor
+  after hooks and before any explicitly approved child extensions. A private inherited descriptor
   carries definitions, arguments, and results through the existing supervisor.
   There is no socket server or generated connector configuration. Connector
   callbacks, authentication, and permission hooks remain in the parent.

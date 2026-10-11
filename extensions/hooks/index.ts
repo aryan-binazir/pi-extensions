@@ -1,5 +1,7 @@
+import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { getActiveCwd } from '../worktree/routing.ts';
+import { catalog } from './catalog/index.ts';
 import { loadEnabled } from './config.ts';
 import { createProtection } from './protection.ts';
 import type { AdviseHook, Awaitable, BlockHook, GateHook, Hook, ToolCall } from './types.ts';
@@ -87,3 +89,6 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
     });
   };
 }
+
+// The switches come from the same checkout as this code, so code and switches always match.
+export default createHooks({ catalog, configPath: fileURLToPath(new URL('../../personal-settings/hooks.yaml', import.meta.url)) });

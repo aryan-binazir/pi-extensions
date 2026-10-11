@@ -46,7 +46,8 @@ export interface TaskResult {
   notificationError?: string;
 }
 interface TaskHandle { id: string; done: Promise<TaskResult> }
-interface ValidTask extends TaskSpec { tools: string[]; extensions: string[]; timeout: number }
+interface ValidTask extends TaskSpec { tools: string[]; extensions: string[]; hooks: string; timeout: number }
+const HOOKS_EXTENSION = fileURLToPath(new URL('../hooks/index.ts', import.meta.url));
 interface Entry {
   spec: ValidTask;
   result: TaskResult;
@@ -111,7 +112,7 @@ function cloneResult(result: TaskResult): TaskResult {
   return snapshot;
 }
 
-export async function validateTask(spec: TaskSpec, allowedTools?: string[], readTools = READ_TOOLS): Promise<ValidTask> {
+export async function validateTask(spec: TaskSpec, allowedTools?: string[], readTools = READ_TOOLS, hooksExtension = HOOKS_EXTENSION): Promise<ValidTask> {
   if (!spec || typeof spec.task !== 'string' || !spec.task.trim() || spec.task.length > 32000) throw new Error('Task brief must contain 1–32000 characters');
   if (typeof spec.cwd !== 'string' || !isAbsolute(spec.cwd)) throw new Error('Task cwd must be absolute');
   const cwd = await realpath(spec.cwd);
@@ -137,7 +138,14 @@ export async function validateTask(spec: TaskSpec, allowedTools?: string[], read
     if (!(await stat(canonical)).isFile()) throw new Error('Extension must be a file');
     extensions.push(canonical);
   }
-  return { ...spec, model, cwd, tools: [...tools], extensions, timeout };
+  let hooks: string;
+  try {
+    hooks = await realpath(hooksExtension);
+    if (!(await stat(hooks)).isFile()) throw new Error('not a file');
+  } catch (error) {
+    throw new Error(`Subagents do not start without the hooks extension at ${hooksExtension}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { ...spec, model, cwd, tools: [...tools], extensions: extensions.filter(path => path !== hooks), hooks, timeout };
 }
 
 export class SubagentRegistry {
@@ -445,6 +453,8 @@ export function piInvocation(spec: ValidTask) {
   if (spec.model) args.push('--model', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
   const connectors = spec.tools.some(tool => !ALL_TOOLS.includes(tool));
+  // Hooks load first so their blocks run before any other child extension sees a tool call.
+  args.push('-e', spec.hooks);
   if (connectors) args.push('-e', fileURLToPath(new URL('./connector-bridge.ts', import.meta.url)));
   for (const extension of new Set(spec.extensions)) args.push('-e', extension);
   args.push('--', spec.task.startsWith('@') ? `\n${spec.task}` : spec.task);

@@ -71,7 +71,8 @@ test('one active panel shows silent running and queued children, promotes rows, 
 test('fast-mode aliases resolve to the base model for direct and workflow children', async () => fixture(async ({execute, ctx, settle}: any) => {
   ctx.model = {provider: 'openai-codex', id: 'gpt-5.6-luna~fast'};
   const child = await execute('subagent', {task: 'fast alias', model: 'inherit', preset: 'reader'});
-  const direct = await settle(child.details.id);
+  await settle(child.details.id);
+  const direct = (await execute('subagent_status', {id: child.details.id})).details;
   const workflow = await execute('workflow', {source: "return await api.spawn({task:'fast workflow',model:'inherit',preset:'reader'},'fast');"});
   for (const value of [direct, workflow.details]) {
     const args = JSON.parse(value.output);

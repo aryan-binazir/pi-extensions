@@ -31,6 +31,8 @@ export default function nvimIde(pi: ExtensionAPI): void {
   let ctx: ExtensionContext | undefined;
   let seenEditor = false;
   let followFailed = false;
+  let workspaceCwd = () => '';
+  let followCwd: string | undefined;
   const warn = (message: string) => { try { if (ctx?.hasUI) ctx.ui.notify(message, 'warning'); } catch {} };
   let pendingFollow: { args: Record<string, unknown>; at: number } | undefined;
   let followTimer: NodeJS.Timeout | undefined;
@@ -39,15 +41,18 @@ export default function nvimIde(pi: ExtensionAPI): void {
     if (followTimer) clearTimeout(followTimer);
     followTimer = undefined;
     pendingFollow = undefined;
+    followCwd = undefined;
     const controller = inFlight;
     inFlight = undefined;
     controller?.abort();
   };
   const scheduleFollow = () => {
+    if (followCwd !== undefined && followCwd !== workspaceCwd()) { cancelFollow(); return; }
     if (!following() || !pendingFollow || !link?.connected || followTimer || inFlight) return;
     followTimer = setTimeout(() => {
       followTimer = undefined;
       const current = link, destination = pendingFollow;
+      if (followCwd !== workspaceCwd()) { cancelFollow(); return; }
       if (!following() || !destination || !current?.connected) return;
       pendingFollow = undefined;
       if (Date.now() - destination.at > replayAgeMs) return;
@@ -73,7 +78,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
     }, followWindowMs);
     followTimer.unref();
   };
-  const editPaths = new Map<string, string>();
+  const editPaths = new Map<string, { path: string; cwd: string }>();
   const activeCwd = (context: ExtensionContext) => getActiveCwd(context.cwd, context.sessionManager.getSessionId());
   let shown: string | undefined;
   const paint = (state: LinkState) => { const text = statusText(state); if (text === shown || !ctx?.hasUI) return; shown = text; ctx.ui.setStatus(statusKey, text); };
@@ -90,7 +95,8 @@ export default function nvimIde(pi: ExtensionAPI): void {
     followFailed = false;
     await previous?.stop();
     const cwd = context.cwd, sessionId = context.sessionManager.getSessionId();
-    const current = new IdeLink({ cwd: () => getActiveCwd(cwd, sessionId), onChange: state => {
+    workspaceCwd = () => getActiveCwd(cwd, sessionId);
+    const current = new IdeLink({ cwd: workspaceCwd, onChange: state => {
       if (link !== current) return;
       if (state.connected) seenEditor = true;
       paint(state);
@@ -104,6 +110,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
   pi.on('before_agent_start', async event => {
     const current = link;
     if (!current) return;
+    if (followCwd !== undefined && followCwd !== workspaceCwd()) cancelFollow();
     await current.retarget();
     const batch = await current.prepareMentions();
     const notices: string[] = [];
@@ -120,15 +127,20 @@ export default function nvimIde(pi: ExtensionAPI): void {
   pi.on('tool_execution_start', (event, context) => {
     if (event.toolName !== 'edit' && event.toolName !== 'write') return;
     const path = (event.args as { path?: unknown })?.path;
-    if (typeof path === 'string') editPaths.set(event.toolCallId, resolveToolPath(path, activeCwd(context)));
+    if (typeof path === 'string') {
+      const cwd = activeCwd(context);
+      editPaths.set(event.toolCallId, { path: resolveToolPath(path, cwd), cwd });
+    }
   });
   pi.on('tool_execution_end', event => {
-    const path = editPaths.get(event.toolCallId);
+    const edit = editPaths.get(event.toolCallId);
     editPaths.delete(event.toolCallId);
-    if (!path || event.isError || !following() || !seenEditor) return;
+    if (!edit || event.isError || !following() || !seenEditor) return;
+    if (followCwd !== undefined && followCwd !== edit.cwd) cancelFollow();
+    followCwd = edit.cwd;
     // Reveal only: openFile has no cursor-only position (claudecode.nvim turns lines into a Visual selection the user
     // never made), and makeFrontmost moves focus, carrying Insert mode into the file or ending terminal mode.
-    pendingFollow = { args: { filePath: path, preview: false, makeFrontmost: false }, at: Date.now() };
+    pendingFollow = { args: { filePath: edit.path, preview: false, makeFrontmost: false }, at: Date.now() };
     scheduleFollow();
   });
 

@@ -764,6 +764,33 @@ test('a worktree without a matching editor clears the old checkout selection', a
   });
 });
 
+test('queued follow stays within its originating worktree after a switch', async () => {
+  await withConnectedIde(async ({ project, fire, ctx }) => {
+    const worktree = join(project, '..', 'worktree');
+    await mkdir(worktree);
+    const editor = fakeIde();
+    await once(editor.server, 'listening');
+    try {
+      await writeFile(join(process.env.CLAUDE_CONFIG_DIR!, 'ide', `${editor.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [worktree], ideName: 'Neovim', authToken: token }));
+      await new Promise(resolve => setTimeout(resolve, 300));
+      await fire('tool_execution_start', { toolName: 'write', toolCallId: 'old', args: { path: 'a.ts' } }, ctx);
+      await fire('tool_execution_end', { toolName: 'write', toolCallId: 'old', isError: false }, ctx);
+      setActiveCwd(project, worktree, ctx.sessionManager.getSessionId());
+      await fire('before_agent_start', { systemPrompt: 'BASE' }, ctx);
+      await until(() => editor.server.clients.size === 1);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      assert.equal(editor.calls.filter(call => call.name === 'openFile').length, 0, 'old navigation is canceled, not replayed to the new editor');
+      await fire('tool_execution_start', { toolName: 'write', toolCallId: 'new', args: { path: 'fresh.ts' } }, ctx);
+      await fire('tool_execution_end', { toolName: 'write', toolCallId: 'new', isError: false }, ctx);
+      await until(() => editor.calls.some(call => call.name === 'openFile'));
+      assert.equal(editor.calls.find(call => call.name === 'openFile')?.arguments.filePath, join(worktree, 'fresh.ts'));
+    } finally {
+      setActiveCwd(project, undefined, ctx.sessionManager.getSessionId());
+      await editor.close();
+    }
+  });
+});
+
 test('an editor opened in the active worktree takes over the link', async () => {
   await withConnectedIde(async ({ ide, project, tools, ctx }) => {
     const worktree = join(project, '..', 'worktree');

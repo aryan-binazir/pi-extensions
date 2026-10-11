@@ -22,6 +22,7 @@
       "./extensions/btw/index.ts",
       "./extensions/vi-mode/index.ts",
       "./extensions/prompt-stash/index.ts",
+      "./extensions/escape-continue/index.ts",
       "./extensions/subagents/index.ts",
       "./extensions/worktree/index.ts",
       "./extensions/computer-use/index.ts",

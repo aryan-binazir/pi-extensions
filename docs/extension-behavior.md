@@ -30,6 +30,38 @@ Registers are lowercase `a-z` and the unnamed register. Unsupported `f`, `F`,
 Escape from insert mode also closes the completion popup. The exact supported vi
 command set is documented in [ADR 001](adr/001-editor.md).
 
+## Escape Continue
+
+In the main editor, the normal interrupt action (Escape by default) cancels the
+active run, waits for cancellation to settle, then starts one queued user
+message in the same session. Steering messages take precedence over follow-ups.
+Remaining queues retain their order, attachments and custom messages, and then
+follow Pi's normal queue modes. The unsubmitted editor draft is untouched.
+With no queued user message, normal Escape behavior applies.
+
+A second Escape while cancellation or prompt preparation is pending stops the
+handoff. Queued messages and attachments stay waiting, with a notice; they are
+picked up by a later submitted prompt. Queues are memory-only, not durable
+session entries. Reload or session shutdown cancels a pending handoff; it never
+starts in the replacement session.
+
+Autocomplete, dialogs, compaction and retry backoff keep their own Escape
+handling. Vi mode keeps insert/visual-mode Escape; only a clean normal-mode
+Escape reaches the interrupt handler. Programmatic `ctx.abort()` is unchanged.
+The extension is inert in RPC, JSON and print modes.
+
+Promotion uses Pi's normal prompt preflight, including `before_agent_start` and
+image normalization, without repeating skill/template expansion. Third-party
+`input` handlers still receive the already-processed prompt with
+`source: "extension"`; a handler that transforms every source can transform it
+again. If preflight rejects or handles the prompt without starting it, the
+queue is kept waiting with a notice.
+
+The compatibility adapter uses guarded interactive-handler and prepared-queue
+internals, tested against Pi 0.99.1. An unsupported layout warns once per session
+and falls back to normal Escape behavior. No keybinding or personal setting is
+changed by loading the extension.
+
 ## Worktrees
 
 `/worktree feature` creates or reuses `amb/feature` at

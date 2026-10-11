@@ -15,7 +15,8 @@ load; helpers and tests are not extensions.
 
 ## Agent setup checklist
 
-1. **Install and select extensions** using the commands above.
+1. **Install and select extensions** using the commands above. Enable
+   [Escape Continue (required)](docs/agent-setup.md#escape-continue).
 2. **Link the shared instructions.** Follow the guarded
    [symlink setup](docs/agent-setup.md#global-system-prompt-append-agent-setup) to link
    this checkout's [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) into
@@ -53,6 +54,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | BTW | `/btw` or `/side` opens a private, tool-free side conversation. |
 | Vi mode | Modal editor with motions, operators, registers, and undo. |
 | Prompt stash | `Ctrl+S` stashes or swaps the main editor draft. |
+| [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape stops the active run and starts the next queued message; an empty queue means stop. |
 | [Subagents](docs/subagents.md) | Background workers, model profiles, approved TypeScript workflows. |
 | [Worktree](docs/extension-behavior.md#worktrees) | `/worktree` routes shell and relative file tools to another checkout. |
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |

@@ -92,11 +92,15 @@ test('a failing gate sends a completed run back to work after earlier boundary e
   });
 });
 
-test('a throwing gate is reported without continuing, and disabled gates do not run', async () => {
+test('a throwing gate is reported without stopping later gates, and disabled gates do not run', async () => {
   const broken: Hook = { id: 'broken', type: 'gate', check: () => { throw new Error('boom'); } };
-  await withHooks([broken], 'hooks:\n  broken: true\n', async ({ emit, configure }) => {
+  const failing: Hook = { id: 'failing', type: 'gate', check: () => 'Not done.' };
+  await withHooks([broken, failing], 'hooks:\n  broken: true\n', async ({ emit, configure }) => {
     const settle = () => emit('agent_before_settle', { entries: [], continue: false, outcome: 'completed', context: { canContinue: false } });
-    assert.deepEqual(await settle(), { entries: [{ type: 'custom_message', customType: 'hooks', content: '[hooks: broken] The gate failed and was skipped: boom', display: true }] });
+    const failure = { type: 'custom_message', customType: 'hooks', content: '[hooks: broken] The gate failed and was skipped: boom', display: true };
+    assert.deepEqual(await settle(), { entries: [failure] });
+    await configure('hooks:\n  broken: true\n  failing: true\n');
+    assert.deepEqual(await settle(), { entries: [failure, { type: 'custom_message', customType: 'hooks', content: '[hooks: failing] Not done.', display: true }], continue: true });
     await configure('hooks:\n  broken: false\n');
     assert.equal(await settle(), undefined);
     await configure('{');
@@ -104,11 +108,22 @@ test('a throwing gate is reported without continuing, and disabled gates do not 
   });
 });
 
-test('a missing, malformed or unknown-hook config blocks every tool except reads and questions', async () => {
+test('switches for hooks this session has not loaded are reported once while known hooks keep running', async () => {
+  await withHooks([blockEcho], 'hooks:\n  block-echo: true\n  pulled-hook: true\n', async ({ call, notices, configure }) => {
+    assert.equal((await call('bash', { command: 'echo hi' }))?.reason, '[hooks: block-echo] No echo.');
+    assert.equal(await call('bash', { command: 'ls' }), undefined);
+    assert.deepEqual(notices, ['hooks.yaml switches on hooks this session has not loaded: pulled-hook. Run /reload to load them.']);
+    await configure('hooks:\n  # every hook commented out\n');
+    assert.equal(await call('bash', { command: 'echo hi' }), undefined, 'an empty hooks mapping switches everything off');
+    assert.equal(notices.length, 1);
+  });
+});
+
+test('a missing or malformed config blocks every tool except reads and questions', async () => {
   await withHooks([blockEcho], undefined, async ({ call, configure }) => {
     const invalid = [
-      undefined, '', 'hooks:\n', 'hooks: [block-echo]\n', 'hooks:\n  block-echo: yes\n', 'other: {}\nhooks: {}\n',
-      'hooks:\n  block-echo: true\n  block-echo: false\n', 'hooks:\n  typo: true\n', 'hooks: {}\n---\nhooks:\n  block-echo: false\n', '{',
+      undefined, '', 'hooks: [block-echo]\n', 'hooks:\n  block-echo: yes\n', 'other: {}\nhooks: {}\n',
+      'hooks:\n  block-echo: true\n  block-echo: false\n', 'hooks: {}\n---\nhooks:\n  block-echo: false\n', '{',
     ];
     for (const text of invalid) {
       if (text !== undefined) await configure(text);

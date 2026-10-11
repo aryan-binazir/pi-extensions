@@ -2,7 +2,7 @@
 const ansiEscapes: Record<string, string> = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
 
 /** Splits simple Bash into commands of unquoted words. It does not expand, substitute or interpret redirections. */
-export function commands(source: string): string[][] {
+function commands(source: string): string[][] {
   const result: string[][] = [];
   let words: string[] = [], word = '', quote = '', started = false;
   const flushWord = () => { if (started) words.push(word); word = ''; started = false; };

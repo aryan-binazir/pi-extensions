@@ -6,8 +6,9 @@ export function parseSwitches(text: string): Map<string, boolean> {
   // Pi exports its YAML parser only through frontmatter, so document markers would end the parsed block early.
   if (/^(---|\.\.\.)/m.test(text)) throw new Error('YAML document markers (--- or ...) are not allowed');
   const { frontmatter, body } = parseFrontmatter(`---\n${text}\n---\n`);
-  const hooks = (frontmatter as Record<string, unknown>).hooks;
-  if (body || Object.keys(frontmatter).length !== 1 || !hooks || typeof hooks !== 'object' || Array.isArray(hooks)) {
+  const keys = Object.keys(frontmatter);
+  const hooks = (frontmatter as Record<string, unknown>).hooks ?? {};
+  if (body || keys.length !== 1 || keys[0] !== 'hooks' || typeof hooks !== 'object' || Array.isArray(hooks)) {
     throw new Error('Expected a single top-level "hooks" mapping of hook ids to true or false');
   }
   const switches = new Map<string, boolean>();
@@ -26,9 +27,8 @@ export function unknownIds(switches: Map<string, boolean>, known: ReadonlySet<st
   return [...switches.keys()].filter(id => !known.has(id));
 }
 
-export async function loadEnabled(path: string, known: ReadonlySet<string>): Promise<Set<string>> {
-  const switches = parseSwitches(await readFile(path, 'utf8'));
-  const unknown = unknownIds(switches, known);
-  if (unknown.length) throw new Error(`Unknown hooks: ${unknown.join(', ')}`);
-  return enabledIn(switches);
+/** Enabled hooks this code knows, and enabled ids it does not, which a newer checkout added. */
+export async function loadSwitches(path: string, known: ReadonlySet<string>): Promise<{ enabled: Set<string>; unloaded: string[] }> {
+  const enabled = enabledIn(parseSwitches(await readFile(path, 'utf8')));
+  return { enabled: new Set([...enabled].filter(id => known.has(id))), unloaded: [...enabled].filter(id => !known.has(id)) };
 }

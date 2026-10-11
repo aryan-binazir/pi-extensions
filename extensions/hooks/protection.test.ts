@@ -45,6 +45,21 @@ test('every checkout copy is protected, including relative, symlinked and CRLF f
   });
 });
 
+test('only one change to a switches file runs at a time, so parallel edits cannot combine into switching a hook off', async () => {
+  await withHooks([...catalog], 'hooks:\n  draft-prs: true\n  no-admin-merge: true\n', async ({ dir, call, emit }) => {
+    const path = join(dir, 'hooks.yaml');
+    const reorder = { path, edits: [{ oldText: 'draft-prs: true\n  no-admin-merge: true\n', newText: 'no-admin-merge: true\n  draft-prs: true\n' }] };
+    const commentNext = { path, edits: [{ oldText: 'no-admin-merge: true\n', newText: 'no-admin-merge: true\n  #' }] };
+    assert.equal(await call('edit', reorder, 'first'), undefined);
+    blocked(await call('edit', commentNext, 'second'), /one change .* at a time/, 'second edit in the same batch');
+    assert.equal(await call('write', { path: join(dir, 'notes.yaml'), content: 'x' }, 'unrelated'), undefined, 'unrelated files stay writable');
+    await emit('tool_result', { toolName: 'edit', toolCallId: 'first', input: reorder, content: [], isError: false });
+    assert.equal(await call('edit', commentNext, 'third'), undefined, 'the next change waits only for the earlier result');
+    await emit('turn_end', {});
+    assert.equal(await call('edit', reorder, 'fourth'), undefined, 'a turn boundary clears changes that never produced a result');
+  });
+});
+
 test('protection runs even when every hook is off or the switches are broken', async () => {
   await withHooks([...catalog], '{', async ({ dir, call }) => {
     const copy = join(dir, 'personal-settings', 'hooks.yaml');
@@ -59,7 +74,8 @@ test('Bash may read and commit the switches but cannot change them', async () =>
     for (const command of [
       'cat personal-settings/hooks.yaml', 'git diff personal-settings/hooks.yaml', 'grep -n true personal-settings/hooks.yaml',
       'git add personal-settings/hooks.yaml && git commit -m "Enable rg advice"', 'git -C repo --no-pager log -p personal-settings/hooks.yaml',
-      'ls personal-settings', 'echo hooks', 'npm run check',
+      'ls personal-settings', 'echo hooks', 'npm run check', 'rg -n draft personal-settings/hooks.yaml',
+      'gh pr create --draft --title "Enable a hook" --body "Switches it on in personal-settings/hooks.yaml."',
     ]) assert.equal(await call('bash', { command }), undefined, command);
     for (const command of [
       'echo "hooks: {}" > personal-settings/hooks.yaml', "sed -i 's/true/false/' personal-settings/hooks.yaml",
@@ -69,6 +85,8 @@ test('Bash may read and commit the switches but cannot change them', async () =>
       'git -c core.pager=x diff personal-settings/hooks.yaml', 'GIT_EXTERNAL_DIFF=x git diff personal-settings/hooks.yaml',
       'git diff --ext-diff personal-settings/hooks.yaml', 'rg --pre=/tmp/x draft personal-settings/hooks.yaml',
       'cd personal-settings && vi hooks.yaml', 'tee personal-settings/hooks.yaml < /tmp/x', 'f=hooks.yaml; cp /tmp/x "personal-settings/$f"',
+      "cp /tmp/x person'al-settings/hoo'ks.yaml", "cat \"$(cp /tmp/x person'al-settings/hoo'ks.yaml)\"",
+      'bash -c "cp /tmp/x personal-settings/hooks.yaml"', 'rg --pre /tmp/x draft personal-settings/hooks.yaml',
     ]) blocked(await call('bash', { command }), /cannot change .*through Bash/, command);
   });
 });

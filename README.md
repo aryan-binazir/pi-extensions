@@ -73,7 +73,8 @@ Hooks are required for this setup. Each hook is tested TypeScript in
 [`personal-settings/hooks.yaml`](personal-settings/hooks.yaml) only switches hooks
 on or off, and hooks it does not list are off. The extension reads that file from
 its own checkout on every event, so switches need no `/reload`, and other machines
-pick them up with `git pull` (local path) or `pi update` (package). The file is
+pick them up with `git pull` (local path) or `pi update` (package). Hooks added by
+newer code load after `/reload`; until then their switches only produce a notice. The file is
 public: keep private information out of it. Design: [ADR 014](docs/adr/014-hooks.md).
 
 | Type | Runs | Effect |
@@ -99,10 +100,10 @@ child extension and do not start without them.
 **Protection.** Agents can switch hooks on but never off. Edit and write calls to
 any `personal-settings/hooks.yaml`, in every checkout and through symlinks, are
 allowed only when every enabled hook stays enabled and the live file names only
-existing hooks; Bash may only read, diff, add and commit it. Only the user
-switches hooks off, removes them, or repairs an invalid file. A missing or invalid
-live file blocks every tool except `read`, `grep`, `find`, `ls` and
-`questionnaire` until the user fixes it.
+existing hooks, one change at a time; Bash may only read, diff, add and commit it.
+Only the user switches hooks off, removes them, or repairs an invalid file. A
+missing or invalid live file blocks every tool except `read`, `grep`, `find`, `ls`
+and `questionnaire` until the user fixes it.
 
 **Setup.** From a **stable checkout** (not a temporary worktree):
 

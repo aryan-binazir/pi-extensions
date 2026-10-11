@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { getActiveCwd } from '../worktree/routing.ts';
 import { catalog } from './catalog/index.ts';
-import { loadEnabled } from './config.ts';
+import { loadSwitches } from './config.ts';
 import { createProtection } from './protection.ts';
 import type { AdviseHook, Awaitable, BlockHook, GateHook, Hook, ToolCall } from './types.ts';
 
@@ -29,9 +29,13 @@ async function ask(check: () => Awaitable<string | undefined>): Promise<{ said?:
 
 export function createHooks({ catalog, configPath }: HooksOptions) {
   const known = new Set(catalog.map(hook => hook.id));
-  const protect = createProtection(configPath, known);
-  const switchedOn = async <T extends Hook>(type: T['type']): Promise<T[]> => {
-    const enabled = await loadEnabled(configPath, known);
+  const protection = createProtection(configPath, known);
+  let reportedUnloaded = '';
+  const switchedOn = async <T extends Hook>(type: T['type'], ctx: ExtensionContext): Promise<T[]> => {
+    const { enabled, unloaded } = await loadSwitches(configPath, known);
+    const names = unloaded.join(', ');
+    if (names && names !== reportedUnloaded && ctx.hasUI) ctx.ui.notify(`hooks.yaml switches on hooks this session has not loaded: ${names}. Run /reload to load them.`, 'warning');
+    reportedUnloaded = names;
     return catalog.filter((hook): hook is T => hook.type === type && enabled.has(hook.id));
   };
   const toolCall = (event: { toolName: string; input: unknown }, ctx: ExtensionContext): ToolCall =>
@@ -40,12 +44,12 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
   return function hooks(pi: ExtensionAPI) {
     pi.on('tool_call', async (event, ctx) => {
       const call = toolCall(event, ctx);
-      const { said: unprotected, failed: protectionFailed } = await ask(() => protect(call));
+      const { said: unprotected, failed: protectionFailed } = await ask(() => protection.check(call, event.toolCallId));
       if (protectionFailed !== undefined) return { block: true, reason: label('protection', `The check failed, so the call was blocked: ${protectionFailed}`) };
       if (unprotected) return { block: true, reason: label('protection', unprotected) };
       let blockers: BlockHook[];
       try {
-        blockers = await switchedOn<BlockHook>('block');
+        blockers = await switchedOn<BlockHook>('block', ctx);
       } catch (error) {
         if (recoveryTools.has(event.toolName)) return;
         return { block: true, reason: `[hooks] ${configPath} is invalid: ${message(error)}. Ask the user to fix it; agents cannot edit it.` };
@@ -58,7 +62,8 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
     });
 
     pi.on('tool_result', async (event, ctx) => {
-      const advisers = await switchedOn<AdviseHook>('advise').catch(() => []);
+      protection.finish(event.toolCallId);
+      const advisers = await switchedOn<AdviseHook>('advise', ctx).catch(() => []);
       const call = toolCall(event, ctx);
       const notes = [];
       for (const hook of advisers) {
@@ -71,21 +76,24 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
 
     // Continuations are capped per human prompt; extension-sent input must not reset the cap.
     let continuations = 0;
-    pi.on('session_start', () => { continuations = 0; });
+    pi.on('session_start', () => { continuations = 0; protection.clear(); });
+    pi.on('turn_end', () => protection.clear());
     pi.on('input', event => { if (event.source !== 'extension') continuations = 0; });
     pi.on('agent_before_settle', async (event, ctx) => {
       if (event.outcome !== 'completed') return;
-      const gates = await switchedOn<GateHook>('gate').catch(() => []);
+      const gates = await switchedOn<GateHook>('gate', ctx).catch(() => []);
+      const entries = [...event.entries];
       for (const hook of gates) {
         const { said, failed } = await ask(() => hook.check({ cwd: activeCwd(ctx), signal: ctx.signal }));
-        if (failed !== undefined) return { entries: [...event.entries, gateMessage(hook.id, `The gate failed and was skipped: ${failed}`)] };
+        if (failed !== undefined) entries.push(gateMessage(hook.id, `The gate failed and was skipped: ${failed}`));
         if (!said) continue;
         if (continuations >= maxGateContinuations) {
-          return { entries: [...event.entries, gateMessage(hook.id, `Still not done after ${maxGateContinuations} continuations, so the agent stopped: ${said}`)] };
+          return { entries: [...entries, gateMessage(hook.id, `Still not done after ${maxGateContinuations} continuations, so the agent stopped: ${said}`)] };
         }
         continuations++;
-        return { entries: [...event.entries, gateMessage(hook.id, said)], continue: true };
+        return { entries: [...entries, gateMessage(hook.id, said)], continue: true };
       }
+      if (entries.length > event.entries.length) return { entries };
     });
   };
 }

@@ -34,10 +34,11 @@ Claude bridge requests retain the complete system prompt so the provider can
 recognize its captured parent prompt and project it into Claude Code's preset.
 They use short cache retention: bridge 0.9.2 interprets `none` as a summarizer
 request and forwards the system prompt verbatim instead of projecting it.
-Other providers keep uncached requests and the system-text cap. The bridge's
-normal path needs a main-agent prompt capture since the last prompt change;
-extensions that change the prompt before the bridge captures it can prevent
-matching. It loads Claude Code user/project settings, so configured hooks run
+Other providers keep uncached requests and the system-text cap. For the bridge,
+BTW reuses the system prompt of the last main-agent turn in the session, which
+the bridge also captured. The idle prompt lacks per-run extension sections, and
+matches no capture when extensions that add them load before the bridge, so
+BTW on the bridge needs one main-agent turn after startup or reload. It loads Claude Code user/project settings, so configured hooks run
 for each BTW request, and it may retain Claude Code transcripts on disk. Closing
 BTW discards local overlay state, not provider-managed storage.
 The current system prompt excludes later context/payload mutations by other

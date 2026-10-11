@@ -1,7 +1,25 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { catalog } from './catalog/index.ts';
+import { parseSwitches, unknownIds } from './config.ts';
+import hooks from './index.ts';
 import { withHooks } from './test-support.ts';
 import type { Hook } from './types.ts';
+
+test('the tracked switches parse, name only real hooks, and are the live file the extension reads', async () => {
+  const ids = catalog.map(hook => hook.id);
+  assert.equal(new Set(ids).size, ids.length, 'hook ids are unique');
+  const path = fileURLToPath(new URL('../../personal-settings/hooks.yaml', import.meta.url));
+  const text = await readFile(path, 'utf8');
+  assert.deepEqual(unknownIds(parseSwitches(text), new Set(ids)), []);
+  const handlers: Record<string, any> = {};
+  hooks({ on: (name: string, handler: any) => { handlers[name] = handler; } } as any);
+  const ctx = { cwd: process.cwd(), sessionManager: { getSessionId: () => 'tracked' } };
+  const result = await handlers.tool_call({ type: 'tool_call', toolName: 'write', toolCallId: 'w', input: { path, content: `${text}  not-a-hook: true\n` } }, ctx);
+  assert.match(result?.reason ?? '', /no hooks named: not-a-hook/, 'only the live file rejects unknown hooks');
+});
 
 const blockEcho: Hook = { id: 'block-echo', type: 'block', check: call => call.toolName === 'bash' && String(call.input.command).startsWith('echo') ? 'No echo.' : undefined };
 

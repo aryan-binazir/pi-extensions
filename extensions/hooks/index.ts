@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { getActiveCwd } from '../worktree/routing.ts';
 import { loadEnabled } from './config.ts';
+import { createProtection } from './protection.ts';
 import type { AdviseHook, Awaitable, BlockHook, GateHook, Hook, ToolCall } from './types.ts';
 
 export interface HooksOptions {
@@ -26,6 +27,7 @@ async function ask(check: () => Awaitable<string | undefined>): Promise<{ said?:
 
 export function createHooks({ catalog, configPath }: HooksOptions) {
   const known = new Set(catalog.map(hook => hook.id));
+  const protect = createProtection(configPath, known);
   const switchedOn = async <T extends Hook>(type: T['type']): Promise<T[]> => {
     const enabled = await loadEnabled(configPath, known);
     return catalog.filter((hook): hook is T => hook.type === type && enabled.has(hook.id));
@@ -35,6 +37,10 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
 
   return function hooks(pi: ExtensionAPI) {
     pi.on('tool_call', async (event, ctx) => {
+      const call = toolCall(event, ctx);
+      const { said: unprotected, failed: protectionFailed } = await ask(() => protect(call));
+      if (protectionFailed !== undefined) return { block: true, reason: label('protection', `The check failed, so the call was blocked: ${protectionFailed}`) };
+      if (unprotected) return { block: true, reason: label('protection', unprotected) };
       let blockers: BlockHook[];
       try {
         blockers = await switchedOn<BlockHook>('block');
@@ -42,7 +48,6 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
         if (recoveryTools.has(event.toolName)) return;
         return { block: true, reason: `[hooks] ${configPath} is invalid: ${message(error)}. Ask the user to fix it; agents cannot edit it.` };
       }
-      const call = toolCall(event, ctx);
       for (const hook of blockers) {
         const { said, failed } = await ask(() => hook.check(call));
         const reason = failed === undefined ? said : `The hook failed, so the call was blocked: ${failed}`;

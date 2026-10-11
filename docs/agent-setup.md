@@ -30,7 +30,10 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    `requireDraftPr` and `blockAdminMerge` are enabled. For Claude
    bridge, use the offline model-list command below and preserve the separate
    `AskClaude` opt-in.
-4. **MCP and runtime limits:** verify selected MCP support uses Pi's built-in
+4. **Scoped models:** verify every model required by [AGENTS.md](../AGENTS.md)
+   is included in the saved scope and resolves in the offline model list. Follow
+   [scoped model setup](#required-scoped-models); report missing models as drift.
+5. **MCP and runtime limits:** verify selected MCP support uses Pi's built-in
    extension and keep server configuration user-scoped. Treat disk configuration
    and loaded-session state separately: require `/reload` after changes, and mark
    sign-in, live provider requests, permission enforcement, and MCP connectivity
@@ -44,6 +47,22 @@ steps, and drift or unverified items, naming the relevant file and README step.
 Ask Ar before repairs or changes to personal settings; continue unrelated work
 when a setup issue does not block it. Keep machine-specific audit results out of
 tracked instructions.
+
+## Required scoped models
+
+During setup, include all three model IDs required by [AGENTS.md](../AGENTS.md)
+in the saved `/scoped-models` selection (`enabledModels` in user-scoped
+`settings.json`). Resolve them through this machine's existing model connections;
+keep existing qualified entries, additional selected models, and startup defaults.
+Add missing entries only after setup changes are approved. If a required model
+is unavailable or its connection is ambiguous, report the blocker and ask Ar
+rather than substituting another model or changing connections.
+
+Completion: all three required IDs are selected and resolve in
+`pi --offline --no-mcp --list-models`. Ask Ar to run `/reload` after settings edits.
+The offline list verifies registration, not live authentication or execution.
+This scope controls model selection and cycling; it does not rewrite subagent
+profiles or the background tracker's model.
 
 ## Global system-prompt append (agent setup)
 
@@ -104,7 +123,10 @@ Pi adds `"npm:@hank-warren/pi-auto-permissions@0.16.2"` to the `packages` array 
 update itself; review new versions before upgrading. Do not also load the
 upstream `@ogulcancelik/pi-auto-permissions`: overlapping guards cause duplicate
 reviews. Create `~/.pi/agent/pi-auto-permissions/config.json` (or under your
-`PI_CODING_AGENT_DIR`):
+`PI_CODING_AGENT_DIR`). In the template below, replace `MODEL_CONNECTION` with
+this machine's existing connection identifier for `gpt-6-luna`; preserve the
+current `reviewer.provider` when it resolves that model. If the connection is
+missing or ambiguous, ask Ar before writing the config.
 
 ```json
 {
@@ -112,7 +134,7 @@ reviews. Create `~/.pi/agent/pi-auto-permissions/config.json` (or under your
   "reviewAllShell": true,
   "rules": ["$defaults"],
   "reviewer": {
-    "provider": "openai-codex",
+    "provider": "MODEL_CONNECTION",
     "model": "gpt-6-luna",
     "reasoningEffort": "low",
     "timeoutMs": 60000,
@@ -129,8 +151,8 @@ reviews. Create `~/.pi/agent/pi-auto-permissions/config.json` (or under your
 
 Review is then on by default across sessions: every Bash command goes through the
 rules and, absent a hard deny or an explicit bypass/standing approval, Luna review
-at low reasoning. Authenticate to `openai-codex` with `/login` and make sure
-`gpt-6-luna` is available; the main agent can use a different model. The
+at low reasoning. Complete any required sign-in for the existing model connection
+and make sure `gpt-6-luna` is available; the main agent can use a different model. The
 prefilter stays off because it uses minimal reasoning whatever the full-review
 setting says. `guardianPolicy` takes natural-language preferences: trusted
 infrastructure in `environment`, scoped exceptions in `allow`, restrictions

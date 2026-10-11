@@ -23,7 +23,7 @@ load; helpers and tests are not extensions.
    Package installation does **not** create the link.
 3. **Install Bash approvals separately (required).** Follow
    [Automatic Bash permissions](docs/agent-setup.md#automatic-bash-permissions-external-package)
-   to configure Hank Warren's Auto Permissions with `openai-codex/gpt-6-luna`
+   to configure Hank Warren's Auto Permissions with `gpt-6-luna`
    at low reasoning. This repo's status extension is only its display companion,
    not the approval engine.
 4. **Set up Guard (required).** Follow [Guard setup](#guard-setup-for-agents) to
@@ -32,7 +32,10 @@ load; helpers and tests are not extensions.
 5. **Install Claude bridge separately (required).** Follow
    [Claude bridge setup](docs/agent-setup.md#claude-bridge-external-package) for the
    pinned Agent SDK provider. Only the `AskClaude` delegation tool is optional.
-6. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
+6. **Configure the required scoped models.** Follow
+   [scoped model setup](docs/agent-setup.md#required-scoped-models), preserving this
+   machine's existing model connections.
+7. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
    servers through its built-in MCP support and `~/.pi/agent/mcp.json`.
 
 With Subagents enabled, the system prompt includes **both** the editable selection

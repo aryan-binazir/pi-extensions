@@ -130,6 +130,61 @@ test('repairing a refused deeper lock connects to the more-specific editor', asy
   } finally { await link.stop(); await root.close(); await branch.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
+test('the only matching editor recovers after a temporary WebSocket refusal without a lock update', async () => {
+  let available = false, refusals = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { if (!available) refusals++; return available; } });
+  server.on('connection', socket => socket.on('message', raw => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { capabilities: {}, serverInfo: { name: 'claudecode-neovim' } } }));
+  }));
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 80, alive: () => true });
+  try {
+    await writeFile(join(dir, `${port}.lock`), lockFile());
+    link.start();
+    await until(() => refusals > 0);
+    available = true;
+    await until(() => link.connected);
+    assert.equal(link.state.port, port);
+  } finally {
+    await link.stop();
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('initialize failures keep the ordinary reconnect backoff', async () => {
+  let connections = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  server.on('connection', socket => {
+    connections++;
+    socket.on('message', raw => {
+      const message = JSON.parse(raw.toString());
+      if (message.method === 'initialize') socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'not ready' } }));
+    });
+  });
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, retryMs: 700, alive: () => true });
+  try {
+    await writeFile(join(dir, `${port}.lock`), lockFile());
+    link.start();
+    await until(() => connections === 1);
+    await new Promise(resolve => setTimeout(resolve, 350));
+    assert.equal(connections, 1, 'initialization errors do not use the 200ms fallback retry');
+    await until(() => connections === 2);
+  } finally {
+    await link.stop();
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('an invalid port lock does not hide a valid IDE lock', async () => {
   const ide = fakeIde();
   await once(ide.server, 'listening');

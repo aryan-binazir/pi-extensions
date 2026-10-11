@@ -77,7 +77,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
   const activeCwd = (context: ExtensionContext) => getActiveCwd(context.cwd, context.sessionManager.getSessionId());
   let shown: string | undefined;
   const paint = (state: LinkState) => { const text = statusText(state); if (text === shown || !ctx?.hasUI) return; shown = text; ctx.ui.setStatus(statusKey, text); };
-  const need = (): IdeLink => { if (!link?.connected) throw new Error('No editor connected. Start Neovim with claudecode.nvim in this directory.'); return link; };
+  const need = (): IdeLink => { if (!link?.connected) throw new Error('Open Neovim with claudecode.nvim in the active worktree.'); return link; };
 
   pi.on('session_start', async (_event, context) => {
     cancelFollow();

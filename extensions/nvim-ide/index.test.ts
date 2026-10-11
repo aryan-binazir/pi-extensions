@@ -299,7 +299,7 @@ test('a disconnected explicit open cancels the old destination before reporting 
     await commands.get('vim').handler('reconnect', ctx);
     await fire('tool_execution_start', { toolCallId: 'queued', toolName: 'write', args: { path: 'old.ts' } }, ctx);
     await fire('tool_execution_end', { toolCallId: 'queued', toolName: 'write', isError: false, result: {} }, ctx);
-    await assert.rejects(tools.get('nvim_open').execute('explicit', { path: 'new.ts' }, undefined, undefined, ctx), /No editor connected/);
+    await assert.rejects(tools.get('nvim_open').execute('explicit', { path: 'new.ts' }, undefined, undefined, ctx), /Open Neovim with claudecode.nvim in the active worktree/);
     await until(() => status.at(-1) === 'Neovim ✓');
     await new Promise(resolve => setTimeout(resolve, 150));
     await tools.get('nvim_diagnostics').execute('barrier', {}, undefined, undefined, ctx);
@@ -446,7 +446,7 @@ test('editor tools resolve paths, and a closed editor clears status, prompt and 
     await ide.close();
     await until(() => status.at(-1) === undefined);
     assert.equal(await fire('before_agent_start', { prompt: 'x', systemPrompt: 'BASE' }, ctx), undefined);
-    await assert.rejects(tools.get('nvim_context').execute('id', {}, undefined, undefined, ctx), /No editor connected/);
+    await assert.rejects(tools.get('nvim_context').execute('id', {}, undefined, undefined, ctx), /Open Neovim with claudecode.nvim in the active worktree/);
     await commands.get('vim').handler('', ctx);
     assert.match(notices.at(-1)!, /waiting for claudecode.nvim in the active worktree/);
   });

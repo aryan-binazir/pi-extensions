@@ -83,7 +83,7 @@ export class IdeLink {
   private socket?: WebSocket;
   private lock?: Lock;
   private retargeting?: Promise<void>;
-  private readonly failedLocks = new Map<number, number>();
+  private readonly failedLocks = new Map<number, Lock>();
   private started = false;
   private timer?: NodeJS.Timeout;
   private watcher?: FSWatcher;
@@ -130,7 +130,6 @@ export class IdeLink {
   private async reconsider(): Promise<void> {
     if (!this.started) return;
     if (!this.socket) {
-      if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
       await this.attempt();
       return;
     }
@@ -147,10 +146,10 @@ export class IdeLink {
   private cwd(): string { return typeof this.options.cwd === 'string' ? this.options.cwd : this.options.cwd(); }
   private async availableLocks(): Promise<Lock[]> {
     const locks = await readLocks(this.options.lockDir ?? defaultLockDir(), this.options.alive);
-    for (const [port, mtime] of this.failedLocks) {
-      if (!locks.some(lock => lock.port === port && lock.mtimeMs === mtime)) this.failedLocks.delete(port);
+    for (const [port, failed] of this.failedLocks) {
+      if (!locks.some(lock => lock.port === port && lock.mtimeMs === failed.mtimeMs)) this.failedLocks.delete(port);
     }
-    return locks.filter(lock => this.failedLocks.get(lock.port) !== lock.mtimeMs);
+    return locks.filter(lock => this.failedLocks.get(lock.port)?.mtimeMs !== lock.mtimeMs);
   }
   async prepareMentions(): Promise<{ mentions: Mention[]; undelivered: number; dropped: number; acknowledge: () => void }> {
     const taken = [...this.mentions];
@@ -200,7 +199,11 @@ export class IdeLink {
     const lock = chooseLock(await this.availableLocks(), this.cwd());
     if (!this.started || this.socket) return;
     trace?.(`lock ${lock ? lock.port : 'none'}`);
-    if (!lock) { this.schedule(); return; }
+    if (!lock) {
+      if (chooseLock([...this.failedLocks.values()], this.cwd())) this.schedule(this.options.retryMs ?? 15000, true);
+      else this.schedule();
+      return;
+    }
     const WebSocket = await loadWs();
     if (!this.started || this.socket) return;
     this.lock = lock;
@@ -208,7 +211,7 @@ export class IdeLink {
     try {
       socket = new WebSocket(`ws://127.0.0.1:${lock.port}`, { headers: { 'x-claude-code-ide-authorization': lock.authToken }, handshakeTimeout: 3000, perMessageDeflate: false, skipUTF8Validation: true });
     } catch {
-      this.failedLocks.set(lock.port, lock.mtimeMs);
+      this.failedLocks.set(lock.port, lock);
       this.lock = undefined;
       this.schedule(this.options.retryMs ?? 200);
       return;
@@ -220,10 +223,9 @@ export class IdeLink {
     socket.on('close', (code, reason) => {
       trace?.(`close ${code} ${reason} current=${this.socket === socket}`);
       if (this.socket !== socket) return;
-      const initialized = this.ready;
-      if (!opened) this.failedLocks.set(lock.port, lock.mtimeMs);
+      if (!opened) this.failedLocks.set(lock.port, lock);
       this.drop(new Error('IDE disconnected'));
-      this.schedule(initialized ? this.options.retryMs ?? 15000 : 200);
+      this.schedule(opened ? this.options.retryMs ?? 15000 : 200);
     });
     socket.once('open', () => {
       opened = true;
@@ -293,14 +295,18 @@ export class IdeLink {
       this.lockDirMissing = false;
     } catch (error) { this.lockDirMissing = (error as NodeJS.ErrnoException).code === 'ENOENT'; }
   }
-  private schedule(delay?: number): void {
+  private schedule(delay?: number, retryFailed = false): void {
     trace?.(`schedule ${delay ?? 'default'} timer=${!!this.timer} watcher=${!!this.watcher} missing=${this.lockDirMissing}`);
     if (!this.started || this.timer) return;
     if (!this.parentWatcher) this.watchParent();
     if (!this.watcher) this.watchLocks();
     // The parent watch is armed before each lock-directory attempt, so it reports a directory created after an ENOENT.
     if (delay === undefined) { if (this.parentWatcher && (this.watcher || this.lockDirMissing)) return; delay = this.options.retryMs ?? 15000; }
-    this.timer = setTimeout(() => { this.timer = undefined; void this.retarget(); }, delay);
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      if (retryFailed) this.failedLocks.clear();
+      void this.retarget();
+    }, delay);
     this.timer.unref();
   }
   private drop(error: Error): void {

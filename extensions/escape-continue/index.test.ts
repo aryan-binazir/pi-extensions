@@ -703,6 +703,114 @@ test('interactive quit retires a handoff before terminal drain or async shutdown
   }
 });
 
+test('accepted TUI reload cannot start a held prompt while an earlier shutdown handler waits', async t => {
+  const preparing = deferred(), releasePrompt = deferred(), shuttingDown = deferred(), releaseShutdown = deferred();
+  t.after(() => { releasePrompt.resolve(); releaseShutdown.resolve(); });
+  const h = await fixture(t, [pi => pi.on('before_agent_start', async event => {
+    if (event.prompt === 'Next') { preparing.resolve(); await releasePrompt.promise; }
+  })], true, [pi => pi.on('session_shutdown', async event => {
+    if (event.reason === 'reload') { shuttingDown.resolve(); await releaseShutdown.promise; }
+  })]);
+  const first = deferred(), promoted = deferred();
+  h.provider.setResponses([h.blocked(first), h.blocked(promoted)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.setText('Draft');
+  h.app.editor.handleInput('\x1b');
+  await preparing.promise;
+  assert.equal(h.session.isStreaming, false);
+  h.app.ui.hideOverlay = () => {};
+  h.app.clearExtensionTerminalInputListeners = h.app.setExtensionFooter = h.app.setExtensionHeader = h.app.clearExtensionWidgets = () => {};
+  h.app.footerDataProvider = { clearExtensionStatuses() {} };
+  h.app.footer = { invalidate() {} };
+  h.app.updateTerminalTitle = h.app.setWorkingIndicator = h.app.setHiddenThinkingLabel = () => {};
+  h.app.rebuildChatFromMessages = h.app.applyRuntimeSettings = () => {};
+  h.app.themeController = { applyFromSettings() {} };
+  h.app.keybindings.reload = () => {};
+  h.app.maybeSaveImplicitProjectTrustAfterReload = () => false;
+  h.app.showStatus = h.app.showWarning = h.app.showError = (message: string) => h.notices.push(message);
+  const reset = h.app.resetExtensionUI.bind(h.app);
+  h.app.resetExtensionUI = () => {
+    assert.ok(h.notices.some(message => /Escape Continue stopped/.test(message)), 'retirement notice precedes UI teardown and its first yield');
+    reset();
+  };
+  h.app.setupEditorSubmitHandler();
+  const reloading = h.app.defaultEditor.onSubmit('/reload');
+  try {
+    await Promise.race([shuttingDown.promise, reloading.then(() => { throw new Error('Reload must reach the blocked shutdown handler'); })]);
+    releasePrompt.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.provider.state.callCount, 1, 'accepted reload must not start the pending handoff');
+    assert.deepEqual(h.users(), ['Original']);
+    assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
+  } finally {
+    releasePrompt.resolve();
+    await h.session.abort();
+    releaseShutdown.resolve();
+    await reloading;
+    await running;
+  }
+  assert.ok(!h.notices.some(message => /Reload failed/.test(message)), h.notices.join('\n'));
+  assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
+});
+
+test('direct session reload retires a held preflight before earlier async shutdown handlers', async t => {
+  const preparing = deferred(), releasePrompt = deferred(), shuttingDown = deferred(), releaseShutdown = deferred();
+  t.after(() => { releasePrompt.resolve(); releaseShutdown.resolve(); });
+  const h = await fixture(t, [pi => pi.on('before_agent_start', async event => {
+    if (event.prompt === 'Next') { preparing.resolve(); await releasePrompt.promise; }
+  })], true, [pi => pi.on('session_shutdown', async event => {
+    if (event.reason === 'reload') { shuttingDown.resolve(); await releaseShutdown.promise; }
+  })]);
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first), fauxAssistantMessage('Must not start')]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput('\x1b');
+  await preparing.promise;
+  const reloading = h.session.reload();
+  try {
+    await shuttingDown.promise;
+    releasePrompt.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.provider.state.callCount, 1);
+    assert.deepEqual(h.users(), ['Original']);
+    assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
+  } finally {
+    releasePrompt.resolve();
+    await h.session.abort();
+    releaseShutdown.resolve();
+    await reloading;
+    await running;
+  }
+  assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
+});
+
+test('a rejected TUI reload leaves the pending handoff eligible to continue', async t => {
+  const first = deferred(), release = deferred(), promoted = deferred();
+  t.after(() => release.resolve());
+  const h = await fixture(t);
+  h.provider.setResponses([h.blocked(first, release), h.blocked(promoted)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput('\x1b');
+  h.app.showWarning = (message: string) => h.notices.push(message);
+  h.app.setupEditorSubmitHandler();
+  await h.app.defaultEditor.onSubmit('/reload');
+  assert.ok(h.notices.some(message => /Wait for the current response/.test(message)));
+  release.resolve();
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.provider.state.callCount, 2);
+  assert.deepEqual(h.users(), ['Original', 'Next']);
+  h.app.editor.handleInput('\x1b');
+  await h.session.waitForIdle();
+});
+
 test('a cancelled runtime replacement leaves the held handoff eligible to continue', async t => {
   const h = await fixture(t, [pi => pi.on('session_before_switch', () => ({ cancel: true }))]);
   const runtime = new AgentSessionRuntime(h.session, h.services, async () => { throw new Error('Cancelled replacement must not create a runtime'); });

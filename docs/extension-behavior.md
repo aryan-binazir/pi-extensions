@@ -47,7 +47,8 @@ picked up by a later submitted prompt. Queues are memory-only, not durable
 session entries. A manual submission during prompt preparation takes precedence
 and cancels the handoff before either prompt commits. Accepted session replacement
 or quit retires the handoff before asynchronous teardown; a cancelled replacement
-leaves it eligible to continue. Reload also cancels a pending handoff.
+leaves it eligible to continue. Accepted reload retires the handoff before its
+first yield; a rejected TUI reload leaves it eligible to continue.
 
 Autocomplete, dialogs, compaction and retry backoff keep their own Escape
 handling. Vi mode keeps insert/visual-mode Escape; only a clean normal-mode
@@ -65,7 +66,8 @@ again. If preflight rejects or handles the prompt without starting it, the
 queue is kept waiting with a notice.
 
 The compatibility adapter uses guarded interactive-handler and prepared-queue
-internals, tested against Pi 0.99.1 and smoke-tested with the installed Pi 1.0.2 TUI. Cancellation is checked at Pi's final
+internals, tested against Pi 0.99.1 and smoke-tested with the installed Pi 1.0.2
+TUI. Cancellation is checked at Pi's final
 asynchronous image-preparation boundary, before prompt options and next-turn
 notifications are committed. The normal preflight observer is never used to
 throw after commit. An unsupported layout warns once per session

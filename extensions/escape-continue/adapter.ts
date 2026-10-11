@@ -27,7 +27,7 @@ const installed = Symbol.for('pi-interactive:escape-continue-adapter');
 const wrapped = Symbol.for('pi-interactive:escape-continue-handler');
 const checkpointed = Symbol.for('pi-interactive:escape-continue-preflight');
 const intercepted = Symbol.for('pi-interactive:escape-continue-queue');
-type Prototype = { bindCurrentSessionExtensions(this: Host): Promise<void>; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; [installed]?: Adapter };
+type Prototype = { bindCurrentSessionExtensions(this: Host): Promise<void>; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; handleReloadCommand(this: Host): Promise<void>; [installed]?: Adapter };
 class CancelledHandoff extends Error {}
 class SupersededHandoff extends Error {}
 
@@ -38,7 +38,7 @@ function queueLayout(session: AgentSession): QueueLayout | undefined {
   const preflight = session as unknown as QueueLayout['preflight'];
   if (!Array.isArray(agent.steeringQueue?.messages) || !Array.isArray(agent.followUpQueue?.messages) ||
       !Array.isArray(display._steeringMessages) || !Array.isArray(display._followUpMessages) ||
-      typeof display._emitQueueUpdate !== 'function' || typeof preflight._normalizePromptImages !== 'function') return;
+      typeof display._emitQueueUpdate !== 'function' || typeof preflight._normalizePromptImages !== 'function' || typeof session.reload !== 'function') return;
   return { agent, display, preflight };
 }
 
@@ -77,6 +77,15 @@ function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter)
       const queued = clear();
       return held ? { steering: [...held.steering, ...queued.steering], followUp: [...held.followUp, ...queued.followUp] } : queued;
     };
+  }
+  if (!marked(session.reload, intercepted)) {
+    const reload = session.reload.bind(session);
+    const guarded: AgentSession['reload'] = (...args) => {
+      state.active.get(session.sessionManager)?.pending?.cancel();
+      return reload(...args);
+    };
+    Object.defineProperty(guarded, intercepted, { value: true });
+    session.reload = guarded;
   }
   const normalize = layout.preflight._normalizePromptImages;
   if (!marked(normalize, checkpointed)) {
@@ -121,7 +130,7 @@ function interrupt(host: Host, original: () => void, state: Adapter): void {
   const session = host.session;
   const registration = state.active.get(session.sessionManager);
   if (registration?.pending) return registration.pending.cancel();
-  if (!registration || !session.isStreaming || session.isCompacting) return original();
+  if (!state.supported || !registration || !session.isStreaming || session.isCompacting) return original();
   const layout = queueLayout(session);
   if (!layout) { warn(registration, state); return original(); }
   const held = { steer: [...layout.agent.steeringQueue.messages], followUp: [...layout.agent.followUpQueue.messages] };
@@ -243,6 +252,17 @@ export function install(): Adapter {
     };
     Object.defineProperty(stop, wrapped, { value: true });
     prototype.shutdown = stop;
+  }
+  const reload = prototype.handleReloadCommand;
+  if (typeof reload !== 'function') state.supported = false;
+  else if (!marked(reload, wrapped)) {
+    const shared = state;
+    const guarded = function (this: Host) {
+      if (!this.session.isStreaming && !this.session.isCompacting) shared.active.get(this.session.sessionManager)?.pending?.cancel();
+      return reload.call(this);
+    };
+    Object.defineProperty(guarded, wrapped, { value: true });
+    prototype.handleReloadCommand = guarded;
   }
   state.attach = attach;
   state.interrupt = interrupt;

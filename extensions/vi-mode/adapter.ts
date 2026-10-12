@@ -1,6 +1,5 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import type { Editor } from "@earendil-works/pi-tui";
-// Shared across copies: each extension load and /reload evaluates this file anew, but the handoff patch keeps the first.
 export const invalidateTextCache = Symbol.for("pi-interactive:vi-text-cache");
 
 export function setCursorPosition(editor: Editor, line: number, col: number): void {

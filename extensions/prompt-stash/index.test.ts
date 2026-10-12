@@ -162,7 +162,6 @@ test("restoring the only draft into an empty editor clears the stash status", ()
   h.emit("session_shutdown");
 });
 
-
 test("stash wraps the loaded vi factory and restores raw drafts with typed text around a collapsed paste", () => {
   const h = stashHost(CustomEditor, true);
   try {

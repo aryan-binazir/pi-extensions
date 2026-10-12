@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createEventBus, CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { editor } from "../vi-mode/test-support.ts";
 import stash from "./index.ts";
 import viMode from "../vi-mode/index.ts";
@@ -7,7 +7,6 @@ import viMode from "../vi-mode/index.ts";
 type Factory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 export function stashHost(EditorClass = CustomEditor, withViMode = false) {
   const hooks = new Map<string, ((...args: any[]) => unknown)[]>();
-  const events = createEventBus();
   let factory: Factory | undefined = EditorClass === CustomEditor ? undefined : (...args) => new EditorClass(...args);
   let e = editor(EditorClass);
   let status: string | undefined;
@@ -39,7 +38,6 @@ export function stashHost(EditorClass = CustomEditor, withViMode = false) {
       const handlers = hooks.get(name) ?? [];
       handlers.push(fn); hooks.set(name, handlers);
     },
-    events,
     registerShortcut: () => assert.fail("stash must not register a conflicting application shortcut"),
   } as unknown as ExtensionAPI;
   if (withViMode) viMode(pi);

@@ -322,7 +322,6 @@ test("editor handoff uses the latest loaded implementations without wrapping twi
   } finally { state.replace = replace; state.show = show; }
 });
 
-
 test("a legacy installed handoff survives its first upgrade without wrapping again", () => {
   execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
     import assert from "node:assert/strict";
@@ -331,7 +330,7 @@ test("a legacy installed handoff survives its first upgrade without wrapping aga
     const replace = prototype.setCustomEditorComponent, show = prototype.showExtensionCustom;
     const marker = Symbol.for("pi-interactive:editor-handoff");
     Object.defineProperty(prototype, marker, { value: true });
-    const { installEditorHandoff } = await import(${JSON.stringify(fileURLToPath(new URL("./adapter.ts", import.meta.url)))});
+    const { installEditorHandoff } = await import(${JSON.stringify(new URL("./adapter.ts", import.meta.url).href)});
     installEditorHandoff();
     installEditorHandoff();
     assert.equal(prototype[marker], true);

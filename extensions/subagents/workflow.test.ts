@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -18,7 +18,11 @@ test('workflow rejects unapproved source, executes approved TS, and replays succ
   assert.equal(calls,0);
   assert.deepEqual(await runWorkflow({...options,approve:async source=>source===options.source}),{output:'done'});
   assert.equal(calls,1);
+  const journal = join(options.journalDirectory, (await readdir(options.journalDirectory))[0]);
+  const old = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000);
+  await utimes(journal, old, old);
   assert.deepEqual(await runWorkflow({...options,approve:async()=>true}),{output:'done'});
+  assert.ok((await stat(journal)).mtimeMs > Date.now() - 60 * 60 * 1000);
   assert.equal(calls,1);
   await runWorkflow({...options,policyIdentity:'changed',approve:async()=>true});
   assert.equal(calls,2);
@@ -193,4 +197,25 @@ test('a resumed workflow replays completed stages and reruns its failed stage', 
   assert.deepEqual(replayed, ['spawn:first']);
   assert.equal(first, 1);
   assert.equal(later, 2);
+}));
+
+
+test('workflow abort rejects journal budget waiters before another child operation starts', async () => bounded(async base => {
+  const controller = new AbortController();
+  let calls = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await assert.rejects(runWorkflow({...base, signal: controller.signal, timeout: 5000,
+      source: "return await Promise.all(Array.from({length:33},(_,i)=>api.spawn({task:'hold'},'s'+i)));",
+      spawn: async (_task: unknown, signal: AbortSignal) => {
+        if (++calls === 32) timer = setTimeout(() => controller.abort(), 50);
+        return await new Promise((_, reject) => {
+          const abort = () => reject(new Error('synthetic child abort'));
+          signal.addEventListener('abort', abort, {once: true});
+          if (signal.aborted) abort();
+        });
+      },
+    }), /aborted/);
+    assert.equal(calls, 32);
+  } finally { clearTimeout(timer); }
 }));

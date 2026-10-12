@@ -26,7 +26,6 @@ test('journal loading does not follow substituted file or directory symlinks', a
     await rename(journalPath, `${journalPath}.original`);
     await symlink(`${journalPath}.original`, journalPath);
     await assert.rejects(WorkflowJournal.open(directory, identity), /must be a directory/);
-    await assert.rejects(WorkflowJournal.open(directory, identity), /must be a directory/);
   } finally { await journal?.close(); await rm(directory, {recursive: true, force: true}); }
 });
 
@@ -166,7 +165,6 @@ test('journal retention prunes by age and count while keeping recent and foreign
 });
 
 
-
 test('journal ownership protects active and resumed stale journals and touch marks replay use', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'journal-running-'));
   const identity = 'a'.repeat(64);
@@ -278,7 +276,7 @@ test('journal ownership rejects concurrent identical runs across directories bef
   } finally { await journal.close(); await rm(root, {recursive: true, force: true}); }
 });
 
-test('journal reservation release admits waiting effects and checkpoints, and abort rejects waiters', async () => {
+test('journal reservation release admits waiting effects and abort rejects waiting stages and checkpoints', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'journal-reservations-'));
   const controller = new AbortController();
   const journal = await WorkflowJournal.open(directory, 'a'.repeat(64), {signal: controller.signal});
@@ -297,6 +295,7 @@ test('journal reservation release admits waiting effects and checkpoints, and ab
     const abortGate = gate();
     const waiting = journal.record('spawn:waiting', 'waiting', async () => { waitingStarted = true; await abortGate.promise; return 'small'; });
     const checkpoint = journal.checkpoint('checkpoint:waiting', 'fits');
+    const checkpointAborted = assert.rejects(checkpoint, /abort/i);
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(waitingStarted, false);
     assert.equal(journal.lookup('checkpoint:waiting'), undefined);
@@ -309,7 +308,6 @@ test('journal reservation release admits waiting effects and checkpoints, and ab
     const aborted = assert.rejects(blocked, /abort/i);
     controller.abort();
     await aborted;
-    const checkpointAborted = assert.rejects(checkpoint, /abort/i);
     await checkpointAborted;
     abortGate.resolve();
     await waiting;
@@ -334,6 +332,9 @@ test('journal on-disk compatibility pins version-2 bytes, filenames, ignored tem
     journal = await WorkflowJournal.open(directory, identity);
     assert.deepEqual(journal.keys, ['checkpoint:one']);
     assert.equal(journal.lookup('checkpoint:one')?.value, 1);
+    await journal.close();
+    await rm(path, {recursive: true});
+    journal = await WorkflowJournal.open(directory, identity);
     await journal.checkpoint('checkpoint:one', 1);
     assert.equal(await readFile(join(path, filename), 'utf8'), golden);
     assert.equal((await stat(path)).mode & 0o777, 0o700);
@@ -415,4 +416,21 @@ test('journal persistence failure reports before rejection, stays poisoned and c
     const fresh = await WorkflowJournal.open(directory, identity);
     await fresh.close();
   } finally { await journal.close(); await rm(root, {recursive: true, force: true}); }
+});
+
+test('journal retention expires stale journals even below the count limit', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'journal-age-'));
+  const staleIdentity = 'a'.repeat(64), recentIdentity = 'b'.repeat(64);
+  try {
+    for (const identity of [staleIdentity, recentIdentity]) {
+      const journal = await WorkflowJournal.open(directory, identity);
+      await journal.checkpoint('checkpoint:one', 1);
+      await journal.close();
+    }
+    await age(join(directory, staleIdentity), 8 * day);
+    await age(join(directory, recentIdentity), 3 * day);
+    const journal = await WorkflowJournal.open(directory, 'c'.repeat(64));
+    await journal.close();
+    assert.deepEqual(await readdir(directory), [recentIdentity]);
+  } finally { await rm(directory, {recursive: true, force: true}); }
 });

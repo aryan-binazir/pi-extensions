@@ -13,7 +13,8 @@ through `track`. `cancelAll` snapshots both, cancels children before aborting
 workflows, awaits their cleanup, and returns the tool's existing `{cancelled,
 count}` result. The count includes children once; an active workflow makes
 `cancelled` true even without children. Shutdown closes the registry, discards
-pending notices, aborts workflows and awaits cleanup. Session restart creates a
+pending notices, aborts workflows and awaits cleanup. A closed registry rejects
+new workflow runs, including runs submitted while shutdown is still cleaning up. Session restart creates a
 new registry. Admission and workflow journal policy remain unchanged.
 
 Child results record the first cancellation cause: user, cancel-all, timeout,
@@ -46,7 +47,9 @@ The extension adapts those signals to the existing tracker and panel. Streaming 
 completion repaint timing, tracker cancellation gates, and background interval
 ordering stay intact. Even a synchronous launch failure emits active before
 inactive. Overlapping cancel-all calls retain the existing boolean tracker gate;
-changing that behavior requires a separate fix.
+changing that behavior requires a separate fix. Activity observers only repaint
+UI, so the registry ignores observer exceptions; a failing observer cannot
+interrupt cancellation, shutdown cleanup or the cancel-all gate reset.
 
 The invocation port accepts either a launch command or an already-created child
 process launched with the same detached process-group ownership as the command

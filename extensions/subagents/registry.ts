@@ -235,6 +235,7 @@ export class SubagentRegistry {
   }
   async track<T>(run: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
     signal?.throwIfAborted();
+    if (this.closed) throw new Error('Registry is shut down');
     const controller = new AbortController();
     let settle!: () => void;
     const tracked: TrackedRun = {controller, done: new Promise<void>(resolve => { settle = resolve; })};
@@ -251,7 +252,7 @@ export class SubagentRegistry {
   }
   cancel(id: string): boolean {
     const cancelled = this.cancelEntry(id, 'user');
-    if (cancelled) this.options.activity?.({tracker: 'invalidate'});
+    if (cancelled) this.observe({tracker: 'invalidate'});
     return cancelled;
   }
   private cancelEntry(id: string, cause: CancellationCause): boolean {
@@ -275,7 +276,7 @@ export class SubagentRegistry {
   wait(id: string): Promise<TaskResult> | undefined { return this.entries.get(id)?.done; }
   async cancelAll(): Promise<{cancelled: boolean; count: number}> {
     this.cancellingAll = true;
-    this.options.activity?.({tracker: 'stop'});
+    this.observe({tracker: 'stop'});
     const runs = [...this.runs];
     const activeRuns = runs.filter(run => !run.controller.signal.aborted);
     this.admissions.abort(new Error('All tasks cancelled'));
@@ -295,7 +296,7 @@ export class SubagentRegistry {
   }
   async shutdown(): Promise<void> {
     this.closed = true;
-    this.options.activity?.({tasks: 'changed', tracker: 'stop'});
+    this.observe({tasks: 'changed', tracker: 'stop'});
     clearTimeout(this.noticeTimer); this.noticeTimer = undefined; this.notices = []; this.overflowNotices = 0; this.noticeTriggersTurn = false;
     for (const run of this.runs) run.controller.abort();
     this.lifecycle.abort(new Error('Registry is shut down'));
@@ -305,7 +306,11 @@ export class SubagentRegistry {
   }
   private emitActivity(event: Activity): void {
     if (this.closed || this.cancellingAll) event = {...event, tracker: undefined};
-    this.options.activity?.(event);
+    this.observe(event);
+  }
+  // Activity only repaints UI; an observer failure must not interrupt cancellation or cleanup.
+  private observe(event: Activity): void {
+    try { this.options.activity?.(event); } catch {}
   }
   private queueNotice(task: TaskResult): void {
     if (this.closed || task.owner !== 'parent' || task.cancellationCause === 'cancel-all' || !this.options.notify) return;

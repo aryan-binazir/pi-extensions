@@ -105,7 +105,7 @@ export function permissionFooter(
       let model = clean(ctx.model?.id ?? 'no-model');
       if (ctx.model?.reasoning) model += ` • ${ctx.thinkingLevel ?? 'off'}`;
       if (ctx.model && data.getAvailableProviderCount() > 1) model = `(${clean(ctx.model.provider)}) ${model}`;
-      const pathRow = theme.fg('dim', base + (label ? ` ${label}` : '') + tail), autoRow = theme.fg('dim', auto);
+      const pathRow = theme.fg('dim', base) + (label ? ` ${theme.fg('warning', label)}` : '') + theme.fg('dim', tail), autoRow = theme.fg('dim', auto);
       const statsRow = theme.fg('dim', stats.join(' ')), modelRow = theme.fg('dim', model);
       const other = [...statuses].filter(([key]) => key !== STATUS_KEY).sort(([a], [b]) => a.localeCompare(b));
       const others = other.length ? other.map(([, text]) => clean(text)).join(' ') : undefined;

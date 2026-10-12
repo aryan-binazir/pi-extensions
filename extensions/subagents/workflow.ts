@@ -1,13 +1,14 @@
 import { execFile, spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, readdir, realpath, rename, rm, stat, utimes } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { open, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type ts from 'typescript';
-import { TIMEOUT_BOUNDS, validateTimeout, type TaskSpec, type ValidTask } from './task.ts';
+import { validateTimeout, type TaskSpec, type ValidTask } from './task.ts';
 import { abortable } from './cancellation.ts';
+import { WorkflowJournal } from './workflow-journal.ts';
 import { insideRoot, type WorkflowAdmission } from './scope.ts';
 interface WorkflowOptions {
   source: string;
@@ -20,19 +21,6 @@ interface WorkflowOptions {
   signal?: AbortSignal;
   timeout?: number;
 }
-interface Stage {
-  signature: string;
-  value: unknown;
-}
-const runningIdentities = new Set<string>();
-// Each stage is its own atomically replaced file, so a write costs one stage,
-// not the whole journal. A child launches only after reserving STAGE_CAP.
-const STAGE_CAP = 1024 * 1024;
-const JOURNAL_CAP = 32 * STAGE_CAP;
-const RETAIN_MS = 7 * 24 * 60 * 60 * 1000;
-const RETAIN_COUNT = 16;
-// Twice the longest workflow run: older journals cannot be in use by any Pi process.
-const IDLE_MS = 2 * TIMEOUT_BOUNDS.maximum;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const execFileAsync = promisify(execFile);
 let compiler: Promise<typeof ts> | undefined;
@@ -80,52 +68,6 @@ async function workflowRuntime(signal?: AbortSignal) {
   }
   return { ...runtime, permissionFlag };
 }
-// Journals stay replayable until unused for RETAIN_MS; beyond the RETAIN_COUNT
-// most recently used, idle ones go sooner. Single-file journals predate this
-// layout and are never replayed, so they go once idle and take no count slot.
-async function pruneJournals(directory: string): Promise<void> {
-  const now = Date.now();
-  const journals: { path: string; idle: number }[] = [];
-  const removals: Promise<void>[] = [];
-  const remove = (path: string) => removals.push(rm(path, { recursive: true, force: true }).catch(() => {}));
-  for (const name of await readdir(directory)) {
-    const match = /^([0-9a-f]{64})(\.json(?:\.[0-9a-f-]{36}\.tmp)?)?$/.exec(name);
-    if (!match || runningIdentities.has(match[1]))
-      continue;
-    const path = resolve(directory, name);
-    let idle: number;
-    try { idle = now - (await lstat(path)).mtimeMs; } catch { continue; }
-    if (!match[2])
-      journals.push({ path, idle });
-    else if (idle > IDLE_MS)
-      remove(path);
-  }
-  journals.sort((a, b) => a.idle - b.idle).forEach(({ path, idle }, index) => {
-    if (idle > RETAIN_MS || index >= RETAIN_COUNT && idle > IDLE_MS)
-      remove(path);
-  });
-  await Promise.all(removals);
-}
-async function readStage(path: string): Promise<{ text: string; length: number; mtimeMs: number }> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const info = await handle.stat();
-    if (!info.isFile()) throw new Error('Workflow journal must be a regular file');
-    if (info.size > STAGE_CAP) throw new Error('Workflow journal exceeds limit');
-    const bytes = Buffer.alloc(info.size + 1);
-    let length = 0;
-    while (length < bytes.length) {
-      const {bytesRead} = await handle.read(bytes, length, bytes.length - length, length);
-      if (!bytesRead) break;
-      length += bytesRead;
-    }
-    if (length > info.size) throw new Error('Workflow journal changed while loading');
-    return { text: bytes.subarray(0, length).toString('utf8'), length, mtimeMs: info.mtimeMs };
-  }
-  finally {
-    await handle.close();
-  }
-}
 export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
   const timeout = validateTimeout(options.timeout, 'Workflow timeout');
   await typescript();
@@ -156,114 +98,24 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
   const cwd = await realpath(options.cwd);
   const admission = options.admission;
   const identity = digest(JSON.stringify({ version: 2, source: options.source, cwd, policy: admission.policyIdentity, defaults: admission.identityDefaults, profiles: admission.profileIdentity, node: runtime.version, typescript: tsc.version, platform: process.platform }));
-  if (runningIdentities.has(identity))
-    throw new Error('Identical workflow is already running');
   const compiled = tsc.transpileModule(`async function workflow(api: any) {\n${options.source}\n}`, { compilerOptions: { target: tsc.ScriptTarget.ES2022, module: tsc.ModuleKind.None }, reportDiagnostics: true });
   const errors = compiled.diagnostics?.filter(d => d.category === tsc.DiagnosticCategory.Error) ?? [];
   if (errors.length)
     throw new Error(tsc.flattenDiagnosticMessageText(errors[0].messageText, '\n'));
-  runningIdentities.add(identity);
   const controller = new AbortController();
   const abort = () => controller.abort();
   options.signal?.addEventListener('abort', abort, { once: true });
   if (options.signal?.aborted)
     controller.abort();
   const pending = new Set<Promise<void>>();
-  const stages: Record<string, Stage> = {};
-  const sizes = new Map<string, number>();
-  let journalBytes = 0;
-  let reserved = 0;
-  let budgetWaiters: (() => void)[] = [];
-  let writeQueue = Promise.resolve();
-  const journalPath = resolve(options.journalDirectory, identity);
-  let journalCreated = false;
+  let openedJournal: WorkflowJournal | undefined;
   let persistenceError: Error | undefined;
-  const exhausted = () => Object.assign(new Error('Workflow journal budget exhausted; split the workflow or reduce stage output'), { retryable: false });
-  // Every write first reserves its record: STAGE_CAP for a spawn, whose result
-  // is unknown until its child ran, or a checkpoint's exact size. Writes wait
-  // while unfinished stages hold the budget and fail before running when none
-  // do. A spawn result over STAGE_CAP (registry results are clipped below it in
-  // index.ts) is still a persistence failure after its child ran.
-  const reserve = async (bytes: number) => {
-    while (journalBytes + reserved + bytes > JOURNAL_CAP) {
-      if (!reserved)
-        throw exhausted();
-      await abortable(new Promise<void>(wake => budgetWaiters.push(wake)), controller.signal);
-    }
-    reserved += bytes;
-  };
-  const release = (bytes: number) => {
-    reserved -= bytes;
-    const waiters = budgetWaiters;
-    budgetWaiters = [];
-    for (const wake of waiters) wake();
-  };
-  const persist = (key: string, stage: Stage, reservation: number) => {
-    writeQueue = writeQueue.then(async () => {
-      const data = JSON.stringify({ version: 2, identity, key, ...stage });
-      const bytes = Buffer.byteLength(data, 'utf8');
-      const previous = sizes.get(key) ?? 0;
-      if (bytes > STAGE_CAP || journalBytes - previous + reserved - reservation + bytes > JOURNAL_CAP)
-        throw new Error('Workflow journal exceeds limit');
-      if (!journalCreated) {
-        await mkdir(journalPath, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
-        if (!(await lstat(journalPath)).isDirectory())
-          throw new Error('Workflow journal must be a directory');
-        journalCreated = true;
-      }
-      const path = resolve(journalPath, `${digest(key)}.json`);
-      const temp = `${path}.${randomUUID()}.tmp`;
-      try {
-        const handle = await open(temp, 'wx', 0o600);
-        try { await handle.writeFile(data); } finally { await handle.close(); }
-        await rename(temp, path);
-        stages[key] = stage;
-        sizes.set(key, bytes);
-        journalBytes += bytes - previous;
-      }
-      finally {
-        await rm(temp, { force: true });
-      }
-    }).catch(error => {
-      persistenceError = new Error(`Workflow persistence failed; reconcile external effects before retrying: ${String(error)}`);
-      controller.abort();
-      throw persistenceError;
-    });
-    return writeQueue;
-  };
   try {
-    await mkdir(options.journalDirectory, { recursive: true, mode: 0o700 });
-    await pruneJournals(options.journalDirectory).catch(() => {});
-    let names: string[] = [];
-    try {
-      if (!(await lstat(journalPath)).isDirectory())
-        throw new Error('Workflow journal must be a directory');
-      names = await readdir(journalPath);
-      journalCreated = true;
-    }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-        throw error;
-    }
-    const loaded: { key: string; stage: Stage; mtimeMs: number }[] = [];
-    for (const name of names) {
-      if (!/^[0-9a-f]{64}\.json$/.test(name))
-        continue;
-      const { text, length, mtimeMs } = await readStage(resolve(journalPath, name));
-      if ((journalBytes += length) > JOURNAL_CAP)
-        throw new Error('Workflow journal exceeds limit');
-      const record = JSON.parse(text);
-      if (!record || typeof record !== 'object' || record.version !== 2 || record.identity !== identity || typeof record.key !== 'string' || !/^(?:spawn|checkpoint):[a-zA-Z0-9_.-]{1,80}$/.test(record.key) || `${digest(record.key)}.json` !== name || typeof record.signature !== 'string')
-        throw new Error('Invalid workflow journal');
-      sizes.set(record.key, length);
-      loaded.push({ key: record.key, stage: { signature: record.signature, value: record.value }, mtimeMs });
-    }
-    for (const { key, stage } of loaded.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.key < b.key ? -1 : 1)))
-      stages[key] = stage;
-    if (Object.keys(stages).length && (!options.approveReplay || !await abortable(options.approveReplay(Object.keys(stages)), controller.signal)))
+    const journal = await WorkflowJournal.open(options.journalDirectory, identity, {signal: controller.signal, onFailure: error => { persistenceError = error; controller.abort(); }});
+    openedJournal = journal;
+    if (journal.keys.length && (!options.approveReplay || !await abortable(options.approveReplay(journal.keys), controller.signal)))
       throw new Error('Workflow replay approval declined');
-    if (journalCreated)
-      await utimes(journalPath, new Date(), new Date()).catch(() => {});
+    await journal.touch();
     if (controller.signal.aborted)
       throw new Error('Workflow aborted');
     const workerPath = fileURLToPath(new URL('./workflow-worker.mjs', import.meta.url));
@@ -300,24 +152,17 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
           const input = args.task as Record<string, unknown>;
           const task = await admission.admit(input as unknown as Omit<TaskSpec, 'cwd'> & {cwd?: string}, cwd);
           const signature = digest(JSON.stringify(task));
-          const cached = stages[key];
+          const cached = journal.lookup(key, signature);
           if (cached) {
-            if (cached.signature !== signature)
-              throw new Error('Stage label reused for a different task');
             await abortable(admission.replay(task, controller.signal), controller.signal);
             return cached.value;
           }
-          await reserve(STAGE_CAP);
-          try {
+          return await journal.record(key, signature, async () => {
             const value = await options.spawn(task, controller.signal);
             if (controller.signal.aborted)
               throw new Error('Workflow aborted');
-            await persist(key, { signature, value }, STAGE_CAP);
             return value;
-          }
-          finally {
-            release(STAGE_CAP);
-          }
+          });
         }
         finally {
           activeStages.delete(key);
@@ -351,19 +196,11 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
       if (operation === 'checkpointGet' || operation === 'checkpointPut') {
         if (typeof args?.key !== 'string' || !/^[a-zA-Z0-9_.-]{1,80}$/.test(args.key))
           throw new Error('Invalid checkpoint');
-        if (operation === 'checkpointGet')
-          return Object.hasOwn(stages, key) ? { found: true, value: stages[key].value } : { found: false };
-        const stage = { signature: 'checkpoint', value: args.value };
-        const bytes = Buffer.byteLength(JSON.stringify({ version: 2, identity, key, ...stage }), 'utf8');
-        if (bytes > STAGE_CAP)
-          throw Object.assign(new Error('Workflow checkpoint exceeds the 1 MiB journal record limit'), { retryable: false });
-        await reserve(bytes);
-        try {
-          await persist(key, stage, bytes);
+        if (operation === 'checkpointGet') {
+          const cached = journal.lookup(key);
+          return cached ? {found: true, value: cached.value} : {found: false};
         }
-        finally {
-          release(bytes);
-        }
+        await journal.checkpoint(key, args.value);
         return null;
       }
       throw new Error('Unknown workflow capability');
@@ -430,8 +267,7 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
   finally {
     controller.abort();
     await Promise.allSettled(pending);
-    await writeQueue.catch(() => { });
+    await openedJournal?.close();
     options.signal?.removeEventListener('abort', abort);
-    runningIdentities.delete(identity);
   }
 }

@@ -175,3 +175,22 @@ test('a stage label cannot replay the cached result of a different task', async 
   await writeFile(join(base.cwd, 'input'), 'world');
   await assert.rejects(runWorkflow(options), /reused for a different task/);
 }));
+
+test('a resumed workflow replays completed stages and reruns its failed stage', async () => bounded(async base => {
+  let first = 0, later = 0;
+  let replayed: string[] = [];
+  const options = {...base,
+    source: "return [await api.spawn({task:'first'},'first'),await api.spawn({task:'later'},'later')];",
+    approveReplay: async (stages: string[]) => { replayed = stages; return true; },
+    spawn: async (task: {task: string}) => {
+      if (task.task === 'first') return ++first;
+      if (++later === 1) throw new Error('synthetic interruption');
+      return 'resumed';
+    },
+  };
+  await assert.rejects(runWorkflow(options), /synthetic interruption/);
+  assert.deepEqual(await runWorkflow(options), [1, 'resumed']);
+  assert.deepEqual(replayed, ['spawn:first']);
+  assert.equal(first, 1);
+  assert.equal(later, 2);
+}));

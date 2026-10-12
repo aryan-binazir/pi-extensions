@@ -23,8 +23,9 @@ including approval and queue time.
 - **Panel.** One shared panel above the editor starts as a single truncated line
   showing running and queued counts, including workflow children, and an `alt+r`
   hint. Lowercase `alt+r`, without Shift, toggles the full bordered panel. The
-  choice persists across empty periods and later worker batches until reload or
-  restart, like Todo. The full panel lists a short ID, status and task brief on
+  choice persists across empty periods and later worker batches in the session.
+  Reload, restart, or session replacement starts collapsed again, like Todo.
+  The full panel lists a short ID, status and task brief on
   one truncated line per child, running children first. From 10 terminal rows it
   takes at most half the terminal height: from 24 rows it lists up to nine
   children, or eight plus a `… N more` line counting hidden running and queued

@@ -234,7 +234,7 @@ test('registered delegation remains attached to its owning abort signal after re
 }));
 
 
-test('registered direct and workflow children share native monitoring without recursive delegation or paid wakeups', async () => fixture(async ({execute, ctx, notifications, statuses, cwd, settle, widgets}: any) => {
+test('registered direct and workflow children share native monitoring without recursive delegation or paid wakeups', async () => fixture(async ({execute, ctx, notifications, statuses, cwd, settle, widgets, shortcuts}: any) => {
   const calls: any[] = [];
   ctx.modelRegistry = {
     ...fixtureModelRegistry(),
@@ -246,6 +246,10 @@ test('registered direct and workflow children share native monitoring without re
   await until(() => calls.length > 0, 'the first shared tracker request');
   assert.equal(calls.length, 1); assert.match(calls[0][1].messages.find((message: any) => message.role === 'user').content, /workflow/);
   assert.deepEqual(widgets.get('interactive-tools:subagents'), ['Subagents · 1 running · 0 queued · alt+r'], 'workflow child appears in shared compact panel');
+  const workflowChild = (await execute('subagent_status')).details[0];
+  await shortcuts.get('alt+r').handler(ctx);
+  assert.equal(widgets.get('interactive-tools:subagents')?.length, 4);
+  assert.match(widgets.get('interactive-tools:subagents')[2], new RegExp(`${workflowChild.id.slice(0, 8)}.*running.*hold`));
   await execute('subagent', {task: 'hold', preset: 'reader'});
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(calls.length, 1);

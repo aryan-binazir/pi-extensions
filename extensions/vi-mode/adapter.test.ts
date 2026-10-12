@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CustomEditor, InteractiveMode } from "@earendil-works/pi-coding-agent";
@@ -233,8 +234,6 @@ async function loadViMode() {
   assert.deepEqual(errors, []);
   return extensions[0];
 }
-// The handoff belongs to whichever copy installed it first (an earlier test's editor or the first load);
-// the second load is never that copy, like vi-mode after /reload.
 let reloaded: ReturnType<typeof loadViMode> | undefined;
 async function reloadedHost() {
   reloaded ??= loadViMode().then(loadViMode);
@@ -286,4 +285,57 @@ test("a vi editor from a reloaded module edits the draft an inline dialog restor
   assert.equal(vi.getText(), "");
   keys(vi, "u");
   assert.equal(vi.getExpandedText(), draft, "undo restores the draft rather than a stale empty copy");
+});
+
+test("editor handoff uses the latest loaded implementations without wrapping twice", async () => {
+  const h = await reloadedHost();
+  h.start();
+  const prototype = InteractiveMode.prototype as any;
+  const marker = Symbol.for("pi-interactive:editor-handoff");
+  const wrappedReplace = prototype.setCustomEditorComponent;
+  const wrappedShow = prototype.showExtensionCustom;
+  await loadViMode();
+  const state = prototype[marker];
+  const firstReplace = state.replace;
+  const firstShow = state.show;
+  await loadViMode();
+  assert.equal(prototype[marker], state);
+  assert.equal(prototype.setCustomEditorComponent, wrappedReplace);
+  assert.equal(prototype.showExtensionCustom, wrappedShow);
+  assert.notEqual(state.replace, firstReplace);
+  assert.notEqual(state.show, firstShow);
+  const replace = state.replace, show = state.show;
+  let replacements = 0, dialogs = 0;
+  state.replace = function (...args: any[]) { replacements++; return replace.apply(this, args); };
+  state.show = function (...args: any[]) { dialogs++; return show.apply(this, args); };
+  try {
+    keys(h.app.editor, "saved draft");
+    await h.app.showExtensionCustom((_tui: unknown, _theme: unknown, _keys: unknown, done: () => void) => {
+      setImmediate(done);
+      return { render: () => [], handleInput() {}, invalidate() {} };
+    }, { overlay: false });
+    assert.equal(dialogs, 1);
+    assert.equal(h.app.editor.getText(), "saved draft");
+    h.app.setCustomEditorComponent(undefined);
+    assert.equal(replacements, 1);
+    assert.equal(h.app.editor.getText(), "saved draft");
+  } finally { state.replace = replace; state.show = show; }
+});
+
+
+test("a legacy installed handoff survives its first upgrade without wrapping again", () => {
+  execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import assert from "node:assert/strict";
+    import { InteractiveMode } from "@earendil-works/pi-coding-agent";
+    const prototype = InteractiveMode.prototype;
+    const replace = prototype.setCustomEditorComponent, show = prototype.showExtensionCustom;
+    const marker = Symbol.for("pi-interactive:editor-handoff");
+    Object.defineProperty(prototype, marker, { value: true });
+    const { installEditorHandoff } = await import(${JSON.stringify(fileURLToPath(new URL("./adapter.ts", import.meta.url)))});
+    installEditorHandoff();
+    installEditorHandoff();
+    assert.equal(prototype[marker], true);
+    assert.equal(prototype.setCustomEditorComponent, replace);
+    assert.equal(prototype.showExtensionCustom, show);
+  `]);
 });

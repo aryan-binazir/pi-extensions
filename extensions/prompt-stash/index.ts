@@ -34,8 +34,7 @@ export default function promptStash(pi: ExtensionAPI): void {
     const captured: { text: string; restore?: () => boolean } = { text: current };
     const draft = active && { text: active.getText(), payloads: readPastes(active) };
     const factory = installed;
-    pi.events?.emit("pi-interactive:stash-capture", captured);
-    if (!captured.restore && draft) captured.restore = () => {
+    if (draft) captured.restore = () => {
       if (!active || ctx.ui.getEditorComponent() !== factory) return false;
       restoreRawDraft(active, draft.text, draft.payloads);
       return true;

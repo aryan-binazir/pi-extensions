@@ -196,17 +196,21 @@ export function markViEditor(editor: Editor): void {
   installSinglePassPasteExpansion(editor);
 }
 // Pi 0.85.1 copies getText() without its paste registry before extension shutdown.
-// Installed once per process: /reload keeps the first patch and the helpers it calls, so changes to them need a restart.
 export function installEditorHandoff(): void {
-  const prototype = InteractiveMode.prototype as unknown as {
-    [handoffInstalled]?: boolean;
-    setCustomEditorComponent: (factory: unknown) => void;
-    showExtensionCustom: (factory: unknown, options?: { overlay?: boolean }) => Promise<unknown>;
+  type Host = { editor: Editor };
+  type Replace = (this: Host, factory: unknown) => void;
+  type Show = (this: Host, factory: unknown, options?: { overlay?: boolean }) => Promise<unknown>;
+  type State = {
+    replace: (this: Host, original: Replace, factory: unknown) => void;
+    show: (this: Host, original: Show, factory: unknown, options?: { overlay?: boolean }) => Promise<unknown>;
   };
-  if (prototype[handoffInstalled]) return;
-  const original = prototype.setCustomEditorComponent;
-  if (typeof original !== "function") throw new Error("Unsupported Pi editor handoff layout");
-  prototype.setCustomEditorComponent = function (this: { editor: Editor }, factory: unknown) {
+  const prototype = InteractiveMode.prototype as unknown as {
+    [handoffInstalled]?: State | true;
+    setCustomEditorComponent: Replace;
+    showExtensionCustom: Show;
+  };
+  if (prototype[handoffInstalled] === true) return;
+  const replace: State["replace"] = function (original, factory) {
     const source = this.editor;
     if (!((source as unknown as { pastes?: unknown }).pastes instanceof Map)) {
       original.call(this, factory);
@@ -230,8 +234,7 @@ export function installEditorHandoff(): void {
     placeCursor(this.editor, this.editor.getText().length);
   };
   // Inline custom UI also restores getText() via setText(), clearing paste data.
-  const showCustom = prototype.showExtensionCustom;
-  prototype.showExtensionCustom = async function (this: { editor: Editor }, factory, options) {
+  const show: State["show"] = async function (showCustom, factory, options) {
     const source = this.editor;
     if (options?.overlay || !(viEditor in source))
       return showCustom.call(this, factory, options);
@@ -258,5 +261,21 @@ export function installEditorHandoff(): void {
       }
     }
   };
-  Object.defineProperty(prototype, handoffInstalled, { value: true });
+  const state = prototype[handoffInstalled];
+  if (state) {
+    state.replace = replace;
+    state.show = show;
+    return;
+  }
+  const original = prototype.setCustomEditorComponent;
+  if (typeof original !== "function") throw new Error("Unsupported Pi editor handoff layout");
+  const showCustom = prototype.showExtensionCustom;
+  const shared: State = { replace, show };
+  prototype.setCustomEditorComponent = function (factory) {
+    return shared.replace.call(this, original, factory);
+  };
+  prototype.showExtensionCustom = function (factory, options) {
+    return shared.show.call(this, showCustom, factory, options);
+  };
+  Object.defineProperty(prototype, handoffInstalled, { value: shared });
 }

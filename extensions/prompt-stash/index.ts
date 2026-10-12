@@ -1,11 +1,10 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
+import { PasteFramer } from "../vi-mode/paste-framing.ts";
 import { installSinglePassPasteExpansion, readPastes, restoreRawDraft } from "../vi-mode/adapter.ts";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 
-const PASTE_START = "\x1b[200~";
-const PASTE_END = "\x1b[201~";
 const ESC = 0x1b;
 const CTRL_S_BYTE = "s".charCodeAt(0) & 0x1f;
 /** CSI u and modifyOtherKeys both spell the key out as a decimal codepoint. */
@@ -69,28 +68,22 @@ export default function promptStash(pi: ExtensionAPI): void {
       active = editor instanceof CustomEditor ? editor : undefined;
       if (active) installSinglePassPasteExpansion(active);
       const input = editor.handleInput.bind(editor);
-      let pasting = false;
-      let boundary = "";
+      const framer = new PasteFramer();
+      let forwarding = 0;
       editor.handleInput = (data) => {
-        const chunk = boundary === "" ? data : boundary + data;
-        const wasPasting = pasting || boundary !== "";
-        const closed = chunk.lastIndexOf(PASTE_END);
-        const opened = chunk.indexOf(PASTE_START, closed < 0 ? 0 : closed + PASTE_END.length);
-        if (opened >= 0) pasting = true;
-        else if (closed >= 0) pasting = false;
-        boundary = "";
-        // Outside a paste, a trailing ESC [ is a complete legacy Alt+[ key, not a split opener.
-        for (let size = pasting ? 2 : 3; size < PASTE_START.length; size++) {
-          const tail = chunk.slice(-size);
-          if (tail.length === size && (PASTE_START.startsWith(tail) || PASTE_END.startsWith(tail)))
-            boundary = tail;
-        }
+        let pasteChunk = framer.pasting || framer.holdingMarker;
+        if (!forwarding)
+          for (const frame of framer.feed(data)) pasteChunk ||= frame.type === "paste";
+        pasteChunk ||= framer.pasting || framer.holdingMarker;
         const lead = data.charCodeAt(0);
         const stashKey = lead === CTRL_S_BYTE || (lead === ESC && data.includes(CTRL_S_CODEPOINT));
-        if (enabled && !wasPasting && !pasting && stashKey && matchesKey(data, "ctrl+s")) {
+        if (enabled && !pasteChunk && stashKey && matchesKey(data, "ctrl+s")) {
           toggle(ctx);
           tui.requestRender();
-        } else input(data);
+        } else {
+          forwarding++;
+          try { input(data); } finally { forwarding--; }
+        }
       };
       return editor;
     };

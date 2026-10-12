@@ -1,4 +1,5 @@
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { PasteFramer } from "./paste-framing.ts";
 import {
   matchesKey,
   decodeKittyPrintable,
@@ -89,8 +90,7 @@ export class ViEditor extends CustomEditor {
   >();
   private prefix = "";
   private prefixCount = 1;
-  private paste: string | undefined;
-  private pasteOpening = "";
+  private pasteFramer = new PasteFramer();
   private op = "";
   private opCount = 1;
   private undoHistory: Snapshot[] = [];
@@ -234,8 +234,7 @@ export class ViEditor extends CustomEditor {
     this.undoHistory = [];
     this.redoHistory = [];
     this.insertion = undefined;
-    this.paste = undefined;
-    this.pasteOpening = "";
+    this.pasteFramer.reset();
     this.resetPending();
     writePastes(this, { pastes: new Map(), counter: 0 });
     this.writeText(collapsePaste(this, safeDraft(text)));
@@ -575,70 +574,41 @@ export class ViEditor extends CustomEditor {
       : undefined;
   }
   dispose(): void {
-    this.paste = undefined;
-    this.pasteOpening = "";
+    this.pasteFramer.reset();
     this.tui.setShowHardwareCursor(this.previousHardwareCursor);
     this.tui.terminal.write("\x1b[0 q");
   }
   override handleInput(data: string): void {
-    if (this.pasteOpening) {
-      data = this.pasteOpening + data;
-      this.pasteOpening = "";
+    for (const frame of this.pasteFramer.feed(data)) {
+      if (frame.type === "key") {
+        if (frame.data.length < data.length) this.handleInput(frame.data);
+        else this.handleKey(frame.data);
+        continue;
+      }
+      const payload = safeDraft(frame.data.replace(/\x1b\[(\d+);5u/g, (sequence, code: string) => {
+        const cp = Number(code);
+        return cp >= 97 && cp <= 122 ? String.fromCharCode(cp - 96)
+          : cp >= 65 && cp <= 90 ? String.fromCharCode(cp - 64) : sequence;
+      }));
+      if (this.insertion && this.insertion.text !== this.text())
+        this.checkpoint(this.insertion);
+      this.checkpoint();
+      const [p, selectionEnd] =
+        this.mode === "visual" || this.mode === "line"
+          ? this.range()
+          : [this.pos(), this.pos()];
+      const text = this.text();
+      const visible = collapsePaste(this, payload);
+      this.writeText(text.slice(0, p) + visible + text.slice(selectionEnd));
+      if (this.mode === "visual" || this.mode === "line") {
+        this.mode = "normal";
+        this.cursorShape();
+      }
+      this.insertion = undefined;
+      this.move(p + visible.length);
     }
-    if (this.paste === undefined) {
-      const opening = "\x1b[200~";
-      const opener = data.indexOf(opening);
-      if (opener > 0) {
-        this.handleInput(data.slice(0, opener));
-        this.pasteOpening = ""; // A fragment before a complete opener never completes.
-        this.handleInput(data.slice(opener));
-        return;
-      }
-      if (opener < 0) {
-        // Pi delivers whole pastes; a partial opener only follows a stalled read. ESC and ESC [ are keys.
-        for (let length = Math.min(data.length, opening.length - 1); length > 2; length--) {
-          if (!opening.startsWith(data.slice(-length))) continue;
-          if (data.length > length) this.handleInput(data.slice(0, -length));
-          this.pasteOpening = data.slice(-length);
-          return;
-        }
-      }
-    }
-    if (this.paste !== undefined || data.startsWith("\x1b[200~")) {
-      if (this.paste === undefined) {
-        this.paste = "";
-        data = data.slice(6);
-      }
-      this.paste += data;
-      const end = this.paste.indexOf("\x1b[201~");
-      if (end >= 0) {
-        const payload = safeDraft(this.paste.slice(0, end).replace(/\x1b\[(\d+);5u/g, (sequence, code: string) => {
-          const cp = Number(code);
-          return cp >= 97 && cp <= 122 ? String.fromCharCode(cp - 96)
-            : cp >= 65 && cp <= 90 ? String.fromCharCode(cp - 64) : sequence;
-        })),
-          remaining = this.paste.slice(end + 6);
-        this.paste = undefined;
-        if (this.insertion && this.insertion.text !== this.text())
-          this.checkpoint(this.insertion);
-        this.checkpoint();
-        const [p, selectionEnd] =
-          this.mode === "visual" || this.mode === "line"
-            ? this.range()
-            : [this.pos(), this.pos()];
-        const text = this.text();
-        const visible = collapsePaste(this, payload);
-        this.writeText(text.slice(0, p) + visible + text.slice(selectionEnd));
-        if (this.mode === "visual" || this.mode === "line") {
-          this.mode = "normal";
-          this.cursorShape();
-        }
-        this.insertion = undefined;
-        this.move(p + visible.length);
-        if (remaining) this.handleInput(remaining);
-      }
-      return;
-    }
+  }
+  private handleKey(data: string): void {
     if (matchesKey(data, "escape")) {
       const discarded = this.discardArgument;
       this.discardArgument = false;

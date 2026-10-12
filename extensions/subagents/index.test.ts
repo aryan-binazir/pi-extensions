@@ -434,7 +434,7 @@ test('source review cancellation restores synchronously and preserves a replacem
   }));
 
 test('the active panel caps its height, lists running children first, and fits narrow widths', async () =>
-  withHost({prefix: 'subagent-panel-', pi: 'setInterval(()=>{},1000)'}, async ({ctx, execute}) => {
+  withHost({prefix: 'subagent-panel-', pi: 'setInterval(()=>{},1000)'}, async ({ctx, execute, shortcuts}) => {
     let panel: ((tui: unknown, theme: unknown) => {render(width: number): string[]}) | undefined;
     ctx.ui.setWidget = (_key: string, value?: typeof panel) => { panel = value; };
     const theme = {fg: (_color: string, text: string) => `\x1b[34m${text}\x1b[39m`};
@@ -448,11 +448,18 @@ test('the active panel caps its height, lists running children first, and fits n
     const queuedWriter = await spawn('hold', 'writer');
     const readers = [await spawn(`${'x'.repeat(99)}😀 cut inside the emoji`)];
     for (let i = 1; i < 18; i++) readers.push(await spawn(`${i} ${'界'.repeat(50)} 🧪`));
+    for (const width of [6, 20, 80]) {
+      const compact = panel!({terminal: {rows: 24}}, theme).render(width);
+      assert.equal(compact.length, 1);
+      assert.ok(visibleWidth(compact[0]) <= width);
+    }
+    assert.deepEqual(panel!({terminal: {rows: 24}}, theme).render(5), []);
+    await shortcuts.get('alt+r').handler(ctx);
     const ids = (lines: string[]) => lines.map(line => line.slice(2, 10));
     let lines = frame(80);
     assert.equal(lines.length, 12, 'header, eight rows and a summary between the borders');
     assert.match(lines[0], /^╭─+╮$/);
-    assert.match(lines[1], /^│ Subagents · 20 active +│$/);
+    assert.match(lines[1], /^│ Subagents · 20 active · alt\+r +│$/);
     assert.deepEqual(ids(lines.slice(2, 10)), [writer, ...readers.slice(0, 7)].map(id => id.slice(0, 8)));
     assert.ok(lines.slice(2, 10).every(line => line.includes(' · running · ')));
     assert.match(lines[10], /^│ … 12 more · 12 queued +│$/);
@@ -478,7 +485,7 @@ test('the active panel caps its height, lists running children first, and fits n
     for (const id of readers.slice(8)) await execute('subagent_cancel', {id});
     lines = frame(80);
     assert.equal(lines.length, 12, 'nine children fit without a summary');
-    assert.match(lines[1], /^│ Subagents · 9 active +│$/);
+    assert.match(lines[1], /^│ Subagents · 9 active · alt\+r +│$/);
     assert.deepEqual(ids(lines.slice(2, 11)), [writer, ...readers.slice(0, 8)].map(id => id.slice(0, 8)));
     assert.match(lines[10], / · queued · 7 界/);
     await execute('subagent_cancel', {id: readers[7]});

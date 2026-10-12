@@ -46,17 +46,26 @@ test('batch re-clipping marks omitted output even when each original notice fitt
   assert.ok(batch.task.tasks.every((task: any) => task.outputTruncated && task.output.length < task.outputLength));
 }));
 
-test('one active panel shows silent running and queued children, promotes rows, then vanishes', async () => fixture(async ({execute, widgets, hooks}: any) => {
+test('alt+r toggles the compact subagent panel and retains the choice across worker batches', async () => fixture(async ({execute, widgets, hooks, shortcuts, ctx}: any) => {
   const first = await execute('subagent', {task: 'hold', preset: 'writer'});
   const second = await execute('subagent', {task: 'hold', preset: 'writer'});
   const key = 'interactive-tools:subagents';
   assert.equal(widgets.size, 1);
+  assert.deepEqual(widgets.get(key), ['Subagents · 1 running · 1 queued · alt+r']);
+  assert.deepEqual([...shortcuts.keys()], ['alt+r']);
+  const toggle = () => shortcuts.get('alt+r').handler(ctx);
+  await toggle();
   assert.equal(widgets.get(key)?.length, 5, 'header and two rows inside a top and bottom border');
   assert.match(widgets.get(key)[0], /^╭─+╮$/);
   assert.match(widgets.get(key)[2], new RegExp(`^│ ${first.details.id.slice(0, 8)}.*running.*hold *│$`));
   assert.match(widgets.get(key)[3], new RegExp(`^│ ${second.details.id.slice(0, 8)}.*queued.*hold *│$`));
   assert.match(widgets.get(key)[4], /^╰─+╯$/);
+  assert.match(widgets.get(key)[1], /alt\+r/);
+  await toggle();
+  assert.deepEqual(widgets.get(key), ['Subagents · 1 running · 1 queued · alt+r']);
   await execute('subagent_cancel', {id: first.details.id});
+  assert.deepEqual(widgets.get(key), ['Subagents · 1 running · 0 queued · alt+r']);
+  await toggle();
   assert.equal(widgets.get(key)?.length, 4);
   assert.match(widgets.get(key)[2], new RegExp(`${second.details.id.slice(0, 8)}.*running`));
   assert.ok(!widgets.get(key).join(' ').includes(first.details.id.slice(0, 8)));
@@ -64,6 +73,12 @@ test('one active panel shows silent running and queued children, promotes rows, 
   assert.equal(widgets.size, 0);
   await execute('subagent', {task: 'hold', preset: 'reader'});
   assert.equal(widgets.size, 1);
+  assert.equal(widgets.get(key)?.length, 4, 'expanded choice survives an empty batch');
+  await execute('subagent_cancel', {id: 'all'});
+  await toggle();
+  assert.equal(widgets.size, 0, 'toggling while empty does not show a panel');
+  await execute('subagent', {task: 'hold', preset: 'reader'});
+  assert.deepEqual(widgets.get(key), ['Subagents · 1 running · 0 queued · alt+r']);
   await hooks.get('session_shutdown')();
   assert.equal(widgets.size, 0);
 }));
@@ -230,7 +245,7 @@ test('registered direct and workflow children share native monitoring without re
   const workflow = execute('workflow', {source: "return await api.spawn({task:'hold',preset:'reader'},'tracking');"}).catch(() => undefined);
   await until(() => calls.length > 0, 'the first shared tracker request');
   assert.equal(calls.length, 1); assert.match(calls[0][1].messages.find((message: any) => message.role === 'user').content, /workflow/);
-  assert.equal(widgets.get('interactive-tools:subagents')?.length, 4, 'workflow child appears in shared panel');
+  assert.deepEqual(widgets.get('interactive-tools:subagents'), ['Subagents · 1 running · 0 queued · alt+r'], 'workflow child appears in shared compact panel');
   await execute('subagent', {task: 'hold', preset: 'reader'});
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(calls.length, 1);

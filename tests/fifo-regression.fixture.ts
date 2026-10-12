@@ -15,6 +15,7 @@ subagents({
   getActiveTools: () => ['read', 'workflow'],
   registerTool: (tool: ToolDefinition) => { tools.set(tool.name, tool); },
   registerCommand: () => {},
+  registerShortcut: () => {},
   on: (name: string, handler: () => Promise<void> | void) => { events.set(name, handler); },
 } as unknown as ExtensionAPI);
 const toolContext: ExtensionToolContext = Object.assign(ctx as unknown as ExtensionContext, {tools: [], executeTool: async () => { throw new Error('No nested tools in this fixture'); }});

@@ -59,7 +59,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | Vi mode | Modal editor with motions, operators, registers, and undo. |
 | Prompt stash | `Ctrl+S` stashes or swaps the main editor draft. |
 | [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape stops the active run and starts the next queued user message; no queued user message means stop. |
-| [Subagents](docs/subagents.md) | Background workers, model profiles, approved TypeScript workflows. |
+| [Subagents](docs/subagents.md) | Background workers, model profiles, approved TypeScript workflows; `alt+r` toggles the compact/full panel. |
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |

@@ -5,13 +5,11 @@ import { basename } from 'node:path';
 import { Type } from 'typebox';
 import { IdeLink, type LinkState } from './link.ts';
 import { resolveToolPath } from '../tool-path.ts';
+import { FollowQueue } from './follow.ts';
 
 export { editorContext, maxEditorContextChars } from './context.ts';
 
 const statusKey = 'nvim-ide';
-const followWindowMs = 100;
-const followTimeoutMs = 5000;
-const replayAgeMs = 30_000;
 // Session replacement re-runs the factory and /reload re-evaluates this module, so the preference lives for the process.
 const followKey = Symbol.for('pi-interactive:nvim-ide.follow.v1');
 const prefs = globalThis as unknown as Record<symbol, boolean | undefined>;
@@ -29,88 +27,39 @@ export function statusText(state: LinkState): string | undefined {
 export default function nvimIde(pi: ExtensionAPI): void {
   let link: IdeLink | undefined;
   let ctx: ExtensionContext | undefined;
-  let seenEditor = false;
-  let followFailed = false;
   let sessionCwd = '';
   const workspaceCwd = () => sessionCwd;
-  let followCwd: string | undefined;
   const warn = (message: string) => { try { if (ctx?.hasUI) ctx.ui.notify(message, 'warning'); } catch {} };
-  let pendingFollow: { args: Record<string, unknown>; at: number } | undefined;
-  let followTimer: NodeJS.Timeout | undefined;
-  let inFlight: AbortController | undefined;
-  const cancelFollow = () => {
-    if (followTimer) clearTimeout(followTimer);
-    followTimer = undefined;
-    pendingFollow = undefined;
-    followCwd = undefined;
-    const controller = inFlight;
-    inFlight = undefined;
-    controller?.abort();
-  };
-  const scheduleFollow = () => {
-    if (followCwd !== undefined && followCwd !== workspaceCwd()) { cancelFollow(); return; }
-    if (!following() || !pendingFollow || !link?.connected || followTimer || inFlight) return;
-    followTimer = setTimeout(() => {
-      followTimer = undefined;
-      const current = link, destination = pendingFollow;
-      if (followCwd !== workspaceCwd()) { cancelFollow(); return; }
-      if (!following() || !destination || !current?.connected) return;
-      pendingFollow = undefined;
-      if (Date.now() - destination.at > replayAgeMs) return;
-      const controller = new AbortController();
-      inFlight = controller;
-      const deadline = setTimeout(() => controller.abort(), followTimeoutMs);
-      deadline.unref();
-      void current.call('openFile', destination.args, controller.signal).then(() => {
-        if (inFlight === controller && link === current) followFailed = false;
-      }).catch(error => {
-        if (inFlight !== controller || link !== current) return;
-        if (!current.connected) pendingFollow ??= destination;
-        else if (!followFailed) {
-          followFailed = true;
-          warn(`Could not reveal ${basename(String(destination.args.filePath))} in the editor: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }).finally(() => {
-        clearTimeout(deadline);
-        if (inFlight !== controller) return;
-        inFlight = undefined;
-        scheduleFollow();
-      });
-    }, followWindowMs);
-    followTimer.unref();
-  };
+  const follow = new FollowQueue({ link: () => link, cwd: workspaceCwd, following, warn });
   const editPaths = new Map<string, { path: string; cwd: string }>();
   let shown: string | undefined;
   const paint = (state: LinkState) => { const text = statusText(state); if (text === shown || !ctx?.hasUI) return; shown = text; ctx.ui.setStatus(statusKey, text); };
   const need = (): IdeLink => { if (!link?.connected) throw new Error('Open Neovim with claudecode.nvim in the session directory.'); return link; };
 
   pi.on('session_start', async (_event, context) => {
-    cancelFollow();
+    follow.reset();
     editPaths.clear();
     ctx = context;
     paint({ connected: false, mentions: 0 });
     const previous = link;
     link = undefined;
-    seenEditor = false;
-    followFailed = false;
     await previous?.stop();
     sessionCwd = context.cwd;
     const current = new IdeLink({ cwd: workspaceCwd, onChange: state => {
       if (link !== current) return;
-      if (state.connected) seenEditor = true;
       paint(state);
-      scheduleFollow();
+      follow.update();
     } });
     link = current;
     current.start();
   });
-  pi.on('session_shutdown', async () => { cancelFollow(); editPaths.clear(); const current = link; link = undefined; await current?.stop(); paint({ connected: false, mentions: 0 }); });
+  pi.on('session_shutdown', async () => { follow.cancel(); editPaths.clear(); const current = link; link = undefined; await current?.stop(); paint({ connected: false, mentions: 0 }); });
 
   pi.on('before_agent_start', async (event, context) => {
     sessionCwd = context.cwd;
     const current = link;
     if (!current) return;
-    if (followCwd !== undefined && followCwd !== workspaceCwd()) cancelFollow();
+    follow.update();
     await current.retarget();
     const batch = await current.prepareMentions();
     const notices: string[] = [];
@@ -135,13 +84,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
   pi.on('tool_execution_end', event => {
     const edit = editPaths.get(event.toolCallId);
     editPaths.delete(event.toolCallId);
-    if (!edit || event.isError || !following() || !seenEditor) return;
-    if (followCwd !== undefined && followCwd !== edit.cwd) cancelFollow();
-    followCwd = edit.cwd;
-    // Reveal only: openFile has no cursor-only position (claudecode.nvim turns lines into a Visual selection the user
-    // never made), and makeFrontmost moves focus, carrying Insert mode into the file or ending terminal mode.
-    pendingFollow = { args: { filePath: edit.path, preview: false, makeFrontmost: false }, at: Date.now() };
-    scheduleFollow();
+    if (edit && !event.isError) follow.enqueue(edit.path, edit.cwd);
   });
 
   pi.registerTool({
@@ -175,13 +118,13 @@ export default function nvimIde(pi: ExtensionAPI): void {
     promptSnippet: 'Open a file at a line range in the connected editor',
     parameters: Type.Object({ path: Type.String(), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }),
     async execute(_id, params, signal, _update, context) {
-      cancelFollow();
+      follow.cancel();
       const ide = need();
       const args: Record<string, unknown> = { filePath: resolveToolPath(params.path, context.cwd), preview: false, makeFrontmost: true };
       const start = params.startLine, end = params.endLine ?? params.startLine, shift = ide.openFileLineOffset;
       if (start && end) { args.startLine = start + shift; args.endLine = end + shift; }
       let text = await ide.call('openFile', args, signal);
-      if (link === ide) followFailed = false;
+      follow.succeeded(ide);
       if (start && end && shift) text = text.replace(`selected lines ${start + shift} to ${end + shift}`, `selected lines ${start} to ${end}`);
       return { content: [{ type: 'text' as const, text }], details: undefined };
     },
@@ -194,7 +137,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
       const say = (message: string, type: 'info' | 'warning' = 'info') => { if (context.hasUI) context.ui.notify(message, type); };
       if (words[0] === 'follow') {
         if (words[1] === 'on' || words[1] === 'off') prefs[followKey] = words[1] === 'on';
-        if (!following()) cancelFollow();
+        follow.update();
         say(`Editor follows pi edits: ${following() ? 'on' : 'off'}`);
         return;
       }

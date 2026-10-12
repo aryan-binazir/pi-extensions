@@ -203,3 +203,94 @@ test("a replaced stash factory restores through the current UI instead of a deta
     assert.equal(h.status, undefined);
   } finally { h.emit("session_shutdown"); }
 });
+
+for (const EditorClass of [CustomEditor, ViEditor]) {
+  test(`${EditorClass.name}: a closer split into single bytes releases stash suppression`, () => {
+    const h = stashHost(EditorClass);
+    for (const chunk of ["\x1b[200~prefix", "\x13", "suffix", "\x1b", "[", "2", "0", "1", "~"])
+      h.editor.handleInput(chunk);
+    assert.equal(h.editor.getExpandedText(), "prefixsuffix");
+    assert.equal(h.status, undefined);
+    h.editor.handleInput("\x13");
+    assert.equal(h.editor.getExpandedText(), "");
+    assert.match(h.status!, /stash/i);
+    h.emit("session_shutdown");
+  });
+}
+
+test("vi does not turn a reconstructed stalled key into a new stash input", () => {
+  const h = stashHost(ViEditor);
+  h.editor.setText("draft");
+  h.editor.handleInput("\x1b[2");
+  h.editor.handleInput("7;5;115~");
+  assert.equal(h.status, undefined);
+  assert.equal(h.editor.getExpandedText(), "draft");
+  h.emit("session_shutdown");
+});
+
+for (const EditorClass of [CustomEditor, ViEditor]) {
+  test(`${EditorClass.name}: stash forwards split-paste chunks unchanged and resumes after every closer split`, () => {
+    const start = "\x1b[200~", end = "\x1b[201~";
+    const chunksByCase = [
+      ["\x1b[20", "0~prefix", "\x13", "suffix\x1b[20", "1~"],
+      ...Array.from({ length: 7 }, (_, offset) => [start + "prefix", "\x13", "suffix" + end.slice(0, offset), end.slice(offset)]),
+    ];
+    for (const chunks of chunksByCase) {
+      const seen: string[] = [];
+      class RecordingEditor extends EditorClass {
+        override handleInput(data: string): void { seen.push(data); super.handleInput(data); }
+      }
+      const h = stashHost(RecordingEditor);
+      for (const chunk of chunks) h.editor.handleInput(chunk);
+      assert.deepEqual(seen, chunks);
+      assert.equal(h.status, undefined);
+      h.editor.handleInput("\x13");
+      assert.equal(h.editor.getExpandedText(), "");
+      assert.match(h.status!, /stash/i);
+      assert.deepEqual(seen, chunks);
+      h.emit("session_shutdown");
+    }
+  });
+
+  test(`${EditorClass.name}: an outside-paste closer fragment leaves Ctrl+S available`, () => {
+    const h = stashHost(EditorClass);
+    h.editor.setText("draft");
+    for (const chunk of ["\x1b[20", "1", "\x13"]) h.editor.handleInput(chunk);
+    assert.equal(h.editor.getExpandedText(), "");
+    assert.match(h.status!, /stash/i);
+    h.emit("session_shutdown");
+  });
+
+  test(`${EditorClass.name}: Ctrl+S after a paste in the same input still stashes`, () => {
+    const h = stashHost(EditorClass);
+    h.editor.setText("draft");
+    h.editor.handleInput("\x1b[200~payload\x1b[201~\x13");
+    assert.equal(h.editor.getExpandedText(), "");
+    assert.match(h.status!, /stash/i);
+    h.editor.handleInput("\x13");
+    assert.equal(h.editor.getExpandedText(), "draftpayload");
+    h.emit("session_shutdown");
+  });
+}
+
+test("vi retains stash handling for Ctrl+S before a whole paste in the same input", () => {
+  const h = stashHost(ViEditor);
+  h.editor.setText("draft");
+  h.editor.handleInput("\x13\x1b[200~payload\x1b[201~");
+  assert.equal(h.editor.getExpandedText(), "payload");
+  assert.match(h.status!, /stash/i);
+  h.editor.handleInput("\x13");
+  assert.equal(h.editor.getExpandedText(), "draft");
+  h.emit("session_shutdown");
+});
+
+test("vi key-prefix dispatch cannot clear stash's held opener", () => {
+  const h = stashHost(ViEditor);
+  for (const chunk of ["foo\x1b[20", "0~bar", "\x13", "\x1b[201~"]) h.editor.handleInput(chunk);
+  assert.equal(h.status, undefined);
+  assert.equal(h.editor.getExpandedText(), "foobar");
+  h.editor.handleInput("\x13");
+  assert.equal(h.editor.getExpandedText(), "");
+  assert.match(h.status!, /stash/i);
+  h.emit("session_shutdown");
+});

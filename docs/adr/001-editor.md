@@ -10,7 +10,7 @@ Public APIs provide text reads, expanded paste reads, input, insertion and edito
 
 Paste handling:
 
-- Pi's input buffer delivers each bracketed paste as one input, applied as a single undoable operation. Vi commands never interpret its contents. If a read stalls inside the opening marker, Pi forwards the fragment and then single characters; vi holds a trailing partial opener of three or more bytes until it completes. A lone ESC or `ESC [` is a complete legacy key (Escape, Alt+[) and is never held; prompt stash applies the same rule outside a paste.
+- Pi's input buffer normally delivers each bracketed paste as one input, applied as a single undoable operation. Vi commands never interpret its contents. Vi and prompt stash share the in-process [paste framer](016-paste-framing.md). Outside a paste it holds only trailing opening-marker prefixes of three or more bytes. A lone ESC or `ESC [` is a complete legacy key (Escape, Alt+[) and is never held. Inside a paste it buffers through the first complete closing marker, including closer fragments of any length. Stash observes each outer input once and forwards raw chunks unchanged to stock or vi; recursive editor dispatch cannot clear its held opener.
 - Character motions use grapheme boundaries, with each valid paste marker treated as one atomic unit.
 - Pastes and public draft replacements exceeding 10 lines or 1000 characters use stock Pi marker formatting and its rendering registry. The adapter preserves safe raw whitespace instead of applying stock paste normalization.
 - Expansion makes one replacement pass so marker-shaped text inside payloads stays literal.

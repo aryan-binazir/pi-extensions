@@ -1537,3 +1537,42 @@ test("rejected visual counted put preserves collapsed text, redo and the registe
   assert.equal(e.getExpandedText(), "ab\nq");
   e.dispose();
 });
+
+test("submission replacement before a stalled opener preserves its later completion", () => {
+  const e = editor();
+  e.setText("draft");
+  let submitted = "";
+  e.onSubmit = text => { submitted = text; e.setText("replacement"); };
+  e.handleInput("\r\x1b[20");
+  assert.equal(submitted, "draft");
+  assert.equal(e.getExpandedText(), "replacement");
+  e.handleInput("0~payload\x1b[201~");
+  assert.equal(e.getExpandedText(), "replacementpayload");
+  e.dispose();
+});
+
+test("every closer split retains one vi paste undo transaction", () => {
+  const end = "\x1b[201~";
+  for (let offset = 0; offset <= end.length; offset++) {
+    const e = editor();
+    e.setText("draft");
+    e.handleInput("\x1b"); keys(e, "0");
+    e.handleInput("\x1b[200~payload" + end.slice(0, offset));
+    e.handleInput(end.slice(offset));
+    assert.equal(e.getExpandedText(), "payloaddraft");
+    keys(e, "u");
+    assert.equal(e.getExpandedText(), "draft");
+    e.dispose();
+  }
+});
+
+test("draft replacement clears incomplete vi paste framing", () => {
+  for (const chunk of ["\x1b[20", "\x1b[200~unfinished"]) {
+    const e = editor();
+    e.handleInput(chunk);
+    e.setText("replacement");
+    e.handleInput("!");
+    assert.equal(e.getExpandedText(), "replacement!");
+    e.dispose();
+  }
+});

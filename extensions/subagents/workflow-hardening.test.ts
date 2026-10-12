@@ -289,13 +289,16 @@ test('journal reservation release admits waiting effects and abort rejects waiti
   let running = 0, waitingStarted = false;
   const pending = gates.map((gate, i) => journal.record(`spawn:s${i}`, `task-${i}`, async () => { running++; await gate.promise; return 'small'; }));
   const failedFirst = assert.rejects(pending[0], /synthetic failure/);
+  const abortGate = gate();
+  const settling: Promise<unknown>[] = [...pending, failedFirst];
   try {
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(running, 32);
-    const abortGate = gate();
     const waiting = journal.record('spawn:waiting', 'waiting', async () => { waitingStarted = true; await abortGate.promise; return 'small'; });
+    settling.push(waiting);
     const checkpoint = journal.checkpoint('checkpoint:waiting', 'fits');
     const checkpointAborted = assert.rejects(checkpoint, /abort/i);
+    settling.push(checkpoint, checkpointAborted);
     await new Promise<void>(resolve => setImmediate(resolve));
     assert.equal(waitingStarted, false);
     assert.equal(journal.lookup('checkpoint:waiting'), undefined);
@@ -306,14 +309,17 @@ test('journal reservation release admits waiting effects and abort rejects waiti
     assert.equal(journal.lookup('checkpoint:waiting'), undefined);
     const blocked = journal.record('spawn:aborted', 'aborted', async () => { throw new Error('must never run'); });
     const aborted = assert.rejects(blocked, /abort/i);
+    settling.push(blocked, aborted);
     controller.abort();
     await aborted;
     await checkpointAborted;
     abortGate.resolve();
     await waiting;
   } finally {
+    controller.abort();
+    abortGate.resolve();
     for (const gate of gates) gate.resolve();
-    await Promise.allSettled(pending);
+    await Promise.allSettled(settling);
     await journal.close();
     await rm(directory, {recursive: true, force: true});
   }

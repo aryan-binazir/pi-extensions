@@ -195,7 +195,6 @@ test('follow after edit opens the changed file, and /vim follow turns it off', a
   });
 });
 
-
 test('a follow interrupted before its reply is replayed after reconnecting', async () => {
   let attempts = 0;
   await withConnectedIde(async ({ ide, fire, commands, ctx, status, notices }) => {
@@ -214,7 +213,6 @@ test('a follow interrupted before its reply is replayed after reconnecting', asy
     return false;
   });
 });
-
 
 for (const [server, offset] of [['claudecode-neovim', 1], ['another-ide', 0]] as const) {
   test(`explicit opens select the requested one-based lines on ${server}`, async () => {
@@ -270,6 +268,33 @@ test('a successful explicit open starts a new automatic failure episode', async 
   }, (call, reply) => {
     if (call.name !== 'openFile' || !String(call.arguments.filePath).includes('bad')) return false;
     reply({ content: [{ type: 'text', text: 'Cannot reveal' }], isError: true });
+    return true;
+  });
+});
+
+test('follow off cancels queued destinations and ignores late replies from a stalled jump', async () => {
+  let lateReply: ((result: unknown) => void) | undefined;
+  await withConnectedIde(async ({ ide, fire, commands, ctx, notices }) => {
+    const edit = async (path: string) => {
+      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
+      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
+    };
+    await edit('stalled.ts');
+    await until(() => lateReply !== undefined);
+    await edit('queued.ts');
+    await commands.get('vim').handler('follow off', ctx);
+    await edit('while-off.ts');
+    await commands.get('vim').handler('follow on', ctx);
+    await edit('fresh.ts');
+    await until(() => ide.calls.length === 2);
+    lateReply!({ content: [{ type: 'text', text: 'late failure' }], isError: true });
+    await edit('final.ts');
+    await until(() => ide.calls.length === 3);
+    assert.deepEqual(ide.calls.map(call => call.arguments.filePath.split('/').at(-1)), ['stalled.ts', 'fresh.ts', 'final.ts']);
+    assert.ok(!notices.some(notice => notice.includes('Could not reveal')));
+  }, (call, reply) => {
+    if (!String(call.arguments.filePath).endsWith('stalled.ts')) return false;
+    lateReply = reply;
     return true;
   });
 });

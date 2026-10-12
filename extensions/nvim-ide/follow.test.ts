@@ -27,11 +27,11 @@ class FakeClock implements FollowClock {
   }
 }
 
-function setup() {
+function setup(options: { connected?: boolean } = {}) {
   const clock = new FakeClock();
   const calls: { args: Record<string, unknown>; signal?: AbortSignal; resolve: (value: string) => void; reject: (error: Error) => void }[] = [];
   const link = {
-    connected: true,
+    connected: options.connected ?? true,
     call(_name: string, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<string> {
       return new Promise((resolve, reject) => { calls.push({ args, signal, resolve, reject }); });
     },
@@ -92,24 +92,21 @@ test('a stalled request aborts at five seconds and releases the next 100 ms wind
 });
 
 test('disconnected edits queue only after this session first connected', async () => {
-  const clock = new FakeClock();
-  const h = setup();
-  h.link.connected = false;
-  const queue = new FollowQueue({ clock, link: () => h.link, cwd: () => h.state.cwd, following: () => true, warn: message => h.warnings.push(message) });
-  queue.enqueue('/project/never-connected.ts', h.state.cwd);
+  const h = setup({ connected: false });
+  h.enqueue('/project/never-connected.ts');
   h.link.connected = true;
-  queue.update();
-  await clock.advance(100);
+  h.queue.update();
+  await h.clock.advance(100);
   assert.equal(h.calls.length, 0);
   h.link.connected = false;
-  queue.update();
-  queue.enqueue('/project/older.ts', h.state.cwd);
-  queue.enqueue('/project/latest.ts', h.state.cwd);
-  await clock.advance(1000);
+  h.queue.update();
+  h.enqueue('/project/older.ts');
+  h.enqueue('/project/latest.ts');
+  await h.clock.advance(1000);
   assert.equal(h.calls.length, 0);
   h.link.connected = true;
-  queue.update();
-  await clock.advance(100);
+  h.queue.update();
+  await h.clock.advance(100);
   assert.equal(h.calls[0].args.filePath, '/project/latest.ts');
 });
 
@@ -147,14 +144,20 @@ for (const trigger of ['cwd change', 'follow off', 'explicit open', 'session rep
     await h.clock.advance(100);
     assert.equal(h.calls.length, 0);
     h.state.following = true;
+    h.state.cwd = '/project';
     h.queue.update();
+    await h.clock.advance(100);
+    assert.equal(h.calls.length, 0, 'cancelled coalescing destination cannot resume');
     h.enqueue('/project/stalled.ts');
     await h.clock.advance(100);
     h.enqueue('/project/pending.ts');
     invalidate();
     assert.equal(h.calls[0].signal!.aborted, true);
     h.state.following = true;
+    h.state.cwd = '/project';
     h.queue.update();
+    await h.clock.advance(100);
+    assert.equal(h.calls.length, 1, 'pending navigation was cleared before a fresh edit');
     h.enqueue('/project/fresh.ts');
     await h.clock.advance(100);
     h.enqueue('/project/latest.ts');
@@ -165,6 +168,23 @@ for (const trigger of ['cwd change', 'follow off', 'explicit open', 'session rep
     h.calls[1].resolve('opened');
     await h.clock.advance(100);
     assert.deepEqual(h.calls.map(call => call.args.filePath), ['/project/stalled.ts', '/project/fresh.ts', '/project/latest.ts']);
+  });
+  test(`${trigger} clears disconnected navigation before reconnect`, async () => {
+    const h = setup();
+    h.link.connected = false;
+    h.queue.update();
+    h.enqueue('/project/queued.ts');
+    if (trigger === 'cwd change') { h.state.cwd = '/other'; h.queue.update(); }
+    else if (trigger === 'follow off') { h.state.following = false; h.queue.update(); }
+    else if (trigger === 'session replacement') h.queue.reset();
+    else h.queue.cancel();
+    h.state.following = true;
+    h.state.cwd = '/project';
+    h.link.connected = true;
+    h.queue.update();
+    await h.clock.advance(100);
+    assert.equal(h.calls.length, 0);
+    assert.deepEqual(h.warnings, []);
   });
 }
 
@@ -295,3 +315,16 @@ for (const change of ['cwd', 'connection'] as const) {
     assert.equal(h.calls.length, change === 'connection' ? 1 : 0);
   });
 }
+
+test('an edit in a new live workspace aborts the old flight before scheduling the new destination', async () => {
+  const h = setup();
+  h.enqueue('/project/old.ts');
+  await h.clock.advance(100);
+  h.state.cwd = '/other';
+  h.enqueue('/other/new.ts');
+  assert.equal(h.calls[0].signal!.aborted, true);
+  h.calls[0].reject(new Error('aborted'));
+  await h.clock.advance(100);
+  assert.equal(h.calls[1].args.filePath, '/other/new.ts');
+  assert.deepEqual(h.warnings, []);
+});

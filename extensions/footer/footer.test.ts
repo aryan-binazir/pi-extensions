@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { stripVTControlCharacters } from 'node:util';
 import { ModelRuntime, ModelRegistry, SessionManager, type ExecResult, type ExtensionAPI, type ExtensionContext, type ReadonlyFooterDataProvider, type Theme } from '@earendil-works/pi-coding-agent';
 import { InMemoryCredentialStore, InMemoryModelsStore, type OAuthCredential } from '@earendil-works/pi-ai';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
-import { stripTerminalSequences, getCapabilities, getOsc8LinkAtColumn, setCapabilities, visibleWidth } from '@earendil-works/pi-tui';
+import { getCapabilities, getOsc8LinkAtColumn, setCapabilities, visibleWidth } from '@earendil-works/pi-tui';
 import { permissionFooter, rightAligned, STATUS_KEY } from './footer.ts';
 import { pullRequests } from './pull-request.ts';
 
@@ -53,7 +54,7 @@ test('links the PR number right after the branch once gh reports it', async () =
     [['gh', ['pr', 'view', '--json', 'number,url,state,isDraft,headRefName', '--', 'main'], '/workspace/project']]);
   await gh.calls[0].answer({ stdout: prJson() });
   assert.equal(f.renders(), 1);
-  const line = f.footer.render(140)[0], visible = stripTerminalSequences(line);
+  const line = f.footer.render(140)[0], visible = stripVTControlCharacters(line);
   assert.match(visible, /^\/workspace\/project \(main\) #42 • Task\s+Auto: on · Luna low$/);
   assert.equal(visibleWidth(line), 140);
   const at = visible.indexOf('#42');
@@ -115,18 +116,18 @@ test('names draft, merged and closed PRs outside the link; terminal states win o
     const gh = fakeGh(), f = fixture(gh.exec);
     f.footer.render(140);
     await gh.calls[0].answer({ stdout: prJson(fields) });
-    const line = f.footer.render(140)[0], visible = stripTerminalSequences(line);
+    const line = f.footer.render(140)[0], visible = stripVTControlCharacters(line);
     assert.match(visible, new RegExp(`^/workspace/project \\(main\\) ${shown} • Task\\s`), JSON.stringify(fields));
     assert.equal(getOsc8LinkAtColumn(line, visible.indexOf(shown) + shown.length - 1), undefined, 'the state word is not linked');
     f.footer.dispose();
   }
 });
 
-const pathRow = (f: ReturnType<typeof fixture>) => stripTerminalSequences(f.footer.render(140)[0]).replace(/\s+Auto:.*$/, '');
+const pathRow = (f: ReturnType<typeof fixture>) => stripVTControlCharacters(f.footer.render(140)[0]).replace(/\s+Auto:.*$/, '');
 
 test('footer labels use the terminal label policy before theme styling', () => {
   const f = fixture();
-  f.ctx.sessionManager.getCwd = () => '/work\u202e\u202espace';
+  f.ctx.sessionManager.getCwd = () => '/work\n\u202espace';
   f.changeBranch('feature\u202ename');
   f.ctx.sessionManager.getSessionName = () => 'Task\u202ename';
   f.ctx.model!.id = 'model\u202ename';
@@ -142,19 +143,19 @@ test('footer labels use the terminal label policy before theme styling', () => {
 
 test('narrow footers never exceed the width or leave a PR link open', async () => {
   const gh = fakeGh(), f = fixture(gh.exec);
-  f.changeBranch('evil branch');
+  f.changeBranch('evil\u001b[2J\u202ebranch');
   f.footer.render(140);
-  await gh.calls[0].answer({ stdout: prJson({ headRefName: 'evil branch' }) });
+  await gh.calls[0].answer({ stdout: prJson({ headRefName: 'evil\u001b[2J\u202ebranch' }) });
   for (let width = 0; width <= 140; width++) {
     const lines = f.footer.render(width);
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `footer at ${width}`);
     const row = lines[0], lastLink = row.lastIndexOf('\u001b]8;;');
     if (lastLink >= 0) assert.ok(row.startsWith('\u001b]8;;\u001b\\', lastLink), `link closed at ${width}`);
-    const visible = stripTerminalSequences(row), at = visible.indexOf('#');
+    const visible = stripVTControlCharacters(row), at = visible.indexOf('#');
     if (at >= 0) assert.equal(getOsc8LinkAtColumn(row, at), prUrl, `link target at ${width}`);
     if (at >= 0) assert.match(visible, /\) #42 /, `the number is whole or absent at ${width}: ${visible}`);
   }
-  assert.match(stripTerminalSequences(f.footer.render(140)[0]), /\(evil branch\) #42 • Task/);
+  assert.match(stripVTControlCharacters(f.footer.render(140)[0]), /\(evil branch\) #42 • Task/);
   f.footer.dispose();
 });
 

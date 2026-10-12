@@ -3,8 +3,8 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 import { test } from 'node:test';
-import { stripTerminalSequences } from '@earendil-works/pi-tui';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import statusExtension from './index.ts';
 import { findConfigLoader, statusText, type PermissionConfig } from './adapter.ts';
@@ -192,7 +192,7 @@ test('the TUI footer links the branch PR and asks gh again after each turn and e
   footer.render(120);
   await new Promise(setImmediate);
   assert.equal(renders, 1);
-  assert.match(stripTerminalSequences(footer.render(120)[0]), /^\/workspace\/repo \(feature\) #42\s+Auto: unavailable$/);
+  assert.match(stripVTControlCharacters(footer.render(120)[0]), /^\/workspace\/repo \(feature\) #42\s+Auto: unavailable$/);
   const bash = (command: string) => h.emit('tool_result', ctx, { type: 'tool_result', toolName: 'bash', input: { command } });
   await h.emit('agent_end', ctx);
   assert.equal(asked.length, 2);

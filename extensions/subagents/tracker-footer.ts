@@ -1,5 +1,5 @@
-import { terminalText } from '../terminal-text.ts';
 import { visibleWidth } from '@earendil-works/pi-tui';
+import { terminalText } from '../terminal-text.ts';
 
 export { terminalText as sanitizeTrackerReport };
 

@@ -1,8 +1,8 @@
 import { join } from 'node:path';
-import { terminalLabel } from '../terminal-text.ts';
 import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { truncateToWidth } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
+import { terminalLabel } from '../terminal-text.ts';
 import { DelegationAdmission } from './scope.ts';
 import type {ConnectorBridge} from './connector-bridge.ts';
 import { SubagentRegistry } from './registry.ts';

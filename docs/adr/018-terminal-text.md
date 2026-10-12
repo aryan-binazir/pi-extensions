@@ -17,14 +17,14 @@ through. Questionnaire needed a separate newline fix for tab labels in #52.
   trims. It produces one line without tabs.
 - `terminalText` removes the same sequences and characters, retains LF, and
   normalizes CRLF and bare CR to LF. It preserves ordinary spaces, indentation
-  and blank lines for Markdown and wrapping. Tabs become spaces.
+  and blank lines for Markdown and wrapping. Tabs expand to four spaces to retain Markdown nesting and code indentation.
 
 Complete terminal sequences are deleted because their bytes are protocol, not
 text. Residual controls become spaces to keep adjacent words separate. The
 module consumes OSC, DCS, SOS, PM and APC payloads introduced by ESC or C1 through
 BEL, ST or end of input before Node's VT stripper handles remaining sequences.
 An unterminated string consumes the rest of the input. The final Cc/Cf pass
-removes terminal introducers even if a malformed sequence was not recognized.
+replaces terminal introducers even if a malformed sequence was not recognized.
 
 All Cf characters are removed, including bidi controls, zero-width characters,
 BOM and ZWJ/ZWNJ. Compound emoji and scripts using those joiners can therefore
@@ -39,7 +39,7 @@ Wrapping, clipping, Markdown rendering and layout remain caller-owned.
 
 This is a shared leaf utility, like `extensions/tool-path.ts`. It has no Pi
 imports, lifecycle, registration, configuration or exported regexes. Each
-extension still owns its Pi adapter and lifecycle, as required by
+extension still owns its Pi adapter and lifecycle, consistent with
 [ADR 006](006-search-fast-power.md). No shared integration framework is added.
 
 ## Boundaries and verification

@@ -23,7 +23,7 @@ test('multiline markdown becomes a plain footer preview', () => {
 });
 
 test('empty or formatting-only reports do not invent a status', () => {
-  for (const report of ['', ' \n', '**', '- **Status:**']) assert.equal(trackerFooter(report), undefined);
+  for (const report of ['', ' \n\t', '**', '- **Status:**', '\x00']) assert.equal(trackerFooter(report), undefined);
 });
 
 test('tracker footer renders reports through the terminal text policy', () => {

@@ -214,12 +214,13 @@ test('shutdown settles an admission whose approval callback never resolves', asy
     invocation: () => { launched = true; return {command: process.execPath, args: ['-e', 'process.exit(0)']}; },
   });
   const admission = registry.spawn({task: 'approval', cwd, extensions: [extension]}).then(() => 'launched', () => 'rejected');
-  await approving;
-  await registry.shutdown();
-  const result = await Promise.race([admission, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 100))]);
-  assert.equal(result, 'rejected');
-  assert.equal(launched, false);
-  await rm(cwd, {recursive: true, force: true});
+  try {
+    await approving;
+    await registry.shutdown();
+    const result = await Promise.race([admission, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 100))]);
+    assert.equal(result, 'rejected');
+    assert.equal(launched, false);
+  } finally { await registry.shutdown(); await rm(cwd, {recursive: true, force: true}); }
 });
 
 test('aborting an owning signal after admission stops its running child', async () => {

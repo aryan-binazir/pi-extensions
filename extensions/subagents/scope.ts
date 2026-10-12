@@ -165,7 +165,7 @@ export class DelegationAdmission {
         if (this.parent().cwd !== spawningCwd) throw new Error('Subagent parent workspace changed; resubmit task');
         if (task.configProvenance?.config !== this.source.config(ctx).identity) throw new Error('Subagent delegation configuration changed; resubmit task');
         assertToolSelection([name], this.parent());
-        assertReaderSelection(task.preset, [name], delegationScope(this.parent()).readTools);
+        if (task.preset === 'reader') assertReaderSelection(task.preset, [name], delegationScope(this.parent()).readTools);
         if (!ctx.tools.some(tool => tool.name === name)) throw new Error(`Connector tool is no longer callable in the parent: ${name}`);
         const outcome = await ctx.executeTool(name, args, {signal});
         return {...outcome.result, isError: outcome.isError};

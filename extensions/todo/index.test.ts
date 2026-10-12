@@ -62,6 +62,22 @@ test('compact summary prioritizes the current task and toggles without changing 
   assert.deepEqual(resumed.widget(), ['Todos 1/3 · alt+t · Current']);
 });
 
+test('todo renders controls safely without changing saved progress', async () => {
+  const app = runtime([], true);
+  const content = 'Task\u202e\x85next';
+  await app.call([{ content, status: 'pending' }]);
+  const saved = app.branch();
+  for (const expanded of [false, true]) {
+    if (expanded) await app.toggle();
+    const painted = app.render(80).join('\n');
+    assert.match(painted, /Task next/);
+    assert.doesNotMatch(painted, /[\u202e\x85]/);
+    assert.ok(painted.includes('\x1b[34m'), 'theme ANSI survives');
+  }
+  assert.deepEqual(app.branch(), saved);
+  assert.equal(app.appended().at(-1).todos[0].content, content);
+});
+
 test('todo updates fit narrow main-screen frames and remain visible after resizing', async t => {
   for (const width of [1, 2, 3, 4, 5, 6, 7, 8, 80]) {
     await t.test(`${width} columns`, async t => {

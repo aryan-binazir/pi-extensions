@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { stripVTControlCharacters } from 'node:util';
 import { ModelRuntime, ModelRegistry, SessionManager, type ExecResult, type ExtensionAPI, type ExtensionContext, type ReadonlyFooterDataProvider, type Theme } from '@earendil-works/pi-coding-agent';
 import { InMemoryCredentialStore, InMemoryModelsStore, type OAuthCredential } from '@earendil-works/pi-ai';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
-import { getCapabilities, getOsc8LinkAtColumn, setCapabilities, visibleWidth } from '@earendil-works/pi-tui';
+import { stripTerminalSequences, getCapabilities, getOsc8LinkAtColumn, setCapabilities, visibleWidth } from '@earendil-works/pi-tui';
 import { permissionFooter, rightAligned, STATUS_KEY } from './footer.ts';
 import { pullRequests } from './pull-request.ts';
 
@@ -54,7 +53,7 @@ test('links the PR number right after the branch once gh reports it', async () =
     [['gh', ['pr', 'view', '--json', 'number,url,state,isDraft,headRefName', '--', 'main'], '/workspace/project']]);
   await gh.calls[0].answer({ stdout: prJson() });
   assert.equal(f.renders(), 1);
-  const line = f.footer.render(140)[0], visible = stripVTControlCharacters(line);
+  const line = f.footer.render(140)[0], visible = stripTerminalSequences(line);
   assert.match(visible, /^\/workspace\/project \(main\) #42 • Task\s+Auto: on · Luna low$/);
   assert.equal(visibleWidth(line), 140);
   const at = visible.indexOf('#42');
@@ -116,31 +115,46 @@ test('names draft, merged and closed PRs outside the link; terminal states win o
     const gh = fakeGh(), f = fixture(gh.exec);
     f.footer.render(140);
     await gh.calls[0].answer({ stdout: prJson(fields) });
-    const line = f.footer.render(140)[0], visible = stripVTControlCharacters(line);
+    const line = f.footer.render(140)[0], visible = stripTerminalSequences(line);
     assert.match(visible, new RegExp(`^/workspace/project \\(main\\) ${shown} • Task\\s`), JSON.stringify(fields));
     assert.equal(getOsc8LinkAtColumn(line, visible.indexOf(shown) + shown.length - 1), undefined, 'the state word is not linked');
     f.footer.dispose();
   }
 });
 
-const pathRow = (f: ReturnType<typeof fixture>) => stripVTControlCharacters(f.footer.render(140)[0]).replace(/\s+Auto:.*$/, '');
+const pathRow = (f: ReturnType<typeof fixture>) => stripTerminalSequences(f.footer.render(140)[0]).replace(/\s+Auto:.*$/, '');
 
-test('narrow footers never exceed the width or leave a PR link open, and the branch is still cleaned', async () => {
+test('footer labels use the terminal label policy before theme styling', () => {
+  const f = fixture();
+  f.ctx.sessionManager.getCwd = () => '/work\u202e\u202espace';
+  f.changeBranch('feature\u202ename');
+  f.ctx.sessionManager.getSessionName = () => 'Task\u202ename';
+  f.ctx.model!.id = 'model\u202ename';
+  f.statuses.set(STATUS_KEY, 'Auto: on\u202estatus');
+  f.statuses.set('other', 'Other\u202estatus');
+  const lines = f.footer.render(140);
+  assert.match(lines[0], /^\/work space \(feature name\) • Task name +Auto: on status$/);
+  assert.match(lines[1], /model name/);
+  assert.equal(lines[2], 'Other status');
+  assert.ok(!lines.join('').includes('\u202e'));
+  f.footer.dispose();
+});
+
+test('narrow footers never exceed the width or leave a PR link open', async () => {
   const gh = fakeGh(), f = fixture(gh.exec);
-  f.changeBranch('evil\u001b[2J\u202ebranch');
+  f.changeBranch('evil branch');
   f.footer.render(140);
-  await gh.calls[0].answer({ stdout: prJson({ headRefName: 'evil\u001b[2J\u202ebranch' }) });
+  await gh.calls[0].answer({ stdout: prJson({ headRefName: 'evil branch' }) });
   for (let width = 0; width <= 140; width++) {
     const lines = f.footer.render(width);
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `footer at ${width}`);
     const row = lines[0], lastLink = row.lastIndexOf('\u001b]8;;');
     if (lastLink >= 0) assert.ok(row.startsWith('\u001b]8;;\u001b\\', lastLink), `link closed at ${width}`);
-    const visible = stripVTControlCharacters(row), at = visible.indexOf('#');
+    const visible = stripTerminalSequences(row), at = visible.indexOf('#');
     if (at >= 0) assert.equal(getOsc8LinkAtColumn(row, at), prUrl, `link target at ${width}`);
     if (at >= 0) assert.match(visible, /\) #42 /, `the number is whole or absent at ${width}: ${visible}`);
-    assert.doesNotMatch(row.replaceAll(`\u001b]8;;${prUrl}\u001b\\`, '').replaceAll('\u001b]8;;\u001b\\', ''), /\u001b(?!\[)|\u001b\[2J|\u202e/);
   }
-  assert.match(stripVTControlCharacters(f.footer.render(140)[0]), /\(evil branch\) #42 • Task/);
+  assert.match(stripTerminalSequences(f.footer.render(140)[0]), /\(evil branch\) #42 • Task/);
   f.footer.dispose();
 });
 
@@ -269,13 +283,11 @@ test('narrow layouts and ANSI/wide paths stay within terminal width without wrap
   f.footer.dispose();
 });
 
-test('missing status and unknown context remain explicit; terminal controls are stripped', () => {
+test('missing status and unknown context remain explicit', () => {
   const f = fixture(); f.statuses.clear();
   f.ctx.getContextUsage = () => undefined;
-  f.ctx.sessionManager.getCwd = () => '/path\n\u001b[2J\u202eevil';
   const lines = f.footer.render(140);
   assert.match(lines[0], /Auto: unavailable$/);
-  assert.doesNotMatch(lines.join(''), /[\n\u001b\u202e]/);
   assert.match(lines[1], /\?\/128k/);
   f.footer.dispose();
 });

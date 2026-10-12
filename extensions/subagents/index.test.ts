@@ -433,6 +433,16 @@ test('source review cancellation restores synchronously and preserves a replacem
     assert.equal(host.ctx.ui.getEditorText(), 'replacement draft');
   }));
 
+test('subagent panel uses terminal labels without changing task briefs', async () =>
+  withHost({prefix: 'subagent-label-', pi: 'setInterval(()=>{},1000)'}, async ({execute, widgets}) => {
+    const task = 'Task\u202ename';
+    const response = await execute('subagent', {task, preset: 'reader'});
+    const painted = widgets.get('interactive-tools:subagents')!.join('\n');
+    assert.match(painted, /Task name/);
+    assert.ok(!painted.includes('\u202e'));
+    assert.equal((await execute('subagent_status', {id: response.details.id})).details.task, task);
+  }));
+
 test('the active panel caps its height, lists running children first, and fits narrow widths', async () =>
   withHost({prefix: 'subagent-panel-', pi: 'setInterval(()=>{},1000)'}, async ({ctx, execute, shortcuts}) => {
     let panel: ((tui: unknown, theme: unknown) => {render(width: number): string[]}) | undefined;

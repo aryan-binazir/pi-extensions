@@ -1,5 +1,6 @@
 import type { ExecResult, ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { getCapabilities, hyperlink } from '@earendil-works/pi-tui';
+import { terminalLabel } from '../terminal-text.ts';
 
 export interface PullRequest { number: number; url: string; state: 'OPEN' | 'CLOSED' | 'MERGED'; isDraft: boolean }
 export interface PullRequests {
@@ -17,9 +18,8 @@ export const pullRequestLabel = (pr: PullRequest) => (getCapabilities().hyperlin
 const states = new Set(['OPEN', 'CLOSED', 'MERGED']);
 const same = (a: PullRequest | undefined, b: PullRequest | undefined) => a === b
   || (!!a && !!b && a.number === b.number && a.url === b.url && a.state === b.state && a.isDraft === b.isDraft);
-const controls = /[\p{Cc}\p{Cf}]/u;
 const webUrl = (url: unknown) => {
-  if (typeof url !== 'string' || controls.test(url) || !URL.canParse(url)) return undefined;
+  if (typeof url !== 'string' || terminalLabel(url) !== url || !URL.canParse(url)) return undefined;
   const parsed = new URL(url);
   return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : undefined;
 };

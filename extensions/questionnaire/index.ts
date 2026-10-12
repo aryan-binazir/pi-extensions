@@ -2,12 +2,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   Editor,
   matchesKey,
-  stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { terminalLabel, terminalText } from "../terminal-text.ts";
 import { installSinglePassPasteExpansion } from "../vi-mode/adapter.ts";
 
 const parameters = Type.Object({
@@ -30,8 +30,6 @@ const parameters = Type.Object({
   ),
 });
 const CONTROL_CHARS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
-const clean = (text: string) =>
-  stripTerminalSequences(text).replace(CONTROL_CHARS, "");
 const CACHE_LIMIT = 64;
 const memo = <T>(cache: Map<string, T>, key: string, build: () => T): T => {
   const hit = cache.get(key);
@@ -148,7 +146,7 @@ export default function questionnaire(pi: ExtensionAPI) {
             const answers = new Map<string, Answer>();
             const cleanAnswers = new Map<string, string>();
             const labels = params.questions.map((item) =>
-              clean(item.label || item.id).replace(/\n/g, " "),
+              terminalLabel(item.label || item.id),
             );
             const tabLabel = (index: number) =>
               `${answers.has(params.questions[index].id) ? "✓ " : ""}${labels[index]}`;
@@ -161,9 +159,9 @@ export default function questionnaire(pi: ExtensionAPI) {
               if (cached) return cached;
               const item = params.questions[index];
               const optionRows = item.options.map((option, i) => ({
-                suffix: ` ${i + 1}. ${clean(option.label)}`,
+                suffix: ` ${i + 1}. ${terminalText(option.label)}`,
                 description: option.description
-                  ? `     ${clean(option.description)}`
+                  ? `     ${terminalText(option.description)}`
                   : undefined,
               }));
               if (item.allowOther !== false)
@@ -171,7 +169,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                   suffix: ` ${item.options.length + 1}. Type something else`,
                   description: undefined,
                 });
-              return (bodies[index] = { prompt: clean(item.prompt), optionRows });
+              return (bodies[index] = { prompt: terminalText(item.prompt), optionRows });
             };
             const wrapCache = new Map<string, string[]>();
             const truncCache = new Map<string, string>();
@@ -226,7 +224,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 label: value,
                 wasCustom: true,
               });
-              cleanAnswers.set(q.id, clean(value));
+              cleanAnswers.set(q.id, terminalText(value));
               editing = false;
               editor.setText("");
               advance();
@@ -291,7 +289,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                           label: option.label,
                           wasCustom: false,
                         });
-                        cleanAnswers.set(q.id, clean(option.label));
+                        cleanAnswers.set(q.id, terminalText(option.label));
                         advance();
                       } else editing = true;
                     }

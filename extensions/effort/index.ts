@@ -10,10 +10,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   matchesKey,
-  stripTerminalSequences,
   truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+
+import { terminalText } from "../terminal-text.ts";
 
 const HANDOFF = "pi-interactive:effort-handoff";
 type HandoffResult =
@@ -149,7 +150,7 @@ export default function effort(pi: ExtensionAPI) {
               let tail: string[] = [];
               let rows: (string[] | undefined)[] = [];
               const layout = (width: number, inner: number, text: string) =>
-                wrapTextWithAnsi(stripTerminalSequences(text), inner).map(
+                wrapTextWithAnsi(terminalText(text), inner).map(
                   (line) =>
                     width < 5
                       ? truncateToWidth(line, width, "")

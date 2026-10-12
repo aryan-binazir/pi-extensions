@@ -14,16 +14,16 @@ import {
   Editor,
   Markdown,
   matchesKey,
-  stripTerminalSequences,
   wrapTextWithAnsi,
   visibleWidth,
 } from "@earendil-works/pi-tui";
+
+import { terminalText } from "../terminal-text.ts";
 
 const MAX_ANSWER = 32000;
 const MAX_HISTORY = 64000;
 const MAX_SNAPSHOT = 96000;
 const MAX_QUESTION = 16000;
-const CONTROL_CHARS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 const MAX_PAINTED = 2048;
 const QUEUED = Symbol("queued");
 
@@ -306,7 +306,6 @@ export default function btw(pi: ExtensionAPI) {
               const framed = width >= 3 && totalHeight >= 3;
               const w = Math.max(1, width - (framed ? 2 : 0));
               const innerHeight = totalHeight - (framed ? 2 : 0);
-              const clean = (text: string) => stripTerminalSequences(text).replace(CONTROL_CHARS, "");
               const padding = w >= 3 ? 1 : 0;
               const markdownTheme = getMarkdownTheme();
               // getMarkdownTheme() hands back fresh closures every call, so probe
@@ -316,7 +315,7 @@ export default function btw(pi: ExtensionAPI) {
                 if (questionCache?.w === w && questionCache.palette === palette && questionCache.question === question)
                   return questionCache.lines;
                 const box = new Box(padding, 1, (text) => theme.bg("userMessageBg", text));
-                box.addChild(new Markdown(clean(question), 0, 0, markdownTheme, {
+                box.addChild(new Markdown(terminalText(question), 0, 0, markdownTheme, {
                   color: (text) => theme.fg("userMessageText", text),
                 }, { preserveOrderedListMarkers: true, preserveBackslashEscapes: true }));
                 const lines = box.render(w);
@@ -327,11 +326,11 @@ export default function btw(pi: ExtensionAPI) {
                 ...userLines(question),
                 "",
                 ...new Markdown("Agent:", padding, 0, markdownTheme).render(w),
-                ...new Markdown(clean(reply), padding, 0, markdownTheme).render(w),
+                ...new Markdown(terminalText(reply), padding, 0, markdownTheme).render(w),
                 "",
               ];
               const footer = [
-                ...wrapTextWithAnsi(stripTerminalSequences(status).replace(CONTROL_CHARS, ""), w),
+                ...wrapTextWithAnsi(terminalText(status), w),
                 ...editor.render(w),
               ].slice(-(Math.max(1, innerHeight - 2)));
               const header = wrapTextWithAnsi(

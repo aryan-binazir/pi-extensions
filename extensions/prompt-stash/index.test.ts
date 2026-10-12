@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { ViEditor } from "../vi-mode/editor.ts";
+import { readPastes } from "../vi-mode/adapter.ts";
 import { stashHost } from "./test-support.ts";
 
 for (const EditorClass of [CustomEditor, ViEditor]) {
@@ -159,4 +160,46 @@ test("restoring the only draft into an empty editor clears the stash status", ()
   h.editor.handleInput("\x13");
   assert.equal(h.status, undefined);
   h.emit("session_shutdown");
+});
+
+test("stash wraps the loaded vi factory and restores raw drafts with typed text around a collapsed paste", () => {
+  const h = stashHost(CustomEditor, true);
+  try {
+    assert.ok(h.editor instanceof ViEditor);
+    const payload = "\tpasted line\r\n".repeat(20);
+    h.editor.handleInput("\x1b[200~raw\tinline\r \x1b[201~");
+    h.editor.handleInput("typed prefix ");
+    h.editor.handleInput(`\x1b[200~${payload}\x1b[201~`);
+    h.editor.handleInput(" typed suffix");
+    const raw = "raw\tinline\r typed prefix [paste #1 +21 lines] typed suffix";
+    assert.equal(h.editor.getText(), raw);
+    const registry = readPastes(h.editor);
+    assert.deepEqual(registry, { pastes: new Map([[1, payload]]), counter: 1 });
+    const vi = h.editor;
+    h.editor.handleInput("\x13");
+    assert.equal(vi.getText(), "");
+    h.editor.handleInput("\x13");
+    assert.equal(h.editor, vi);
+    assert.equal(vi.getText(), raw);
+    assert.equal(vi.getExpandedText(), `raw\tinline\r typed prefix ${payload} typed suffix`);
+    assert.deepEqual(readPastes(vi), registry);
+    assert.equal(h.status, undefined);
+  } finally { h.emit("session_shutdown"); }
+});
+
+test("a replaced stash factory restores through the current UI instead of a detached vi editor", () => {
+  const h = stashHost(CustomEditor, true);
+  try {
+    const detached = h.editor;
+    detached.handleInput("saved vi draft");
+    detached.handleInput("\x13");
+    const other = (...args: ConstructorParameters<typeof CustomEditor>) => new CustomEditor(...args);
+    h.ctx.ui.setEditorComponent(other);
+    assert.notEqual(h.editor, detached);
+    detached.handleInput("\x13");
+    assert.equal(h.editor.getExpandedText(), "saved vi draft");
+    assert.equal(detached.getText(), "");
+    assert.equal(h.ctx.ui.getEditorComponent(), other);
+    assert.equal(h.status, undefined);
+  } finally { h.emit("session_shutdown"); }
 });

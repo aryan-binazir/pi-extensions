@@ -1,17 +1,18 @@
-import { join, resolve } from 'node:path';
-import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext, type ExtensionToolContext } from '@earendil-works/pi-coding-agent';
+import { join } from 'node:path';
+import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { truncateToWidth } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
-import { ALL_TOOLS, assertChildTask, assertToolSelection, delegationScope, assertWorkflowRead } from './scope.ts';
+import { DelegationAdmission } from './scope.ts';
 import type {ConnectorBridge} from './connector-bridge.ts';
-import { piInvocation, SubagentRegistry, TIMEOUT_BOUNDS, type TaskSpec } from './registry.ts';
+import { SubagentRegistry } from './registry.ts';
+import { TIMEOUT_BOUNDS, type TaskSpec } from './task.ts';
 import { thinkingPattern } from './thinking.ts';
 import { runWorkflow } from './workflow.ts';
 import { clipJson, taskView } from './presentation.ts';
 import { abortable } from './cancellation.ts';
 import { SubagentTracker } from './tracker.ts';
 import { sanitizeTrackerReport, trackerFooter } from './tracker-footer.ts';
-import { availableModel, assertTaskFields, loadProfiles, profileGuidance, profileLocation, resolveProfile, type ProfileConfig } from './profiles.ts';
+import { loadProfiles, profileGuidance, profileLocation, type ProfileConfig } from './profiles.ts';
 
 const taskSchema = Type.Object({
   task: Type.String({ minLength: 1, maxLength: 32000 }), cwd: Type.Optional(Type.String()),
@@ -56,15 +57,13 @@ export default function subagents(pi: ExtensionAPI): void {
     try { pi.sendMessage({customType: 'subagent-complete', content: JSON.stringify(value), display: true}, {triggerTurn, deliverAs: triggerTurn ? 'followUp' : 'nextTurn'}); }
     catch (error) { registry.notificationFailed(pending.map(task => task.id), error); }
   };
-  const parent = () => {
-    const registered = pi.getAllTools?.();
-    return {
-      cwd: context?.cwd ?? process.cwd(), tools: pi.getActiveTools(), delegatedTools: snapshot?.delegatedTools,
-      registeredTools: registered?.map(tool => tool.name),
-      callableTools: registered?.filter(tool => ['direct', 'deferred', 'codemode', 'codemode-deferred'].includes(tool.exposure ?? 'direct')).map(tool => tool.name),
-      builtinTools: registered?.filter(tool => tool.sourceInfo?.path.startsWith('builtin:') && tool.sourceInfo.path !== 'builtin:mcp').map(tool => tool.name),
-    };
-  };
+  const admission = new DelegationAdmission({
+    cwd: () => context?.cwd ?? process.cwd(), tools: () => pi.getActiveTools(),
+    definitions: pi.getAllTools ? () => pi.getAllTools() : undefined,
+    grants: () => snapshot?.delegatedTools, selection: () => context,
+    config: ctx => configFor(ctx),
+    approve: (title, request, signal, ctx = context!) => withApprovalUI(ctx, signal, () => ctx.ui.confirm(title, request, {signal})),
+  });
   const collapsedBriefById = new Map<string, string>();
   const brief = (id: string, task: string) => {
     let label = collapsedBriefById.get(id);
@@ -112,19 +111,7 @@ export default function subagents(pi: ExtensionAPI): void {
     });
   };
   const createRegistry = () => new SubagentRegistry({
-    allowedTools: () => delegationScope(parent()).tools,
-    readTools: () => delegationScope(parent()).readTools,
-    authorize: async (task, signal) => {
-      const ctx = context;
-      await assertChildTask(task, { parent: parent(), approve: ctx?.hasUI ? request => withApprovalUI(ctx, signal, () => ctx.ui.confirm('Approve local child extensions', request, {signal})) : undefined });
-    },
-    invocation: task => {
-      if (context && task.configProvenance) {
-        if (task.configProvenance.config !== configFor(context).identity) throw new Error('Subagent configuration or trust changed while queued; resubmit task');
-        availableModel(task.model!, context.modelRegistry, task.profile);
-      }
-      return piInvocation(task);
-    },
+    admission,
     onUpdate: renderActiveAgents,
     onComplete: task => {
       renderActiveAgents();
@@ -141,31 +128,7 @@ export default function subagents(pi: ExtensionAPI): void {
     latestReport = sanitizeTrackerReport(report);
     if (context?.hasUI) context.ui.setStatus('subagent-tracker', trackerFooter(report, process.stdout.columns));
   });
-  const trackedSpawn = async (task: TaskSpec, ctx: ExtensionToolContext, signal?: AbortSignal, owner: 'parent' | 'workflow' = 'parent') => {
-    const names = (task.tools ?? []).filter(name => !ALL_TOOLS.includes(name));
-    let bridge: ConnectorBridge | undefined;
-    if (names.length) {
-      const spawningCwd = parent().cwd;
-      assertToolSelection(names, parent());
-      if (typeof ctx.executeTool !== 'function' || !ctx.tools || names.some(name => !ctx.tools.some(tool => tool.name === name))) throw new Error(`Parent Pi cannot execute delegated tools: ${names.join(', ')}. Requires Pi 0.99.1+ tools/executeTool support.`);
-      const definitions = pi.getAllTools();
-      bridge = {
-        tools: names.map(name => {
-          const tool = definitions.find(tool => tool.name === name)!;
-          return {name: tool.name, description: tool.description, parameters: tool.parameters, annotations: tool.annotations, namespace: tool.namespace};
-        }),
-        execute: async (name, args, callSignal) => {
-          callSignal.throwIfAborted();
-          if (parent().cwd !== spawningCwd) throw new Error('Subagent parent workspace changed; resubmit task');
-          if (task.configProvenance?.config !== configFor(ctx).identity) throw new Error('Subagent delegation configuration changed; resubmit task');
-          assertToolSelection([name], parent());
-          if (task.preset === 'reader' && !delegationScope(parent()).readTools.includes(name)) throw new Error(`Reader preset cannot grant write tools: ${name}`);
-          if (!ctx.tools.some(tool => tool.name === name)) throw new Error(`Connector tool is no longer callable in the parent: ${name}`);
-          const outcome = await ctx.executeTool(name, args, {signal: callSignal});
-          return {...outcome.result, isError: outcome.isError};
-        },
-      };
-    }
+  const trackedSpawn = async (task: TaskSpec, signal?: AbortSignal, owner: 'parent' | 'workflow' = 'parent', bridge?: ConnectorBridge) => {
     const handle = await registry.spawn(task, signal, owner, bridge);
     renderActiveAgents();
     if (!shuttingDown && !cancellingAll) tracker.update();
@@ -197,12 +160,6 @@ export default function subagents(pi: ExtensionAPI): void {
     }
     if (configError) throw configError;
     return snapshot!;
-  };
-  const normalize = (task: Omit<TaskSpec, 'cwd'> & {cwd?: string}, ctx: ExtensionContext, config = configFor(ctx)): TaskSpec => {
-    assertTaskFields(task);
-    if (Array.isArray(task.tools) && task.tools.every(name => typeof name === 'string')) assertToolSelection(task.tools, parent());
-    if (task.cwd !== undefined && typeof task.cwd !== 'string') throw new Error('Invalid child cwd');
-    return resolveProfile({...task, cwd: resolve(ctx.cwd, task.cwd ?? '.')}, config, ctx);
   };
   pi.on('before_agent_start', (event, ctx) => {
     if (!pi.getActiveTools().some(tool => tool === 'subagent' || tool === 'workflow')) return;
@@ -264,9 +221,9 @@ export default function subagents(pi: ExtensionAPI): void {
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
       context = ctx;
-      const task = normalize(params, ctx);
+      const {task, bridge} = admission.direct(params, ctx);
       if (!task.model) throw new Error('A selected parent model or explicit provider/model is required');
-      const handle = await trackedSpawn(task, ctx, signal);
+      const handle = await trackedSpawn(task, signal, 'parent', bridge);
       return result({ id: handle.id, status: 'queued', notification: completionGuidance });
     },
   });
@@ -302,20 +259,10 @@ export default function subagents(pi: ExtensionAPI): void {
       signal?.addEventListener('abort', abort, { once: true });
       const cwd = ctx.cwd;
       try {
-        const config = configFor(ctx);
-        const selectionContext = {model: ctx.model, thinkingLevel: ctx.thinkingLevel, modelRegistry: ctx.modelRegistry};
+        const workflowAdmission = admission.workflow(ctx);
         const run = runWorkflow({
           source: params.source, cwd, timeout: params.timeout, signal: controller.signal,
-          journalDirectory: join(getAgentDir(), 'workflow-journals'), policyIdentity: delegationScope(parent()).replayIdentity,
-          allowedTools: () => delegationScope(parent()).tools,
-          readTools: () => delegationScope(parent()).readTools,
-          defaultTask: {model: ctx.model && `${ctx.model.provider}/${ctx.model.id}`, thinking: ctx.thinkingLevel},
-          profileIdentity: config.identity,
-          normalizeTask: task => {
-            if (configFor(ctx).identity !== config.identity || ctx.cwd !== cwd) throw new Error('Workflow configuration or workspace changed; restart workflow');
-            if (Array.isArray(task.tools) && task.tools.every(name => typeof name === 'string')) assertToolSelection(task.tools, parent());
-            return resolveProfile(task, config, selectionContext);
-          },
+          journalDirectory: join(getAgentDir(), 'workflow-journals'), admission: workflowAdmission,
           approve: ctx.hasUI ? async source => {
             const title = 'Review workflow TypeScript; submit unchanged source to continue';
             const reviewed = await withApprovalUI(ctx, controller.signal, async () => {
@@ -345,12 +292,10 @@ export default function subagents(pi: ExtensionAPI): void {
             });
             return reviewed === source && await withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.', {signal: controller.signal}));
           } : undefined,
-          validateTask: async task => { await assertChildTask(task, { parent: parent(), approve: ctx.hasUI ? request => withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Approve workflow child extensions', request, {signal: controller.signal})) : undefined }); },
           approveReplay: ctx.hasUI ? stages => withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Replay previously successful stages?', `These stages will NOT run again: ${stages.join(', ')}. Approve only if their outputs and side effects remain valid in the current workspace.`, {signal: controller.signal})) : async () => false,
-          authorizeRead: path => assertWorkflowRead(parent(), path),
           spawn: async (task, taskSignal) => {
             taskSignal.throwIfAborted();
-            const handle = await trackedSpawn(task, ctx, taskSignal, 'workflow');
+            const handle = await trackedSpawn(task, taskSignal, 'workflow', admission.bridge(task, ctx));
             const cancel = () => registry.cancel(handle.id);
             taskSignal.addEventListener('abort', cancel, { once: true });
             if (taskSignal.aborted) cancel();

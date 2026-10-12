@@ -1,3 +1,4 @@
+import { DelegationAdmission } from '../extensions/subagents/scope.ts';
 import assert from 'node:assert/strict';
 import {chmod, mkdir, mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -158,7 +159,8 @@ test('forged child requests cannot invoke a parent tool outside that child selec
 }));
 
 test('an empty connector bridge error settles the child call normally', async () => fixture(async ({cwd}) => {
-  const registry = new SubagentRegistry({allowedTools: () => [read], readTools: () => [read]});
+  const admission = new DelegationAdmission({cwd: () => cwd, tools: () => [read], grants: () => ({[read]: 'read'}), definitions: () => [{name: read, exposure: 'direct'}] as any});
+  const registry = new SubagentRegistry({admission});
   try {
     const child = await registry.spawn({task: request(), cwd, model: 'test/fixture', tools: [read], timeout: 3000}, undefined, 'parent', {
       tools: [{name: read, description: 'Fixture connector', parameters: Type.Object({issueKey: Type.String()})}],

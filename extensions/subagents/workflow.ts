@@ -6,26 +6,18 @@ import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type ts from 'typescript';
-import { TIMEOUT_BOUNDS, validateTask, validateTimeout, type TaskSpec } from './registry.ts';
-import { thinkingSuffix } from './thinking.ts';
+import { ALL_TOOLS, TIMEOUT_BOUNDS, validateTimeout, type TaskSpec } from './task.ts';
 import { abortable } from './cancellation.ts';
-import { assertTaskFields } from './profiles.ts';
-import { insideRoot } from './scope.ts';
+import { DelegationAdmission, insideRoot, type WorkflowAdmission } from './scope.ts';
 interface WorkflowOptions {
   source: string;
   cwd: string;
   journalDirectory: string;
-  policyIdentity: string;
-  allowedTools?: () => string[];
-  readTools?: () => string[];
-  defaultTask?: Pick<TaskSpec, 'model' | 'thinking'>;
-  profileIdentity?: string;
-  normalizeTask?: (task: TaskSpec) => TaskSpec;
+  policyIdentity?: string;
+  admission?: WorkflowAdmission;
   approve?: (source: string) => Promise<boolean>;
   approveReplay?: (stages: string[]) => Promise<boolean>;
-  authorizeRead?: (path: string) => Promise<void>;
   spawn: (task: TaskSpec, signal: AbortSignal) => Promise<unknown>;
-  validateTask?: (task: Awaited<ReturnType<typeof validateTask>>) => Promise<void>;
   signal?: AbortSignal;
   timeout?: number;
 }
@@ -163,7 +155,8 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
   const runtime = await workflowRuntime(options.signal);
   const tsc = await typescript();
   const cwd = await realpath(options.cwd);
-  const identity = digest(JSON.stringify({ version: 2, source: options.source, cwd, policy: options.policyIdentity, defaults: options.defaultTask, profiles: options.profileIdentity, node: runtime.version, typescript: tsc.version, platform: process.platform }));
+  const admission = options.admission ?? new DelegationAdmission({cwd: () => cwd, tools: () => ALL_TOOLS}).workflow();
+  const identity = digest(JSON.stringify({ version: 2, source: options.source, cwd, policy: options.policyIdentity ?? admission.policyIdentity, defaults: admission.identityDefaults, profiles: admission.profileIdentity, node: runtime.version, typescript: tsc.version, platform: process.platform }));
   if (runningIdentities.has(identity))
     throw new Error('Identical workflow is already running');
   const compiled = tsc.transpileModule(`async function workflow(api: any) {\n${options.source}\n}`, { compilerOptions: { target: tsc.ScriptTarget.ES2022, module: tsc.ModuleKind.None }, reportDiagnostics: true });
@@ -306,21 +299,13 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
         activeStages.add(key);
         try {
           const input = args.task as Record<string, unknown>;
-          assertTaskFields(input);
-          if (input.cwd !== undefined && typeof input.cwd !== 'string')
-            throw new Error('Invalid child cwd');
-          const inherited = {...options.defaultTask, ...input, cwd: input.cwd ? resolve(cwd, input.cwd) : cwd};
-          if (input.thinking === undefined && typeof input.model === 'string') inherited.thinking = thinkingSuffix.exec(input.model)?.[1] ?? options.defaultTask?.thinking;
-          const task = await validateTask(options.normalizeTask ? options.normalizeTask({...input, cwd: inherited.cwd} as unknown as TaskSpec) : inherited as unknown as TaskSpec, options.allowedTools?.(), options.readTools?.());
-          if (options.defaultTask && !task.model) throw new Error('A selected parent model or explicit provider/model is required');
-          if (!insideRoot(cwd, task.cwd))
-            throw new Error('Child cwd escapes workflow cwd');
+          const task = await admission.admit(input as unknown as Omit<TaskSpec, 'cwd'> & {cwd?: string}, cwd);
           const signature = digest(JSON.stringify(task));
           const cached = stages[key];
           if (cached) {
             if (cached.signature !== signature)
               throw new Error('Stage label reused for a different task');
-            await abortable(options.validateTask?.(task), controller.signal);
+            await abortable(admission.replay(task, controller.signal), controller.signal);
             return cached.value;
           }
           await reserve(STAGE_CAP);
@@ -346,7 +331,7 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
         if (!insideRoot(cwd, path))
           throw new Error('readFile escapes workflow cwd');
         const authorizedFile = await stat(path);
-        await abortable(options.authorizeRead?.(path), controller.signal);
+        await abortable(admission.read(path), controller.signal);
         const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
         try {
           const openedFile = await file.stat();

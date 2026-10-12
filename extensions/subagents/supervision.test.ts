@@ -1,3 +1,4 @@
+import { supervisorAdmission } from './test-support.ts';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -18,7 +19,7 @@ async function alive(pid: number) {
 test('supervised cancellation signals Pi once and allows its graceful cleanup', {timeout: 5000}, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'subagent-grace-'));
   const previousPath = process.env.PATH;
-  const registry = new SubagentRegistry();
+  const registry = new SubagentRegistry({admission: supervisorAdmission});
   try {
     await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nlet signals=0;process.on('SIGTERM',()=>{signals++;setTimeout(()=>{console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:String(signals)}]}}));process.exit(0);},300);});console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'armed'}}));setInterval(()=>{},1000);`);
     await chmod(join(cwd, 'pi'), 0o700);
@@ -41,7 +42,7 @@ test('supervised cancellation signals Pi once and allows its graceful cleanup', 
 test('a normally completed supervised child releases its owner pipe and settles', {timeout: 10000}, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'subagent-complete-'));
   const previousPath = process.env.PATH;
-  const registry = new SubagentRegistry();
+  const registry = new SubagentRegistry({admission: supervisorAdmission});
   try {
     await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}));`);
     await chmod(join(cwd, 'pi'), 0o700);
@@ -64,7 +65,7 @@ test('a supervised child stops when its owning process is abruptly killed', {tim
   try {
     await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconst child=require('node:child_process').spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});console.log('ready');setInterval(()=>{},1000);"],{stdio:['ignore','pipe','ignore']});child.stdout.once('data',()=>console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:process.pid+','+child.pid}})));setInterval(()=>{},1000);`);
     await chmod(join(cwd, 'pi'), 0o700);
-    const script = `import {SubagentRegistry} from ${JSON.stringify(new URL('./registry.ts', import.meta.url).href)}; const registry = new SubagentRegistry({onUpdate: task=>{if(task.output)console.log(task.output);}});await registry.spawn({task:'synthetic child only',cwd:${JSON.stringify(cwd)},timeout:8000});`;
+    const script = `import {SubagentRegistry} from ${JSON.stringify(new URL('./registry.ts', import.meta.url).href)}; import {supervisorAdmission} from ${JSON.stringify(new URL('./test-support.ts', import.meta.url).href)}; const registry = new SubagentRegistry({admission: supervisorAdmission, onUpdate: task=>{if(task.output)console.log(task.output);}});await registry.spawn({task:'synthetic child only',cwd:${JSON.stringify(cwd)},timeout:8000});`;
     owner = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {cwd: import.meta.dirname, env: {...process.env, PATH: `${cwd}:${process.env.PATH ?? ''}`}, stdio: ['ignore', 'pipe', 'pipe']});
     let output = '', errors = '';
     owner.stdout?.on('data', chunk => { output += String(chunk); });

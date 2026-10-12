@@ -1,3 +1,4 @@
+import { supervisorAdmission } from './test-support.ts';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
@@ -5,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { piInvocation, SubagentRegistry, validateTask } from './registry.ts';
-import { assertChildTask } from './scope.ts';
+import { piInvocation, SubagentRegistry } from './registry.ts';
+import { assertChildTask, validateTask, DelegationAdmission } from './scope.ts';
 
 test('explicit task briefs remain literal messages through Pi attachment parsing with no tools', async () => {
   const entry = import.meta.resolve('@earendil-works/pi-coding-agent');
@@ -44,7 +45,7 @@ test('isolated processes stream text and usage and push completion without polli
   const cwd = await mkdtemp(join(tmpdir(), 'subagents-'));
   const updates: string[] = [];
   const notifications: string[] = [];
-  const registry = new SubagentRegistry({
+  const registry = new SubagentRegistry({admission: supervisorAdmission,
     invocation: () => ({command: process.execPath, args: ['-e', `console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'hello'}}));console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',usage:{input:2,output:3},content:[{type:'text',text:'hello'}]}}))`]}),
     onUpdate: task => updates.push(task.output), onComplete: task => notifications.push(task.status),
   });
@@ -60,7 +61,7 @@ test('isolated processes stream text and usage and push completion without polli
 });
 
 test('failure, timeout, cancellation and session shutdown settle real subprocesses', async () => {
-  const registry = new SubagentRegistry({invocation: spec => ({command: process.execPath,args:['-e',spec.task === 'fail' ? 'process.exit(7)' : 'setInterval(()=>{},1000)']})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: spec => ({command: process.execPath,args:['-e',spec.task === 'fail' ? 'process.exit(7)' : 'setInterval(()=>{},1000)']})});
   try {
     assert.equal((await (await registry.spawn({task:'fail',cwd:tmpdir()})).done).status,'failed');
     assert.equal((await (await registry.spawn({task:'hang',cwd:tmpdir(),timeout:50})).done).status,'timed-out');
@@ -75,7 +76,7 @@ test('failure, timeout, cancellation and session shutdown settle real subprocess
 });
 
 test('default concurrency runs eight readers and queues the ninth until a slot opens', async () => {
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)']})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)']})});
   try {
     const tasks = [];
     for (let i = 0; i < 9; i++) tasks.push(await registry.spawn({task: `reader ${i}`, cwd: tmpdir(), preset: 'reader'}));
@@ -91,7 +92,7 @@ test('default concurrency runs eight readers and queues the ninth until a slot o
 test('writers using a directory symlink serialize while unrelated readers can run', async () => {
   const cwd = await mkdtemp(join(tmpdir(),'writers-'));
   await symlink(cwd,join(cwd,'alias'));
-  const registry = new SubagentRegistry({concurrency:2,invocation:()=>({command:process.execPath,args:['-e',`setTimeout(()=>console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}})),150)`]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, concurrency:2,invocation:()=>({command:process.execPath,args:['-e',`setTimeout(()=>console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}})),150)`]})});
   try {
     const first = await registry.spawn({task:'first',cwd});
     const second = await registry.spawn({task:'second',cwd:join(cwd,'alias')});
@@ -103,7 +104,7 @@ test('writers using a directory symlink serialize while unrelated readers can ru
 });
 
 test('notification failures settle tasks, keep the child error and do not strand queued writers', async () => {
- const registry=new SubagentRegistry({concurrency:1,onComplete:()=>{throw new Error('UI gone');},invocation:spec=>({command:process.execPath,args:['-e',spec.task==='fail'
+ const registry=new SubagentRegistry({admission: supervisorAdmission, concurrency:1,onComplete:()=>{throw new Error('UI gone');},invocation:spec=>({command:process.execPath,args:['-e',spec.task==='fail'
   ? `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'error',errorMessage:'provider refused request'}}))`
   : `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}}))`]})});
  try {
@@ -121,7 +122,7 @@ test('notification failures settle tasks, keep the child error and do not strand
 test('timeout reaps a child and its ordinary process-group descendants', async()=>{
  const cwd=await mkdtemp(join(tmpdir(),'process-tree-'));const marker=join(cwd,'pid');
  const script=`const {spawn}=require('child_process');const child=spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'],{stdio:'ignore'});require('fs').writeFileSync(${JSON.stringify(marker)},String(child.pid));setInterval(()=>{},1000);`;
- const registry=new SubagentRegistry({invocation:()=>({command:process.execPath,args:['-e',script]})});
+ const registry=new SubagentRegistry({admission: supervisorAdmission, invocation:()=>({command:process.execPath,args:['-e',script]})});
  try {
   const task=await registry.spawn({task:'spawn descendant',cwd,timeout:200});
   assert.equal((await task.done).status,'timed-out');
@@ -138,7 +139,7 @@ test('timeout reaps a child and its ordinary process-group descendants', async()
 
 test('invalid task model, tools, preset, cwd, extensions and timeout never launch a process',async()=>{
  let launched=0;
- const registry=new SubagentRegistry({invocation:()=>{launched++;return {command:process.execPath,args:['-e','process.exit(0)']};}});
+ const registry=new SubagentRegistry({admission: supervisorAdmission, invocation:()=>{launched++;return {command:process.execPath,args:['-e','process.exit(0)']};}});
  const base={task:'read',cwd:tmpdir()};
  try {
   for(const bad of [{task:''},{cwd:'relative'},{model:'--unsafe'},{preset:'unknown'},{preset:'reader',tools:['bash']},{tools:['unknown']},{extensions:['relative.ts']},{timeout:0}]) {
@@ -156,7 +157,7 @@ test('split UTF-8 stdout and stderr retain non-ASCII text', async () => {
     process.stderr.write(Buffer.from([0xf0,0x9f]));
     setTimeout(()=>{process.stdout.write(record.subarray(split));process.stderr.write(Buffer.from([0x9a,0x80]));console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'café 🚀'}]}}));},50);
   `;
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', script]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', script]})});
   try {
     const result = await (await registry.spawn({task: 'unicode', cwd: tmpdir()})).done;
     assert.equal(result.status, 'succeeded');
@@ -173,7 +174,7 @@ test('streamed deltas and stderr keep only the last 64 KiB, mid-stream and at co
   `;
   const expected = Array.from({length: 4000}, (_, i) => String(i % 10).repeat(40)).join('');
   const updates: string[] = [];
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', script]}), onUpdate: task => updates.push(task.output)});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', script]}), onUpdate: task => updates.push(task.output)});
   try {
     const result = await (await registry.spawn({task: 'stream', cwd: tmpdir()})).done;
     assert.equal(result.status, 'succeeded');
@@ -191,8 +192,9 @@ test('streamed deltas and stderr keep only the last 64 KiB, mid-stream and at co
 test('explicit tools must respect parent permissions without an authorize callback', async () => {
   const launched: string[][] = [];
   let allowed = ['read'];
+  const admission = new DelegationAdmission({cwd: () => tmpdir(), tools: () => allowed});
   const registry = new SubagentRegistry({
-    allowedTools: () => allowed,
+    admission,
     invocation: spec => {
       launched.push(spec.tools);
       return {command: process.execPath, args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}}));`]};
@@ -219,7 +221,7 @@ for (const missingGroup of [false, true]) {
       if (missingGroup) throw Object.assign(new Error('No such process'), {code: 'ESRCH'});
       return true;
     });
-    const registry = new SubagentRegistry({invocation: () => ({
+    const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({
       command: process.execPath,
       args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:String(process.pid)}]}}));`],
     })});
@@ -237,7 +239,7 @@ test('cancellation escalation does not signal the process group again at exit or
   const kill = t.mock.method(process, 'kill');
   let ready!: (pid: number) => void;
   const started = new Promise<number>(resolve => { ready = resolve; });
-  const registry = new SubagentRegistry({
+  const registry = new SubagentRegistry({admission: supervisorAdmission,
     invocation: () => ({command: process.execPath, args: ['-e', `
       process.on('SIGTERM',()=>{});
       console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:String(process.pid)}}));

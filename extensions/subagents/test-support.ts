@@ -2,6 +2,10 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import subagents from './index.ts';
+import { DelegationAdmission } from './scope.ts';
+import { ALL_TOOLS } from './task.ts';
+
+export const supervisorAdmission = new DelegationAdmission({cwd: () => tmpdir(), tools: () => ALL_TOOLS, approve: async () => true});
 
 export function fixtureModelRegistry() {
   const models = ['test/fixture', 'test/selected', 'test/different', 'openai-codex/gpt-6-astra', 'openai-codex/gpt-5.6-luna'].map(value => {

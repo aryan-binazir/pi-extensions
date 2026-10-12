@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { StringEnum } from '@earendil-works/pi-ai';
+import { terminalLabel } from '../terminal-text.ts';
 
 interface Todo { content: string; status: 'pending' | 'in_progress' | 'completed' }
 interface Snapshot { version: 1; todos: Todo[]; staleTurns: number }
@@ -47,8 +48,8 @@ export default function todo(pi: ExtensionAPI): void {
     ctx.ui.setWidget('interactive-tools:todo', (_tui, theme) => {
       const blue = (text: string) => theme.fg('border', text);
       const current = state.todos.find(item => item.status === 'in_progress') ?? state.todos.find(item => item.status === 'pending');
-      const summary = `Todos ${state.todos.filter(item => item.status === 'completed').length}/${state.todos.length} · ${blue('alt+t')} · ${current?.content ?? ''}`;
-      const lines = [`Todo — declared progress · ${blue('alt+t')}`, ...state.todos.map(item => `${blue(item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○')} ${item.content}`)];
+      const summary = `Todos ${state.todos.filter(item => item.status === 'completed').length}/${state.todos.length} · ${blue('alt+t')} · ${terminalLabel(current?.content ?? '')}`;
+      const lines = [`Todo — declared progress · ${blue('alt+t')}`, ...state.todos.map(item => `${blue(item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○')} ${terminalLabel(item.content)}`)];
       return {
         invalidate() {},
         render(width: number) {

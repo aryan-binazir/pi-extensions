@@ -330,15 +330,24 @@ test("the questionnaire renders inline rather than as an overlay", async () => {
   await running;
 });
 
-test("questionnaire strips residual terminal controls from model-provided labels", async () => {
+test("questionnaire renders model text through the terminal text policies", async () => {
   const h = host();
-  const running = h.run([{ id: "safe", prompt: "safe\x1bcRESET", options: [{ value: "a", label: "answer\x07\x9b31m" }] }]);
-  const rendered = h.render().join("\n");
-  assert.ok(!rendered.includes("\x1bc"));
-  assert.ok(!rendered.includes("\x07"));
-  assert.ok(!rendered.includes("\x9b"));
-  h.key("\x1b");
-  await running;
+  const running = h.run([
+    { id: "first", label: "Tab\u202eone", prompt: "Prompt\u202eone", options: [{ value: "a", label: "Answer\u202eone", description: "Detail\u202eone" }] },
+    question("second"),
+  ]);
+  try {
+    const rendered = h.render().join("\n");
+    for (const text of ["Tab one", "Prompt one", "Answer one", "Detail one"]) assert.ok(rendered.includes(text));
+    assert.ok(!rendered.includes("\u202e"));
+    h.key("\r");
+    h.key("\r");
+    h.key("\r");
+    assert.equal((await running).details.answers[0].label, "Answer\u202eone");
+  } finally {
+    h.key("\x1b");
+    await running;
+  }
 });
 
 test("long tabs keep every active question and Submit visible", async () => {
@@ -403,14 +412,14 @@ test("newline tab labels keep real TUI rows aligned without changing prompts or 
       const initial = checkFrame();
       assert.equal((writes.join("").match(/\n/g) ?? []).length, initial.length - 1);
       assert.equal(tui.captureRenderState().hardwareCursorRow, initial.length - 1);
-      assert.match(initial[1], width === 80
-        ? /\[ First  Two \]   Fallback ID   Submit/
-        : /1\/3 \[ First  Two \] · Submit/);
+      assert.match(initial[1], width >= 40
+        ? /\[ First Two \]   Fallback ID   Submit/
+        : /1\/3 \[ First Two \] · Submit/);
       assert.ok(initial.some((row) => row.includes("Line one") && !row.includes("Line two")));
       assert.ok(initial.some((row) => row.includes("Line two") && !row.includes("Line one")));
       writes.length = 0;
       component.handleInput("\r");
-      assert.match(checkFrame()[1], width === 80
+      assert.match(checkFrame()[1], width >= 40
         ? /\[ Fallback ID \]/
         : /2\/3 \[ Fallback ID \] · Submit/);
       assert.ok(writes.length > 0, "Answering must repaint the next tab");

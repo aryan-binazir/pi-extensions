@@ -99,6 +99,18 @@ test("slider traverses only actual supported thinking levels", async (t) => {
   await result;
   assert.deepEqual(h.changes, ["max"]);
 });
+test("effort renders model text through the terminal text policy", async (t) => {
+  const h = host(t, { model: "Model\u202ename", level: "high" });
+  const result = h.commands.effort.handler("", h.ctx);
+  try {
+    assert.match(h.render(), /Model name/);
+    assert.ok(!h.render().includes("\u202e"));
+  } finally {
+    h.key("\u001b");
+    await result;
+  }
+});
+
 test("slider has a padded full border and fits narrow terminals", async (t) => {
   const h = host(t);
   h.ctx.model.id = "模型".repeat(60);

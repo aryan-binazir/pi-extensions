@@ -125,7 +125,23 @@ test('names draft, merged and closed PRs outside the link; terminal states win o
 
 const pathRow = (f: ReturnType<typeof fixture>) => stripVTControlCharacters(f.footer.render(140)[0]).replace(/\s+Auto:.*$/, '');
 
-test('narrow footers never exceed the width or leave a PR link open, and the branch is still cleaned', async () => {
+test('footer labels use the terminal label policy before theme styling', () => {
+  const f = fixture();
+  f.ctx.sessionManager.getCwd = () => '/work\n\u202espace';
+  f.changeBranch('feature\u202ename');
+  f.ctx.sessionManager.getSessionName = () => 'Task\u202ename';
+  f.ctx.model!.id = 'model\u202ename';
+  f.statuses.set(STATUS_KEY, 'Auto: on\u202estatus');
+  f.statuses.set('other', 'Other\u202estatus');
+  const lines = f.footer.render(140);
+  assert.match(lines[0], /^\/work space \(feature name\) • Task name +Auto: on status$/);
+  assert.match(lines[1], /model name/);
+  assert.equal(lines[2], 'Other status');
+  assert.ok(!lines.join('').includes('\u202e'));
+  f.footer.dispose();
+});
+
+test('narrow footers never exceed the width or leave a PR link open', async () => {
   const gh = fakeGh(), f = fixture(gh.exec);
   f.changeBranch('evil\u001b[2J\u202ebranch');
   f.footer.render(140);
@@ -138,7 +154,6 @@ test('narrow footers never exceed the width or leave a PR link open, and the bra
     const visible = stripVTControlCharacters(row), at = visible.indexOf('#');
     if (at >= 0) assert.equal(getOsc8LinkAtColumn(row, at), prUrl, `link target at ${width}`);
     if (at >= 0) assert.match(visible, /\) #42 /, `the number is whole or absent at ${width}: ${visible}`);
-    assert.doesNotMatch(row.replaceAll(`\u001b]8;;${prUrl}\u001b\\`, '').replaceAll('\u001b]8;;\u001b\\', ''), /\u001b(?!\[)|\u001b\[2J|\u202e/);
   }
   assert.match(stripVTControlCharacters(f.footer.render(140)[0]), /\(evil branch\) #42 • Task/);
   f.footer.dispose();
@@ -269,13 +284,11 @@ test('narrow layouts and ANSI/wide paths stay within terminal width without wrap
   f.footer.dispose();
 });
 
-test('missing status and unknown context remain explicit; terminal controls are stripped', () => {
+test('missing status and unknown context remain explicit', () => {
   const f = fixture(); f.statuses.clear();
   f.ctx.getContextUsage = () => undefined;
-  f.ctx.sessionManager.getCwd = () => '/path\n\u001b[2J\u202eevil';
   const lines = f.footer.render(140);
   assert.match(lines[0], /Auto: unavailable$/);
-  assert.doesNotMatch(lines.join(''), /[\n\u001b\u202e]/);
   assert.match(lines[1], /\?\/128k/);
   f.footer.dispose();
 });

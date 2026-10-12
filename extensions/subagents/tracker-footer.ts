@@ -1,17 +1,11 @@
-import { stripVTControlCharacters } from 'node:util';
 import { visibleWidth } from '@earendil-works/pi-tui';
+import { terminalText } from '../terminal-text.ts';
 
-export function sanitizeTrackerReport(report: string): string {
-  const oscPayload = /(?:\x1b\]|\x9d)[\s\S]*?(?:\x07|\x1b\\|\x9c|$)/g;
-  const withoutOsc = report.replace(oscPayload, '');
-  return stripVTControlCharacters(withoutOsc)
-    .replace(/\r\n?/g, '\n')
-    .replace(/[\p{Cc}\p{Cf}]/gu, char => char === '\n' ? '\n' : ' ');
-}
+export { terminalText as sanitizeTrackerReport };
 
 export function trackerFooter(report: string, columns = 100): string | undefined {
   const width = Number.isFinite(columns) ? Math.max(0, Math.min(100, Math.floor(columns))) : 100;
-  const text = sanitizeTrackerReport(report)
+  const text = terminalText(report)
     .replace(/^\s*```[^\n]*$/gm, '')
     .replace(/!?(\[([^\]]+)\])\([^)]*\)/g, '$2')
     .replace(/[*`~]/g, '')

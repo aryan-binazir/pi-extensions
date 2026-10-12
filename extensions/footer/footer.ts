@@ -1,16 +1,11 @@
 import { isAbsolute, relative, sep } from 'node:path';
-import { stripVTControlCharacters } from 'node:util';
 import type { Usage } from '@earendil-works/pi-ai';
 import type { ContextUsage, ExtensionContext, ReadonlyFooterDataProvider, Theme } from '@earendil-works/pi-coding-agent';
-import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { stripTerminalSequences, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { terminalLabel } from '../terminal-text.ts';
 import { pullRequestLabel, type PullRequests } from './pull-request.ts';
 
 export const STATUS_KEY = 'auto-permissions-status';
-// Every escape sequence stripVTControlCharacters removes starts with a Cc code
-// point, so one early-exiting scan proves both passes are no-ops for plain text.
-const suspect = /[\p{Cc}\p{Cf}]/u;
-const clean = (text: string) => suspect.test(text)
-  ? stripVTControlCharacters(text).replace(/[\p{Cc}\p{Cf}]/gu, ' ') : text;
 const tokens = (n: number) => n < 1000 ? String(n) : n < 10000 ? `${(n / 1000).toFixed(1)}k`
   : n < 1000000 ? `${Math.round(n / 1000)}k` : `${(n / 1000000).toFixed(1)}M`;
 
@@ -85,10 +80,10 @@ export function permissionFooter(
       }
       const cwd = homeCwd;
       const branch = data.getGitBranch(), name = ctx.sessionManager.getSessionName();
-      const base = clean(`${cwd}${branch ? ` (${branch})` : ''}`), tail = clean(name ? ` • ${name}` : '');
+      const base = terminalLabel(`${cwd}${branch ? ` (${branch})` : ''}`), tail = name ? ` • ${terminalLabel(name)}` : '';
       const pr = pullRequests?.get(raw, branch), label = pr && pullRequestLabel(pr);
       const statuses = data.getExtensionStatuses();
-      const auto = clean(statuses.get(STATUS_KEY) ?? 'Auto: unavailable');
+      const auto = terminalLabel(statuses.get(STATUS_KEY) ?? 'Auto: unavailable');
       const { totals, cacheHit, usage } = sessionStats(ctx);
       const stats: string[] = [];
       for (const [key, prefix] of [['input', '↑'], ['output', '↓'], ['cacheRead', 'R'], ['cacheWrite', 'W']] as const) {
@@ -102,20 +97,20 @@ export function permissionFooter(
       const percent = usage?.percent;
       const contextLabel = `${percent == null ? '?' : percent.toFixed(1) + '%'}/${tokens(usage?.contextWindow ?? ctx.model?.contextWindow ?? 0)}`;
       stats.push(theme.fg(percent != null && percent > 90 ? 'error' : percent != null && percent > 70 ? 'warning' : 'dim', contextLabel));
-      let model = clean(ctx.model?.id ?? 'no-model');
+      let model = terminalLabel(ctx.model?.id ?? 'no-model');
       if (ctx.model?.reasoning) model += ` • ${ctx.thinkingLevel ?? 'off'}`;
-      if (ctx.model && data.getAvailableProviderCount() > 1) model = `(${clean(ctx.model.provider)}) ${model}`;
+      if (ctx.model && data.getAvailableProviderCount() > 1) model = `(${terminalLabel(ctx.model.provider)}) ${model}`;
       const pathRow = theme.fg('dim', base) + (label ? ` ${theme.fg('warning', label)}` : '') + theme.fg('dim', tail), autoRow = theme.fg('dim', auto);
       const statsRow = theme.fg('dim', stats.join(' ')), modelRow = theme.fg('dim', model);
       const other = [...statuses].filter(([key]) => key !== STATUS_KEY).sort(([a], [b]) => a.localeCompare(b));
-      const others = other.length ? other.map(([, text]) => clean(text)).join(' ') : undefined;
+      const others = other.length ? other.map(([, text]) => terminalLabel(text)).join(' ') : undefined;
       const key = `${width}.${pathRow.length}.${autoRow.length}.${statsRow.length}`
         + `.${modelRow.length}.${others?.length ?? -1}|`
         + pathRow + autoRow + statsRow + modelRow + (others ?? '');
       if (key === cacheKey) return cacheLines;
       let pathLine = rightAligned(pathRow, autoRow, width);
       if (label) {
-        const wholeLabel = `${base} ${stripVTControlCharacters(label)}`, shown = stripVTControlCharacters(pathLine);
+        const wholeLabel = `${base} ${stripTerminalSequences(label)}`, shown = stripTerminalSequences(pathLine);
         const labelCut = !shown.startsWith(wholeLabel) || ![undefined, ' '].includes(shown[wholeLabel.length]);
         if (labelCut) pathLine = rightAligned(theme.fg('dim', base + tail), autoRow, width);
       }

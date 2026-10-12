@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { truncateToWidth } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
+import { terminalLabel } from '../terminal-text.ts';
 import { DelegationAdmission } from './scope.ts';
 import type {ConnectorBridge} from './connector-bridge.ts';
 import { SubagentRegistry } from './registry.ts';
@@ -69,7 +70,7 @@ export default function subagents(pi: ExtensionAPI): void {
     let label = collapsedBriefById.get(id);
     if (label === undefined) {
       if (collapsedBriefById.size > 1024) collapsedBriefById.clear();
-      label = task.replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 100).replace(/\p{Cs}/gu, '\uFFFD');
+      label = terminalLabel(terminalLabel(task).slice(0, 100));
       collapsedBriefById.set(id, label);
     }
     return label;

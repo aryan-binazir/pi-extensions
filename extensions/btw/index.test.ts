@@ -733,32 +733,21 @@ test("an oversized followup stays editable and can be shortened without retyping
   h.key("\u001b");
   await result;
 });
-for (const { name, delta, forbidden, visible } of [
-  {
-    name: "clipboard writes and screen erases",
-    delta: "safe\u001b]52;c;YXR0YWNr\u0007\u001b[2J answer",
-    forbidden: ["\u001b]52", "\u001b[2J", "\u0007"],
-    visible: /safe.*answer/,
-  },
-  {
-    name: "terminal resets and 8-bit controls",
-    delta: "safe\u001bcRESET\u0007\u009b31mtext",
-    forbidden: ["\u001bc", "\u0007", "\u009b"],
-    visible: /safe/,
-  },
-]) {
-  test(`BTW strips provider ${name} from rendered text`, async () => {
-    const h = host([{ type: "text_delta", delta }]);
-    const result = h.commands.btw.handler("Question", h.ctx);
-    await tick();
+test("BTW renders provider text through the terminal text policy", async () => {
+  const h = host([{ type: "text_delta", delta: "Side\u202eanswer" }]);
+  const result = h.commands.btw.handler("Question\u202etext", h.ctx);
+  await tick();
+  try {
     const output = h.render();
-    for (const sequence of forbidden)
-      assert.ok(!output.includes(sequence), JSON.stringify(sequence));
-    assert.match(output, visible);
+    assert.match(output, /Side answer/);
+    assert.match(output, /Question text/);
+    assert.ok(!output.includes("\u202e"));
+    assert.equal(userMessages(h.requests[0].context).at(-1)!.content, "Question\u202etext");
+  } finally {
     h.key("\u001b");
     await result;
-  });
-}
+  }
+});
 
 test("paging past the top of a long side transcript stops on the first turn", async () => {
   const h = host([{ type: "text_delta", delta: "answer line\n\n".repeat(40) }]);

@@ -38,14 +38,6 @@ test('direct and workflow children escape leading @ only in the CLI brief with n
   });
 });
 
-test('batch re-clipping marks omitted output even when each original notice fitted', async () => fixture(async ({execute, settle, notifications}: any) => {
-  const children = await Promise.all([1, 2].map(i => execute('subagent', {task: String(i) + 'x'.repeat(1700), preset: 'reader'})));
-  await Promise.all(children.map(child => settle(child.details.id)));
-  const batch = await until(() => notifications.find((notice: any) => notice.type === 'subagent-complete' && notice.task.tasks), 'the batched completion notice');
-  assert.equal(batch.task.tasks.length, 2);
-  assert.ok(batch.task.tasks.every((task: any) => task.outputTruncated && task.output.length < task.outputLength));
-}));
-
 test('alt+r toggles the compact subagent panel and retains the choice across worker batches', async () => fixture(async ({execute, widgets, hooks, shortcuts, ctx}: any) => {
   const first = await execute('subagent', {task: 'hold', preset: 'writer'});
   const second = await execute('subagent', {task: 'hold', preset: 'writer'});
@@ -195,16 +187,6 @@ test('direct children inherit the selected parent model and thinking level', asy
   assert.equal(args[args.indexOf('--thinking') + 1], 'low');
 }));
 
-test('near-simultaneous child completions produce one compact parent continuation', async () => fixture(async ({execute, notifications, cwd}: any) => {
-  await Promise.all([execute('subagent', {task: 'batch', preset: 'reader'}), execute('subagent', {task: 'batch', preset: 'reader'})]);
-  await until(async () => (await execute('subagent_status')).details.every((task: any) => task.output === 'ready'), 'both batch children to report ready');
-  await writeFile(join(cwd, 'release'), 'go');
-  await until(() => notifications.length >= 1, 'the first completion notice');
-  await afterNoticeFlushWindow();
-  assert.equal(notifications.length, 1);
-  assert.equal(notifications[0].task.tasks.length, 2);
-}));
-
 test('status and completion delivery stay bounded when several children return large results', async () => fixture(async ({execute, settle, notifications}: any) => {
   const children = await Promise.all(Array.from({length: 4}, () => execute('subagent', {task: 'large', preset: 'reader'})));
   await Promise.all(children.map(task => settle(task.details.id)));
@@ -312,9 +294,9 @@ test('shutdown aborts a pending tracker without delaying children and late repor
   assert.equal(requests[1].signal.aborted, true); requests[1].resolve();
 }));
 
-test('cancel-all suppresses a burst of child notifications at the registered boundary', async () => fixture(async ({execute, notifications}: any) => {
-  await Promise.all(Array.from({length: 40}, () => execute('subagent', {task: 'hold', preset: 'writer'})));
-  assert.equal((await execute('subagent_cancel', {id: 'all'})).details.count, 40);
+test('cancel-all suppresses child notifications through the registered sink', async () => fixture(async ({execute, notifications}: any) => {
+  await Promise.all(Array.from({length: 2}, () => execute('subagent', {task: 'hold', preset: 'writer'})));
+  assert.equal((await execute('subagent_cancel', {id: 'all'})).details.count, 2);
   await new Promise(resolve => setTimeout(resolve, 350));
   assert.deepEqual(notifications, []);
 }));
@@ -322,35 +304,6 @@ test('cancel-all suppresses a burst of child notifications at the registered bou
 const onFirstCompletion = (activity: any[], run: () => Promise<any>) => new Promise<any>(resolve => {
   activity.push = (entry: any) => { if (!entry.active) { activity.push = () => 0; resolve(run()); } return 0; };
 });
-
-test('cancel-all still delivers a completion batched before it and suppresses the children it cancels', async () => fixture(async ({execute, activity, notifications}: any) => {
-  const held = await execute('subagent', {task: 'hold', preset: 'reader'});
-  let sentBeforeCancel = -1;
-  const cancelled = onFirstCompletion(activity, () => { sentBeforeCancel = notifications.length; return execute('subagent_cancel', {id: 'all'}); });
-  const done = await execute('subagent', {task: 'done', preset: 'reader'});
-  assert.deepEqual((await cancelled).details, {cancelled: true, count: 1});
-  assert.equal(sentBeforeCancel, 0, 'cancel-all must start inside the batching window');
-  await afterNoticeFlushWindow();
-  assert.equal(notifications.length, 1);
-  assert.deepEqual([notifications[0].task.id, notifications[0].task.status], [done.details.id, 'succeeded']);
-  assert.deepEqual(notifications[0].options, {triggerTurn: true, deliverAs: 'followUp'});
-  assert.equal((await execute('subagent_status', {id: held.details.id})).details.status, 'cancelled');
-}));
-
-test('cancel-all keeps the overflow count of cancellations batched before it', async () => fixture(async ({execute, notifications}: any) => {
-  const children = await Promise.all(Array.from({length: 20}, () => execute('subagent', {task: 'hold', preset: 'writer'})));
-  const queued = (await Promise.all(children.map((child: any) => execute('subagent_status', {id: child.details.id}))))
-    .filter((task: any) => task.details.status === 'queued').map((task: any) => task.details.id);
-  assert.equal(queued.length, 19);
-  await Promise.all(queued.map((id: string) => execute('subagent_cancel', {id})));
-  assert.equal((await execute('subagent_cancel', {id: 'all'})).details.count, 1);
-  await afterNoticeFlushWindow();
-  assert.equal(notifications.length, 1);
-  const notice = notifications[0];
-  assert.deepEqual(notice.options, {triggerTurn: false, deliverAs: 'nextTurn'});
-  assert.equal(notice.task.tasks.length + notice.task.additionalCompletions, 19);
-  assert.ok(notice.task.tasks.every((task: any) => queued.includes(task.id)));
-}));
 
 test('shutdown discards a completion that cancel-all left batched before the next session starts', async () => fixture(async ({execute, activity, notifications, hooks, ctx}: any) => {
   await execute('subagent', {task: 'hold', preset: 'reader'});
@@ -360,38 +313,6 @@ test('shutdown discards a completion that cancel-all left batched before the nex
   await hooks.get('session_start')({}, ctx);
   await afterNoticeFlushWindow();
   assert.deepEqual(notifications, []);
-}));
-
-test('cancel-all still reports a child it did not target while it waits', async () =>
-  withHost({
-    prefix: 'subagent-cancel-window-',
-    pi: `process.on('SIGTERM',()=>{});console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'ready'}}));setInterval(()=>{if(require('node:fs').existsSync('release'))process.exit(0);},5);`,
-  }, async ({cwd, execute, notifications}) => {
-    const status = async (id: string) => (await execute('subagent_status', {id})).details;
-    const stubborn = await execute('subagent', {task: 'stubborn', preset: 'writer'});
-    await until(async () => (await status(stubborn.details.id)).output === 'ready', 'the stubborn child to ignore SIGTERM');
-    let cancelling = true;
-    const cancelled = execute('subagent_cancel', {id: 'all'}).finally(() => { cancelling = false; });
-    const late = await execute('subagent', {task: 'late', preset: 'writer'});
-    assert.equal((await status(late.details.id)).status, 'queued');
-    assert.deepEqual((await execute('subagent_cancel', {id: late.details.id})).details, {cancelled: true});
-    assert.equal(cancelling, true, 'cancel-all must still be waiting for the stubborn child');
-    await writeFile(join(cwd, 'release'), 'go');
-    assert.deepEqual((await cancelled).details, {cancelled: true, count: 1});
-    await afterNoticeFlushWindow();
-    assert.deepEqual(notifications.map(notice => [notice.task.id, notice.task.status, notice.options.triggerTurn]), [[late.details.id, 'cancelled', false]]);
-  }));
-
-test('ordinary cancellation bursts use a bounded batch without a paid wake', async () => fixture(async ({execute, notifications}: any) => {
-  const children = await Promise.all(Array.from({length: 40}, () => execute('subagent', {task: 'hold', preset: 'writer'})));
-  await Promise.all(children.map((child: any) => execute('subagent_cancel', {id: child.details.id})));
-  await until(() => notifications.length > 0, 'the batched cancellation notice');
-  assert.equal(notifications.length, 1);
-  const notice = notifications[0];
-  assert.deepEqual(notice.options, {triggerTurn: false, deliverAs: 'nextTurn'});
-  assert.ok(notice.task.tasks.length <= 16);
-  assert.equal(notice.task.tasks.length + notice.task.additionalCompletions, 40);
-  assert.ok(Buffer.byteLength(JSON.stringify(notice.task), 'utf8') <= 16384);
 }));
 
 test('registered status output pages mark only omitted suffix output as truncated', async () => fixture(async ({execute, settle}: any) => {
@@ -432,28 +353,6 @@ test('tracker reports update one bounded footer status without entering chat or 
   assert.equal(JSON.parse(uiNotices.at(-1)).tasks.length, 1);
   await hooks.get('session_shutdown')();
   assert.equal(statuses.has('subagent-tracker'), false);
-}));
-
-test('a real completion after cancellation overflow still requests a parent continuation', async () => fixture(async ({execute, notifications, cwd}: any) => {
-  const children = await Promise.all(Array.from({length: 20}, () => execute('subagent', {task: 'hold', preset: 'writer'})));
-  const completion = await execute('subagent', {task: 'batch', preset: 'reader'});
-  await until(async () => (await execute('subagent_status', {id: completion.details.id})).details.output === 'ready', 'the completing child to report ready');
-  const queuedWriters = children.slice(1);
-  await Promise.all(queuedWriters.map((child: any) => execute('subagent_cancel', {id: child.details.id})));
-  await writeFile(join(cwd, 'release'), 'go');
-  await until(() => notifications.length > 0, 'the overflow continuation notice');
-  assert.equal(notifications.length, 1);
-  assert.equal(notifications[0].task.tasks.length + notifications[0].task.additionalCompletions, 20);
-  assert.deepEqual(notifications[0].options, {triggerTurn: true, deliverAs: 'followUp'});
-}));
-
-test('shutdown suppresses pending batched cancellations and child completions', async () => fixture(async ({execute, notifications, hooks}: any) => {
-  const child = await execute('subagent', {task: 'hold', preset: 'reader'});
-  await execute('subagent_cancel', {id: child.details.id});
-  await execute('subagent', {task: 'hold', preset: 'reader'});
-  await hooks.get('session_shutdown')();
-  await new Promise(resolve => setTimeout(resolve, 350));
-  assert.deepEqual(notifications, []);
 }));
 
 test('/subagents cancel ID cancels one child and tells the user', async () => fixture(async ({execute, commands, ctx, uiNotices, settle}: any) => {

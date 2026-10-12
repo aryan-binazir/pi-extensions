@@ -4,9 +4,8 @@ import { truncateToWidth } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { terminalLabel } from '../terminal-text.ts';
 import { DelegationAdmission } from './scope.ts';
-import type {ConnectorBridge} from './connector-bridge.ts';
 import { SubagentRegistry } from './registry.ts';
-import { TIMEOUT_BOUNDS, type TaskSpec } from './task.ts';
+import { TIMEOUT_BOUNDS } from './task.ts';
 import { thinkingPattern } from './thinking.ts';
 import { runWorkflow } from './workflow.ts';
 import { clipJson, taskView } from './presentation.ts';
@@ -26,37 +25,12 @@ const result = (value: unknown) => ({ content: [{ type: 'text' as const, text: J
 
 export default function subagents(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
-  let shuttingDown = false;
-  let cancellingAll = false;
-  const cancelledByAll = new Set<string>();
-  const workflows = new Set<AbortController>();
-  const workflowRuns = new Set<Promise<unknown>>();
   let approvalUI: Promise<unknown> = Promise.resolve();
   const withApprovalUI = <T>(ctx: ExtensionContext, signal: AbortSignal, show: () => Promise<T>): Promise<T> => {
     if (ctx.mode !== 'tui') return abortable(show(), signal);
     const prompt = approvalUI.then(() => { signal.throwIfAborted(); return show(); });
     approvalUI = prompt.catch(() => {});
     return abortable(prompt, signal);
-  };
-  let notices: ReturnType<typeof taskView>[] = [];
-  let overflowNotices = 0;
-  let noticeTriggersTurn = false;
-  let noticeTimer: NodeJS.Timeout | undefined;
-  const flushNotices = () => {
-    const pending = notices;
-    const count = pending.length + overflowNotices;
-    const triggerTurn = noticeTriggersTurn;
-    notices = []; overflowNotices = 0; noticeTriggersTurn = false; noticeTimer = undefined;
-    if (shuttingDown || !count) return;
-    const tasks: ReturnType<typeof taskView>[] = [];
-    for (const notice of pending) {
-      const output = clipJson(notice.output, 1024, true);
-      const compact = {...notice, output, outputTruncated: notice.outputTruncated || output.length < notice.output.length};
-      if (Buffer.byteLength(JSON.stringify([...tasks, compact]), 'utf8') <= 12000) tasks.push(compact);
-    }
-    const value = count === 1 ? pending[0] : {tasks, additionalCompletions: count - tasks.length};
-    try { pi.sendMessage({customType: 'subagent-complete', content: JSON.stringify(value), display: true}, {triggerTurn, deliverAs: triggerTurn ? 'followUp' : 'nextTurn'}); }
-    catch (error) { registry.notificationFailed(pending.map(task => task.id), error); }
   };
   const admission = new DelegationAdmission({
     cwd: () => context?.cwd ?? process.cwd(), tools: () => pi.getActiveTools(),
@@ -81,7 +55,7 @@ export default function subagents(pi: ExtensionAPI): void {
   const panelSlots = 9;
   const renderActiveAgents = () => {
     if (!context?.hasUI) return;
-    const active = shuttingDown ? [] : registry.activeTasks().sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
+    const active = registry.isShutdown ? [] : registry.activeTasks().sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
     const total = active.length, running = active.filter(task => task.status === 'running').length;
     const rows = active.slice(0, panelSlots).map(task => [task.id.slice(0, 8), task.status, brief(task.id, task.task)]);
     const rendered = total ? JSON.stringify([expanded, total, running, rows]) : undefined;
@@ -120,14 +94,18 @@ export default function subagents(pi: ExtensionAPI): void {
   });
   const createRegistry = () => new SubagentRegistry({
     admission,
-    onUpdate: renderActiveAgents,
-    onComplete: task => {
+    notify: (content, options) => pi.sendMessage({customType: 'subagent-complete', content, display: true}, options),
+    activity: event => {
       renderActiveAgents();
-      if (context?.hasUI && !registry.hasActive()) context.ui.setStatus('subagent-tracker', undefined);
-      if (cancelledByAll.delete(task.id) || shuttingDown || task.owner !== 'parent') return;
-      noticeTriggersTurn ||= task.status !== 'cancelled';
-      if (notices.length < 16) notices.push(taskView(task, 4096)); else overflowNotices++;
-      noticeTimer ??= setTimeout(flushNotices, 250);
+      if (event.tracker === 'stop' || !registry.hasActive()) {
+        if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
+      }
+      if (event.tracker === 'stop') {
+        tracker.stop();
+        if (registry.isShutdown) latestReport = undefined;
+      } else if (event.tracker === 'invalidate') tracker.invalidate();
+      else if (event.tracker === 'update') tracker.update();
+      if (event.background) pi.events.emit('pi-interactive:background-activity', event.background);
     },
   });
   let registry = createRegistry();
@@ -136,24 +114,6 @@ export default function subagents(pi: ExtensionAPI): void {
     latestReport = sanitizeTrackerReport(report);
     if (context?.hasUI) context.ui.setStatus('subagent-tracker', trackerFooter(report, process.stdout.columns));
   });
-  const trackedSpawn = async (task: TaskSpec, signal?: AbortSignal, owner: 'parent' | 'workflow' = 'parent', bridge?: ConnectorBridge) => {
-    const handle = await registry.spawn(task, signal, owner, bridge);
-    renderActiveAgents();
-    if (!shuttingDown && !cancellingAll) tracker.update();
-    const invalidate = () => { if (!shuttingDown && !cancellingAll) tracker.invalidate(); };
-    signal?.addEventListener('abort', invalidate, {once: true});
-    if (signal?.aborted) invalidate();
-    void handle.done.then(task => {
-      signal?.removeEventListener('abort', invalidate);
-      renderActiveAgents();
-      if (!shuttingDown && !cancellingAll) {
-        if (task.status === 'cancelled') tracker.invalidate(); else tracker.update();
-      }
-    });
-    pi.events.emit('pi-interactive:background-activity', { id: handle.id, active: true });
-    void handle.done.then(() => pi.events.emit('pi-interactive:background-activity', { id: handle.id, active: false }));
-    return handle;
-  };
   let snapshot: ProfileConfig | undefined;
   let configError: Error | undefined;
   let locationKey = '';
@@ -180,46 +140,12 @@ export default function subagents(pi: ExtensionAPI): void {
     context = ctx;
     try { configFor(ctx, true); } catch (error) { if (ctx.hasUI) ctx.ui.notify(String(error), 'error'); }
     panelPaintKnown = false;
-    if (shuttingDown) {
-      registry = createRegistry();
-      shuttingDown = false;
-    }
+    if (registry.isShutdown) registry = createRegistry();
   });
-  const stopReporting = () => {
-    tracker.stop();
-    if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
-  };
-  const stopAll = async () => {
-    shuttingDown = true;
-    latestReport = undefined;
-    renderActiveAgents();
-    stopReporting();
-    clearTimeout(noticeTimer); noticeTimer = undefined; notices = []; overflowNotices = 0; noticeTriggersTurn = false;
-    for (const controller of workflows) controller.abort();
-    await registry.shutdown();
-    await Promise.allSettled(workflowRuns);
-  };
-  pi.on('session_shutdown', stopAll);
+  pi.on('session_shutdown', () => registry.shutdown());
   const cancelTasks = async (id: string) => {
-    if (id === 'all') {
-      cancellingAll = true;
-      stopReporting();
-      const runs = [...workflowRuns];
-      const activeWorkflows = [...workflows].filter(controller => !controller.signal.aborted);
-      try {
-        for (const task of registry.activeTasks()) cancelledByAll.add(task.id);
-        const cancelChildren = registry.cancelAll();
-        for (const controller of activeWorkflows) controller.abort();
-        const count = await cancelChildren;
-        await Promise.allSettled(runs);
-        return {cancelled: count > 0 || activeWorkflows.length > 0, count};
-      } finally {
-        cancellingAll = false;
-        if (!shuttingDown) tracker.update();
-      }
-    }
+    if (id === 'all') return registry.cancelAll();
     const cancelled = registry.cancel(id);
-    if (cancelled) tracker.invalidate();
     await registry.wait(id);
     return {cancelled};
   };
@@ -230,7 +156,7 @@ export default function subagents(pi: ExtensionAPI): void {
       signal?.throwIfAborted();
       context = ctx;
       const {task, bridge} = admission.direct(params, ctx);
-      const handle = await trackedSpawn(task, signal, 'parent', bridge);
+      const handle = await registry.spawn(task, signal, 'parent', bridge);
       return result({ id: handle.id, status: 'queued', notification: completionGuidance });
     },
   });
@@ -260,23 +186,19 @@ export default function subagents(pi: ExtensionAPI): void {
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
       context = ctx;
-      const controller = new AbortController();
-      workflows.add(controller);
-      const abort = () => controller.abort();
-      signal?.addEventListener('abort', abort, { once: true });
       const cwd = ctx.cwd;
-      try {
-        const workflowAdmission = admission.workflow(ctx, controller.signal);
-        const run = runWorkflow({
-          source: params.source, cwd, timeout: params.timeout, signal: controller.signal,
+      return result(await registry.track(async workflowSignal => {
+        const workflowAdmission = admission.workflow(ctx, workflowSignal);
+        return runWorkflow({
+          source: params.source, cwd, timeout: params.timeout, signal: workflowSignal,
           journalDirectory: join(getAgentDir(), 'workflow-journals'), admission: workflowAdmission,
           approve: ctx.hasUI ? async source => {
             const title = 'Review workflow TypeScript; submit unchanged source to continue';
-            const reviewed = await withApprovalUI(ctx, controller.signal, async () => {
+            const reviewed = await withApprovalUI(ctx, workflowSignal, async () => {
               if (ctx.mode !== 'tui') return ctx.ui.editor(title, source);
               const draft = ctx.ui.getEditorText();
               return ctx.ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
-                const cleanup = () => controller.signal.removeEventListener('abort', abort);
+                const cleanup = () => workflowSignal.removeEventListener('abort', abort);
                 let finished = false;
                 const finish = (value?: string) => {
                   if (finished) return;
@@ -291,19 +213,19 @@ export default function subagents(pi: ExtensionAPI): void {
                   ? typeof settings.externalEditor === 'string' && settings.externalEditor.trim() ? settings.externalEditor : undefined
                   : settings === undefined ? SettingsManager.create(ctx.cwd, getAgentDir(), {projectTrusted: ctx.isProjectTrusted?.() === true}).getExternalEditorCommand() : undefined;
                 const editor = Object.assign(new ExtensionEditorComponent(tui, keybindings, title, source, finish, abort, undefined, externalEditor), {dispose: cleanup});
-                controller.signal.addEventListener('abort', abort, {once: true});
-                if (controller.signal.aborted) abort();
+                workflowSignal.addEventListener('abort', abort, {once: true});
+                if (workflowSignal.aborted) abort();
                 return editor;
   
             });
             });
-            return reviewed === source && await withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.', {signal: controller.signal}));
+            return reviewed === source && await withApprovalUI(ctx, workflowSignal, () => ctx.ui.confirm('Execute this exact workflow?', 'The displayed source may spawn tasks and read bounded workspace files. Successful stages will be journaled for replay.', {signal: workflowSignal}));
           } : undefined,
-          approveReplay: ctx.hasUI ? stages => withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Replay previously successful stages?', `These stages will NOT run again: ${stages.join(', ')}. Approve only if their outputs and side effects remain valid in the current workspace.`, {signal: controller.signal})) : async () => false,
+          approveReplay: ctx.hasUI ? stages => withApprovalUI(ctx, workflowSignal, () => ctx.ui.confirm('Replay previously successful stages?', `These stages will NOT run again: ${stages.join(', ')}. Approve only if their outputs and side effects remain valid in the current workspace.`, {signal: workflowSignal})) : async () => false,
           spawn: async (task, taskSignal) => {
             taskSignal.throwIfAborted();
             const request = workflowAdmission.request(task);
-            const handle = await trackedSpawn(request.task, taskSignal, 'workflow', request.bridge);
+            const handle = await registry.spawn(request.task, taskSignal, 'workflow', request.bridge);
             const cancel = () => registry.cancel(handle.id);
             taskSignal.addEventListener('abort', cancel, { once: true });
             if (taskSignal.aborted) cancel();
@@ -317,17 +239,7 @@ export default function subagents(pi: ExtensionAPI): void {
             }
           },
         });
-        workflowRuns.add(run);
-        try {
-          return result(await run);
-        } finally {
-          workflowRuns.delete(run);
-        }
-      } finally {
-        controller.abort();
-        workflows.delete(controller);
-        signal?.removeEventListener('abort', abort);
-      }
+      }, signal));
     },
   });
   pi.registerCommand('subagents', {

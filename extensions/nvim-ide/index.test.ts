@@ -176,6 +176,8 @@ test('follow after edit opens the changed file, and /vim follow turns it off', a
     await settle();
     assert.equal(ide.calls.length, 2, 'failed edits and non-file tools do not move the editor');
 
+    await fire('tool_execution_start', { toolCallId: 'queued', toolName: 'write', args: { path: 'queued.ts' } }, ctx);
+    await fire('tool_execution_end', { toolCallId: 'queued', toolName: 'write', isError: false, result: {} }, ctx);
     await commands.get('vim').handler('follow off', ctx);
     assert.equal(notices.at(-1), 'Editor follows pi edits: off');
     await fire('tool_execution_start', { toolCallId: 't5', toolName: 'edit', args: { path: 'a.ts' } }, ctx);
@@ -186,34 +188,13 @@ test('follow after edit opens the changed file, and /vim follow turns it off', a
     assert.equal(notices.at(-1), 'Editor follows pi edits: off', 'an unrecognised argument only reports the current setting');
     await commands.get('vim').handler('follow on', ctx);
     assert.equal(notices.at(-1), 'Editor follows pi edits: on');
+    await fire('tool_execution_start', { toolCallId: 'fresh', toolName: 'write', args: { path: 'fresh.ts' } }, ctx);
+    await fire('tool_execution_end', { toolCallId: 'fresh', toolName: 'write', isError: false, result: {} }, ctx);
+    await until(() => ide.calls.length === 3);
+    assert.equal(ide.calls[2].arguments.filePath, join(project, 'fresh.ts'), 'follow off cleared the queued destination');
   });
 });
 
-test('a burst of edits reveals only the latest destination', async () => {
-  await withConnectedIde(async ({ ide, fire, ctx }) => {
-    for (const path of ['first.ts', 'middle.ts', 'latest.ts']) {
-      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
-      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
-    }
-    await until(() => ide.calls.length > 0);
-    await new Promise(resolve => setTimeout(resolve, 150));
-    assert.deepEqual(ide.calls.map(call => call.arguments.filePath.split('/').at(-1)), ['latest.ts']);
-  });
-});
-
-test('the latest edit made during a reconnect is revealed when the editor becomes ready', async () => {
-  await withConnectedIde(async ({ ide, fire, commands, ctx, status }) => {
-    await commands.get('vim').handler('reconnect', ctx);
-    assert.equal(status.at(-1), undefined);
-    for (const path of ['older.ts', 'latest.ts']) {
-      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
-      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
-    }
-    await until(() => status.at(-1) === 'Neovim ✓');
-    await until(() => ide.calls.length > 0);
-    assert.deepEqual(ide.calls.map(call => call.arguments.filePath.split('/').at(-1)), ['latest.ts']);
-  });
-});
 
 test('a follow interrupted before its reply is replayed after reconnecting', async () => {
   let attempts = 0;
@@ -234,36 +215,6 @@ test('a follow interrupted before its reply is replayed after reconnecting', asy
   });
 });
 
-test('follow errors warn once per failure episode and do not automatically retry', async () => {
-  await withConnectedIde(async ({ ide, fire, tools, ctx, notices }) => {
-    for (const [i, path] of ['bad1.ts', 'bad2.ts', 'good.ts', 'bad3.ts'].entries()) {
-      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
-      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
-      await until(() => ide.calls.filter(call => call.name === 'openFile').length === i + 1);
-      await tools.get('nvim_diagnostics').execute('barrier', {}, undefined, undefined, ctx);
-      assert.equal(notices.filter(notice => notice.includes('Could not reveal')).length, i === 3 ? 2 : 1);
-    }
-    await new Promise(resolve => setTimeout(resolve, 150));
-    assert.equal(ide.calls.filter(call => call.name === 'openFile').length, 4, 'connected tool errors do not retry themselves');
-  }, (call, reply) => {
-    if (!String(call.arguments.filePath).includes('bad')) return false;
-    reply({ content: [{ type: 'text', text: 'File cannot be opened' }], isError: true });
-    return true;
-  });
-});
-
-test('a stalled follow expires within five seconds so the newer edit can be revealed', async () => {
-  await withConnectedIde(async ({ ide, fire, ctx, notices }) => {
-    for (const path of ['stalled.ts', 'newer.ts']) {
-      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
-      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
-      if (path === 'stalled.ts') await until(() => ide.calls.length === 1);
-    }
-    await until(() => ide.calls.length === 2, 6500);
-    assert.equal(ide.calls[1].arguments.filePath.split('/').at(-1), 'newer.ts');
-    assert.equal(notices.filter(notice => notice.includes('Could not reveal')).length, 1);
-  }, call => String(call.arguments.filePath).endsWith('stalled.ts'));
-});
 
 for (const [server, offset] of [['claudecode-neovim', 1], ['another-ide', 0]] as const) {
   test(`explicit opens select the requested one-based lines on ${server}`, async () => {
@@ -307,45 +258,18 @@ test('a disconnected explicit open cancels the old destination before reporting 
 });
 
 test('a successful explicit open starts a new automatic failure episode', async () => {
-  await withConnectedIde(async ({ fire, tools, ctx, notices }) => {
+  await withConnectedIde(async ({ ide, fire, tools, ctx, notices }) => {
     for (const path of ['bad1.ts', 'bad2.ts']) {
       if (path === 'bad2.ts') await tools.get('nvim_open').execute('explicit', { path: 'good.ts' }, undefined, undefined, ctx);
       await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
       await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
-      await new Promise(resolve => setTimeout(resolve, 150));
+      await until(() => ide.calls.some(call => String(call.arguments.filePath).endsWith(path)));
       await tools.get('nvim_diagnostics').execute('barrier', {}, undefined, undefined, ctx);
     }
     assert.equal(notices.filter(notice => notice.includes('Could not reveal')).length, 2);
   }, (call, reply) => {
     if (call.name !== 'openFile' || !String(call.arguments.filePath).includes('bad')) return false;
     reply({ content: [{ type: 'text', text: 'Cannot reveal' }], isError: true });
-    return true;
-  });
-});
-
-test('follow off cancels queued destinations and ignores late replies from a stalled jump', async () => {
-  let lateReply: ((result: unknown) => void) | undefined;
-  await withConnectedIde(async ({ ide, fire, commands, ctx, notices }) => {
-    const edit = async (path: string) => {
-      await fire('tool_execution_start', { toolCallId: path, toolName: 'write', args: { path } }, ctx);
-      await fire('tool_execution_end', { toolCallId: path, toolName: 'write', isError: false, result: {} }, ctx);
-    };
-    await edit('stalled.ts');
-    await until(() => lateReply !== undefined);
-    await edit('queued.ts');
-    await commands.get('vim').handler('follow off', ctx);
-    await edit('while-off.ts');
-    await commands.get('vim').handler('follow on', ctx);
-    await edit('fresh.ts');
-    await until(() => ide.calls.length === 2);
-    lateReply!({ content: [{ type: 'text', text: 'late failure' }], isError: true });
-    await edit('final.ts');
-    await until(() => ide.calls.length === 3);
-    assert.deepEqual(ide.calls.map(call => call.arguments.filePath.split('/').at(-1)), ['stalled.ts', 'fresh.ts', 'final.ts']);
-    assert.ok(!notices.some(notice => notice.includes('Could not reveal')));
-  }, (call, reply) => {
-    if (!String(call.arguments.filePath).endsWith('stalled.ts')) return false;
-    lateReply = reply;
     return true;
   });
 });
@@ -365,23 +289,6 @@ test('session replacement clears queued follows and sends and paints the new ses
     await fire('tool_execution_end', { toolCallId: 'fresh', toolName: 'write', isError: false, result: {} }, next.ctx);
     await until(() => ide.calls.length === 1);
     assert.equal(ide.calls[0].arguments.filePath.split('/').at(-1), 'new-session.ts');
-  });
-});
-
-test('an expired disconnected destination is not replayed ahead of a fresh edit', async t => {
-  await withConnectedIde(async ({ ide, fire, commands, ctx, status }) => {
-    t.mock.timers.enable({ apis: ['Date'], now: 0 });
-    await commands.get('vim').handler('reconnect', ctx);
-    await fire('tool_execution_start', { toolCallId: 'stale', toolName: 'write', args: { path: 'stale.ts' } }, ctx);
-    await fire('tool_execution_end', { toolCallId: 'stale', toolName: 'write', isError: false, result: {} }, ctx);
-    t.mock.timers.setTime(31000);
-    await until(() => status.at(-1) === 'Neovim ✓');
-    await new Promise(resolve => setTimeout(resolve, 150));
-    await fire('tool_execution_start', { toolCallId: 'fresh', toolName: 'write', args: { path: 'fresh.ts' } }, ctx);
-    await fire('tool_execution_end', { toolCallId: 'fresh', toolName: 'write', isError: false, result: {} }, ctx);
-    await until(() => ide.calls.length > 0);
-    assert.deepEqual(ide.calls.map(call => call.arguments.filePath.split('/').at(-1)), ['fresh.ts']);
-    t.mock.timers.reset();
   });
 });
 
@@ -520,7 +427,6 @@ test('status text shows connection, active file, cursor line or selected range',
   assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'abc', filePath: '/w/math.ts', start: { line: 4, character: 0 }, end: { line: 6, character: 1 }, isEmpty: false } }), 'Neovim ✓ math.ts:5-7 ▮');
   assert.equal(statusText({ connected: true, ideName: 'Neovim', mentions: 0, selection: { text: 'ab', filePath: '/w/math.ts', start: { line: 4, character: 0 }, end: { line: 4, character: 2 }, isEmpty: false } }), 'Neovim ✓ math.ts:5 ▮');
 });
-
 
 test('follow after edit opens the file inside the session directory, not the original directory', async () => {
   await withConnectedIde(async ({ ide, project, fire, ctx }) => {

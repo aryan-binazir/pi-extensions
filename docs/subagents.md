@@ -20,9 +20,13 @@ including approval and queue time.
 - **Concurrency.** Up to eight children run concurrently by default; same-directory
   writers still queue behind one another. No new token or spending quotas are
   imposed.
-- **Panel.** One shared panel above the editor lists queued and running children,
-  including workflow children, with a short ID, status and task brief on one
-  truncated line each, running children first. From 10 terminal rows the panel
+- **Panel.** One shared panel above the editor starts as a single truncated line
+  showing running and queued counts, including workflow children, and an `alt+r`
+  hint. Lowercase `alt+r`, without Shift, toggles the full bordered panel. The
+  choice persists across empty periods and later worker batches in the session.
+  Reload, restart, or session replacement starts collapsed again, like Todo.
+  The full panel lists a short ID, status and task brief on
+  one truncated line per child, running children first. From 10 terminal rows it
   takes at most half the terminal height: from 24 rows it lists up to nine
   children, or eight plus a `… N more` line counting hidden running and queued
   children; shorter terminals list fewer, down to one row and the summary. In the

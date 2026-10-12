@@ -76,27 +76,27 @@ export default function subagents(pi: ExtensionAPI): void {
   };
   let paintedPanel: string | undefined;
   let panelPaintKnown = false;
-  // Nine task lines: eight rows cover the default concurrency of eight; the ninth is a row or "… N more".
+  let expanded = false;
   const panelSlots = 9;
   const renderActiveAgents = () => {
     if (!context?.hasUI) return;
     const active = shuttingDown ? [] : registry.activeTasks().sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
     const total = active.length, running = active.filter(task => task.status === 'running').length;
     const rows = active.slice(0, panelSlots).map(task => [task.id.slice(0, 8), task.status, brief(task.id, task.task)]);
-    const rendered = total ? JSON.stringify([total, running, rows]) : undefined;
+    const rendered = total ? JSON.stringify([expanded, total, running, rows]) : undefined;
     if (panelPaintKnown && rendered === paintedPanel) return;
     panelPaintKnown = true;
     paintedPanel = rendered;
     context.ui.setWidget('interactive-tools:subagents', rendered === undefined ? undefined : (tui, theme) => {
       const blue = (text: string) => theme.fg('border', text);
-      const lines = [`Subagents · ${total} active`, ...rows.map(([id, status, task]) => `${id} · ${blue(status)} · ${task}`)];
+      const summary = `Subagents · ${running} running · ${total - running} queued · ${blue('alt+r')}`;
+      const lines = [`Subagents · ${total} active · ${blue('alt+r')}`, ...rows.map(([id, status, task]) => `${id} · ${blue(status)} · ${task}`)];
       return {
         invalidate() {},
         render(width: number) {
           if (width < 6) return [];
+          if (!expanded) return [truncateToWidth(summary, width)];
           const inner = width - 4;
-          // At most half the terminal from 10 rows (12 lines at 24 rows): taller panels push changes above the viewport,
-          // and pi-tui then redraws the whole session and clears scrollback.
           const slots = Math.max(2, Math.min(panelSlots, Math.floor((tui?.terminal?.rows || 24) / 2) - 3));
           const shown = total <= slots ? total : slots - 1;
           const hiddenRunning = Math.max(0, running - shown), hiddenQueued = total - shown - hiddenRunning;
@@ -110,6 +110,13 @@ export default function subagents(pi: ExtensionAPI): void {
       };
     });
   };
+  pi.registerShortcut('alt+r', {
+    description: 'Toggle compact/full subagent panel',
+    handler() {
+      expanded = !expanded;
+      renderActiveAgents();
+    },
+  });
   const createRegistry = () => new SubagentRegistry({
     admission,
     onUpdate: renderActiveAgents,

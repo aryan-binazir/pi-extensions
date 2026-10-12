@@ -36,6 +36,7 @@ export interface Host {
   tools: Map<string, any>;
   hooks: Map<string, any>;
   commands: Map<string, any>;
+  shortcuts: Map<string, any>;
   notifications: {type: string; task: any; message: any; options: any}[];
   activity: {id: string; active: boolean}[];
   widgets: Map<string, string[]>;
@@ -66,7 +67,7 @@ export async function withHost(options: HostOptions, run: (host: Host) => Promis
   const cwd = await mkdtemp(join(tmpdir(), options.prefix));
   const agentDir = join(cwd, 'agent');
   const priorPath = process.env.PATH, priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-  const tools = new Map<string, any>(), hooks = new Map<string, any>(), commands = new Map<string, any>();
+  const tools = new Map<string, any>(), hooks = new Map<string, any>(), commands = new Map<string, any>(), shortcuts = new Map<string, any>();
   const notifications: Host['notifications'] = [], activity: Host['activity'] = [], uiNotices: string[] = [];
   const widgets = new Map<string, string[]>(), statuses = new Map<string, string>();
   const active = options.tools ?? ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls'];
@@ -95,12 +96,13 @@ export async function withHost(options: HostOptions, run: (host: Host) => Promis
       getActiveTools: typeof active === 'function' ? active : () => active,
       registerTool: (tool: any) => tools.set(tool.name, tool),
       registerCommand: (name: string, command: any) => commands.set(name, command),
+      registerShortcut: (key: string, shortcut: any) => shortcuts.set(key, shortcut),
       on: (name: string, hook: any) => hooks.set(name, hook),
       sendMessage: (message: any, deliveryOptions: any) => notifications.push({type: message.customType, task: JSON.parse(message.content), message, options: deliveryOptions}),
       events: {emit: (name: string, value: any) => { if (name === 'pi-interactive:background-activity') activity.push(value); }},
     } as any);
     const host: Host = {
-      cwd, agentDir, ctx, tools, hooks, commands, notifications, activity, widgets, statuses, uiNotices,
+      cwd, agentDir, ctx, tools, hooks, commands, shortcuts, notifications, activity, widgets, statuses, uiNotices,
       execute: (name, args = {}, signal) => tools.get(name).execute(name, args, signal, undefined, ctx),
       start: (event = {}) => hooks.get('session_start')(event, ctx),
       shutdown: (event = {}) => hooks.get('session_shutdown')(event, ctx),

@@ -37,10 +37,10 @@ const cases: Case[] = [
     frames: [[paste("one"), paste("two")]] },
   { name: "text before stalled opener", chunks: ["prefix\x1b[2", "00~payload\x1b", "[201~suffix"],
     frames: [[key("prefix")], [], [paste("payload"), key("suffix")]],
-    states: [[false, true], [true, true], [false, false]] },
+    states: [[false, true], [true, false], [false, false]] },
   { name: "closer completed byte by byte", chunks: [start + "payload", "\x1b", "[", "2", "0", "1", "~"],
     frames: [[], [], [], [], [], [], [paste("payload")]],
-    states: [[true, false], [true, true], [true, true], [true, true], [true, true], [true, true], [false, false]] },
+    states: [[true, false], [true, false], [true, false], [true, false], [true, false], [true, false], [false, false]] },
 ];
 for (let offset = 0; offset <= start.length; offset++) {
   const legacy = offset === 1 || offset === 2;
@@ -52,7 +52,7 @@ for (let offset = 0; offset <= start.length; offset++) {
 for (let offset = 0; offset <= end.length; offset++) {
   cases.push({ name: `closer split at ${offset}`, chunks: [start + "payload" + end.slice(0, offset), end.slice(offset)],
     frames: [offset === 6 ? [paste("payload")] : [], offset === 6 ? [key("")] : [paste("payload")]],
-    states: [[offset < 6, offset > 0 && offset < 6], [false, false]] });
+    states: [[offset < 6, false], [false, false]] });
 }
 
 test("bracketed paste framing preserves ordered raw frames across chunk boundaries", async t => {

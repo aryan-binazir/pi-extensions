@@ -10,26 +10,33 @@ function partialLength(data: string, marker: string, minimum: number): number {
 
 export class PasteFramer {
   private opening = "";
-  private paste: string | undefined;
+  private paste: string[] | undefined;
+  private closing = "";
   get pasting(): boolean { return this.paste !== undefined; }
-  get holdingMarker(): boolean {
-    return this.opening !== "" || (this.paste !== undefined && partialLength(this.paste, END, 1) > 0);
-  }
+  get holdingMarker(): boolean { return this.opening !== ""; }
   reset(): void {
     this.opening = "";
     this.paste = undefined;
+    this.closing = "";
   }
   *feed(data: string): Generator<PasteFrame> {
     data = this.opening + data;
     this.opening = "";
     for (;;) {
       if (this.paste !== undefined) {
-        const searchFrom = Math.max(0, this.paste.length - END.length + 1);
-        this.paste += data;
-        const end = this.paste.indexOf(END, searchFrom);
-        if (end < 0) return;
-        const payload = this.paste.slice(0, end);
-        data = this.paste.slice(end + END.length);
+        data = this.closing + data;
+        this.closing = "";
+        const end = data.indexOf(END);
+        if (end < 0) {
+          const length = partialLength(data, END, 1);
+          const content = length ? data.slice(0, -length) : data;
+          if (content) this.paste.push(content);
+          this.closing = length ? data.slice(-length) : "";
+          return;
+        }
+        this.paste.push(data.slice(0, end));
+        const payload = this.paste.join("");
+        data = data.slice(end + END.length);
         this.paste = undefined;
         yield { type: "paste", data: payload };
         if (!data) return;
@@ -37,7 +44,7 @@ export class PasteFramer {
       }
       const opener = data.indexOf(START);
       if (opener === 0) {
-        this.paste = "";
+        this.paste = [];
         data = data.slice(START.length);
         continue;
       }

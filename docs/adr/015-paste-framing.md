@@ -5,32 +5,23 @@ Status: accepted.
 Vi and prompt stash use `PasteFramer` from `extensions/vi-mode/paste-framing.ts`.
 It owns marker recognition and buffering behind `feed`, `pasting`,
 `holdingMarker` and `reset`. `feed` yields ordered raw key data or complete raw
-paste payloads. Consumers exhaust the iterator before feeding the next chunk.
-Vi retains payload decoding, sanitization, collapse, selection replacement and
-undo; stash only observes framing and forwards raw input unchanged.
-
-Outside a paste, hold a trailing opening-marker prefix only when it is at
-least three bytes long. ESC and ESC [ are complete legacy keys, so opener
-splits after one or two bytes do not reconstruct a paste. Join held fragments
-with their continuation as one key if it is unrelated; discard abandoned
-fragments before a fresh complete opener. Inside a paste, buffer through the
-first complete closer, including a one-byte ESC fragment. Nested openers are
-literal payload. A literal closer ends the paste because the protocol has no
-escaping. Closing-marker fragments outside a paste are key data unless they
-also match a held opening-marker prefix.
+paste payloads using the rule in [ADR 001](001-editor.md). `holdingMarker`
+reports an outside-paste opener fragment; `pasting` covers the entire active
+payload, including closer fragments. Payload chunks remain separate until a
+complete closer arrives; only a short candidate closer is searched again.
+Vi retains decoding, sanitization, collapse, selection replacement and undo.
+Stash observes framing and forwards raw input unchanged.
 
 Frames are lazy so key callbacks run before the framer holds later bytes in
-the same chunk. This preserves submission callbacks that replace the draft
-before a stalled opener. Vi resets on draft replacement and disposal. It
-handles keys spanning the original input internally and re-enters its decorated
-input method for shorter key segments around pastes, preserving stash shortcuts
-before and after a paste. Stash observes only outer inputs; recursive forwarding
-already belongs to an observed chunk and must not overwrite framing state.
-The observation has its own framer because stash also wraps the stock editor.
+the same chunk. Re-entry is safe at a yield because framing state is idle;
+re-fed key segments contain neither an opener nor a held trailing opener prefix.
+Callbacks can reset the draft, and unconsumed bytes in the outer input still
+run afterward. Vi resets on draft replacement and disposal. Key segments
+shorter than the supplied chunk re-enter its decorated input method; whole
+or reconstructed unsplit keys dispatch internally. This preserves existing
+stash shortcuts around pastes and submission/reset ordering.
 
-The shared rule fixes stash remaining in paste mode after a closer stalls at
-one byte, stash holding a closing-only prefix outside a paste, and vi's
-recursive key-prefix dispatch clearing stash's held opener. Table-driven framer
-tests and real stock/vi input tests cover these corrections, raw forwarding,
-legacy keys, callback ordering and undo. No observer mode or consumer-specific
-marker policy is needed.
+Stash has its own framer because it also wraps the stock editor. It observes
+only outer input; recursive editor forwarding already belongs to that observed
+chunk and must not overwrite its framing state. Stash retains its existing
+lifetime without adding draft-replacement hooks.

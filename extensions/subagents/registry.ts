@@ -2,26 +2,14 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
+import { thinkingLevel, thinkingPattern } from './thinking.ts';
 import { abortable } from './cancellation.ts';
 import { fileURLToPath } from 'node:url';
-import type { SelectionProvenance } from './profiles.ts';
-import { ALL_TOOLS, READ_TOOLS } from './scope.ts';
-import { thinkingLevel, thinkingPattern } from './thinking.ts';
+import { TIMEOUT_BOUNDS, validateTimeout, type SelectionProvenance, type TaskSpec, type ValidTask } from './task.ts';
+import type { DelegationAdmission } from './scope.ts';
 import type {Duplex} from 'node:stream';
-import {attachConnectorBridge, CONNECTOR_FRAME_LIMIT, type ConnectorBridge} from './connector-bridge.ts';
+import {attachConnectorBridge, type ConnectorBridge} from './connector-bridge.ts';
 
-export interface TaskSpec {
-  task: string;
-  cwd: string;
-  profile?: string;
-  configProvenance?: SelectionProvenance;
-  model?: string;
-  thinking?: string;
-  tools?: string[];
-  preset?: 'reader' | 'writer';
-  extensions?: string[];
-  timeout?: number;
-}
 export interface TaskResult {
   id: string;
   owner: 'parent' | 'workflow';
@@ -46,8 +34,6 @@ export interface TaskResult {
   notificationError?: string;
 }
 interface TaskHandle { id: string; done: Promise<TaskResult> }
-interface ValidTask extends TaskSpec { tools: string[]; extensions: string[]; hooks: string; timeout: number }
-const HOOKS_EXTENSION = fileURLToPath(new URL('../hooks/index.ts', import.meta.url));
 interface Entry {
   spec: ValidTask;
   result: TaskResult;
@@ -68,28 +54,22 @@ interface Entry {
 }
 interface RegistryOptions {
   concurrency?: number;
-  allowedTools?: () => string[];
-  readTools?: () => string[];
+  admission: Pick<DelegationAdmission, 'queue' | 'launch'>;
   invocation?: (spec: ValidTask) => { command: string; args: string[]; env?: NodeJS.ProcessEnv; supervised?: boolean };
-  authorize?: (spec: ValidTask, signal: AbortSignal) => Promise<void>;
   onUpdate?: (task: TaskResult) => void;
   onComplete?: (task: TaskResult) => void;
 }
 const CAP = 64 * 1024;
 const RETAINED = 50;
 const ACTIVE_STATUS = new Set<TaskResult['status']>(['queued', 'running']);
-const SUPERVISOR = fileURLToPath(new URL('./process-supervisor.mjs', import.meta.url));
-export const TIMEOUT_BOUNDS = {minimum: 10, maximum: 3600000};
-export function validateTimeout(timeout: number | undefined, what: string): number {
-  const value = timeout ?? TIMEOUT_BOUNDS.maximum;
-  if (!Number.isInteger(value) || value < TIMEOUT_BOUNDS.minimum || value > TIMEOUT_BOUNDS.maximum)
-    throw new Error(`${what} must be ${TIMEOUT_BOUNDS.minimum}–${TIMEOUT_BOUNDS.maximum} milliseconds`);
-  return value;
-}
+const HOOKS_EXTENSION = fileURLToPath(new URL('../hooks/index.ts', import.meta.url));
 const FAST_ALIAS = new RegExp(`^(openai(?:-codex)?\\/.+)~fast(?=:${thinkingPattern}$|$)`);
 function withoutFastAlias(model: string): string {
   return model.replace(FAST_ALIAS, '$1');
 }
+
+
+const SUPERVISOR = fileURLToPath(new URL('./process-supervisor.mjs', import.meta.url));
 
 /** Overlay variables instead of copying: node's spawn walks the prototype chain,
  * so the child gets the same environment for one pass over intercepted process.env. */
@@ -112,7 +92,7 @@ function cloneResult(result: TaskResult): TaskResult {
   return snapshot;
 }
 
-export async function validateTask(spec: TaskSpec, allowedTools?: string[], readTools = READ_TOOLS, hooksExtension = HOOKS_EXTENSION): Promise<ValidTask> {
+export async function prepareTask(spec: TaskSpec, selectTools: (task: TaskSpec) => string[], hooksExtension = HOOKS_EXTENSION): Promise<ValidTask> {
   if (!spec || typeof spec.task !== 'string' || !spec.task.trim() || spec.task.length > 32000) throw new Error('Task brief must contain 1–32000 characters');
   if (typeof spec.cwd !== 'string' || !isAbsolute(spec.cwd)) throw new Error('Task cwd must be absolute');
   const cwd = await realpath(spec.cwd);
@@ -121,14 +101,7 @@ export async function validateTask(spec: TaskSpec, allowedTools?: string[], read
   if (model !== undefined && (typeof model !== 'string' || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:/-]+$/.test(model))) throw new Error('Model must be provider/model');
   if (spec.thinking !== undefined && !thinkingLevel.test(spec.thinking)) throw new Error('Invalid thinking level');
   if (spec.preset !== undefined && !['reader', 'writer'].includes(spec.preset)) throw new Error('Unknown preset');
-  const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS).filter(tool => !allowedTools || allowedTools.includes(tool));
-  if (!Array.isArray(tools) || tools.some(tool => typeof tool !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(tool)) || new Set(tools).size !== tools.length) throw new Error('Invalid child tool selection; use unique exact tool names');
-  const unknown = tools.filter(tool => !ALL_TOOLS.includes(tool) && !allowedTools?.includes(tool));
-  if (unknown.length) throw new Error(`Unavailable or disallowed child tools: ${unknown.join(', ')}. Configure exact connector grants in user-scoped subagents.json and activate the tools in the parent.`);
-  const denied = allowedTools && tools.filter(tool => !allowedTools.includes(tool));
-  if (denied?.length) throw new Error(`Explicit child tools exceed parent permissions: ${denied.join(', ')}`);
-  const writes = tools.filter(tool => !readTools.includes(tool));
-  if (spec.preset === 'reader' && writes.length) throw new Error(`Reader preset cannot grant write tools: ${writes.join(', ')}`);
+  const tools = selectTools(spec);
   const timeout = validateTimeout(spec.timeout, 'Timeout');
   if (spec.extensions !== undefined && (!Array.isArray(spec.extensions) || spec.extensions.length > 16)) throw new Error('Invalid extensions');
   const extensions: string[] = [];
@@ -156,7 +129,7 @@ export class SubagentRegistry {
   private lifecycle = new AbortController();
   private admissions = new AbortController();
   private readonly limit: number;
-  constructor(private options: RegistryOptions = {}) {
+  constructor(private options: RegistryOptions) {
     this.limit = options.concurrency ?? 8;
     if (!Number.isInteger(this.limit) || this.limit < 1 || this.limit > 16) throw new Error('Concurrency must be 1–16');
   }
@@ -169,16 +142,17 @@ export class SubagentRegistry {
     const timer = setTimeout(() => deadline.abort(new Error('Task admission deadline exceeded')), timeout);
     const admissionSignal = AbortSignal.any([this.lifecycle.signal, this.admissions.signal, deadline.signal, ...(signal ? [signal] : [])]);
     let validated: ValidTask;
+    let writer: boolean;
     try {
-      validated = await abortable(validateTask(spec, this.options.allowedTools?.(), this.options.readTools?.()), admissionSignal);
-      const connectors = validated.tools.filter(tool => !ALL_TOOLS.includes(tool));
-      if (connectors.some(name => !connectorBridge?.tools.some(tool => tool.name === name))) throw new Error(`Child connector tools require a callable parent bridge: ${connectors.join(', ')}`);
-      if (connectorBridge) {
-        connectorBridge = {...connectorBridge, tools: connectorBridge.tools.filter(tool => connectors.includes(tool.name))};
-        if (Buffer.byteLength(JSON.stringify({type: 'tools', tools: connectorBridge.tools})) + 1 > CONNECTOR_FRAME_LIMIT) throw new Error(`Connector definitions exceed 1 MiB: ${connectors.join(', ')}. Reduce the selected tools or their schemas/descriptions.`);
-      }
-      admissionSignal.throwIfAborted();
-      await abortable(this.options.authorize?.(validated, admissionSignal), admissionSignal);
+      const admitted = await abortable(this.options.admission.queue(spec, admissionSignal, connectorBridge), admissionSignal);
+      validated = admitted.task;
+      if (!validated || typeof validated.task !== 'string' || !validated.task.trim() || validated.task.length > 32000) throw new Error('Task brief must contain 1–32000 characters');
+      if (typeof validated.cwd !== 'string' || !isAbsolute(validated.cwd)) throw new Error('Task cwd must be absolute');
+      validateTimeout(validated.timeout, 'Timeout');
+      if (!Array.isArray(validated.extensions) || validated.extensions.length > 16) throw new Error('Invalid extensions');
+      if (validated.extensions.some(path => typeof path !== 'string' || !isAbsolute(path))) throw new Error('Extension paths must be absolute');
+      connectorBridge = admitted.bridge;
+      writer = admitted.writer;
       admissionSignal.throwIfAborted();
       if (Date.now() >= deadlineAt) throw new Error('Task admission deadline exceeded');
     } finally { clearTimeout(timer); }
@@ -192,7 +166,7 @@ export class SubagentRegistry {
     const id = randomUUID();
     const entry: Entry = {
       spec: validated, result: { id, owner, profile: validated.profile, configProvenance: validated.configProvenance, model: validated.model, thinking: validated.thinking, task: validated.task, cwd: validated.cwd, status: 'queued', output: '', stderr: '', droppedRecords: 0, usage: {input: 0, output: 0} },
-      resolve, done, deadlineAt, writer: validated.extensions.length > 0 || validated.tools.some(tool => !(this.options.readTools?.() ?? READ_TOOLS).includes(tool)), finished: false,
+      resolve, done, deadlineAt, writer, finished: false,
       connectorBridge, connectorController: new AbortController(),
     };
     this.entries.set(id, entry);
@@ -351,9 +325,8 @@ export class SubagentRegistry {
       } catch {}
     };
     try {
-      const allowed = this.options.allowedTools?.();
-      if (allowed && entry.spec.tools.some(tool => !allowed.includes(tool))) throw new Error(`Child tools exceed current parent permissions at launch: ${entry.spec.tools.filter(tool => !allowed.includes(tool)).join(', ')}`);
-      const invocation = this.options.invocation?.(entry.spec) ?? piInvocation(entry.spec);
+      this.options.admission.launch(entry.spec);
+      const invocation = this.options.invocation?.(entry.spec) ?? piInvocation(entry.spec, Boolean(entry.connectorBridge?.tools.length));
       entry.supervised = invocation.supervised;
       entry.process = spawn(invocation.command, invocation.args, {cwd: entry.spec.cwd, env: childEnv(invocation.env ?? process.env, {PI_SUBAGENT_TIMEOUT_MS: String(Math.max(10, entry.deadlineAt - Date.now()))}), detached: true, stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', entry.connectorBridge ? 'pipe' : 'ignore']});
       entry.process.stdout?.setEncoding('utf8');
@@ -448,11 +421,10 @@ export class SubagentRegistry {
   }
 }
 
-export function piInvocation(spec: ValidTask) {
+export function piInvocation(spec: ValidTask, connectors = false) {
   const args = ['--mode', 'json', '-p', '--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--tools', spec.tools.join(','), '--system-prompt', 'You are a delegated agent. Your only task context is the explicit brief below. Use only the configured tools and assigned workspace. Do not assume parent conversation context.'];
   if (spec.model) args.push('--model', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
-  const connectors = spec.tools.some(tool => !ALL_TOOLS.includes(tool));
   args.push('-e', spec.hooks);
   if (connectors) args.push('-e', fileURLToPath(new URL('./connector-bridge.ts', import.meta.url)));
   for (const extension of new Set(spec.extensions)) args.push('-e', extension);

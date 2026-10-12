@@ -2,6 +2,11 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import subagents from './index.ts';
+import { DelegationAdmission, type WorkflowAdmission } from './scope.ts';
+import { ALL_TOOLS } from './task.ts';
+import { runWorkflow } from './workflow.ts';
+
+export const supervisorAdmission = admissionFixture({cwd: () => tmpdir(), tools: () => ALL_TOOLS, approve: async () => true}).admission;
 
 export function fixtureModelRegistry() {
   const models = ['test/fixture', 'test/selected', 'test/different', 'openai-codex/gpt-6-astra', 'openai-codex/gpt-5.6-luna'].map(value => {
@@ -109,4 +114,22 @@ export async function withHost(options: HostOptions, run: (host: Host) => Promis
     if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
     await rm(cwd, {recursive: true, force: true});
   }
+}
+
+export function admissionFixture(source: Pick<ConstructorParameters<typeof DelegationAdmission>[0], 'cwd' | 'tools'> & Partial<ConstructorParameters<typeof DelegationAdmission>[0]>) {
+  const ctx: any = {cwd: source.cwd(), model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'low', modelRegistry: fixtureModelRegistry(), hasUI: true,
+    tools: source.definitions?.() ?? [], executeTool: async () => ({result: {content: []}, isError: false})};
+  const config: any = {defaultProfile: 'fixture', delegatedTools: {}, profiles: {fixture: {model: 'test/fixture', thinking: 'low', description: '', useWhen: ''}},
+    provenance: {defaultProfile: 'fixture', 'fixture.model': 'fixture', 'fixture.thinking': 'fixture'}, sources: [], local: 'excluded', identity: 'fixture-config'};
+  return {ctx, admission: new DelegationAdmission({config: () => config, selection: () => ctx, grants: () => ({}), ...source})};
+}
+
+export function workflowFixture(cwd: string) {
+  const fixture = admissionFixture({cwd: () => cwd, tools: () => ALL_TOOLS});
+  return fixture.admission.workflow(fixture.ctx);
+}
+
+export function runFixtureWorkflow(options: Omit<Parameters<typeof runWorkflow>[0], 'admission'> & {policyIdentity: string; admission?: WorkflowAdmission}) {
+  const {policyIdentity, admission = workflowFixture(options.cwd), ...rest} = options;
+  return runWorkflow({...rest, admission: {...admission, policyIdentity}});
 }

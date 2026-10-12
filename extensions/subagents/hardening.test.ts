@@ -1,10 +1,13 @@
+import { supervisorAdmission, admissionFixture } from './test-support.ts';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 import { SubagentRegistry } from './registry.ts';
 
 test('a long-running task remains retained when it finishes after many shorter tasks', async () => {
-  const registry = new SubagentRegistry({invocation: spec => {
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: spec => {
     if (spec.task === 'long') return {command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)']};
     throw new Error('Synthetic short task');
   }});
@@ -22,11 +25,13 @@ test('cancel-all winning an admission microtask race prevents the launch', async
   for (let depth = 0; depth < 8; depth++) {
     let cancelled = false, lateLaunches = 0;
     let cancellation = Promise.resolve();
-    const registry = new SubagentRegistry({authorize: async () => {
+    const registry = new SubagentRegistry({admission: {launch: () => {}, queue: async (spec, signal, bridge) => {
+      const admitted = await supervisorAdmission.queue(spec, signal, bridge);
       let chain = Promise.resolve();
       for (let i = 0; i < depth; i++) chain = chain.then(() => undefined);
       cancellation = chain.then(async () => { cancelled = true; await registry.cancelAll(); });
-    }, invocation: () => { if (cancelled) lateLaunches++; throw new Error('Synthetic launch boundary'); }});
+      return admitted;
+    }}, invocation: () => { if (cancelled) lateLaunches++; throw new Error('Synthetic launch boundary'); }});
     try {
       await registry.spawn({task: 'admission race', cwd: tmpdir()}).then(handle => handle.done, () => undefined);
       await cancellation;
@@ -38,7 +43,8 @@ test('cancel-all winning an admission microtask race prevents the launch', async
 test('queued work cannot launch with tools revoked by its owner while it waited', async () => {
   let allowed = ['read', 'write'];
   const launched: string[] = [];
-  const registry = new SubagentRegistry({concurrency: 1, allowedTools: () => allowed, invocation: spec => {
+  const admission = admissionFixture({cwd: () => tmpdir(), tools: () => allowed}).admission;
+  const registry = new SubagentRegistry({concurrency: 1, admission, invocation: spec => {
     launched.push(spec.task);
     return {command: process.execPath, args: ['-e', `setTimeout(()=>console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}})),100);`]};
   }});
@@ -56,7 +62,7 @@ test('queued work cannot launch with tools revoked by its owner while it waited'
 test('a burst of streamed events does not repaint observers for every record', async () => {
   let updates = 0;
   const script = `for(let i=0;i<1000;i++)console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'x'}}));console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}));`;
-  const registry = new SubagentRegistry({onUpdate: () => { updates++; }, invocation: () => ({command: process.execPath, args: ['-e', script]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, onUpdate: () => { updates++; }, invocation: () => ({command: process.execPath, args: ['-e', script]})});
   try {
     const result = await (await registry.spawn({task: 'burst', cwd: tmpdir()})).done;
     assert.equal(result.output, 'done');
@@ -65,7 +71,7 @@ test('a burst of streamed events does not repaint observers for every record', a
 });
 
 test('completed-result retention is bounded without imposing a lifetime launch quota', async () => {
-  const registry = new SubagentRegistry({invocation: () => { throw new Error('Synthetic launch failure'); }});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => { throw new Error('Synthetic launch failure'); }});
   try {
     for (let i = 0; i < 1005; i++) await (await registry.spawn({task: `attempt ${i}`, cwd: tmpdir()})).done;
     assert.equal(registry.list().length, 50);
@@ -74,18 +80,24 @@ test('completed-result retention is bounded without imposing a lifetime launch q
 });
 
 test('the task deadline covers unanswered admission approval before any process exists', async () => {
-  const registry = new SubagentRegistry({authorize: () => new Promise<void>(() => {})});
+  const cwd = await mkdtemp(join(tmpdir(), 'admission-deadline-'));
+  const extension = join(cwd, 'child.ts');
+  await writeFile(extension, 'export default () => {};');
+  let approvals = 0;
+  const admission = admissionFixture({cwd: () => cwd, tools: () => ['read'], approve: () => {approvals++; return new Promise(() => {});}}).admission;
+  const registry = new SubagentRegistry({admission});
   try {
-    const admission = registry.spawn({task: 'approval', cwd: tmpdir(), timeout: 50}).then(() => 'started', () => 'rejected');
-    const outcome = await Promise.race([admission, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 200))]);
+    const admission = registry.spawn({task: 'approval', cwd, extensions: [extension], timeout: 200}).then(() => 'started', () => 'rejected');
+    const outcome = await Promise.race([admission, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 600))]);
     assert.equal(outcome, 'rejected');
+    assert.equal(approvals, 1);
     assert.deepEqual(registry.list(), []);
-  } finally { await registry.shutdown(); }
+  } finally { await registry.shutdown(); await rm(cwd, {recursive: true, force: true}); }
 });
 
 test('queued work expires without launching after its deadline', async () => {
   const launches: string[] = [];
-  const registry = new SubagentRegistry({concurrency: 1, invocation: spec => {
+  const registry = new SubagentRegistry({admission: supervisorAdmission, concurrency: 1, invocation: spec => {
     launches.push(spec.task);
     return {command: process.execPath, args: ['-e', `setTimeout(()=>console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}})),300);`]};
   }});
@@ -99,7 +111,7 @@ test('queued work expires without launching after its deadline', async () => {
 
 test('cancellation gives the child time to finish graceful cleanup before escalation', async () => {
   const script = `process.on('SIGTERM',()=>setTimeout(()=>{console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'cleaned'}]}}));process.exit(0);},500));console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'armed'}}));setInterval(()=>{},1000);`;
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', script]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', script]})});
   try {
     const handle = await registry.spawn({task: 'graceful cleanup', cwd: tmpdir()});
     const end = Date.now() + 2000;
@@ -116,7 +128,7 @@ test('cancellation gives the child time to finish graceful cleanup before escala
 test('usage preserves provider-reported cached tokens, totals, reasoning and cost', async () => {
   const usage = {input: 1, output: 2, cacheRead: 100, cacheWrite: 10, cacheWrite1h: 4, reasoning: 1, totalTokens: 113, cost: {input: 0.01, output: 0.02, cacheRead: 0.1, cacheWrite: 0.2, total: 0.33}};
   const event = {type: 'message_end', message: {role: 'assistant', stopReason: 'stop', usage, content: []}};
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', `console.log(${JSON.stringify(JSON.stringify(event))});`]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', `console.log(${JSON.stringify(JSON.stringify(event))});`]})});
   try {
     const result = await (await registry.spawn({task: 'report usage', cwd: tmpdir()})).done;
     assert.deepEqual(result.usage, usage);
@@ -125,7 +137,7 @@ test('usage preserves provider-reported cached tokens, totals, reasoning and cos
 
 test('dropping an oversized final assistant record cannot reuse an earlier success', async () => {
   const script = `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'Earlier'}]}}));console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'error',content:[{type:'text',text:'X'.repeat(400000)}]}}));`;
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', script]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', script]})});
   try {
     const result = await (await registry.spawn({task: 'oversized terminal record', cwd: tmpdir()})).done;
     assert.equal(result.status, 'incomplete');
@@ -136,7 +148,7 @@ test('dropping an oversized final assistant record cannot reuse an earlier succe
 test('exit zero is not success when the final assistant outcome is absent or incomplete', async () => {
   for (const stopReason of [undefined, 'length', 'toolUse', 'pending', 'deferred']) {
     const event = stopReason ? {type: 'message_end', message: {role: 'assistant', stopReason, content: [{type: 'text', text: 'Partial'}]}} : {type: 'session'};
-    const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', `console.log(${JSON.stringify(JSON.stringify(event))});`]})});
+    const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', `console.log(${JSON.stringify(JSON.stringify(event))});`]})});
     try {
       const result = await (await registry.spawn({task: 'incomplete outcome', cwd: tmpdir()})).done;
       assert.equal(result.status, 'incomplete', `stopReason=${stopReason}`);
@@ -146,7 +158,7 @@ test('exit zero is not success when the final assistant outcome is absent or inc
 
 test('an oversized image record does not kill a child that subsequently completes', async () => {
   const script = `const line=JSON.stringify({type:'tool_execution_end',toolCallId:'image',toolName:'read',isError:false,result:{content:[{type:'image',data:'A'.repeat(400000)}]}})+'\\n';let offset=0;const timer=setInterval(()=>{process.stdout.write(line.slice(offset,offset+32768));offset+=32768;if(offset>=line.length){clearInterval(timer);console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'Image inspected'}]}}));}},2);`;
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', script]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', script]})});
   try {
     const result = await (await registry.spawn({task: 'inspect image', cwd: tmpdir()})).done;
     assert.equal(result.status, 'succeeded');
@@ -157,7 +169,7 @@ test('an oversized image record does not kill a child that subsequently complete
 
 test('four consecutive identical failing calls return control instead of retrying forever', async () => {
   const events = toolCall('loop', 'bash', {command: 'missing-command'}, true);
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', `for(let i=0;i<4;i++)for(const event of ${JSON.stringify(events)})console.log(JSON.stringify({...event,toolCallId:String(i)}));setInterval(()=>{},1000);`]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', `for(let i=0;i<4;i++)for(const event of ${JSON.stringify(events)})console.log(JSON.stringify({...event,toolCallId:String(i)}));setInterval(()=>{},1000);`]})});
   try {
     const result = await (await registry.spawn({task: 'repetitive failure', cwd: tmpdir(), timeout: 500})).done;
     assert.equal(result.status, 'stalled');
@@ -173,7 +185,7 @@ test('productive edit/test cycles and repeated successful polling are not turn-l
   }
   for (let i = 0; i < 30; i++) events.push(...toolCall(`poll-${i}`, 'bash', {command: 'git status'}, false));
   events.push({type: 'message_end', message: {role: 'assistant', stopReason: 'stop', content: [{type: 'text', text: 'Productive work finished'}]}});
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', `for(const event of ${JSON.stringify(events)})console.log(JSON.stringify(event));`]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', `for(const event of ${JSON.stringify(events)})console.log(JSON.stringify(event));`]})});
   try {
     const result = await (await registry.spawn({task: 'productive iterations', cwd: tmpdir()})).done;
     assert.equal(result.status, 'succeeded');
@@ -182,7 +194,7 @@ test('productive edit/test cycles and repeated successful polling are not turn-l
 });
 
 test('a task uses a one-hour default backstop without a turn quota', async () => {
-  const registry = new SubagentRegistry({invocation: spec => ({command: process.execPath, args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:${JSON.stringify(String(spec.timeout))}}]}}));`]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: spec => ({command: process.execPath, args: ['-e', `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:${JSON.stringify(String(spec.timeout))}}]}}));`]})});
   try {
     const result = await (await registry.spawn({task: 'default timeout', cwd: tmpdir()})).done;
     assert.equal(result.output, '3600000');
@@ -193,20 +205,26 @@ test('shutdown settles an admission whose approval callback never resolves', asy
   let entered!: () => void;
   const approving = new Promise<void>(resolve => { entered = resolve; });
   let launched = false;
+  const cwd = await mkdtemp(join(tmpdir(), 'admission-shutdown-'));
+  const extension = join(cwd, 'child.ts');
+  await writeFile(extension, 'export default () => {};');
+  const admissionPort = admissionFixture({cwd: () => cwd, tools: () => ['read'], approve: () => {entered(); return new Promise(() => {});}}).admission;
   const registry = new SubagentRegistry({
-    authorize: () => { entered(); return new Promise<void>(() => {}); },
+    admission: admissionPort,
     invocation: () => { launched = true; return {command: process.execPath, args: ['-e', 'process.exit(0)']}; },
   });
-  const admission = registry.spawn({task: 'approval', cwd: tmpdir()}).then(() => 'launched', () => 'rejected');
-  await approving;
-  await registry.shutdown();
-  const result = await Promise.race([admission, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 100))]);
-  assert.equal(result, 'rejected');
-  assert.equal(launched, false);
+  const admission = registry.spawn({task: 'approval', cwd, extensions: [extension]}).then(() => 'launched', () => 'rejected');
+  try {
+    await approving;
+    await registry.shutdown();
+    const result = await Promise.race([admission, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 100))]);
+    assert.equal(result, 'rejected');
+    assert.equal(launched, false);
+  } finally { await registry.shutdown(); await rm(cwd, {recursive: true, force: true}); }
 });
 
 test('aborting an owning signal after admission stops its running child', async () => {
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)']})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', 'setInterval(()=>{},1000)']})});
   const controller = new AbortController();
   try {
     const handle = await registry.spawn({task: 'wait', cwd: tmpdir()}, controller.signal);
@@ -222,7 +240,7 @@ test('a recovered provider failure does not turn completed work into a failed ta
     {type: 'auto_retry_start'},
     {type: 'message_end', message: {role: 'assistant', stopReason: 'stop', content: [{type: 'text', text: 'Completed'}]}},
   ];
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', `for (const event of ${JSON.stringify(events)}) console.log(JSON.stringify(event));`]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', `for (const event of ${JSON.stringify(events)}) console.log(JSON.stringify(event));`]})});
   try {
     const result = await (await registry.spawn({task: 'recover', cwd: tmpdir()})).done;
     assert.equal(result.status, 'succeeded');
@@ -239,7 +257,7 @@ function toolCall(toolCallId: string, toolName: string, args: object, isError: b
 }
 
 async function eventResult(script: string) {
-  const registry = new SubagentRegistry({invocation: () => ({command: process.execPath, args: ['-e', script]})});
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => ({command: process.execPath, args: ['-e', script]})});
   try { return await (await registry.spawn({task: 'event regression', cwd: tmpdir(), timeout: 3000})).done; }
   finally { await registry.shutdown(); }
 }

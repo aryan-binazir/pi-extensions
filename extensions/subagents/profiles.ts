@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { getAgentDir, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { clampThinkingLevel } from '@earendil-works/pi-ai/compat';
 import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
-import type { TaskSpec } from './registry.ts';
+import type { TaskSpec, ConnectorGrants } from './task.ts';
 import { thinkingLevel, thinkingSuffix } from './thinking.ts';
-import { ALL_TOOLS, type ConnectorGrants } from './scope.ts';
+import { ALL_TOOLS } from './task.ts';
 
 const namePattern = /^[a-z][a-z0-9-]{0,47}$/;
 interface Profile { model: string; thinking: string; description: string; useWhen: string }
@@ -19,7 +19,6 @@ export interface ProfileConfig {
   local: 'trusted' | 'excluded';
   identity: string;
 }
-export interface SelectionProvenance { config: string; profile: string; model: string; thinking: string }
 const astra = 'openai-codex/gpt-6-astra';
 const bundledProfiles = {
   defaultProfile: 'implement',

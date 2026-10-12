@@ -367,13 +367,13 @@ test('registry delivers a parent completion after the 250 ms window', async t =>
   assert.deepEqual(notices[0].options, {triggerTurn: true, deliverAs: 'followUp'});
 });
 
-function lifecycleFixture(t: TestContext, concurrency = 8) {
+function lifecycleFixture(t: TestContext, concurrency = 8, observe: () => void = () => {}) {
   t.mock.timers.enable({apis: ['setTimeout', 'Date']});
   const children = new Map<string, {complete: (output?: string) => void; close: () => void}>();
   const notices: {value: any; options: {triggerTurn: boolean; deliverAs: string}}[] = [];
   const activity: {tracker?: string; background?: {id: string; active: boolean}}[] = [];
   const registry = new SubagentRegistry({admission: supervisorAdmission, concurrency,
-    activity: event => { activity.push(event); },
+    activity: event => { activity.push(event); observe(); },
     invocation: spec => {
       const stdout = new PassThrough(), stderr = new PassThrough();
       const child = Object.assign(new EventEmitter(), {stdout, stderr, stdio: []}) as unknown as ChildProcess;
@@ -472,6 +472,34 @@ test('shutdown discards a batch preserved by cancel-all and awaits mixed run cle
   assert.deepEqual(notices, []);
   assert.equal(registry.isShutdown, true);
   await assert.rejects(spawn('late'), /shut down/);
+});
+
+test('workflows submitted during or after shutdown never run', async t => {
+  const {registry, children, spawn} = lifecycleFixture(t);
+  const held = await spawn('held');
+  const stopping = registry.shutdown();
+  let ran = false;
+  await assert.rejects(registry.track(async () => { ran = true; }), /shut down/);
+  children.get('held')!.close(); await held.done; await stopping;
+  await assert.rejects(registry.track(async () => { ran = true; }), /shut down/);
+  assert.equal(ran, false);
+});
+
+test('a throwing activity observer cannot block cancel-all or shutdown cleanup', async t => {
+  const {registry, children, spawn} = lifecycleFixture(t, 8, () => { throw new Error('observer failed'); });
+  const first = await spawn('first');
+  const cancelling = registry.cancelAll();
+  children.get('first')!.close();
+  assert.deepEqual(await cancelling, {cancelled: true, count: 1});
+  assert.equal((await first.done).cancellationCause, 'cancel-all');
+  const second = await spawn('second');
+  let aborted = false;
+  const run = registry.track(signal => new Promise<void>(resolve => { signal.addEventListener('abort', () => { aborted = true; resolve(); }, {once: true}); }));
+  const stopping = registry.shutdown();
+  children.get('second')!.close();
+  await stopping; await run;
+  assert.equal(aborted, true);
+  assert.equal((await second.done).cancellationCause, 'shutdown');
 });
 
 test('ordinary cancellation overflow survives cancel-all without waking the parent', async t => {

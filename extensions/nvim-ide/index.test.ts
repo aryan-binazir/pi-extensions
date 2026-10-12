@@ -736,7 +736,11 @@ test('an editor opened in the session directory takes over the link', async () =
       await writeFile(join(process.env.CLAUDE_CONFIG_DIR!, 'ide', `${editor.port()}.lock`), JSON.stringify({ pid: process.pid, transport: 'ws', workspaceFolders: [worktree], ideName: 'Neovim', authToken: token }));
       await until(() => editor.server.clients.size === 1);
       await until(() => ide.server.clients.size === 0);
-      await tools.get('nvim_context').execute('id', {}, undefined, undefined, ctx);
+      // The old socket can close before the new link finishes its initialize handshake.
+      for (let attempt = 0; ; attempt++) {
+        try { await tools.get('nvim_context').execute('id', {}, undefined, undefined, ctx); break; }
+        catch (error) { if (attempt >= 150) throw error; await new Promise(resolve => setTimeout(resolve, 20)); }
+      }
       assert.ok(editor.calls.some(call => call.name === 'getWorkspaceFolders'));
     } finally {
       ctx.cwd = project;

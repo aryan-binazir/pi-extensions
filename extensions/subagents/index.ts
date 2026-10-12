@@ -97,8 +97,8 @@ export default function subagents(pi: ExtensionAPI): void {
     notify: (content, options) => pi.sendMessage({customType: 'subagent-complete', content, display: true}, options),
     activity: event => {
       if (event.background) { pi.events.emit('pi-interactive:background-activity', event.background); return; }
-      renderActiveAgents();
-      if (event.tracker === 'stop' || !registry.hasActive()) {
+      if (event.tasks) renderActiveAgents();
+      if (event.tracker === 'stop' || event.tasks === 'completed' && !registry.hasActive()) {
         if (context?.hasUI) context.ui.setStatus('subagent-tracker', undefined);
       }
       if (event.tracker === 'stop') {

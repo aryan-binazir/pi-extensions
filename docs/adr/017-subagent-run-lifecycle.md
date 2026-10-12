@@ -39,8 +39,10 @@ re-clip output to 1024 bytes and admit compact notices into a 12000-byte JSON
 array. Notices that do not fit and notices beyond the count limit contribute to
 `additionalCompletions`. Sink failures are recorded on retained tasks.
 
-Activity signals carry tracker intent and child background intervals. The
-extension adapts those signals to the existing tracker and panel. Streaming and
+Activity signals distinguish task changes and completions from tracker intent
+and child background intervals. Tracker-only invalidation does not repaint the
+panel or clear the footer; completion clears the footer when no work remains.
+The extension adapts those signals to the existing tracker and panel. Streaming and
 completion repaint timing, tracker cancellation gates, and background interval
 ordering stay intact. Even a synchronous launch failure emits active before
 inactive. Overlapping cancel-all calls retain the existing boolean tracker gate;

@@ -56,6 +56,7 @@ interface Entry {
   closeConnectorBridge?: () => void;
 }
 interface Activity {
+  tasks?: 'changed' | 'completed';
   tracker?: 'update' | 'invalidate' | 'stop';
   background?: {id: string; active: boolean};
 }
@@ -198,9 +199,9 @@ export class SubagentRegistry {
       entry.detachSignal = () => signal.removeEventListener('abort', abort);
     }
     this.pump();
-    this.emitActivity({tracker: 'update'});
+    this.emitActivity({tasks: 'changed', tracker: 'update'});
     this.emitActivity({background: {id, active: true}});
-    void done.then(task => this.emitActivity({tracker: task.status === 'cancelled' ? 'invalidate' : 'update'}));
+    void done.then(task => this.emitActivity({tasks: 'changed', tracker: task.status === 'cancelled' ? 'invalidate' : 'update'}));
     void done.then(() => this.emitActivity({background: {id, active: false}}));
     return { id, done };
   }
@@ -294,7 +295,7 @@ export class SubagentRegistry {
   }
   async shutdown(): Promise<void> {
     this.closed = true;
-    this.options.activity?.({tracker: 'stop'});
+    this.options.activity?.({tasks: 'changed', tracker: 'stop'});
     clearTimeout(this.noticeTimer); this.noticeTimer = undefined; this.notices = []; this.overflowNotices = 0; this.noticeTriggersTurn = false;
     for (const run of this.runs) run.controller.abort();
     this.lifecycle.abort(new Error('Registry is shut down'));
@@ -410,7 +411,7 @@ export class SubagentRegistry {
         if ((this.options.onUpdate || this.options.activity) && ['message_update', 'message_end'].includes(event.type) && Date.now() - lastUpdateAt >= 100) {
           lastUpdateAt = Date.now();
           this.options.onUpdate?.(cloneResult(entry.result));
-          this.emitActivity({});
+          this.emitActivity({tasks: 'changed'});
         }
       } catch {}
     };
@@ -495,7 +496,7 @@ export class SubagentRegistry {
     const heldRunSlot = Boolean(entry.process) || entry.result.status === 'failed';
     if (heldRunSlot) { this.running--; if (entry.writer) this.writers.delete(entry.spec.cwd); }
     const snapshot = cloneResult(entry.result);
-    try { this.options.onComplete?.(snapshot); this.emitActivity({}); this.queueNotice(snapshot); } catch (error) { entry.result.notificationError = `Completion notification failed: ${String(error).slice(0,1000)}`; }
+    try { this.options.onComplete?.(snapshot); this.emitActivity({tasks: 'completed'}); this.queueNotice(snapshot); } catch (error) { entry.result.notificationError = `Completion notification failed: ${String(error).slice(0,1000)}`; }
     finally {
       entry.resolve(cloneResult(entry.result));
       let finished = 0;

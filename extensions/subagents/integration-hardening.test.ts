@@ -19,6 +19,30 @@ function fixture(run: (host: any) => Promise<void>) {
 const noticeFlushWindowMs = 250;
 const afterNoticeFlushWindow = () => new Promise<void>(resolve => setTimeout(resolve, noticeFlushWindowMs + 50));
 
+for (const mode of ['id', 'parent', 'all']) test(`${mode} cancellation preserves the panel until child cleanup`, async () => {
+  const held = `process.on('SIGTERM',()=>{});console.log(JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'ready'}}));setInterval(()=>{if(require('node:fs').existsSync('release'))process.exit(0);},5);`;
+  await withHost({prefix: 'cancel-paint-', pi: held}, async host => {
+    const controller = new AbortController();
+    const child = await host.execute('subagent', {task: 'held', preset: 'reader'}, controller.signal);
+    await until(async () => (await host.execute('subagent_status', {id: child.details.id})).details.output === 'ready', 'child readiness');
+    host.statuses.set('subagent-tracker', 'Existing report');
+    let stopping: Promise<unknown> = Promise.resolve();
+    if (mode === 'parent') controller.abort();
+    else stopping = host.execute('subagent_cancel', {id: mode === 'all' ? 'all' : child.details.id});
+    try {
+      assert.equal(host.widgets.has('interactive-tools:subagents'), true);
+      assert.equal(host.statuses.has('subagent-tracker'), mode !== 'all');
+      assert.equal(host.activity.at(-1)?.active, true);
+    } finally {
+      await writeFile(join(host.cwd, 'release'), 'go');
+      await stopping;
+      await until(() => host.activity.at(-1)?.active === false, 'child cleanup');
+    }
+    assert.equal(host.widgets.has('interactive-tools:subagents'), false);
+    assert.equal(host.statuses.has('subagent-tracker'), false);
+  });
+});
+
 test('direct and workflow children escape leading @ only in the CLI brief with no tools', async () => {
   await withHost({prefix: 'literal-brief-host-', pi, tools: []}, async ({execute}) => {
     const brief = '@literal task brief\n--model keep this text  ';

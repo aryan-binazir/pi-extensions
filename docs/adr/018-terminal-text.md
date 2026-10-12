@@ -21,8 +21,11 @@ through. Questionnaire needed a separate newline fix for tab labels in #52.
 
 Complete terminal sequences are deleted because their bytes are protocol, not
 text. Residual controls become spaces to keep adjacent words separate. The
-module consumes OSC, DCS, SOS, PM and APC payloads introduced by ESC or C1 through
-BEL, ST or end of input before Node's VT stripper handles remaining sequences.
+module consumes OSC payloads introduced by ESC or C1 through BEL, ST or end of
+input. DCS, SOS, PM and APC require ST or end of input; embedded BEL remains part
+of their payload. Separate sequence patterns consume CSI parameters, intermediate
+bytes and optional final bytes, then other ESC sequences. Their byte ranges do
+not overlap, avoiding backtracking over long CSI parameter runs.
 An unterminated string consumes the rest of the input. The final Cc/Cf pass
 replaces terminal introducers even if a malformed sequence was not recognized.
 

@@ -25,14 +25,14 @@ load; helpers and tests are not extensions.
 3. **Install Bash approvals separately (required).** Follow
    [Automatic Bash permissions](docs/agent-setup.md#automatic-bash-permissions-external-package)
    to configure Hank Warren's Auto Permissions with `gpt-6-luna`
-   at low reasoning. This repo's status extension is only its display companion,
-   not the approval engine.
+   at low reasoning. This repo's footer only displays its status; it is not the
+   approval engine.
 4. **Enable Hooks (required).** Follow [Hooks setup](#hooks) to select the
    extension, load it before Auto Permissions, and remove Guard where it is still
    installed.
-5. **Enable the footer with PR links (required).** Select this repo's
-   `auto-permissions-status` extension and install the GitHub CLI signed in to
-   GitHub; see [footer setup](docs/agent-setup.md#footer-with-pr-links).
+5. **Enable the footer (required).** Select this repo's footer extension (its
+   entry point is still `extensions/auto-permissions-status/index.ts`) and install
+   the GitHub CLI signed in to GitHub; see [footer setup](docs/agent-setup.md#footer).
 6. **Install Claude bridge separately (required).** Follow
    [Claude bridge setup](docs/agent-setup.md#claude-bridge-external-package) for the
    pinned Agent SDK provider and its required Max plan setting. Only the `AskClaude`
@@ -63,7 +63,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
-| [Auto Permissions status](docs/agent-setup.md#footer-with-pr-links) | Compact footer with the separately installed Bash-approval plugin's status and a clickable link to the branch's GitHub PR. |
+| [Footer](docs/agent-setup.md#footer) | Replaces Pi's footer: directory, branch and clickable GitHub PR link, session, token/cost/context usage, model, Auto Permissions status, and other extensions' statuses. |
 | [Neovim IDE](docs/nvim-ide.md) | Connects to claudecode.nvim: bounded request snapshots, reliable editor sends, editor tools, and coalesced live follow with reconnect replay. |
 
 See [session and editor behavior](docs/extension-behavior.md)

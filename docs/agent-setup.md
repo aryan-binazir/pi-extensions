@@ -30,7 +30,7 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    for Bash approvals, check the reviewer settings;
    for Hooks, check its selected entrypoint is in a stable checkout and loads before
    Auto Permissions, and that no Guard entry or `guard.json` link remains;
-   for the footer, check the status-extension selection and `gh` on `PATH`,
+   for the footer, check the footer extension selection and `gh` on `PATH`,
    reporting a failing `gh auth status --active --hostname github.com` as
    unverified sign-in rather than drift. For Claude
    bridge, use the offline model-list command below, check `provider.plan` is
@@ -225,28 +225,32 @@ and revise-first behavior for subagent sessions that load the plugin. 0.21.0's
 unattended behavior is opt-in via `PI_AUTO_PERMISSIONS_UNATTENDED=1`; ordinary
 interactive sessions still ask for approval.
 
-Enable this repository's **`auto-permissions-status`** extension (required; see
-[footer with PR links](#footer-with-pr-links)) with `pi config`; for a local
-checkout, add the absolute path to
-`extensions/auto-permissions-status/index.ts` to `extensions` in
-`~/.pi/agent/settings.json`. After `/reload` the footer shows
+The required [footer](#footer) shows the plugin's status after `/reload`:
 `Auto: on · Luna low`, `Auto: off`, `Auto: unavailable` (Hank's settings command
 is not loaded), `Auto: config error` (the package's own validator rejected the
-config), or `Auto: unavailable (adapter)` — the companion's adapter is tested
+config), or `Auto: unavailable (adapter)` — the footer's adapter is tested
 against **0.21.0** and retains **0.16.2** compatibility. Other versions are
 reported as unavailable until reviewed. `/auto-permissions` inspects the settings.
-It reports loaded-plugin status, not that any given review will succeed, and never imports an
-absent guard, edits policy, or makes model calls. Its compact TUI footer puts Auto
-on the directory/branch row with token/cache/cost/context usage and the main model
-below; **Pi has one footer slot**, so do not run it alongside another
-custom-footer extension. It restores the default footer on shutdown. The same
-footer links the branch's pull request.
+The status reflects the loaded plugin, not that any given review will succeed; the
+footer never imports an absent guard, edits policy, or makes model calls.
 
-## Footer with PR links
+## Footer
 
-This setup requires the `auto-permissions-status` extension above: it owns Pi's
-footer and puts a clickable link to the branch's GitHub pull request after the
-branch name. Do not also install a PR-status or footer package; they compete for
+This repository's footer extension (code in `extensions/footer/`) is required.
+Its entry point is still `extensions/auto-permissions-status/index.ts`, kept so
+existing setups need no change. Enable it with `pi config`; for a local checkout,
+add the absolute path to `extensions/auto-permissions-status/index.ts` to
+`extensions` in `~/.pi/agent/settings.json`.
+
+It replaces Pi's footer. The first row shows the directory, branch, pull request
+link and session name, with the Auto Permissions status on the right; the second
+shows token/cache/cost/context usage, with the main model on the right; a third
+row shows other extensions' statuses. **Pi has one footer slot**, so do not run it
+alongside another custom-footer extension. It restores the default footer on
+shutdown.
+
+The pull request link is a clickable link to the branch's GitHub pull request
+after the branch name. Do not also install a PR-status or footer package; they compete for
 the one footer slot or have their links stripped.
 
 The link needs the [GitHub CLI](https://cli.github.com/) on `PATH`, signed in to
@@ -279,7 +283,7 @@ error. gh searches the repository it resolves as the base (it prefers an
 in other repositories, and local branches tracking a differently named remote
 branch, show no link. The link follows Pi's branch for the session directory.
 
-Completion: `auto-permissions-status` is selected and
+Completion: `extensions/auto-permissions-status/index.ts` is selected and
 `gh auth status --active --hostname github.com` reports a signed-in account. Ask Ar to run `/reload`; a branch with an open PR then
 shows its number in the footer.
 

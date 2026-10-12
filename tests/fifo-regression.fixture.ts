@@ -1,4 +1,4 @@
-import {DelegationAdmission} from '../extensions/subagents/scope.ts';
+import {workflowFixture, runFixtureWorkflow as runWorkflow} from '../extensions/subagents/test-support.ts';
 import type {ExtensionAPI, ExtensionContext, ExtensionToolContext, ToolDefinition} from '@earendil-works/pi-coding-agent';
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
@@ -6,7 +6,6 @@ import {mkdtemp, rm, writeFile, symlink, rename} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import subagents from '../extensions/subagents/index.ts';
-import {runWorkflow} from '../extensions/subagents/workflow.ts';
 const cwd = await mkdtemp(join(tmpdir(), 'fifo-regression-'));
 process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent');
 const tools = new Map<string, ToolDefinition>();
@@ -38,6 +37,6 @@ try {
     await rename(path, `${path}.old`);
     await symlink('/etc/passwd', path);
   };
-  await assert.rejects(runWorkflow({cwd,journalDirectory:join(cwd,'journals'),policyIdentity:'race',source:'return await api.readFile("file");',approve:async()=>true,spawn:async()=>{},admission:{...new DelegationAdmission({cwd:()=>cwd,tools:()=>['read']}).workflow(),read:substituteFinalPathComponent}}), /ELOOP|symbolic link/);
+  await assert.rejects(runWorkflow({cwd,journalDirectory:join(cwd,'journals'),policyIdentity:'race',source:'return await api.readFile("file");',approve:async()=>true,spawn:async()=>{},admission:{...workflowFixture(cwd),read:substituteFinalPathComponent}}), /ELOOP|symbolic link/);
   console.log('FIFO_REGRESSION_PASS: regular-file rejection, timeout, registered session shutdown, symlink substitution');
 } finally {await rm(cwd,{recursive:true,force:true});}

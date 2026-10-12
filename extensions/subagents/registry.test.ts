@@ -1,4 +1,4 @@
-import { supervisorAdmission } from './test-support.ts';
+import { supervisorAdmission, admissionFixture } from './test-support.ts';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { piInvocation, SubagentRegistry } from './registry.ts';
-import { assertChildTask, validateTask, DelegationAdmission } from './scope.ts';
+import { assertChildTask, validateTask } from './scope.ts';
 
 test('explicit task briefs remain literal messages through Pi attachment parsing with no tools', async () => {
   const entry = import.meta.resolve('@earendil-works/pi-coding-agent');
@@ -192,7 +192,7 @@ test('streamed deltas and stderr keep only the last 64 KiB, mid-stream and at co
 test('explicit tools must respect parent permissions without an authorize callback', async () => {
   const launched: string[][] = [];
   let allowed = ['read'];
-  const admission = new DelegationAdmission({cwd: () => tmpdir(), tools: () => allowed});
+  const admission = admissionFixture({cwd: () => tmpdir(), tools: () => allowed}).admission;
   const registry = new SubagentRegistry({
     admission,
     invocation: spec => {
@@ -271,4 +271,18 @@ test('every child loads the hooks extension before any other and refuses to star
       await assert.rejects(validateTask({task: 'Check', cwd, tools: []}, [], undefined, missing), /Subagents do not start without the hooks extension/);
     }
   } finally { await rm(cwd, {recursive: true, force: true}); }
+});
+
+
+test('the supervisor rejects malformed tasks returned by an admission port', async () => {
+  const signal = new AbortController().signal;
+  const admitted = await supervisorAdmission.queue({task: 'inspect', cwd: tmpdir(), tools: []}, signal);
+  let launches = 0;
+  for (const bad of [{task: ''}, {cwd: 'relative'}, {timeout: 0}, {extensions: {}}, {extensions: ['relative.ts']}]) {
+    const registry = new SubagentRegistry({admission: {queue: async () => ({...admitted, task: {...admitted.task, ...bad} as any}), launch: () => {}},
+      invocation: () => {launches++; throw new Error('Must not launch');}});
+    try { await assert.rejects(registry.spawn({task: 'inspect', cwd: tmpdir()})); }
+    finally { await registry.shutdown(); }
+  }
+  assert.equal(launches, 0);
 });

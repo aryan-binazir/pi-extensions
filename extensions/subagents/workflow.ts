@@ -6,18 +6,17 @@ import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type ts from 'typescript';
-import { ALL_TOOLS, TIMEOUT_BOUNDS, validateTimeout, type TaskSpec } from './task.ts';
+import { TIMEOUT_BOUNDS, validateTimeout, type TaskSpec, type ValidTask } from './task.ts';
 import { abortable } from './cancellation.ts';
-import { DelegationAdmission, insideRoot, type WorkflowAdmission } from './scope.ts';
+import { insideRoot, type WorkflowAdmission } from './scope.ts';
 interface WorkflowOptions {
   source: string;
   cwd: string;
   journalDirectory: string;
-  policyIdentity?: string;
-  admission?: WorkflowAdmission;
+  admission: WorkflowAdmission;
   approve?: (source: string) => Promise<boolean>;
   approveReplay?: (stages: string[]) => Promise<boolean>;
-  spawn: (task: TaskSpec, signal: AbortSignal) => Promise<unknown>;
+  spawn: (task: ValidTask, signal: AbortSignal) => Promise<unknown>;
   signal?: AbortSignal;
   timeout?: number;
 }
@@ -155,8 +154,8 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
   const runtime = await workflowRuntime(options.signal);
   const tsc = await typescript();
   const cwd = await realpath(options.cwd);
-  const admission = options.admission ?? new DelegationAdmission({cwd: () => cwd, tools: () => ALL_TOOLS}).workflow();
-  const identity = digest(JSON.stringify({ version: 2, source: options.source, cwd, policy: options.policyIdentity ?? admission.policyIdentity, defaults: admission.identityDefaults, profiles: admission.profileIdentity, node: runtime.version, typescript: tsc.version, platform: process.platform }));
+  const admission = options.admission;
+  const identity = digest(JSON.stringify({ version: 2, source: options.source, cwd, policy: admission.policyIdentity, defaults: admission.identityDefaults, profiles: admission.profileIdentity, node: runtime.version, typescript: tsc.version, platform: process.platform }));
   if (runningIdentities.has(identity))
     throw new Error('Identical workflow is already running');
   const compiled = tsc.transpileModule(`async function workflow(api: any) {\n${options.source}\n}`, { compilerOptions: { target: tsc.ScriptTarget.ES2022, module: tsc.ModuleKind.None }, reportDiagnostics: true });

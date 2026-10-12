@@ -1,10 +1,9 @@
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 import { availableModel, assertTaskFields, resolveProfile, type ProfileConfig } from './profiles.ts';
-import { ALL_TOOLS, READ_TOOLS, validateTimeout, withoutFastAlias, type ConnectorGrants, type TaskSpec, type ValidTask } from './task.ts';
-import { thinkingLevel } from './thinking.ts';
+import { ALL_TOOLS, READ_TOOLS, type ConnectorGrants, type TaskSpec, type ValidTask } from './task.ts';
+import { prepareTask } from './registry.ts';
 import { CONNECTOR_FRAME_LIMIT, type ConnectorBridge } from './connector-bridge.ts';
 
 interface DelegationScope { cwd: string; tools: string[]; delegatedTools?: ConnectorGrants; registeredTools?: string[]; callableTools?: string[]; builtinTools?: string[] }
@@ -73,41 +72,22 @@ export async function assertWorkflowRead(parent: DelegationScope, path: string):
   await assertWorkspacePath(parent.cwd, path);
 }
 
-const HOOKS_EXTENSION = fileURLToPath(new URL('../hooks/index.ts', import.meta.url));
-export async function validateTask(spec: TaskSpec, allowedTools?: string[], readTools = READ_TOOLS, hooksExtension = HOOKS_EXTENSION): Promise<ValidTask> {
-  if (!spec || typeof spec.task !== 'string' || !spec.task.trim() || spec.task.length > 32000) throw new Error('Task brief must contain 1–32000 characters');
-  if (typeof spec.cwd !== 'string' || !isAbsolute(spec.cwd)) throw new Error('Task cwd must be absolute');
-  const cwd = await realpath(spec.cwd);
-  if (!(await stat(cwd)).isDirectory()) throw new Error('Task cwd must be a directory');
-  const model = typeof spec.model === 'string' ? withoutFastAlias(spec.model) : spec.model;
-  if (model !== undefined && (typeof model !== 'string' || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:/-]+$/.test(model))) throw new Error('Model must be provider/model');
-  if (spec.thinking !== undefined && !thinkingLevel.test(spec.thinking)) throw new Error('Invalid thinking level');
-  if (spec.preset !== undefined && !['reader', 'writer'].includes(spec.preset)) throw new Error('Unknown preset');
-  const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS).filter(tool => !allowedTools || allowedTools.includes(tool));
-  if (!Array.isArray(tools) || tools.some(tool => typeof tool !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(tool)) || new Set(tools).size !== tools.length) throw new Error('Invalid child tool selection; use unique exact tool names');
-  const unknown = connectorTools(tools).filter(tool => !allowedTools?.includes(tool));
-  if (unknown.length) throw new Error(`Unavailable or disallowed child tools: ${unknown.join(', ')}. Configure exact connector grants in user-scoped subagents.json and activate the tools in the parent.`);
-  const denied = allowedTools && tools.filter(tool => !allowedTools.includes(tool));
-  if (denied?.length) throw new Error(`Explicit child tools exceed parent permissions: ${denied.join(', ')}`);
+export function validateTask(spec: TaskSpec, allowedTools?: string[], readTools = READ_TOOLS, hooksExtension?: string): Promise<ValidTask> {
+  return prepareTask(spec, spec => {
+    const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS).filter(tool => !allowedTools || allowedTools.includes(tool));
+    if (!Array.isArray(tools) || tools.some(tool => typeof tool !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(tool)) || new Set(tools).size !== tools.length) throw new Error('Invalid child tool selection; use unique exact tool names');
+    const unknown = connectorTools(tools).filter(tool => !allowedTools?.includes(tool));
+    if (unknown.length) throw new Error(`Unavailable or disallowed child tools: ${unknown.join(', ')}. Configure exact connector grants in user-scoped subagents.json and activate the tools in the parent.`);
+    const denied = allowedTools && tools.filter(tool => !allowedTools.includes(tool));
+    if (denied?.length) throw new Error(`Explicit child tools exceed parent permissions: ${denied.join(', ')}`);
+    assertReaderSelection(spec.preset, tools, readTools);
+    return tools;
+  }, hooksExtension);
+}
+
+function assertReaderSelection(preset: TaskSpec['preset'], tools: string[], readTools: string[]): void {
   const writes = tools.filter(tool => !readTools.includes(tool));
-  if (spec.preset === 'reader' && writes.length) throw new Error(`Reader preset cannot grant write tools: ${writes.join(', ')}`);
-  const timeout = validateTimeout(spec.timeout, 'Timeout');
-  if (spec.extensions !== undefined && (!Array.isArray(spec.extensions) || spec.extensions.length > 16)) throw new Error('Invalid extensions');
-  const extensions: string[] = [];
-  for (const path of spec.extensions ?? []) {
-    if (typeof path !== 'string' || !isAbsolute(path)) throw new Error('Extension paths must be absolute');
-    const canonical = await realpath(path);
-    if (!(await stat(canonical)).isFile()) throw new Error('Extension must be a file');
-    extensions.push(canonical);
-  }
-  let hooks: string;
-  try {
-    hooks = await realpath(hooksExtension);
-    if (!(await stat(hooks)).isFile()) throw new Error('not a file');
-  } catch (error) {
-    throw new Error(`Subagents do not start without the hooks extension at ${hooksExtension}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return { ...spec, model, cwd, tools: [...tools], extensions: extensions.filter(path => path !== hooks), hooks, timeout };
+  if (preset === 'reader' && writes.length) throw new Error(`Reader preset cannot grant write tools: ${writes.join(', ')}`);
 }
 
 export function connectorTools(tools: string[]): string[] {
@@ -119,9 +99,9 @@ interface AdmissionSource {
   cwd: () => string;
   tools: () => string[];
   definitions?: ExtensionAPI['getAllTools'];
-  grants?: () => ConnectorGrants | undefined;
-  config?: (ctx: ExtensionContext) => ProfileConfig;
-  selection?: () => ExtensionContext | undefined;
+  grants: () => ConnectorGrants | undefined;
+  config: (ctx: ExtensionContext) => ProfileConfig;
+  selection: () => ExtensionContext | undefined;
   approve?: (title: string, request: string, signal: AbortSignal, ctx?: ExtensionContext) => Promise<boolean>;
 }
 export interface WorkflowAdmission {
@@ -130,6 +110,7 @@ export interface WorkflowAdmission {
   identityDefaults?: Pick<TaskSpec, 'model' | 'thinking'>;
   admit: (input: Omit<TaskSpec, 'cwd'> & {cwd?: string}, cwd: string) => Promise<ValidTask>;
   replay: (task: ValidTask, signal: AbortSignal) => Promise<void>;
+  request: (task: ValidTask) => {task: ValidTask; bridge?: ConnectorBridge};
   read: (path: string) => Promise<void>;
 }
 
@@ -148,24 +129,26 @@ export class DelegationAdmission {
   private parent(): DelegationScope {
     const registered = this.source.definitions?.();
     return {
-      cwd: this.source.cwd(), tools: this.source.tools(), delegatedTools: this.source.grants?.(),
+      cwd: this.source.cwd(), tools: this.source.tools(), delegatedTools: this.source.grants(),
       registeredTools: registered?.map(tool => tool.name),
       callableTools: registered?.filter(tool => ['direct', 'deferred', 'codemode', 'codemode-deferred'].includes(tool.exposure ?? 'direct')).map(tool => tool.name),
       builtinTools: registered?.filter(tool => tool.sourceInfo?.path.startsWith('builtin:') && tool.sourceInfo.path !== 'builtin:mcp').map(tool => tool.name),
     };
   }
-  private normalize(raw: Omit<TaskSpec, 'cwd'> & {cwd?: string}, ctx?: ExtensionContext, config = ctx && this.source.config?.(ctx)): TaskSpec {
+  private normalize(raw: Omit<TaskSpec, 'cwd'> & {cwd?: string}, ctx: ExtensionContext, config = this.source.config(ctx)): TaskSpec {
     assertTaskFields(raw);
     if (Array.isArray(raw.tools) && raw.tools.every(name => typeof name === 'string')) assertToolSelection(raw.tools, this.parent());
     if (raw.cwd !== undefined && typeof raw.cwd !== 'string') throw new Error('Invalid child cwd');
-    const task = {...raw, cwd: resolve(ctx?.cwd ?? this.source.cwd(), raw.cwd ?? '.')};
-    return config && ctx ? resolveProfile(task, config, ctx) : task;
+    const task = {...raw, cwd: resolve(ctx.cwd, raw.cwd ?? '.')};
+    return resolveProfile(task, config, ctx);
   }
   direct(raw: Omit<TaskSpec, 'cwd'> & {cwd?: string}, ctx?: ExtensionToolContext): {task: TaskSpec; bridge?: ConnectorBridge} {
-    const task = this.normalize(raw, ctx ?? this.source.selection?.());
-    return {task, bridge: ctx ? this.bridge(task, ctx) : undefined};
+    ctx ??= this.source.selection() as ExtensionToolContext;
+    if (!ctx) throw new Error('A selected parent model or explicit provider/model is required');
+    const task = this.normalize(raw, ctx);
+    return {task, bridge: this.bridge(task, ctx)};
   }
-  bridge(task: TaskSpec, ctx: ExtensionToolContext): ConnectorBridge | undefined {
+  private bridge(task: TaskSpec, ctx: ExtensionToolContext): ConnectorBridge | undefined {
     const names = connectorTools(task.tools ?? []);
     if (!names.length) return undefined;
     const spawningCwd = this.parent().cwd;
@@ -180,9 +163,9 @@ export class DelegationAdmission {
       execute: async (name, args, signal) => {
         signal.throwIfAborted();
         if (this.parent().cwd !== spawningCwd) throw new Error('Subagent parent workspace changed; resubmit task');
-        if (task.configProvenance?.config !== this.source.config?.(ctx).identity) throw new Error('Subagent delegation configuration changed; resubmit task');
+        if (task.configProvenance?.config !== this.source.config(ctx).identity) throw new Error('Subagent delegation configuration changed; resubmit task');
         assertToolSelection([name], this.parent());
-        if (task.preset === 'reader' && !delegationScope(this.parent()).readTools.includes(name)) throw new Error(`Reader preset cannot grant write tools: ${name}`);
+        assertReaderSelection(task.preset, [name], delegationScope(this.parent()).readTools);
         if (!ctx.tools.some(tool => tool.name === name)) throw new Error(`Connector tool is no longer callable in the parent: ${name}`);
         const outcome = await ctx.executeTool(name, args, {signal});
         return {...outcome.result, isError: outcome.isError};
@@ -190,47 +173,54 @@ export class DelegationAdmission {
     };
   }
   async queue(spec: TaskSpec, signal: AbortSignal, bridge?: ConnectorBridge): Promise<AdmissionResult> {
+    if (!spec.configProvenance) {
+      const ctx = this.source.selection();
+      if (!ctx) throw new Error('A selected parent model or explicit provider/model is required');
+      spec = this.normalize(spec, ctx);
+    }
     const scope = delegationScope(this.parent());
     const task = await validateTask(spec, scope.tools, scope.readTools);
     bridge = validateBridge(task, bridge);
     signal.throwIfAborted();
-    const ctx = this.source.selection?.();
-    await assertChildTask(task, {parent: this.parent(), approve: this.source.approve && (!this.source.selection || ctx?.hasUI) ? (request => this.source.approve!('Approve local child extensions', request, signal, ctx)) : undefined});
+    const ctx = this.source.selection();
+    await assertChildTask(task, {parent: this.parent(), approve: this.source.approve && ctx?.hasUI ? (request => this.source.approve!('Approve local child extensions', request, signal, ctx)) : undefined});
     const readTools = delegationScope(this.parent()).readTools;
     return {task, bridge, writer: task.extensions.length > 0 || task.tools.some(tool => !readTools.includes(tool))};
   }
   launch(task: ValidTask): void {
     const scope = delegationScope(this.parent());
     if (task.tools.some(tool => !scope.tools.includes(tool))) throw new Error(`Child tools exceed current parent permissions at launch: ${task.tools.filter(tool => !scope.tools.includes(tool)).join(', ')}`);
-    const ctx = this.source.selection?.();
-    if (ctx && task.configProvenance) {
-      if (task.configProvenance.config !== this.source.config?.(ctx).identity) throw new Error('Subagent configuration or trust changed while queued; resubmit task');
-      availableModel(task.model!, ctx.modelRegistry, task.profile);
-    }
+    const ctx = this.source.selection();
+    if (!ctx || !task.configProvenance) throw new Error('Subagent configuration or trust changed while queued; resubmit task');
+    if (task.configProvenance.config !== this.source.config(ctx).identity) throw new Error('Subagent configuration or trust changed while queued; resubmit task');
+    availableModel(task.model!, ctx.modelRegistry, task.profile);
   }
-  workflow(ctx?: ExtensionToolContext): WorkflowAdmission {
-    const config = ctx && this.source.config?.(ctx), cwd = ctx?.cwd ?? this.source.cwd();
-    const selection = ctx && {model: ctx.model, thinkingLevel: ctx.thinkingLevel, modelRegistry: ctx.modelRegistry};
+  workflow(ctx?: ExtensionToolContext, replaySignal?: AbortSignal): WorkflowAdmission {
+    ctx ??= this.source.selection() as ExtensionToolContext;
+    if (!ctx) throw new Error('A selected parent model or explicit provider/model is required');
+    const captured = ctx;
+    const config = this.source.config(captured), cwd = captured.cwd;
+    const selection = {model: ctx.model, thinkingLevel: ctx.thinkingLevel, modelRegistry: ctx.modelRegistry};
     return {
+      request: task => ({task, bridge: this.bridge(task, captured)}),
       policyIdentity: delegationScope(this.parent()).replayIdentity,
-      profileIdentity: config?.identity,
-      identityDefaults: ctx ? {model: ctx.model && `${ctx.model.provider}/${ctx.model.id}`, thinking: ctx.thinkingLevel} : undefined,
+      profileIdentity: config.identity,
+      identityDefaults: {model: ctx.model && `${ctx.model.provider}/${ctx.model.id}`, thinking: ctx.thinkingLevel},
       admit: async (input, root) => {
         assertTaskFields(input);
         if (input.cwd !== undefined && typeof input.cwd !== 'string') throw new Error('Invalid child cwd');
         let task = {...input, cwd: input.cwd ? resolve(root, input.cwd) : root};
-        if (ctx && config && selection) {
-          if (this.source.config?.(ctx).identity !== config.identity || ctx.cwd !== cwd) throw new Error('Workflow configuration or workspace changed; restart workflow');
-          if (Array.isArray(task.tools) && task.tools.every(name => typeof name === 'string')) assertToolSelection(task.tools, this.parent());
-          task = resolveProfile(task, config, selection);
-        }
+        if (this.source.config(captured).identity !== config.identity || captured.cwd !== cwd) throw new Error('Workflow configuration or workspace changed; restart workflow');
+        if (Array.isArray(task.tools) && task.tools.every(name => typeof name === 'string')) assertToolSelection(task.tools, this.parent());
+        task = resolveProfile(task, config, selection);
         const scope = delegationScope(this.parent());
         const validated = await validateTask(task, scope.tools, scope.readTools);
         if (!insideRoot(root, validated.cwd)) throw new Error('Child cwd escapes workflow cwd');
         return validated;
       },
       replay: async (task, signal) => {
-        await assertChildTask(task, {parent: this.parent(), approve: this.source.approve && (!ctx || ctx.hasUI) ? (request => this.source.approve!('Approve workflow child extensions', request, signal, ctx)) : undefined});
+        signal = replaySignal ?? signal;
+        await assertChildTask(task, {parent: this.parent(), approve: this.source.approve && captured.hasUI ? (request => this.source.approve!('Approve workflow child extensions', request, signal, captured)) : undefined});
       },
       read: path => assertWorkflowRead(this.parent(), path),
     };

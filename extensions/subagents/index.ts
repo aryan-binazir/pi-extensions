@@ -222,7 +222,6 @@ export default function subagents(pi: ExtensionAPI): void {
       signal?.throwIfAborted();
       context = ctx;
       const {task, bridge} = admission.direct(params, ctx);
-      if (!task.model) throw new Error('A selected parent model or explicit provider/model is required');
       const handle = await trackedSpawn(task, signal, 'parent', bridge);
       return result({ id: handle.id, status: 'queued', notification: completionGuidance });
     },
@@ -259,7 +258,7 @@ export default function subagents(pi: ExtensionAPI): void {
       signal?.addEventListener('abort', abort, { once: true });
       const cwd = ctx.cwd;
       try {
-        const workflowAdmission = admission.workflow(ctx);
+        const workflowAdmission = admission.workflow(ctx, controller.signal);
         const run = runWorkflow({
           source: params.source, cwd, timeout: params.timeout, signal: controller.signal,
           journalDirectory: join(getAgentDir(), 'workflow-journals'), admission: workflowAdmission,
@@ -295,7 +294,8 @@ export default function subagents(pi: ExtensionAPI): void {
           approveReplay: ctx.hasUI ? stages => withApprovalUI(ctx, controller.signal, () => ctx.ui.confirm('Replay previously successful stages?', `These stages will NOT run again: ${stages.join(', ')}. Approve only if their outputs and side effects remain valid in the current workspace.`, {signal: controller.signal})) : async () => false,
           spawn: async (task, taskSignal) => {
             taskSignal.throwIfAborted();
-            const handle = await trackedSpawn(task, taskSignal, 'workflow', admission.bridge(task, ctx));
+            const request = workflowAdmission.request(task);
+            const handle = await trackedSpawn(request.task, taskSignal, 'workflow', request.bridge);
             const cancel = () => registry.cancel(handle.id);
             taskSignal.addEventListener('abort', cancel, { once: true });
             if (taskSignal.aborted) cancel();

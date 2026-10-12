@@ -1,9 +1,10 @@
-import { supervisorAdmission } from './test-support.ts';
+import { supervisorAdmission, admissionFixture } from './test-support.ts';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 import { SubagentRegistry } from './registry.ts';
-import { DelegationAdmission } from './scope.ts';
 
 test('a long-running task remains retained when it finishes after many shorter tasks', async () => {
   const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: spec => {
@@ -42,7 +43,7 @@ test('cancel-all winning an admission microtask race prevents the launch', async
 test('queued work cannot launch with tools revoked by its owner while it waited', async () => {
   let allowed = ['read', 'write'];
   const launched: string[] = [];
-  const admission = new DelegationAdmission({cwd: () => tmpdir(), tools: () => allowed});
+  const admission = admissionFixture({cwd: () => tmpdir(), tools: () => allowed}).admission;
   const registry = new SubagentRegistry({concurrency: 1, admission, invocation: spec => {
     launched.push(spec.task);
     return {command: process.execPath, args: ['-e', `setTimeout(()=>console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[]}})),100);`]};
@@ -79,13 +80,19 @@ test('completed-result retention is bounded without imposing a lifetime launch q
 });
 
 test('the task deadline covers unanswered admission approval before any process exists', async () => {
-  const registry = new SubagentRegistry({admission: {launch: () => {}, queue: () => new Promise(() => {})}});
+  const cwd = await mkdtemp(join(tmpdir(), 'admission-deadline-'));
+  const extension = join(cwd, 'child.ts');
+  await writeFile(extension, 'export default () => {};');
+  let approvals = 0;
+  const admission = admissionFixture({cwd: () => cwd, tools: () => ['read'], approve: () => {approvals++; return new Promise(() => {});}}).admission;
+  const registry = new SubagentRegistry({admission});
   try {
-    const admission = registry.spawn({task: 'approval', cwd: tmpdir(), timeout: 50}).then(() => 'started', () => 'rejected');
-    const outcome = await Promise.race([admission, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 200))]);
+    const admission = registry.spawn({task: 'approval', cwd, extensions: [extension], timeout: 200}).then(() => 'started', () => 'rejected');
+    const outcome = await Promise.race([admission, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 600))]);
     assert.equal(outcome, 'rejected');
+    assert.equal(approvals, 1);
     assert.deepEqual(registry.list(), []);
-  } finally { await registry.shutdown(); }
+  } finally { await registry.shutdown(); await rm(cwd, {recursive: true, force: true}); }
 });
 
 test('queued work expires without launching after its deadline', async () => {
@@ -198,16 +205,21 @@ test('shutdown settles an admission whose approval callback never resolves', asy
   let entered!: () => void;
   const approving = new Promise<void>(resolve => { entered = resolve; });
   let launched = false;
+  const cwd = await mkdtemp(join(tmpdir(), 'admission-shutdown-'));
+  const extension = join(cwd, 'child.ts');
+  await writeFile(extension, 'export default () => {};');
+  const admissionPort = admissionFixture({cwd: () => cwd, tools: () => ['read'], approve: () => {entered(); return new Promise(() => {});}}).admission;
   const registry = new SubagentRegistry({
-    admission: {launch: () => {}, queue: async (spec, signal, bridge) => { await supervisorAdmission.queue(spec, signal, bridge); entered(); return new Promise(() => {}); }},
+    admission: admissionPort,
     invocation: () => { launched = true; return {command: process.execPath, args: ['-e', 'process.exit(0)']}; },
   });
-  const admission = registry.spawn({task: 'approval', cwd: tmpdir()}).then(() => 'launched', () => 'rejected');
+  const admission = registry.spawn({task: 'approval', cwd, extensions: [extension]}).then(() => 'launched', () => 'rejected');
   await approving;
   await registry.shutdown();
   const result = await Promise.race([admission, new Promise<string>(resolve => setTimeout(() => resolve('hung'), 100))]);
   assert.equal(result, 'rejected');
   assert.equal(launched, false);
+  await rm(cwd, {recursive: true, force: true});
 });
 
 test('aborting an owning signal after admission stops its running child', async () => {

@@ -1,9 +1,12 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { realpath, stat } from 'node:fs/promises';
+import { isAbsolute } from 'node:path';
+import { thinkingLevel, thinkingPattern } from './thinking.ts';
 import { abortable } from './cancellation.ts';
 import { fileURLToPath } from 'node:url';
-import { TIMEOUT_BOUNDS, type SelectionProvenance, type TaskSpec, type ValidTask } from './task.ts';
-import { connectorTools, type DelegationAdmission } from './scope.ts';
+import { TIMEOUT_BOUNDS, validateTimeout, type SelectionProvenance, type TaskSpec, type ValidTask } from './task.ts';
+import type { DelegationAdmission } from './scope.ts';
 import type {Duplex} from 'node:stream';
 import {attachConnectorBridge, type ConnectorBridge} from './connector-bridge.ts';
 
@@ -59,6 +62,13 @@ interface RegistryOptions {
 const CAP = 64 * 1024;
 const RETAINED = 50;
 const ACTIVE_STATUS = new Set<TaskResult['status']>(['queued', 'running']);
+const HOOKS_EXTENSION = fileURLToPath(new URL('../hooks/index.ts', import.meta.url));
+const FAST_ALIAS = new RegExp(`^(openai(?:-codex)?\\/.+)~fast(?=:${thinkingPattern}$|$)`);
+function withoutFastAlias(model: string): string {
+  return model.replace(FAST_ALIAS, '$1');
+}
+
+
 const SUPERVISOR = fileURLToPath(new URL('./process-supervisor.mjs', import.meta.url));
 
 /** Overlay variables instead of copying: node's spawn walks the prototype chain,
@@ -80,6 +90,35 @@ function cloneResult(result: TaskResult): TaskResult {
   if (result.error !== undefined) snapshot.error = result.error;
   if (result.notificationError !== undefined) snapshot.notificationError = result.notificationError;
   return snapshot;
+}
+
+export async function prepareTask(spec: TaskSpec, selectTools: (task: TaskSpec) => string[], hooksExtension = HOOKS_EXTENSION): Promise<ValidTask> {
+  if (!spec || typeof spec.task !== 'string' || !spec.task.trim() || spec.task.length > 32000) throw new Error('Task brief must contain 1–32000 characters');
+  if (typeof spec.cwd !== 'string' || !isAbsolute(spec.cwd)) throw new Error('Task cwd must be absolute');
+  const cwd = await realpath(spec.cwd);
+  if (!(await stat(cwd)).isDirectory()) throw new Error('Task cwd must be a directory');
+  const model = typeof spec.model === 'string' ? withoutFastAlias(spec.model) : spec.model;
+  if (model !== undefined && (typeof model !== 'string' || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.:/-]+$/.test(model))) throw new Error('Model must be provider/model');
+  if (spec.thinking !== undefined && !thinkingLevel.test(spec.thinking)) throw new Error('Invalid thinking level');
+  if (spec.preset !== undefined && !['reader', 'writer'].includes(spec.preset)) throw new Error('Unknown preset');
+  const tools = selectTools(spec);
+  const timeout = validateTimeout(spec.timeout, 'Timeout');
+  if (spec.extensions !== undefined && (!Array.isArray(spec.extensions) || spec.extensions.length > 16)) throw new Error('Invalid extensions');
+  const extensions: string[] = [];
+  for (const path of spec.extensions ?? []) {
+    if (typeof path !== 'string' || !isAbsolute(path)) throw new Error('Extension paths must be absolute');
+    const canonical = await realpath(path);
+    if (!(await stat(canonical)).isFile()) throw new Error('Extension must be a file');
+    extensions.push(canonical);
+  }
+  let hooks: string;
+  try {
+    hooks = await realpath(hooksExtension);
+    if (!(await stat(hooks)).isFile()) throw new Error('not a file');
+  } catch (error) {
+    throw new Error(`Subagents do not start without the hooks extension at ${hooksExtension}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { ...spec, model, cwd, tools: [...tools], extensions: extensions.filter(path => path !== hooks), hooks, timeout };
 }
 
 export class SubagentRegistry {
@@ -107,6 +146,11 @@ export class SubagentRegistry {
     try {
       const admitted = await abortable(this.options.admission.queue(spec, admissionSignal, connectorBridge), admissionSignal);
       validated = admitted.task;
+      if (!validated || typeof validated.task !== 'string' || !validated.task.trim() || validated.task.length > 32000) throw new Error('Task brief must contain 1–32000 characters');
+      if (typeof validated.cwd !== 'string' || !isAbsolute(validated.cwd)) throw new Error('Task cwd must be absolute');
+      validateTimeout(validated.timeout, 'Timeout');
+      if (!Array.isArray(validated.extensions) || validated.extensions.length > 16) throw new Error('Invalid extensions');
+      if (validated.extensions.some(path => typeof path !== 'string' || !isAbsolute(path))) throw new Error('Extension paths must be absolute');
       connectorBridge = admitted.bridge;
       writer = admitted.writer;
       admissionSignal.throwIfAborted();
@@ -282,7 +326,7 @@ export class SubagentRegistry {
     };
     try {
       this.options.admission.launch(entry.spec);
-      const invocation = this.options.invocation?.(entry.spec) ?? piInvocation(entry.spec);
+      const invocation = this.options.invocation?.(entry.spec) ?? piInvocation(entry.spec, Boolean(entry.connectorBridge?.tools.length));
       entry.supervised = invocation.supervised;
       entry.process = spawn(invocation.command, invocation.args, {cwd: entry.spec.cwd, env: childEnv(invocation.env ?? process.env, {PI_SUBAGENT_TIMEOUT_MS: String(Math.max(10, entry.deadlineAt - Date.now()))}), detached: true, stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', entry.connectorBridge ? 'pipe' : 'ignore']});
       entry.process.stdout?.setEncoding('utf8');
@@ -377,11 +421,10 @@ export class SubagentRegistry {
   }
 }
 
-export function piInvocation(spec: ValidTask) {
+export function piInvocation(spec: ValidTask, connectors = false) {
   const args = ['--mode', 'json', '-p', '--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--tools', spec.tools.join(','), '--system-prompt', 'You are a delegated agent. Your only task context is the explicit brief below. Use only the configured tools and assigned workspace. Do not assume parent conversation context.'];
   if (spec.model) args.push('--model', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
-  const connectors = connectorTools(spec.tools).length > 0;
   args.push('-e', spec.hooks);
   if (connectors) args.push('-e', fileURLToPath(new URL('./connector-bridge.ts', import.meta.url)));
   for (const extension of new Set(spec.extensions)) args.push('-e', extension);

@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { assertChildTask, DelegationAdmission } from './scope.ts';
-import { runWorkflow } from './workflow.ts';
+import { assertChildTask } from './scope.ts';
+import { runFixtureWorkflow as runWorkflow, workflowFixture } from './test-support.ts';
 
 test('workflow rejects unapproved source, executes approved TS, and replays successful stages', async () => {
  const cwd = await mkdtemp(join(tmpdir(),'workflow-'));
@@ -86,7 +86,7 @@ test('abort cancels outstanding children and unfinished workflow calls cannot re
 test('replay requires explicit confirmation and validates cached child permissions', async () => {
  const cwd=await mkdtemp(join(tmpdir(),'workflow-replay-'));
  let calls=0;let checks=0;
- const admission = new DelegationAdmission({cwd:()=>cwd,tools:()=>['read','grep','find','ls','write','edit','bash']}).workflow();
+ const admission = workflowFixture(cwd);
  const base={cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'same',source:'return await api.spawn({task:"read"},"stable");',approve:async()=>true,spawn:async()=>{calls++;return 'done';},admission:{...admission,replay:async()=>{checks++;}}};
  try {
   await runWorkflow(base);

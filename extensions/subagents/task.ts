@@ -1,4 +1,3 @@
-import { thinkingPattern } from './thinking.ts';
 export type ConnectorGrants = Record<string, 'read' | 'write'>;
 export interface SelectionProvenance { config: string; profile: string; model: string; thinking: string }
 export interface TaskSpec {
@@ -24,8 +23,3 @@ export function validateTimeout(timeout: number | undefined, what: string): numb
     throw new Error(`${what} must be ${TIMEOUT_BOUNDS.minimum}–${TIMEOUT_BOUNDS.maximum} milliseconds`);
   return value;
 }
-const FAST_ALIAS = new RegExp(`^(openai(?:-codex)?\\/.+)~fast(?=:${thinkingPattern}$|$)`);
-export function withoutFastAlias(model: string): string {
-  return model.replace(FAST_ALIAS, '$1');
-}
-

@@ -1,11 +1,10 @@
-import { DelegationAdmission } from './scope.ts';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { runWorkflow } from './workflow.ts';
+import { runFixtureWorkflow as runWorkflow, workflowFixture } from './test-support.ts';
 import { withHost } from './test-support.ts';
 
 test('journal loading does not follow a substituted symlink', async () => {
@@ -45,7 +44,7 @@ test('a changed ancestor cannot substitute another file after read authorization
     await mkdir(data, {recursive: true}); await mkdir(outside);
     await writeFile(join(data, 'file'), 'allowed'); await writeFile(join(outside, 'file'), 'synthetic outside');
     await assert.rejects(runWorkflow({source: "return await api.readFile('data/file');", cwd, journalDirectory: join(root, 'journals'), policyIdentity: 'path', approve: async () => true,
-      admission: {...new DelegationAdmission({cwd:()=>cwd,tools:()=>['read']}).workflow(), read: async () => { await rm(data, {recursive: true}); await symlink(outside, data); }},
+      admission: {...workflowFixture(cwd), read: async () => { await rm(data, {recursive: true}); await symlink(outside, data); }},
       spawn: async () => { throw new Error('unused'); },
     }), /changed during authorization/);
   } finally { await rm(root, {recursive: true, force: true}); }

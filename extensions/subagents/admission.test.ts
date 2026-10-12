@@ -4,14 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { DelegationAdmission } from './scope.ts';
-import { createHash } from 'node:crypto';
 import { loadProfiles } from './profiles.ts';
-import { fixtureModelRegistry } from './test-support.ts';
+import { fixtureModelRegistry, admissionFixture } from './test-support.ts';
 
 test('admission rejects tools beyond the parent scope', async () => {
   const cwd = await realpath(await mkdtemp(join(tmpdir(), 'admission-')));
   try {
-    const admission = new DelegationAdmission({cwd: () => cwd, tools: () => ['read']});
+    const admission = admissionFixture({cwd: () => cwd, tools: () => ['read']}).admission;
     assert.throws(() => admission.direct({task: 'inspect', cwd, tools: ['bash']}), {message: 'Explicit child tools exceed parent permissions: bash. Activate these tools in the parent before delegating. For Pi MCP, set the selected tools\' toolExposure to direct in user-scoped mcp.json and /reload.'});
     assert.deepEqual((await admission.queue(admission.direct({task: 'inspect', cwd, preset: 'reader'}).task, new AbortController().signal)).task.tools, ['read']);
   } finally { await rm(cwd, {recursive: true, force: true}); }
@@ -22,8 +21,8 @@ test('connector admission distinguishes ungranted and uncallable tools', async (
   let grants: Record<string, 'read' | 'write'> = {};
   let exposure = 'direct';
   try {
-    const admission = new DelegationAdmission({cwd: () => cwd, tools: () => ['read', 'fixture_read'], grants: () => grants,
-      definitions: () => [{name: 'fixture_read', exposure}] as any});
+    const admission = admissionFixture({cwd: () => cwd, tools: () => ['read', 'fixture_read'], grants: () => grants,
+      definitions: () => [{name: 'fixture_read', exposure}] as any}).admission;
     assert.throws(() => admission.direct({task: 'inspect', tools: ['fixture_read']}), {message: 'Disallowed connector tools: fixture_read. Add exact read/write grants to user-scoped subagents.json and /reload.'});
     grants = {fixture_read: 'read'};
     exposure = 'hidden';
@@ -39,7 +38,7 @@ test('queue admission rejects reader writes and cwd escapes', async () => {
   await mkdir(cwd); await mkdir(outside);
   const signal = new AbortController().signal;
   try {
-    const admission = new DelegationAdmission({cwd: () => cwd, tools: () => ['read', 'bash']});
+    const admission = admissionFixture({cwd: () => cwd, tools: () => ['read', 'bash']}).admission;
     await assert.rejects(admission.queue(admission.direct({task: 'inspect', preset: 'reader', tools: ['bash']}).task, signal), {message: 'Reader preset cannot grant write tools: bash'});
     await assert.rejects(admission.queue(admission.direct({task: 'inspect', cwd: outside, tools: ['read']}).task, signal), {message: 'Path is outside parent workspace'});
   } finally { await rm(root, {recursive: true, force: true}); }
@@ -60,7 +59,7 @@ async function configured(run: (fixture: any) => Promise<void>) {
   try {
     await run({cwd, ctx, admission, signal: new AbortController().signal,
       setTools: (value: string[]) => {tools = value;}, setGrant: (value: 'read' | 'write') => {grants = {fixture_read: value};},
-      setConfig: () => {config = {...config, identity: 'changed'};}, setExposure: (value: string) => {exposure = value;},
+      setConfig: () => {config = {...config, identity: 'changed'};}, removeGrant: () => {grants = {};}, setExposure: (value: string) => {exposure = value;},
       setCwd: (value: string) => {parentCwd = value; ctx.cwd = value;}, executions: () => executions});
   } finally { await rm(cwd, {recursive: true, force: true}); }
 }
@@ -116,20 +115,57 @@ test('live queue and cached replay retain separate extension approvals', async (
   await writeFile(extension, 'export default () => {};');
   const titles: string[] = [], signal = new AbortController().signal;
   try {
-    const admission = new DelegationAdmission({cwd: () => cwd, tools: () => ['read'], approve: async title => {titles.push(title); return true;}});
+    const admission = admissionFixture({cwd: () => cwd, tools: () => ['read'], approve: async title => {titles.push(title); return true;}}).admission;
     const workflow = admission.workflow();
     const task = await workflow.admit({task: 'inspect', preset: 'reader', extensions: [extension]}, cwd);
     await admission.queue(task, signal);
     await workflow.replay(task, signal);
     assert.deepEqual(titles, ['Approve local child extensions', 'Approve workflow child extensions']);
-    const denied = new DelegationAdmission({cwd: () => cwd, tools: () => ['read'], approve: async () => false});
+    const denied = admissionFixture({cwd: () => cwd, tools: () => ['read'], approve: async () => false}).admission;
     await assert.rejects(denied.queue(task, signal), {message: 'Child extension loading was not approved', retryable: false});
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 
-test('workflow task signatures retain the pre-refactor validated shape and property order', async () => {
-  const admission = new DelegationAdmission({cwd: () => '/tmp', tools: () => ['read']});
-  const task = await admission.workflow().admit({task: 'compatibility', cwd: '/tmp', model: 'test/fixture', thinking: 'low', tools: ['read'], preset: 'reader'}, '/tmp');
-  const json = JSON.stringify(task).replace(task.hooks, '<hooks>');
-  assert.equal(createHash('sha256').update(json).digest('hex'), '87a92b23c6e0d9427fa1c749f32c525599a6bc1295d2d717fe0c584a1e4924f3');
+test('workflow task signatures retain the production shape and property order', async () => {
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), 'admission-signature-')));
+  try {
+    const admission = admissionFixture({cwd: () => cwd, tools: () => ['read']}).admission;
+    const task = await admission.workflow().admit({task: 'compatibility', cwd, model: 'test/fixture', thinking: 'low', tools: ['read'], preset: 'reader'}, cwd);
+    const json = JSON.stringify(task).replace(task.cwd, '<cwd>').replace(task.hooks, '<hooks>');
+    assert.equal(json, '{"task":"compatibility","cwd":"<cwd>","model":"test/fixture","thinking":"low","tools":["read"],"preset":"reader","profile":"fixture","configProvenance":{"config":"fixture-config","profile":"fixture","model":"explicit","thinking":"explicit"},"extensions":[],"hooks":"<hooks>","timeout":3600000}');
+  } finally { await rm(cwd, {recursive: true, force: true}); }
+});
+
+test('a removed connector grant is rejected at queue and forwarded execution', async () => configured(async ({ctx, admission, signal, removeGrant, executions}) => {
+  const request = admission.direct({task: 'inspect', tools: ['fixture_read']}, ctx);
+  removeGrant();
+  await assert.rejects(admission.queue(request.task, signal, request.bridge), /Unavailable or disallowed child tools: fixture_read/);
+  await assert.rejects(request.bridge.execute('fixture_read', {}, signal), /Disallowed connector tools: fixture_read/);
+  assert.equal(executions(), 0);
+}));
+
+test('model removal is rechecked at launch and live workflow tools stay bounded', async () => configured(async ({cwd, ctx, admission, signal}) => {
+  const request = admission.direct({task: 'inspect', tools: ['read']}, ctx);
+  const task = (await admission.queue(request.task, signal)).task;
+  const workflow = admission.workflow(ctx);
+  await assert.rejects(workflow.admit({task: 'inspect', tools: ['edit']}, cwd), /Explicit child tools exceed parent permissions: edit/);
+  ctx.modelRegistry.getAvailable = () => [];
+  assert.throws(() => admission.launch(task), /Subagent model openai-codex\/gpt-6-astra is unavailable/);
+}));
+
+test('cached extension approval retains the outer workflow signal', async () => {
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), 'admission-replay-signal-')));
+  const extension = join(cwd, 'child.ts');
+  await writeFile(extension, 'export default () => {};');
+  const outer = new AbortController(), inner = new AbortController();
+  let approvalSignal: AbortSignal | undefined;
+  try {
+    const fixture = admissionFixture({cwd: () => cwd, tools: () => ['read'], approve: async (_title, _request, signal) => {approvalSignal = signal; return true;}});
+    const workflow = fixture.admission.workflow(fixture.ctx, outer.signal);
+    const task = await workflow.admit({task: 'inspect', extensions: [extension]}, cwd);
+    inner.abort();
+    await workflow.replay(task, inner.signal);
+    assert.equal(approvalSignal, outer.signal);
+    assert.equal(approvalSignal?.aborted, false);
+  } finally { await rm(cwd, {recursive: true, force: true}); }
 });

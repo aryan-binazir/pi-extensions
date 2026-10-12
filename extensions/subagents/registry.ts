@@ -9,8 +9,11 @@ import { TIMEOUT_BOUNDS, validateTimeout, type SelectionProvenance, type TaskSpe
 import type { DelegationAdmission } from './scope.ts';
 import type {Duplex} from 'node:stream';
 import {attachConnectorBridge, type ConnectorBridge} from './connector-bridge.ts';
+import { clipJson, taskView } from './presentation.ts';
 
+export type CancellationCause = 'user' | 'cancel-all' | 'timeout' | 'shutdown' | 'stall' | 'workflow';
 export interface TaskResult {
+  cancellationCause?: CancellationCause;
   id: string;
   owner: 'parent' | 'workflow';
   profile?: string;
@@ -52,12 +55,23 @@ interface Entry {
   connectorController: AbortController;
   closeConnectorBridge?: () => void;
 }
+interface Activity {
+  tasks?: 'changed' | 'completed';
+  tracker?: 'update' | 'invalidate' | 'stop';
+  background?: {id: string; active: boolean};
+}
+interface TrackedRun {
+  controller: AbortController;
+  done: Promise<void>;
+}
 interface RegistryOptions {
   concurrency?: number;
   admission: Pick<DelegationAdmission, 'queue' | 'launch'>;
-  invocation?: (spec: ValidTask) => { command: string; args: string[]; env?: NodeJS.ProcessEnv; supervised?: boolean };
+  invocation?: (spec: ValidTask) => { command: string; args: string[]; env?: NodeJS.ProcessEnv; supervised?: boolean } | ChildProcess;
   onUpdate?: (task: TaskResult) => void;
   onComplete?: (task: TaskResult) => void;
+  activity?: (event: Activity) => void;
+  notify?: (content: string, options: {triggerTurn: boolean; deliverAs: 'followUp' | 'nextTurn'}) => void;
 }
 const CAP = 64 * 1024;
 const RETAINED = 50;
@@ -88,6 +102,7 @@ function cloneResult(result: TaskResult): TaskResult {
   if (usage.cost) snapshot.usage.cost = {...usage.cost};
   if (result.usageIncomplete !== undefined) snapshot.usageIncomplete = result.usageIncomplete;
   if (result.error !== undefined) snapshot.error = result.error;
+  if (result.cancellationCause !== undefined) snapshot.cancellationCause = result.cancellationCause;
   if (result.notificationError !== undefined) snapshot.notificationError = result.notificationError;
   return snapshot;
 }
@@ -123,6 +138,12 @@ export async function prepareTask(spec: TaskSpec, selectTools: (task: TaskSpec) 
 
 export class SubagentRegistry {
   private entries = new Map<string, Entry>();
+  private notices: ReturnType<typeof taskView>[] = [];
+  private overflowNotices = 0;
+  private noticeTriggersTurn = false;
+  private noticeTimer?: NodeJS.Timeout;
+  private runs = new Set<TrackedRun>();
+  private cancellingAll = false;
   private running = 0;
   private writers = new Set<string>();
   private closed = false;
@@ -133,6 +154,7 @@ export class SubagentRegistry {
     this.limit = options.concurrency ?? 8;
     if (!Number.isInteger(this.limit) || this.limit < 1 || this.limit > 16) throw new Error('Concurrency must be 1–16');
   }
+  get isShutdown(): boolean { return this.closed; }
   async spawn(spec: TaskSpec, signal?: AbortSignal, owner: TaskResult['owner'] = 'parent', connectorBridge?: ConnectorBridge): Promise<TaskHandle> {
     signal?.throwIfAborted();
     if (this.closed) throw new Error('Registry is shut down');
@@ -170,13 +192,17 @@ export class SubagentRegistry {
       connectorBridge, connectorController: new AbortController(),
     };
     this.entries.set(id, entry);
-    entry.timer = setTimeout(() => this.cancel(id, true), Math.max(0, deadlineAt - Date.now()));
+    entry.timer = setTimeout(() => this.cancelEntry(id, 'timeout'), Math.max(0, deadlineAt - Date.now()));
     if (signal) {
-      const abort = () => this.cancel(id);
+      const abort = () => { this.cancelEntry(id, owner === 'workflow' ? 'workflow' : 'user'); this.emitActivity({tracker: 'invalidate'}); };
       signal.addEventListener('abort', abort, {once: true});
       entry.detachSignal = () => signal.removeEventListener('abort', abort);
     }
     this.pump();
+    this.emitActivity({tasks: 'changed', tracker: 'update'});
+    this.emitActivity({background: {id, active: true}});
+    void done.then(task => this.emitActivity({tasks: 'changed', tracker: task.status === 'cancelled' ? 'invalidate' : 'update'}));
+    void done.then(() => this.emitActivity({background: {id, active: false}}));
     return { id, done };
   }
   list(offset = 0, limit = this.entries.size): TaskResult[] {
@@ -201,16 +227,39 @@ export class SubagentRegistry {
     return false;
   }
   get(id: string): TaskResult | undefined { const entry = this.entries.get(id); return entry && cloneResult(entry.result); }
-  notificationFailed(ids: string[], error: unknown): void {
+  private notificationFailed(ids: string[], error: unknown): void {
     for (const id of ids) {
       const entry = this.entries.get(id);
       if (entry) entry.result.notificationError = `Completion notification failed: ${String(error).slice(0, 1000)}`;
     }
   }
-  cancel(id: string, timeout = false): boolean {
+  async track<T>(run: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    const controller = new AbortController();
+    let settle!: () => void;
+    const tracked: TrackedRun = {controller, done: new Promise<void>(resolve => { settle = resolve; })};
+    this.runs.add(tracked);
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, {once: true});
+    try { return await run(controller.signal); }
+    finally {
+      controller.abort();
+      this.runs.delete(tracked);
+      signal?.removeEventListener('abort', abort);
+      settle();
+    }
+  }
+  cancel(id: string): boolean {
+    const cancelled = this.cancelEntry(id, 'user');
+    if (cancelled) this.options.activity?.({tracker: 'invalidate'});
+    return cancelled;
+  }
+  private cancelEntry(id: string, cause: CancellationCause): boolean {
     const entry = this.entries.get(id);
     if (!entry || entry.finished || !['queued', 'running'].includes(entry.result.status)) return false;
     clearTimeout(entry.timer);
+    entry.result.cancellationCause = this.closed ? 'shutdown' : cause;
+    const timeout = cause === 'timeout';
     entry.connectorController.abort();
     entry.closeConnectorBridge?.();
     entry.result.status = timeout ? (entry.result.status === 'queued' ? 'expired-in-queue' : 'timed-out') : 'cancelled';
@@ -224,20 +273,61 @@ export class SubagentRegistry {
     return true;
   }
   wait(id: string): Promise<TaskResult> | undefined { return this.entries.get(id)?.done; }
-  async cancelAll(): Promise<number> {
+  async cancelAll(): Promise<{cancelled: boolean; count: number}> {
+    this.cancellingAll = true;
+    this.options.activity?.({tracker: 'stop'});
+    const runs = [...this.runs];
+    const activeRuns = runs.filter(run => !run.controller.signal.aborted);
     this.admissions.abort(new Error('All tasks cancelled'));
     this.admissions = new AbortController();
     const entries = [...this.entries.values()].filter(entry => !entry.finished);
     let count = 0;
-    for (const entry of entries) if (this.cancel(entry.result.id)) count++;
-    await Promise.all(entries.map(entry => entry.done));
-    return count;
+    try {
+      for (const entry of entries) if (this.cancelEntry(entry.result.id, 'cancel-all')) count++;
+      for (const run of activeRuns) run.controller.abort();
+      await Promise.all(entries.map(entry => entry.done));
+      await Promise.allSettled(runs.map(run => run.done));
+      return {cancelled: count > 0 || activeRuns.length > 0, count};
+    } finally {
+      this.cancellingAll = false;
+      if (!this.closed) this.emitActivity({tracker: 'update'});
+    }
   }
   async shutdown(): Promise<void> {
     this.closed = true;
+    this.options.activity?.({tasks: 'changed', tracker: 'stop'});
+    clearTimeout(this.noticeTimer); this.noticeTimer = undefined; this.notices = []; this.overflowNotices = 0; this.noticeTriggersTurn = false;
+    for (const run of this.runs) run.controller.abort();
     this.lifecycle.abort(new Error('Registry is shut down'));
-    for (const entry of this.entries.values()) this.cancel(entry.result.id);
+    for (const entry of this.entries.values()) this.cancelEntry(entry.result.id, 'shutdown');
     await Promise.all([...this.entries.values()].map(e => e.done));
+    await Promise.allSettled([...this.runs].map(run => run.done));
+  }
+  private emitActivity(event: Activity): void {
+    if (this.closed || this.cancellingAll) event = {...event, tracker: undefined};
+    this.options.activity?.(event);
+  }
+  private queueNotice(task: TaskResult): void {
+    if (this.closed || task.owner !== 'parent' || task.cancellationCause === 'cancel-all' || !this.options.notify) return;
+    this.noticeTriggersTurn ||= task.status !== 'cancelled';
+    if (this.notices.length < 16) this.notices.push(taskView(task, 4096)); else this.overflowNotices++;
+    this.noticeTimer ??= setTimeout(() => this.flushNotices(), 250);
+  }
+  private flushNotices(): void {
+    const pending = this.notices;
+    const count = pending.length + this.overflowNotices;
+    const triggerTurn = this.noticeTriggersTurn;
+    this.notices = []; this.overflowNotices = 0; this.noticeTriggersTurn = false; this.noticeTimer = undefined;
+    if (this.closed || !count) return;
+    const tasks: ReturnType<typeof taskView>[] = [];
+    for (const notice of pending) {
+      const output = clipJson(notice.output, 1024, true);
+      const compact = {...notice, output, outputTruncated: notice.outputTruncated || output.length < notice.output.length};
+      if (Buffer.byteLength(JSON.stringify([...tasks, compact]), 'utf8') <= 12000) tasks.push(compact);
+    }
+    const value = count === 1 ? pending[0] : {tasks, additionalCompletions: count - tasks.length};
+    try { this.options.notify?.(JSON.stringify(value), {triggerTurn, deliverAs: triggerTurn ? 'followUp' : 'nextTurn'}); }
+    catch (error) { this.notificationFailed(pending.map(task => task.id), error); }
   }
   private signal(entry: Entry, signal: NodeJS.Signals) {
     if (!entry.process?.pid || entry.sigkillAttempted) return;
@@ -253,7 +343,7 @@ export class SubagentRegistry {
     }
   }
   private start(entry: Entry) {
-    if (Date.now() >= entry.deadlineAt) { this.cancel(entry.result.id, true); return; }
+    if (Date.now() >= entry.deadlineAt) { this.cancelEntry(entry.result.id, 'timeout'); return; }
     this.running++;
     if (entry.writer) this.writers.add(entry.spec.cwd);
     entry.result.status = 'running';
@@ -290,7 +380,7 @@ export class SubagentRegistry {
           toolCalls.delete(event.toolCallId);
           consecutiveFailures = fingerprint ? (fingerprint === failedCall ? consecutiveFailures + 1 : 1) : 0;
           failedCall = fingerprint;
-          if (consecutiveFailures >= 4 && this.cancel(entry.result.id)) {
+          if (consecutiveFailures >= 4 && this.cancelEntry(entry.result.id, 'stall')) {
             entry.result.status = 'stalled';
             entry.result.error = `Stopped after 4 identical consecutive failed tool calls: ${String(event.toolName).slice(0, 100)}`;
           }
@@ -318,17 +408,18 @@ export class SubagentRegistry {
           assistantError = message.stopReason === 'error' || message.stopReason === 'aborted'
             ? String(message.errorMessage ?? message.stopReason).slice(0, CAP) : undefined;
         }
-        if (this.options.onUpdate && ['message_update', 'message_end'].includes(event.type) && Date.now() - lastUpdateAt >= 100) {
+        if ((this.options.onUpdate || this.options.activity) && ['message_update', 'message_end'].includes(event.type) && Date.now() - lastUpdateAt >= 100) {
           lastUpdateAt = Date.now();
-          this.options.onUpdate(cloneResult(entry.result));
+          this.options.onUpdate?.(cloneResult(entry.result));
+          this.emitActivity({tasks: 'changed'});
         }
       } catch {}
     };
     try {
       this.options.admission.launch(entry.spec);
       const invocation = this.options.invocation?.(entry.spec) ?? piInvocation(entry.spec, Boolean(entry.connectorBridge?.tools.length));
-      entry.supervised = invocation.supervised;
-      entry.process = spawn(invocation.command, invocation.args, {cwd: entry.spec.cwd, env: childEnv(invocation.env ?? process.env, {PI_SUBAGENT_TIMEOUT_MS: String(Math.max(10, entry.deadlineAt - Date.now()))}), detached: true, stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', entry.connectorBridge ? 'pipe' : 'ignore']});
+      entry.supervised = 'command' in invocation && invocation.supervised;
+      entry.process = 'command' in invocation ? spawn(invocation.command, invocation.args, {cwd: entry.spec.cwd, env: childEnv(invocation.env ?? process.env, {PI_SUBAGENT_TIMEOUT_MS: String(Math.max(10, entry.deadlineAt - Date.now()))}), detached: true, stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', entry.connectorBridge ? 'pipe' : 'ignore']}) : invocation;
       entry.process.stdout?.setEncoding('utf8');
       entry.process.stderr?.setEncoding('utf8');
       entry.process.stdout?.on('data', chunk => {
@@ -366,7 +457,7 @@ export class SubagentRegistry {
       entry.process.on('error', error => { entry.result.error = error.message; sawError = true; });
       entry.process.on('close', (exitCode, signal) => {
         const reported = /^\d{1,3}\n$/.test(control) && Number(control) <= 255 ? Number(control) : undefined;
-        const code = invocation.supervised && signal === 'SIGKILL' && reported !== undefined ? reported : exitCode;
+        const code = entry.supervised && signal === 'SIGKILL' && reported !== undefined ? reported : exitCode;
         if (pending) consume(pending);
         if (assistantError && !entry.result.error) entry.result.error = assistantError;
         if (entry.result.status === 'running') {
@@ -405,7 +496,7 @@ export class SubagentRegistry {
     const heldRunSlot = Boolean(entry.process) || entry.result.status === 'failed';
     if (heldRunSlot) { this.running--; if (entry.writer) this.writers.delete(entry.spec.cwd); }
     const snapshot = cloneResult(entry.result);
-    try { this.options.onComplete?.(snapshot); } catch (error) { entry.result.notificationError = `Completion notification failed: ${String(error).slice(0,1000)}`; }
+    try { this.options.onComplete?.(snapshot); this.emitActivity({tasks: 'completed'}); this.queueNotice(snapshot); } catch (error) { entry.result.notificationError = `Completion notification failed: ${String(error).slice(0,1000)}`; }
     finally {
       entry.resolve(cloneResult(entry.result));
       let finished = 0;

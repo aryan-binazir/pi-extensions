@@ -1,6 +1,6 @@
 import { readFile, realpath } from 'node:fs/promises';
 import { basename, dirname, join, sep } from 'node:path';
-import { resolveToolPath } from '../worktree/routing.ts';
+import { resolveToolPath } from '../tool-path.ts';
 import { enabledIn, parseSwitches, unknownIds } from './config.ts';
 import { invocations } from './shell.ts';
 import type { ToolCall } from './types.ts';

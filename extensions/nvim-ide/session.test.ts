@@ -53,7 +53,6 @@ for (const composition of ['isolated', 'package'] as const) test(`real Pi ${comp
     assert.equal(requests.length, 1);
     assert.ok(requests[0].includes('INCLUDED_IN_REQUEST'));
     if (composition === 'package') {
-      assert.ok(requests[0].includes('Active worktree directory:'));
       assert.ok(requests[0].includes('Default profile'));
     }
     assert.ok(!requests[0].includes('NEVER_SUBMITTED'));

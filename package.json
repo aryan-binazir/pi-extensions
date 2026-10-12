@@ -26,7 +26,6 @@
       "./extensions/prompt-stash/index.ts",
       "./extensions/escape-continue/index.ts",
       "./extensions/subagents/index.ts",
-      "./extensions/worktree/index.ts",
       "./extensions/computer-use/index.ts",
       "./extensions/fast-mode/index.ts",
       "./extensions/auto-caffeinate/index.ts",

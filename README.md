@@ -60,14 +60,13 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | Prompt stash | `Ctrl+S` stashes or swaps the main editor draft. |
 | [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape stops the active run and starts the next queued user message; no queued user message means stop. |
 | [Subagents](docs/subagents.md) | Background workers, model profiles, approved TypeScript workflows. |
-| [Worktree](docs/extension-behavior.md#worktrees) | `/worktree` routes shell and relative file tools to another checkout. |
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
 | [Auto Permissions status](docs/agent-setup.md#footer-with-pr-links) | Compact footer with the separately installed Bash-approval plugin's status and a clickable link to the branch's GitHub PR. |
 | [Neovim IDE](docs/nvim-ide.md) | Connects to claudecode.nvim: bounded request snapshots, reliable editor sends, editor tools, and coalesced live follow with reconnect replay. |
 
-See [session/editor behavior and worktree boundaries](docs/extension-behavior.md)
+See [session and editor behavior](docs/extension-behavior.md)
 for operational details. Prompt stash's shortcut applies only to the main editor;
 Pi's model/thinking save bindings remain unchanged.
 

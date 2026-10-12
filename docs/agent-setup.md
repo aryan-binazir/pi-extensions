@@ -277,8 +277,7 @@ change. Without a PR, `gh`, sign-in or network, the footer shows no link and no
 error. gh searches the repository it resolves as the base (it prefers an
 `upstream` remote) for a PR whose head branch has the local branch's name; PRs
 in other repositories, and local branches tracking a differently named remote
-branch, show no link. The link follows Pi's branch for the session directory, not a
-checkout selected mid-session with `/worktree`.
+branch, show no link. The link follows Pi's branch for the session directory.
 
 Completion: `auto-permissions-status` is selected and
 `gh auth status --active --hostname github.com` reports a signed-in account. Ask Ar to run `/reload`; a branch with an open PR then

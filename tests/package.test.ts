@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { test } from 'node:test';
 import { createAgentSession, ModelRuntime, SessionManager, DefaultPackageManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
-import { setActiveCwd } from '../extensions/worktree/routing.ts';
 
 const root = resolve(import.meta.dirname, '..');
 const expected = new Map<string, { tools: string[]; commands: string[]; shortcuts: string[] }>([
@@ -17,7 +16,6 @@ const expected = new Map<string, { tools: string[]; commands: string[]; shortcut
   ['prompt-stash', {tools: [], commands: [], shortcuts: []}],
   ['escape-continue', {tools: [], commands: [], shortcuts: []}],
   ['subagents', {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: []}],
-  ['worktree', {tools: ['bash'], commands: ['worktree'], shortcuts: []}],
   ['computer-use', {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []}],
   ['fast-mode', {tools: [], commands: ['fast'], shortcuts: []}],
   ['auto-caffeinate', {tools: [], commands: [], shortcuts: []}],
@@ -118,21 +116,15 @@ async function packageSession(run: (h: { session: any; runner: any; temp: string
   }
 }
 
-test('todo context composes with structured subagent and worktree prompt sections', async () => packageSession(async ({session, runner, temp}) => {
+test('todo context composes with the structured subagent prompt section', async () => packageSession(async ({session, runner}) => {
   await session.getToolDefinition('todo_write')!.execute('t1', {todos: [{content: 'Composed task', status: 'pending'}]}, undefined, undefined, runner.createToolContext('t1', undefined));
-  const checkout = join(temp, 'checkout'); await mkdir(checkout);
-  const sessionId = session.sessionManager.getSessionId();
-  setActiveCwd(temp, checkout, sessionId);
-  try {
-    const result = await runner.emitBeforeAgentStart('hi', undefined, {customPrompt: 'BASE_PROMPT'});
-    const context = await runner.emitContext([]);
-    assert.match(context.at(-1)!.content, /\[pending\] Composed task/);
-    assert.equal(result.systemPromptOptions.forceSystemPrompt, undefined);
-    assert.equal(result.systemPromptOptions.customPrompt, 'BASE_PROMPT');
-    assert.match(result.systemPromptOptions.sections.subagent_profiles, /Default profile \(used when profile is omitted\): implement/);
-    assert.match(result.systemPromptOptions.sections.active_worktree, /Active worktree directory:/);
-    assert.doesNotMatch(JSON.stringify(result.systemPromptOptions.sections), /Composed task/);
-  } finally { setActiveCwd(temp, undefined, sessionId); }
+  const result = await runner.emitBeforeAgentStart('hi', undefined, {customPrompt: 'BASE_PROMPT'});
+  const context = await runner.emitContext([]);
+  assert.match(context.at(-1)!.content, /\[pending\] Composed task/);
+  assert.equal(result.systemPromptOptions.forceSystemPrompt, undefined);
+  assert.equal(result.systemPromptOptions.customPrompt, 'BASE_PROMPT');
+  assert.match(result.systemPromptOptions.sections.subagent_profiles, /Default profile \(used when profile is omitted\): implement/);
+  assert.doesNotMatch(JSON.stringify(result.systemPromptOptions.sections), /Composed task/);
 }));
 
 test('hooks block before a later package such as Auto Permissions sees the call, and allowed calls still reach it', async () => {

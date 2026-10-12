@@ -1,6 +1,5 @@
 import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { getActiveCwd } from '../worktree/routing.ts';
 import { catalog } from './catalog/index.ts';
 import { loadSwitches } from './config.ts';
 import { createProtection } from './protection.ts';
@@ -11,7 +10,6 @@ export interface HooksOptions {
   configPath: string;
 }
 
-const activeCwd = (ctx: ExtensionContext) => getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId());
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const label = (id: string, text: string) => `[hooks: ${id}] ${text}`;
 const usableWhileSwitchesAreBroken = new Set(['read', 'grep', 'find', 'ls', 'questionnaire']);
@@ -38,7 +36,7 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
     return catalog.filter((hook): hook is T => hook.type === type && enabled.has(hook.id));
   };
   const toolCall = (event: { toolName: string; input: unknown }, ctx: ExtensionContext): ToolCall =>
-    ({ toolName: event.toolName, input: event.input as Record<string, unknown>, cwd: activeCwd(ctx) });
+    ({ toolName: event.toolName, input: event.input as Record<string, unknown>, cwd: ctx.cwd });
 
   return function hooks(pi: ExtensionAPI) {
     pi.on('tool_call', async (event, ctx) => {
@@ -80,7 +78,7 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
       const gates = await switchedOn<GateHook>('gate', ctx).catch(() => []);
       const entries = [...event.entries];
       for (const hook of gates) {
-        const { said, failed } = await ask(() => hook.check({ cwd: activeCwd(ctx), signal: ctx.signal }));
+        const { said, failed } = await ask(() => hook.check({ cwd: ctx.cwd, signal: ctx.signal }));
         if (failed !== undefined) entries.push(gateMessage(hook.id, `The gate failed and was skipped: ${failed}`));
         if (!said) continue;
         if (continuationsThisPrompt >= maxGateContinuations) {

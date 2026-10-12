@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import test from 'node:test';
 import subagents from './index.ts';
 import { until, withHost } from './test-support.ts';
-import { setActiveCwd } from '../worktree/routing.ts';
 
 const pi = `if(process.argv.at(-1)==='hold')setInterval(()=>{},1000);else console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify(process.argv.slice(2))}]}}));`;
 
@@ -25,24 +24,20 @@ function fixture(run: (f: any) => Promise<void>) {
       assert.equal(value.status, 'succeeded', JSON.stringify(value));
       return value;
     };
-    try {
-      await run({
-        cwd, ctx, tools, hooks, execute,
-        global: join(host.agentDir, 'subagents.json'),
-        local: join(cwd, '.pi/subagents.local.json'),
-        put: (path: string, value: unknown) => writeFile(path, JSON.stringify(value)),
-        direct,
-        workflow: async (input: any) => (await execute('workflow', {source: `return await api.spawn(${JSON.stringify(input)},'stage');`})).details,
-        prompt: async () => {
-          const options = {sections: {} as Record<string, string>};
-          await hooks.get('before_agent_start')({systemPromptOptions: options}, ctx);
-          return options.sections.subagent_profiles;
-        },
-        reload: async () => { await host.shutdown({reason: 'reload'}); await host.start({reason: 'reload'}); },
-      });
-    } finally {
-      setActiveCwd(cwd, undefined, cwd);
-    }
+    await run({
+      cwd, ctx, tools, hooks, execute,
+      global: join(host.agentDir, 'subagents.json'),
+      local: join(cwd, '.pi/subagents.local.json'),
+      put: (path: string, value: unknown) => writeFile(path, JSON.stringify(value)),
+      direct,
+      workflow: async (input: any) => (await execute('workflow', {source: `return await api.spawn(${JSON.stringify(input)},'stage');`})).details,
+      prompt: async () => {
+        const options = {sections: {} as Record<string, string>};
+        await hooks.get('before_agent_start')({systemPromptOptions: options}, ctx);
+        return options.sections.subagent_profiles;
+      },
+      reload: async () => { await host.shutdown({reason: 'reload'}); await host.start({reason: 'reload'}); },
+    });
   });
 }
 
@@ -89,17 +84,15 @@ test('invalid snapshot blocks direct and workflow until reload repairs it', asyn
   await reload(); assert.equal((await direct({task: 'yes'})).thinking, 'medium');
 }));
 
-test('trust revocation and routed cwd drop local overrides without transferring trust', async () => fixture(async ({local, put, reload, direct, ctx, cwd, prompt}) => {
+test('trust revocation drops local overrides and explicit child cwd uses parent profiles', async () => fixture(async ({local, put, reload, direct, ctx, cwd, prompt}) => {
   await put(local, {profiles: {implement: {thinking: 'high'}}}); await reload();
   assert.equal((await direct({task: 'trusted'})).thinking, 'high');
   ctx.isProjectTrusted = () => false;
   assert.equal((await direct({task: 'untrusted'})).thinking, 'medium');
-  ctx.isProjectTrusted = () => true;
   const routed = join(cwd, 'checkout'); await mkdir(join(routed, '.pi'), {recursive: true});
   await put(join(routed, '.pi/subagents.local.json'), {profiles: {implement: {model: 'test/fixture', thinking: 'off'}}});
-  setActiveCwd(cwd, routed, cwd);
   assert.match(await prompt(), /implement: openai-codex\/gpt-6-astra \/ medium/);
-  const task = await direct({task: 'routed'}); assert.equal(task.thinking, 'medium'); assert.equal(task.cwd, await realpath(routed));
+  const task = await direct({task: 'other checkout', cwd: routed}); assert.equal(task.thinking, 'medium'); assert.equal(task.cwd, await realpath(routed));
 }));
 
 test('both public spawn boundaries reject unknown fields/profiles and unavailable models; replay rechecks availability', async () => fixture(async ({execute, workflow, ctx}) => {
@@ -119,7 +112,7 @@ test('workflow captures inherited parent selection and aborts new stages after w
   const value = await execute('workflow', {source: "return await api.spawn({task:'inherit',model:'inherit'},'one');"});
   assert.equal(value.details.model, 'test/selected'); assert.equal(value.details.thinking, 'medium');
   const routed = join(cwd, 'other'); await mkdir(routed);
-  ctx.ui.confirm = async () => { setActiveCwd(cwd, routed, cwd); return true; };
+  ctx.ui.confirm = async () => { ctx.cwd = routed; return true; };
   await assert.rejects(execute('workflow', {source: "return await api.spawn({task:'moved'},'moved');"}), /configuration or workspace changed/);
   ctx.ui.confirm = originalConfirm;
 }));

@@ -4,7 +4,6 @@ import { truncateToWidth } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { ALL_TOOLS, assertChildTask, assertToolSelection, delegationScope, assertWorkflowRead } from './scope.ts';
 import type {ConnectorBridge} from './connector-bridge.ts';
-import { getActiveCwd } from '../worktree/routing.ts';
 import { piInvocation, SubagentRegistry, TIMEOUT_BOUNDS, type TaskSpec } from './registry.ts';
 import { thinkingPattern } from './thinking.ts';
 import { runWorkflow } from './workflow.ts';
@@ -60,7 +59,7 @@ export default function subagents(pi: ExtensionAPI): void {
   const parent = () => {
     const registered = pi.getAllTools?.();
     return {
-      cwd: getActiveCwd(context?.cwd ?? process.cwd(), context?.sessionManager.getSessionId()), tools: pi.getActiveTools(), delegatedTools: snapshot?.delegatedTools,
+      cwd: context?.cwd ?? process.cwd(), tools: pi.getActiveTools(), delegatedTools: snapshot?.delegatedTools,
       registeredTools: registered?.map(tool => tool.name),
       callableTools: registered?.filter(tool => ['direct', 'deferred', 'codemode', 'codemode-deferred'].includes(tool.exposure ?? 'direct')).map(tool => tool.name),
       builtinTools: registered?.filter(tool => tool.sourceInfo?.path.startsWith('builtin:') && tool.sourceInfo.path !== 'builtin:mcp').map(tool => tool.name),
@@ -188,7 +187,7 @@ export default function subagents(pi: ExtensionAPI): void {
   let configError: Error | undefined;
   let locationKey = '';
   const configFor = (ctx: ExtensionContext, reload = false): ProfileConfig => {
-    const location = profileLocation(ctx, getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()));
+    const location = profileLocation(ctx, ctx.cwd);
     const key = JSON.stringify(location);
     if (reload || key !== locationKey) {
       locationKey = key; snapshot = undefined; configError = undefined;
@@ -203,7 +202,7 @@ export default function subagents(pi: ExtensionAPI): void {
     assertTaskFields(task);
     if (Array.isArray(task.tools) && task.tools.every(name => typeof name === 'string')) assertToolSelection(task.tools, parent());
     if (task.cwd !== undefined && typeof task.cwd !== 'string') throw new Error('Invalid child cwd');
-    return resolveProfile({...task, cwd: resolve(getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()), task.cwd ?? '.')}, config, ctx);
+    return resolveProfile({...task, cwd: resolve(ctx.cwd, task.cwd ?? '.')}, config, ctx);
   };
   pi.on('before_agent_start', (event, ctx) => {
     if (!pi.getActiveTools().some(tool => tool === 'subagent' || tool === 'workflow')) return;
@@ -301,7 +300,7 @@ export default function subagents(pi: ExtensionAPI): void {
       workflows.add(controller);
       const abort = () => controller.abort();
       signal?.addEventListener('abort', abort, { once: true });
-      const cwd = getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId());
+      const cwd = ctx.cwd;
       try {
         const config = configFor(ctx);
         const selectionContext = {model: ctx.model, thinkingLevel: ctx.thinkingLevel, modelRegistry: ctx.modelRegistry};
@@ -313,7 +312,7 @@ export default function subagents(pi: ExtensionAPI): void {
           defaultTask: {model: ctx.model && `${ctx.model.provider}/${ctx.model.id}`, thinking: ctx.thinkingLevel},
           profileIdentity: config.identity,
           normalizeTask: task => {
-            if (configFor(ctx).identity !== config.identity || getActiveCwd(ctx.cwd, ctx.sessionManager.getSessionId()) !== cwd) throw new Error('Workflow configuration or workspace changed; restart workflow');
+            if (configFor(ctx).identity !== config.identity || ctx.cwd !== cwd) throw new Error('Workflow configuration or workspace changed; restart workflow');
             if (Array.isArray(task.tools) && task.tools.every(name => typeof name === 'string')) assertToolSelection(task.tools, parent());
             return resolveProfile(task, config, selectionContext);
           },

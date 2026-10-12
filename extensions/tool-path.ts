@@ -1,27 +1,8 @@
 import { isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-// The extension loader and SDK consumers can have distinct module caches.
-const key = Symbol.for('pi.agent-workflows.active-cwd.v1');
-const registry = globalThis as unknown as Record<symbol, Map<string, string>>;
-const paths = registry[key] ??= new Map<string, string>();
-let memoCwd: string | undefined, memoSession: string | undefined, memoKey = '';
-const identity = (cwd: string, sessionId?: string) => {
-  if (cwd === memoCwd && sessionId === memoSession) return memoKey;
-  const computed = JSON.stringify([resolve(cwd), sessionId ?? 'default']);
-  const resolveIgnoresProcessCwd = isAbsolute(cwd);
-  if (resolveIgnoresProcessCwd) { memoCwd = cwd; memoSession = sessionId; memoKey = computed; }
-  return computed;
-};
-export function getActiveCwd(originalCwd: string, sessionId?: string): string { return paths.get(identity(originalCwd, sessionId)) ?? originalCwd; }
-export function setActiveCwd(originalCwd: string, cwd?: string, sessionId?: string): void {
-  if (cwd) paths.set(identity(originalCwd, sessionId), resolve(cwd)); else paths.delete(identity(originalCwd, sessionId));
-}
 
 const unicodeSpaces = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
-// An empty, "." or ".." segment is exactly what normalizeString rewrites, so a
-// POSIX path with none is already its own path.resolve() output and joining two
-// such paths with a separator yields the resolve() of the pair.
 const unnormalizedAbsolute = /\/(?:\.\.?)?(?:\/|$)/;
 const unnormalizedRelative = /(?:^|\/)(?:\.\.?)?(?:\/|$)/;
 const posix = process.platform !== 'win32';
@@ -34,9 +15,6 @@ function joinable(cwd: string): boolean {
   return true;
 }
 
-/** Pi 0.85.1 utils/paths normalizePath + tools/path-utils resolveToCwd semantics.
- * The SDK does not publicly export these helpers.
- */
 export function resolveToolPath(raw: string, cwd: string): string {
   let path = raw.replace(unicodeSpaces, ' ');
   if (path.startsWith('@')) path = path.slice(1);

@@ -254,8 +254,7 @@ Guidance on which one to choose lives in the shared
 globally. The extension contributes the effective profile catalog through the structured
 `subagent_profiles` prompt section, using the same resolver as the read-only
 CLI—no subprocess is launched during prompt setup. It does not force-replace the
-system prompt, so other sections such as active-worktree notices and submitted
-editor snapshots remain visible to providers.
+system prompt, so other sections such as submitted editor snapshots remain visible to providers.
 
 Inspect the configuration from this checkout:
 
@@ -341,8 +340,6 @@ Snapshot lifetime and provenance:
 
 - The effective settings snapshot lasts until session start/reload, or an active
   cwd/trust change. Local settings are read only at that cwd, never ancestors.
-- A routed worktree cannot reuse the original session's trust: its local settings
-  are excluded until the worktree is opened as Pi's own trusted session cwd.
 - Local files are machine-owned and gitignored; this does not untrack files already
   committed. Settings symlinks and non-regular files are rejected.
 - `subagent_status` includes each task's profile, resolved model/thinking, bounded

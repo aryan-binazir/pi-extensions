@@ -9,7 +9,6 @@ import {Type} from 'typebox';
 import subagents from '../extensions/subagents/index.ts';
 import {until} from '../extensions/subagents/test-support.ts';
 import {SubagentRegistry} from '../extensions/subagents/registry.ts';
-import {setActiveCwd} from '../extensions/worktree/routing.ts';
 
 const read = 'claude_jira_get_issue', write = 'claude_jira_update_issue';
 const request = (name = read, args: Record<string, unknown> = {issueKey: 'BBA-42'}, delay = 0) => JSON.stringify({name, args, delay});
@@ -131,23 +130,6 @@ for (const [runtime, binary] of [['SDK', undefined], ['installed Pi', process.en
   }, {binary}));
 }
 
-test('switching the parent workspace revokes connector calls even with identical settings', async () => fixture(async ({cwd, execute, completed, calls, session}) => {
-  const first = join(cwd, 'first-workspace'), other = join(cwd, 'other-workspace'), gate = join(cwd, 'call-ready');
-  await mkdir(first); await mkdir(other);
-  const sessionId = session.sessionManager.getSessionId();
-  try {
-    setActiveCwd(cwd, first, sessionId);
-    const child = await execute('subagent', {task: JSON.stringify({name: read, args: {issueKey: 'BBA-42'}, waitFor: gate}), tools: [read]});
-    setActiveCwd(cwd, other, sessionId);
-    await writeFile(gate, 'ready');
-    const task = await completed(child.details.id);
-    assert.equal(task.status, 'succeeded', JSON.stringify(task));
-    const output = JSON.parse(task.output);
-    assert.equal(output.results[0].isError, true);
-    assert.match(output.results[0].content[0].text, /parent workspace changed.*resubmit task/);
-    assert.equal(calls.length, 0);
-  } finally {setActiveCwd(cwd, undefined, sessionId);}
-}));
 
 test('an explicitly granted connector executes in a real background child after another parent turn', async () => fixture(async ({execute, completed, parentTurn, calls, hooks, secret}) => {
   const launched = await parentTurn('subagent', {task: request(read, {issueKey: 'BBA-42'}, 300), preset: 'reader', tools: ['read', read]});

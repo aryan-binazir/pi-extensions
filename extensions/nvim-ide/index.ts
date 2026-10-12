@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { basename } from 'node:path';
 import { Type } from 'typebox';
 import { IdeLink, type LinkState } from './link.ts';
-import { getActiveCwd, resolveToolPath } from '../worktree/routing.ts';
+import { resolveToolPath } from '../tool-path.ts';
 
 export { editorContext, maxEditorContextChars } from './context.ts';
 
@@ -31,7 +31,8 @@ export default function nvimIde(pi: ExtensionAPI): void {
   let ctx: ExtensionContext | undefined;
   let seenEditor = false;
   let followFailed = false;
-  let workspaceCwd = () => '';
+  let sessionCwd = '';
+  const workspaceCwd = () => sessionCwd;
   let followCwd: string | undefined;
   const warn = (message: string) => { try { if (ctx?.hasUI) ctx.ui.notify(message, 'warning'); } catch {} };
   let pendingFollow: { args: Record<string, unknown>; at: number } | undefined;
@@ -79,10 +80,9 @@ export default function nvimIde(pi: ExtensionAPI): void {
     followTimer.unref();
   };
   const editPaths = new Map<string, { path: string; cwd: string }>();
-  const activeCwd = (context: ExtensionContext) => getActiveCwd(context.cwd, context.sessionManager.getSessionId());
   let shown: string | undefined;
   const paint = (state: LinkState) => { const text = statusText(state); if (text === shown || !ctx?.hasUI) return; shown = text; ctx.ui.setStatus(statusKey, text); };
-  const need = (): IdeLink => { if (!link?.connected) throw new Error('Open Neovim with claudecode.nvim in the active worktree.'); return link; };
+  const need = (): IdeLink => { if (!link?.connected) throw new Error('Open Neovim with claudecode.nvim in the session directory.'); return link; };
 
   pi.on('session_start', async (_event, context) => {
     cancelFollow();
@@ -94,8 +94,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
     seenEditor = false;
     followFailed = false;
     await previous?.stop();
-    const cwd = context.cwd, sessionId = context.sessionManager.getSessionId();
-    workspaceCwd = () => getActiveCwd(cwd, sessionId);
+    sessionCwd = context.cwd;
     const current = new IdeLink({ cwd: workspaceCwd, onChange: state => {
       if (link !== current) return;
       if (state.connected) seenEditor = true;
@@ -107,7 +106,8 @@ export default function nvimIde(pi: ExtensionAPI): void {
   });
   pi.on('session_shutdown', async () => { cancelFollow(); editPaths.clear(); const current = link; link = undefined; await current?.stop(); paint({ connected: false, mentions: 0 }); });
 
-  pi.on('before_agent_start', async event => {
+  pi.on('before_agent_start', async (event, context) => {
+    sessionCwd = context.cwd;
     const current = link;
     if (!current) return;
     if (followCwd !== undefined && followCwd !== workspaceCwd()) cancelFollow();
@@ -128,7 +128,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
     if (event.toolName !== 'edit' && event.toolName !== 'write') return;
     const path = (event.args as { path?: unknown })?.path;
     if (typeof path === 'string') {
-      const cwd = activeCwd(context);
+      const cwd = context.cwd;
       editPaths.set(event.toolCallId, { path: resolveToolPath(path, cwd), cwd });
     }
   });
@@ -164,7 +164,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
     promptSnippet: 'Get LSP diagnostics from the connected editor',
     parameters: Type.Object({ path: Type.Optional(Type.String({ description: 'File path; omit for all open buffers' })) }),
     async execute(_id, params, signal, _update, context) {
-      const args = params.path ? { uri: pathToFileURL(resolveToolPath(params.path, activeCwd(context))).href } : {};
+      const args = params.path ? { uri: pathToFileURL(resolveToolPath(params.path, context.cwd)).href } : {};
       return { content: [{ type: 'text' as const, text: await need().call('getDiagnostics', args, signal) }], details: undefined };
     },
   });
@@ -177,7 +177,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
     async execute(_id, params, signal, _update, context) {
       cancelFollow();
       const ide = need();
-      const args: Record<string, unknown> = { filePath: resolveToolPath(params.path, activeCwd(context)), preview: false, makeFrontmost: true };
+      const args: Record<string, unknown> = { filePath: resolveToolPath(params.path, context.cwd), preview: false, makeFrontmost: true };
       const start = params.startLine, end = params.endLine ?? params.startLine, shift = ide.openFileLineOffset;
       if (start && end) { args.startLine = start + shift; args.endLine = end + shift; }
       let text = await ide.call('openFile', args, signal);
@@ -200,7 +200,7 @@ export default function nvimIde(pi: ExtensionAPI): void {
       }
       if (words[0] === 'reconnect') { link?.reconnect(); say('Editor link: rediscovering'); return; }
       const state = link?.state;
-      if (!state?.connected) { say('Editor link: waiting for claudecode.nvim in the active worktree.', 'warning'); return; }
+      if (!state?.connected) { say('Editor link: waiting for claudecode.nvim in the session directory.', 'warning'); return; }
       say(`Editor link: ${state.ideName} on port ${state.port}, follow ${following() ? 'on' : 'off'}${state.selection ? `, viewing ${state.selection.filePath}` : ''}`);
     },
   });

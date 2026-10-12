@@ -17,9 +17,11 @@ pending notices, aborts workflows and awaits cleanup. Session restart creates a
 new registry. Admission and workflow journal policy remain unchanged.
 
 Child results record the first cancellation cause: user, cancel-all, timeout,
-shutdown, or the existing repeated-failure stall guard. Tracked workflows record
-external cancellation without changing their returned values, error strings or
-abort reasons. Workflow deadlines remain in the workflow runner. Cause metadata
+shutdown, the existing repeated-failure stall guard, or a workflow-runner abort.
+Workflow-runner aborts do not distinguish its deadline from failure cleanup;
+that distinction is not available in its signal. Workflow deadlines remain in
+the workflow runner, and returned values, error strings and abort reasons stay
+unchanged. Cause metadata
 is internal to the registry contract; `taskView` keeps parent messages and status
 unchanged. Successful results, including serialized workflow journal records,
 retain their original shape.
@@ -45,7 +47,8 @@ inactive. Overlapping cancel-all calls retain the existing boolean tracker gate;
 changing that behavior requires a separate fix.
 
 The invocation port accepts either a launch command or an already-created child
-process. Production still uses the existing supervised invocation. In-process
+process launched with the same detached process-group ownership as the command
+invocation. Production still uses the existing supervised invocation. In-process
 fixtures supply event emitters and streams through that same port, exercising
 real result parsing and cleanup without starting subprocesses. Fake timers and
 an in-memory sink cover cancellation races and batching. Host tests retain

@@ -11,7 +11,7 @@ import type {Duplex} from 'node:stream';
 import {attachConnectorBridge, type ConnectorBridge} from './connector-bridge.ts';
 import { clipJson, taskView } from './presentation.ts';
 
-export type CancellationCause = 'user' | 'cancel-all' | 'timeout' | 'shutdown' | 'stall';
+export type CancellationCause = 'user' | 'cancel-all' | 'timeout' | 'shutdown' | 'stall' | 'workflow';
 export interface TaskResult {
   cancellationCause?: CancellationCause;
   id: string;
@@ -62,7 +62,6 @@ interface Activity {
 interface TrackedRun {
   controller: AbortController;
   done: Promise<void>;
-  cancellationCause?: CancellationCause;
 }
 interface RegistryOptions {
   concurrency?: number;
@@ -194,13 +193,15 @@ export class SubagentRegistry {
     this.entries.set(id, entry);
     entry.timer = setTimeout(() => this.cancelEntry(id, 'timeout'), Math.max(0, deadlineAt - Date.now()));
     if (signal) {
-      const abort = () => { this.cancelEntry(id, 'user'); this.activity({tracker: 'invalidate'}); };
+      const abort = () => { this.cancelEntry(id, owner === 'workflow' ? 'workflow' : 'user'); this.emitActivity({tracker: 'invalidate'}); };
       signal.addEventListener('abort', abort, {once: true});
       entry.detachSignal = () => signal.removeEventListener('abort', abort);
     }
     this.pump();
-    this.activity({tracker: 'update', background: {id, active: true}});
-    void done.then(task => this.activity({tracker: task.status === 'cancelled' ? 'invalidate' : 'update', background: {id, active: false}}));
+    this.emitActivity({tracker: 'update'});
+    this.emitActivity({background: {id, active: true}});
+    void done.then(task => this.emitActivity({tracker: task.status === 'cancelled' ? 'invalidate' : 'update'}));
+    void done.then(() => this.emitActivity({background: {id, active: false}}));
     return { id, done };
   }
   list(offset = 0, limit = this.entries.size): TaskResult[] {
@@ -225,7 +226,7 @@ export class SubagentRegistry {
     return false;
   }
   get(id: string): TaskResult | undefined { const entry = this.entries.get(id); return entry && cloneResult(entry.result); }
-  notificationFailed(ids: string[], error: unknown): void {
+  private notificationFailed(ids: string[], error: unknown): void {
     for (const id of ids) {
       const entry = this.entries.get(id);
       if (entry) entry.result.notificationError = `Completion notification failed: ${String(error).slice(0, 1000)}`;
@@ -237,7 +238,7 @@ export class SubagentRegistry {
     let settle!: () => void;
     const tracked: TrackedRun = {controller, done: new Promise<void>(resolve => { settle = resolve; })};
     this.runs.add(tracked);
-    const abort = () => { tracked.cancellationCause ??= 'user'; controller.abort(); };
+    const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, {once: true});
     try { return await run(controller.signal); }
     finally {
@@ -247,9 +248,9 @@ export class SubagentRegistry {
       settle();
     }
   }
-  cancel(id: string, timeout = false): boolean {
-    const cancelled = this.cancelEntry(id, timeout ? 'timeout' : 'user');
-    if (cancelled && !timeout) this.options.activity?.({tracker: 'invalidate'});
+  cancel(id: string): boolean {
+    const cancelled = this.cancelEntry(id, 'user');
+    if (cancelled) this.options.activity?.({tracker: 'invalidate'});
     return cancelled;
   }
   private cancelEntry(id: string, cause: CancellationCause): boolean {
@@ -282,26 +283,26 @@ export class SubagentRegistry {
     let count = 0;
     try {
       for (const entry of entries) if (this.cancelEntry(entry.result.id, 'cancel-all')) count++;
-      for (const run of activeRuns) { run.cancellationCause = 'cancel-all'; run.controller.abort(); }
+      for (const run of activeRuns) run.controller.abort();
       await Promise.all(entries.map(entry => entry.done));
       await Promise.allSettled(runs.map(run => run.done));
       return {cancelled: count > 0 || activeRuns.length > 0, count};
     } finally {
       this.cancellingAll = false;
-      if (!this.closed) this.activity({tracker: 'update'});
+      if (!this.closed) this.emitActivity({tracker: 'update'});
     }
   }
   async shutdown(): Promise<void> {
     this.closed = true;
     this.options.activity?.({tracker: 'stop'});
     clearTimeout(this.noticeTimer); this.noticeTimer = undefined; this.notices = []; this.overflowNotices = 0; this.noticeTriggersTurn = false;
-    for (const run of this.runs) { run.cancellationCause ??= 'shutdown'; run.controller.abort(); }
+    for (const run of this.runs) run.controller.abort();
     this.lifecycle.abort(new Error('Registry is shut down'));
     for (const entry of this.entries.values()) this.cancelEntry(entry.result.id, 'shutdown');
     await Promise.all([...this.entries.values()].map(e => e.done));
     await Promise.allSettled([...this.runs].map(run => run.done));
   }
-  private activity(event: Activity): void {
+  private emitActivity(event: Activity): void {
     if (this.closed || this.cancellingAll) event = {...event, tracker: undefined};
     this.options.activity?.(event);
   }
@@ -409,7 +410,7 @@ export class SubagentRegistry {
         if ((this.options.onUpdate || this.options.activity) && ['message_update', 'message_end'].includes(event.type) && Date.now() - lastUpdateAt >= 100) {
           lastUpdateAt = Date.now();
           this.options.onUpdate?.(cloneResult(entry.result));
-          this.activity({});
+          this.emitActivity({});
         }
       } catch {}
     };
@@ -494,7 +495,7 @@ export class SubagentRegistry {
     const heldRunSlot = Boolean(entry.process) || entry.result.status === 'failed';
     if (heldRunSlot) { this.running--; if (entry.writer) this.writers.delete(entry.spec.cwd); }
     const snapshot = cloneResult(entry.result);
-    try { this.options.onComplete?.(snapshot); this.activity({}); this.queueNotice(snapshot); } catch (error) { entry.result.notificationError = `Completion notification failed: ${String(error).slice(0,1000)}`; }
+    try { this.options.onComplete?.(snapshot); this.emitActivity({}); this.queueNotice(snapshot); } catch (error) { entry.result.notificationError = `Completion notification failed: ${String(error).slice(0,1000)}`; }
     finally {
       entry.resolve(cloneResult(entry.result));
       let finished = 0;

@@ -7,7 +7,8 @@ import test, { type TestContext } from 'node:test';
 import { SubagentRegistry } from './registry.ts';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import type { ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
 
 test('a long-running task remains retained when it finishes after many shorter tasks', async () => {
   const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: spec => {
@@ -525,9 +526,13 @@ test('the batching window starts with the first notice rather than restarting on
 });
 
 test('notification sink failures are recorded on retained completed tasks', async t => {
-  const {registry, children, notices, spawn} = lifecycleFixture(t);
-  notices.push = () => { throw new Error('UI gone'); };
-  const child = await spawn('failed notice'); children.get('failed notice')!.complete(); await child.done;
+  t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+  const registry = new SubagentRegistry({admission: supervisorAdmission,
+    invocation: () => { throw new Error('Synthetic launch failure'); },
+    notify: () => { throw new Error('UI gone'); },
+  });
+  t.after(() => registry.shutdown());
+  const child = await registry.spawn({task: 'failed notice', cwd: tmpdir()}); await child.done;
   t.mock.timers.tick(250);
   assert.equal(registry.get(child.id)?.notificationError, 'Completion notification failed: Error: UI gone');
 });
@@ -571,9 +576,10 @@ test('cancel-all gates tracker activity during cleanup and resumes it afterward'
   assert.deepEqual(activity.filter(event => event.background).map(event => event.background), [{id: late.id, active: true}]);
   children.get('held')!.close(); await stopping;
   assert.equal(activity.at(-1)?.tracker, 'update');
-  const cancelled = registry.cancel(late.id); children.get('late')!.close(); await late.done;
-  assert.equal(cancelled, true);
+  assert.equal(registry.cancel(late.id), true);
   assert.equal(activity.at(-1)?.tracker, 'invalidate');
+  children.get('late')!.close(); await late.done;
+  assert.equal(activity.filter(event => event.tracker).at(-1)?.tracker, 'invalidate');
 });
 
 test('workflow-only cancellation reports work and propagates the owning signal without changing its abort reason', async t => {
@@ -590,4 +596,105 @@ test('workflow-only cancellation reports work and propagates the owning signal w
   const active = registry.track(signal => new Promise<void>(resolve => { signal.addEventListener('abort', () => resolve(), {once: true}); }));
   assert.deepEqual(await registry.cancelAll(), {cancelled: true, count: 0});
   await active;
+});
+
+test('batch re-clipping marks output that fit the original single-notice view', async t => {
+  const {children, notices, spawn} = lifecycleFixture(t);
+  for (const name of ['first', 'second']) {
+    const child = await spawn(name); children.get(name)!.complete('x'.repeat(1700)); await child.done;
+  }
+  t.mock.timers.tick(250);
+  assert.equal(notices[0].value.tasks.length, 2);
+  for (const task of notices[0].value.tasks) {
+    assert.equal(task.outputLength, 1700);
+    assert.equal(task.output.length, 1022);
+    assert.equal(task.outputTruncated, true);
+  }
+});
+
+
+test('a throwing tracker adapter does not prevent closing background activity', async () => {
+  const script = `
+    import {SubagentRegistry} from ${JSON.stringify(new URL('./registry.ts', import.meta.url).href)};
+    import {supervisorAdmission} from ${JSON.stringify(new URL('./test-support.ts', import.meta.url).href)};
+    import {tmpdir} from 'node:os';
+    import {EventEmitter} from 'node:events';
+    import {PassThrough} from 'node:stream';
+    process.on('unhandledRejection', () => {});
+    const activity = [];
+    let fail = false;
+    const child = Object.assign(new EventEmitter(), {stdout: new PassThrough(), stderr: new PassThrough(), stdio: []});
+    const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => child,
+      activity: event => {
+        if (fail && event.tracker === 'update') throw new Error('UI gone');
+        if (event.background) activity.push(event.background.active);
+      },
+    });
+    const handle = await registry.spawn({task: 'adapter failure', cwd: tmpdir()});
+    fail = true; child.emit('close', 0, null); await handle.done;
+    await new Promise(resolve => setImmediate(resolve));
+    console.log(JSON.stringify(activity));
+    await registry.shutdown();
+  `;
+  const {stdout} = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script]);
+  assert.deepEqual(JSON.parse(stdout), [true, false]);
+});
+
+
+test('shutdown during cancel-all prevents its final tracker update', async t => {
+  const {registry, children, activity, notices, spawn} = lifecycleFixture(t);
+  await spawn('held');
+  const cancelled = registry.cancelAll();
+  const stopped = registry.shutdown();
+  activity.length = 0;
+  children.get('held')!.close(); await cancelled; await stopped;
+  t.mock.timers.tick(250);
+  assert.deepEqual(activity.filter(event => event.tracker), []);
+  assert.deepEqual(notices, []);
+  assert.deepEqual(await registry.cancelAll(), {cancelled: false, count: 0});
+  assert.deepEqual(activity.filter(event => event.tracker).map(event => event.tracker), ['stop']);
+});
+
+test('a workflow tracked during cancel-all remains usable and belongs to the next cancellation', async t => {
+  const {registry, children, spawn} = lifecycleFixture(t);
+  await spawn('held');
+  const first = registry.cancelAll();
+  let aborted = false;
+  const late = registry.track(signal => new Promise<void>(resolve => {
+    signal.addEventListener('abort', () => { aborted = true; resolve(); }, {once: true});
+  }));
+  children.get('held')!.close(); await first;
+  assert.equal(aborted, false);
+  assert.deepEqual(await registry.cancelAll(), {cancelled: true, count: 0});
+  await late;
+  assert.equal(aborted, true);
+});
+
+test('an already-aborted signal does not register or start a workflow', async t => {
+  const {registry} = lifecycleFixture(t);
+  const controller = new AbortController(); controller.abort();
+  let entered = false;
+  await assert.rejects(registry.track(async () => { entered = true; }, controller.signal), {name: 'AbortError'});
+  assert.equal(entered, false);
+  assert.deepEqual(await registry.cancelAll(), {cancelled: false, count: 0});
+});
+
+test('cancel-all suppresses a burst larger than the retained notice limit', async t => {
+  const {registry, children, notices, spawn} = lifecycleFixture(t);
+  for (let i = 0; i < 20; i++) await spawn(`child ${i}`);
+  const stopping = registry.cancelAll();
+  for (const child of children.values()) child.close();
+  assert.deepEqual(await stopping, {cancelled: true, count: 20});
+  t.mock.timers.tick(250);
+  assert.deepEqual(notices, []);
+});
+
+test('workflow-runner aborts retain their source without claiming a user cancellation', async t => {
+  const {registry, children, notices} = lifecycleFixture(t);
+  const controller = new AbortController();
+  const child = await registry.spawn({task: 'workflow abort', cwd: tmpdir()}, controller.signal, 'workflow');
+  controller.abort(); children.get('workflow abort')!.close();
+  assert.equal((await child.done).cancellationCause, 'workflow');
+  t.mock.timers.tick(250);
+  assert.deepEqual(notices, []);
 });

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentSessionRuntime, createAgentSession, type CreateAgentSessionRuntimeFactory, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type FauxResponseFactory } from '@earendil-works/pi-ai';
-import { CombinedAutocompleteProvider, Container } from '@earendil-works/pi-tui';
+import { CombinedAutocompleteProvider, Container, setKittyProtocolActive } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import viMode from '../vi-mode/index.ts';
 import stash from '../prompt-stash/index.ts';
@@ -44,7 +44,7 @@ async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [
   app.compactionQueuedMessages = [];
   Object.defineProperty(app, 'settingsManager', { value: settingsManager });
   app.keybindings = new KeybindingsManager();
-  app.ui = { requestRender() {}, terminal: { write() {}, rows: 30, columns: 80 }, onDebug: undefined, setFocus() {}, getShowHardwareCursor: () => false, setShowHardwareCursor() {} };
+  app.ui = { requestRender() {}, terminal: { write() {}, rows: 30, columns: 80 }, onDebug: undefined, setFocus() {}, getFocusedComponent: () => app.editor, getShowHardwareCursor: () => false, setShowHardwareCursor() {} };
   const notices: string[] = [];
   const baseUI = session.extensionRunner!.createContext().ui;
   const ui = { ...baseUI,
@@ -297,6 +297,220 @@ test('an unselected extension leaves stock Escape queue-to-editor behavior intac
   await running;
   assert.deepEqual(h.users(), ['Original']);
   assert.equal(h.app.editor.getText(), 'Next');
+});
+
+for (const extensions of [[viMode, stash], [stash, viMode]]) test(`Ctrl-X Ctrl-S promotes the next queued message while Vi stays in insert mode, ${extensions[0] === viMode ? 'vi first' : 'stash first'}`, async t => {
+  const h = await fixture(t, extensions);
+  const first = deferred(), promoted = deferred();
+  h.provider.setResponses([h.blocked(first), h.blocked(promoted)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  let copies = 0;
+  h.app.editor.onAction('app.message.copy', () => { copies++; });
+  h.app.editor.handleInput('a');
+  h.app.editor.handleInput('b');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  assert.equal(h.session.agent.signal?.aborted, true);
+  await promoted.promise;
+  h.app.editor.handleInput('c');
+  assert.equal(h.app.editor.getText(), 'abc');
+  assert.equal(copies, 0);
+  assert.deepEqual(h.users(), ['Original', 'Next']);
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  await h.session.waitForIdle();
+  await running;
+});
+
+test('fragmented bracketed paste containing Ctrl-X Ctrl-S cannot interrupt the run', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  h.app.editor.onAction('app.message.copy', () => assert.fail('paste must not copy'));
+  for (const chunk of ['\x1b[200~before', '\x18', '\x13', 'after\x1b[201~'])
+    h.app.editor.handleInput(chunk);
+  assert.equal(h.session.agent.signal?.aborted, false);
+  assert.equal(h.app.editor.getText(), 'beforeafter');
+  await h.session.abort();
+  await running;
+});
+
+for (const extensions of [[], [viMode, stash], [stash, viMode]]) test(`Ctrl-X Ctrl-S works after a real reload, ${extensions.length === 0 ? 'stock' : extensions[0] === viMode ? 'vi first' : 'stash first'}`, async t => {
+  const h = await fixture(t, extensions);
+  await h.session.reload();
+  const first = deferred(), promoted = deferred();
+  h.provider.setResponses([h.blocked(first), h.blocked(promoted)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.onAction('app.message.copy', () => {});
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  assert.equal(h.session.agent.signal?.aborted, true);
+  await promoted.promise;
+  assert.equal(h.app.editor.getText(), 'draft');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  await h.session.waitForIdle();
+  await running;
+});
+
+test('standalone Ctrl-S still stashes and restores the draft immediately', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput('\x13');
+  assert.equal(h.app.editor.getText(), '');
+  h.app.editor.handleInput('\x13');
+  assert.equal(h.app.editor.getText(), 'draft');
+});
+
+for (const [encoding, ctrlX] of [['legacy', '\x18'], ['Kitty', '\x1b[120;5u'], ['modifyOtherKeys', '\x1b[27;5;120~']]) test(`standalone ${encoding} Ctrl-X still copies after the prefix timeout`, async t => {
+  const h = await fixture(t, [viMode, stash]);
+  setKittyProtocolActive(encoding === 'Kitty');
+  t.after(() => setKittyProtocolActive(false));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let copied: string | undefined;
+  h.app.editor.onAction('app.message.copy', () => { copied = h.app.editor.getText(); });
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput(ctrlX);
+  t.mock.timers.tick(749);
+  assert.equal(copied, undefined);
+  t.mock.timers.tick(1);
+  assert.equal(copied, 'draft');
+  assert.equal(h.app.editor.getText(), 'draft');
+});
+
+test('an unrelated next key copies first and then remains available to Vi insertion', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  const copies: string[] = [];
+  h.app.editor.onAction('app.message.copy', () => { copies.push(h.app.editor.getText()); });
+  h.app.editor.handleInput('a');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('b');
+  assert.deepEqual(copies, ['a']);
+  assert.equal(h.app.editor.getText(), 'ab');
+});
+
+test('an idle chord preserves the Bash draft and never triggers double-Escape navigation', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  h.settingsManager.setDoubleEscapeAction('tree');
+  h.app.lastEscapeTime = Date.now();
+  h.app.showTreeSelector = () => assert.fail('idle chord must not open the tree');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  assert.equal(h.app.editor.getText(), '');
+  h.app.isBashMode = true;
+  h.app.editor.setText('!echo synthetic');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  assert.equal(h.app.editor.getText(), '!echo synthetic');
+});
+
+test('a pending copy is discarded when editor focus moves to a dialog', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  h.app.editor.onAction('app.message.copy', () => assert.fail('dialog focus must discard pending copy'));
+  h.app.editor.handleInput('\x18');
+  h.app.ui.getFocusedComponent = () => new Container();
+  t.mock.timers.tick(750);
+  h.app.ui.getFocusedComponent = () => h.app.editor;
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput('\x13');
+  assert.equal(h.app.editor.getText(), '');
+});
+
+test('replacing the editor discards a pending copy and preserves the chord on the new editor', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const previous = h.app.editor;
+  previous.onAction('app.message.copy', () => assert.fail('retired editor must not copy'));
+  previous.handleInput('\x18');
+  h.app.setCustomEditorComponent(undefined);
+  t.mock.timers.tick(750);
+  h.app.editor.onAction('app.message.copy', () => assert.fail('chord must not copy'));
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  t.mock.timers.tick(750);
+  assert.equal(h.app.editor.getText(), 'draft');
+});
+
+test('disabling Escape Continue drops the prefix and restores immediate standalone copy', async t => {
+  const h = await fixture(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let copies = 0;
+  h.app.editor.onAction('app.message.copy', () => { copies++; });
+  h.app.editor.handleInput('\x18');
+  await h.session.extensionRunner!.emit({ type: 'session_shutdown', reason: 'reload' });
+  t.mock.timers.tick(750);
+  assert.equal(copies, 0);
+  h.app.editor.handleInput('\x18');
+  assert.equal(copies, 1);
+});
+
+test('the chord uses the live Escape callback without leaving Vi insert mode', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  let stopped = false;
+  h.app.defaultEditor.onEscape = () => { stopped = true; };
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  assert.equal(stopped, true);
+  h.app.editor.handleInput('i');
+  assert.equal(h.app.editor.getText(), 'i');
+  await h.session.abort();
+  await running;
+});
+
+test('the chord interrupts immediately with autocomplete open and retains the insert draft', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  h.app.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([{ name: 'hello' }, { name: 'help' }], h.session.sessionManager.getCwd()));
+  h.app.editor.setText('/he');
+  h.app.editor.handleInput('\t');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.app.editor.isShowingAutocomplete(), true);
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  assert.equal(h.session.agent.signal?.aborted, true);
+  assert.equal(h.app.editor.isShowingAutocomplete(), true);
+  assert.equal(h.app.editor.getText(), '/he');
+  await running;
+});
+
+test('a second chord during prompt preparation stops the handoff and keeps the queued message', async t => {
+  const preparing = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const h = await fixture(t, [pi => pi.on('before_agent_start', async event => {
+    if (event.prompt === 'Next') { preparing.resolve(); await release.promise; }
+  }), viMode, stash]);
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first), fauxAssistantMessage('Should not start')]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  await preparing.promise;
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  assert.ok(h.notices.some(message => /stopped; queued messages and attachments kept waiting/.test(message)));
+  release.resolve();
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.users(), ['Original']);
+  assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
 });
 
 for (const extensions of [[viMode, stash], [stash, viMode]]) test(`vi-mode and stash retain their Escape ownership in load order ${extensions[0] === viMode ? 'vi first' : 'stash first'}`, async t => {
@@ -858,8 +1072,3 @@ test('rebinding the UI wraps Escape only once', async t => {
   await h.session.waitForIdle();
   await running;
 });
-
-
-
-
-

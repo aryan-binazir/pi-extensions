@@ -277,13 +277,13 @@ function interrupt(host: Host, original: () => void, state: Adapter): void {
   showHeld();
   const check = () => {
     if (cancelled || !current()) throw new CancelledHandoff();
-    if (session.isStreaming || session.isCompacting) throw new SupersededHandoff('Another prompt started during the handoff');
   };
   const resume = async () => {
     let unsubscribe: (() => void) | undefined;
     try {
       await abortRun(session, state);
       check();
+      if (session.isStreaming || session.isCompacting) throw new SupersededHandoff('Another prompt started during the handoff');
       unsubscribe = session.subscribe(event => {
         if (event.type === 'agent_start' && state.checkpoints.getStore()?.check === check) starting = true;
         if (!starting) return;

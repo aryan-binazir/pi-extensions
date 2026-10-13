@@ -101,6 +101,36 @@ test('Escape aborts the current run and starts the queued follow-up without touc
   assert.equal(h.session.pendingMessageCount, 0);
 });
 
+test('the handoff accepts its own busy run during final prompt preparation', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first), fauxAssistantMessage('Next response')]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  const preparation = h.session as unknown as {
+    _isAgentRunActive: boolean;
+    _normalizePromptImages(images: unknown): Promise<unknown>;
+  };
+  const normalize = preparation._normalizePromptImages;
+  preparation._normalizePromptImages = async images => {
+    const active = preparation._isAgentRunActive;
+    preparation._isAgentRunActive = true;
+    try { return await normalize.call(h.session, images); }
+    finally { preparation._isAgentRunActive = active; }
+  };
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.users(), ['Original', 'Next']);
+  assert.ok(!h.notices.some(message => /Another prompt started/.test(message)), h.notices.join('\n'));
+  await h.session.waitForIdle();
+  assert.equal(h.app.editor.getText(), 'draft');
+  assert.equal(h.session.pendingMessageCount, 0);
+});
+
 test('Pi 0.87 boolean preflight results release each promoted handoff and allow the next chord', async t => {
   const h = await fixture(t, [viMode, stash]);
   const prompt = h.session.prompt.bind(h.session);

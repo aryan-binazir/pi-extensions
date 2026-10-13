@@ -86,7 +86,7 @@ again. If preflight rejects or handles the prompt without starting it, the
 queue is kept waiting with a notice.
 
 The compatibility adapter uses guarded interactive-handler and prepared-queue
-internals, tested against Pi 0.99.1 and through the Pi 0.87.1 and 1.0.2
+internals, tested against Pi 0.99.1 and through the Pi 0.87.1, 1.0.2 and 1.2.0
 TUIs. Run-start events support the older boolean prompt-preflight callback.
 Cancellation is checked at Pi's final
 asynchronous image-preparation boundary, before prompt options and next-turn

@@ -45,6 +45,24 @@ test("insert uses a hardware beam without a fake block; normal restores a block"
   assert.equal(writes.at(-1), "\x1b[0 q");
 });
 
+test("insert restores its hardware beam after reload reapplies the stock cursor setting", () => {
+  const e = editor();
+  const tui = (e as unknown as { tui: import("@earendil-works/pi-tui").TUI }).tui;
+  const writes: string[] = [];
+  tui.terminal.write = (data) => { writes.push(data); };
+  e.focused = true;
+  e.setText("draft");
+  tui.setShowHardwareCursor(false);
+  writes.length = 0;
+  const rendered = e.render(40).join("");
+  assert.equal(tui.getShowHardwareCursor(), true);
+  assert.ok(writes.includes("\x1b[6 q"));
+  assert.ok(rendered.includes(CURSOR_MARKER));
+  assert.ok(!rendered.includes("\x1b[7m"));
+  e.dispose();
+  assert.equal(tui.getShowHardwareCursor(), false);
+});
+
 test("normal counted operator deletes two words and undo/redo restores changes", () => {
   const e = editor();
   e.setText("one two three");

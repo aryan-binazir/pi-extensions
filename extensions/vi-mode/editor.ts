@@ -881,6 +881,10 @@ export class ViEditor extends CustomEditor {
     return super.renderBottomBorder(Math.max(0, width - visibleWidth(label)), hidden) + label;
   }
   override render(width: number): string[] {
+    if (this.focused && !this.tui.getShowHardwareCursor()) {
+      this.tui.setShowHardwareCursor(true);
+      this.cursorShape();
+    }
     if (this.mode !== "visual" && this.mode !== "line") {
       const lines = this.scan().project
         ? renderProjected(this, () => super.render(width), this.text())

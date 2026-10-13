@@ -86,8 +86,9 @@ again. If preflight rejects or handles the prompt without starting it, the
 queue is kept waiting with a notice.
 
 The compatibility adapter uses guarded interactive-handler and prepared-queue
-internals, tested against Pi 0.99.1 and smoke-tested with the installed Pi 1.0.2
-TUI. Cancellation is checked at Pi's final
+internals, tested against Pi 0.99.1 and through the Pi 0.87.1 and 1.0.2
+TUIs. Run-start events support the older boolean prompt-preflight callback.
+Cancellation is checked at Pi's final
 asynchronous image-preparation boundary, before prompt options and next-turn
 notifications are committed. The normal preflight observer is never used to
 throw after commit. An unsupported layout warns once per session

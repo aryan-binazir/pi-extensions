@@ -97,7 +97,7 @@ function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter)
   }
   const normalize = layout.preflight._normalizePromptImages;
   if (!marked(normalize, checkpointed)) {
-    // Pi 0.99.1/1.0.2 commits next-turn messages and prompt options after this final async preflight boundary.
+    // Pi commits next-turn messages and prompt options after this final async preflight boundary.
     const guarded = async (images: unknown) => {
       const scope = state.checkpoints.getStore();
       if (scope?.session === session) scope.check();
@@ -285,6 +285,7 @@ function interrupt(host: Host, original: () => void, state: Adapter): void {
       await abortRun(session, state);
       check();
       unsubscribe = session.subscribe(event => {
+        if (event.type === 'agent_start' && state.checkpoints.getStore()?.check === check) starting = true;
         if (!starting) return;
         if (event.type === 'agent_start' && cancelled) void abortRun(session, state);
         if (event.type === 'message_start' && event.message.role === 'user') delivered = true;

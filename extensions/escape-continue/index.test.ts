@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentSessionRuntime, createAgentSession, type CreateAgentSessionRuntimeFactory, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type FauxResponseFactory } from '@earendil-works/pi-ai';
-import { CombinedAutocompleteProvider, Container, setKittyProtocolActive } from '@earendil-works/pi-tui';
+import { CombinedAutocompleteProvider, Container, Input, setKittyProtocolActive } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import viMode from '../vi-mode/index.ts';
 import stash from '../prompt-stash/index.ts';
@@ -428,6 +428,53 @@ test('Ctrl-S waiting at prefix expiry completes the chord before delayed copy', 
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(copies, 0);
   assert.equal(h.app.editor.getText(), 'draft');
+});
+
+test('a late Ctrl-S cannot complete a prefix whose timer was delayed by a busy event loop', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  let now = 0, copies = 0;
+  t.mock.method(performance, 'now', () => now);
+  h.app.editor.onAction('app.message.copy', () => { copies++; });
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput('\x18');
+  now = 1000;
+  h.app.editor.handleInput('\x13');
+  assert.equal(copies, 1);
+  assert.equal(h.app.editor.getText(), '');
+  h.app.editor.handleInput('\x13');
+  assert.equal(h.app.editor.getText(), 'draft');
+});
+
+test('the key after a forwarded Ctrl-X action reaches the newly focused component', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  const selectorInput = new Input();
+  let focused = h.app.editor;
+  h.app.ui.getFocusedComponent = () => focused;
+  h.app.editor.onAction('app.message.copy', () => { focused = selectorInput; });
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('a');
+  assert.equal(selectorInput.getValue(), 'a');
+  assert.equal(h.app.editor.getText(), 'draft');
+});
+
+test('direct reload retires a pending copy before an earlier shutdown handler yields', async t => {
+  const shuttingDown = deferred(), release = deferred();
+  t.after(() => release.resolve());
+  const h = await fixture(t, [], true, [pi => pi.on('session_shutdown', async event => {
+    if (event.reason === 'reload') { shuttingDown.resolve(); await release.promise; }
+  })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let copies = 0;
+  h.app.editor.onAction('app.message.copy', () => { copies++; });
+  h.app.editor.handleInput('\x18');
+  const reloading = h.session.reload();
+  await shuttingDown.promise;
+  t.mock.timers.tick(750);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(copies, 0);
+  release.resolve();
+  await reloading;
 });
 
 test('an idle chord preserves the Bash draft and never triggers double-Escape navigation', async t => {

@@ -89,6 +89,7 @@ function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter)
     const reload = session.reload.bind(session);
     const guarded: AgentSession['reload'] = (...args) => {
       state.active.get(session.sessionManager)?.pending?.cancel();
+      state.active.get(session.sessionManager)?.input?.reset();
       return reload(...args);
     };
     Object.defineProperty(guarded, intercepted, { value: true });
@@ -147,6 +148,7 @@ function decorate(host: Host, state: Adapter): void {
   previous?.reset();
   const original = previous?.original ?? editor.handleInput;
   let prefix: string | undefined;
+  let deadline = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let flushTimer: ReturnType<typeof setImmediate> | undefined;
   let forwarding = 0;
@@ -157,6 +159,7 @@ function decorate(host: Host, state: Adapter): void {
     timer = undefined;
     flushTimer = undefined;
     prefix = undefined;
+    deadline = 0;
   };
   const reset = () => {
     resetPrefix();
@@ -178,15 +181,21 @@ function decorate(host: Host, state: Adapter): void {
     let pasteChunk = framer.pasting || framer.holdingMarker;
     for (const frame of framer.feed(data)) pasteChunk ||= frame.type === 'paste';
     pasteChunk ||= framer.pasting || framer.holdingMarker;
-    if (!pasteChunk && prefix !== undefined && matchesKey(data, 'ctrl+s')) {
+    if (!pasteChunk && prefix !== undefined && performance.now() <= deadline && matchesKey(data, 'ctrl+s')) {
       resetPrefix();
       if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
         (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
       return;
     }
     flush();
+    const focused = host.ui?.getFocusedComponent();
+    if (!current() || focused !== editor) {
+      focused?.handleInput?.(data);
+      return;
+    }
     if (!pasteChunk && matchesKey(data, 'ctrl+x')) {
       prefix = data;
+      deadline = performance.now() + 750;
       timer = setTimeout(() => {
         if (!current() || host.ui?.getFocusedComponent() !== editor) return resetPrefix();
         flushTimer = setImmediate(() => { flush(); host.ui?.requestRender(); });
@@ -344,7 +353,10 @@ export function install(): Adapter {
   else if (!marked(reload, wrapped)) {
     const shared = state;
     const guarded = function (this: Host) {
-      if (!this.session.isStreaming && !this.session.isCompacting) shared.active.get(this.session.sessionManager)?.pending?.cancel();
+      if (!this.session.isStreaming && !this.session.isCompacting) {
+        shared.active.get(this.session.sessionManager)?.pending?.cancel();
+        shared.active.get(this.session.sessionManager)?.input?.reset();
+      }
       return reload.call(this);
     };
     Object.defineProperty(guarded, wrapped, { value: true });

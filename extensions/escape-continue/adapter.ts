@@ -277,7 +277,7 @@ function interrupt(host: Host, original: () => void, state: Adapter): void {
   showHeld();
   const check = () => {
     if (cancelled || !current()) throw new CancelledHandoff();
-    if (!session.isIdle) throw new SupersededHandoff('Another prompt started during the handoff');
+    if (session.isStreaming || session.isCompacting) throw new SupersededHandoff('Another prompt started during the handoff');
   };
   const resume = async () => {
     let unsubscribe: (() => void) | undefined;

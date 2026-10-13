@@ -13,6 +13,7 @@ import { editor } from '../vi-mode/test-support.ts';
 import { KeybindingsManager } from '../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js';
 import { initTheme } from '../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';
 import escapeContinue from './index.ts';
+import { install } from './adapter.ts';
 
 initTheme('dark', false);
 
@@ -99,6 +100,31 @@ test('Escape aborts the current run and starts the queued follow-up without touc
   await h.session.waitForIdle();
   assert.equal(h.app.editor.getText(), 'Unsubmitted draft');
   assert.equal(h.session.pendingMessageCount, 0);
+});
+
+test('the chord promotes a queued message when the runtime has no session idle getter', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first), fauxAssistantMessage('Next response')]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  const adapter = install();
+  const abort = adapter.rawAborts.get(h.session)!;
+  adapter.rawAborts.set(h.session, async () => {
+    await abort();
+    Object.defineProperty(h.session, 'isIdle', { value: undefined, configurable: true });
+  });
+  t.after(() => { delete (h.session as unknown as { isIdle?: boolean }).isIdle; });
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput('\x18');
+  h.app.editor.handleInput('\x13');
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  delete (h.session as unknown as { isIdle?: boolean }).isIdle;
+  assert.deepEqual(h.users(), ['Original', 'Next']);
+  assert.equal(h.app.editor.getText(), 'draft');
+  assert.ok(!h.notices.some(message => /Another prompt started/.test(message)));
 });
 
 test('promotion preserves duplicate steering tails and attachments without folding them into its first request', async t => {

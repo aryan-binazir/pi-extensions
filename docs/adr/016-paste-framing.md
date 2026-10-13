@@ -2,7 +2,8 @@
 
 Status: accepted.
 
-Vi and prompt stash use `PasteFramer` from `extensions/vi-mode/paste-framing.ts`.
+Vi, prompt stash and Escape Continue use `PasteFramer` from
+`extensions/vi-mode/paste-framing.ts`.
 It owns marker recognition and buffering behind `feed`, `pasting`,
 `holdingMarker` and `reset`. `feed` yields ordered raw key data or complete raw
 paste payloads using the rule in [ADR 001](001-editor.md). `holdingMarker`
@@ -25,3 +26,7 @@ Stash has its own framer because it also wraps the stock editor. It observes
 only outer input; recursive editor forwarding already belongs to that observed
 chunk and must not overwrite its framing state. Stash retains its existing
 lifetime without adding draft-replacement hooks.
+
+Escape Continue also observes only outer input and forwards raw chunks. Its
+framer prevents control-key chunks inside a fragmented paste from starting or
+completing the interrupt chord. It resets on editor or registration retirement.

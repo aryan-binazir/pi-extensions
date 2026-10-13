@@ -40,16 +40,21 @@ and then follow Pi's normal queue modes. Custom-only entries are not promoted as
 user input; they stay queued for subsequent normal boundaries. The unsubmitted editor draft is untouched.
 With no queued user message, normal Escape behavior applies.
 
-Ctrl-X followed by Ctrl-S within 750 ms invokes the same interrupt handler
-directly in the main editor, preserving Vi insert mode, cursor and draft.
+Ctrl-X followed by Ctrl-S within 750 ms invokes the live interrupt handler
+directly in the main editor without leaving Vi insert mode. Agent-run
+interruptions preserve the cursor and draft.
 It interrupts immediately even when autocomplete is open, leaving the popup
-alone. With no active run or pending handoff, the chord does nothing; it does
-not trigger idle Escape actions such as opening the session tree or clearing a
-Bash draft. A second chord stops a pending handoff just as a second Escape does.
+alone. Bash commands, retry backoff and compaction use Pi's current Escape
+handling. With no active run, handoff, Bash command, retry or compaction, the
+chord does nothing; it does not open the session tree or clear a Bash draft.
+A second chord stops a pending handoff just as a second Escape does.
 
-Standalone Ctrl-S still stashes the draft. Standalone Ctrl-X retains Pi's copy
-action after the 750 ms wait, or immediately before another key is forwarded.
-Pasted control bytes never form the chord. Pending prefixes are discarded on
+Standalone Ctrl-S still stashes the draft. Standalone Ctrl-X is forwarded to Pi
+after the 750 ms wait, or immediately before another key. With default bindings,
+this copies; rebinding Ctrl-X changes the forwarded action but keeps the wait.
+Control bytes inside well-formed bracketed paste never form the chord. Pi treats
+anything after the first paste-end marker as ordinary input.
+Pending prefixes are discarded on
 editor replacement, session shutdown and reload, and a delayed copy is skipped
 if the main editor has lost focus. Selectors and dialogs keep their own keys.
 Legacy, Kitty and modifyOtherKeys encodings are supported without keybinding

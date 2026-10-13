@@ -17,6 +17,7 @@ type Adapter = {
   rawAborts: WeakMap<AgentSession, () => Promise<void>>;
   warnedSessions: WeakSet<ExtensionContext['sessionManager']>;
   supported: boolean;
+  editorReplacementPatched?: boolean;
   attach(host: Host, state: Adapter): void;
   decorate(host: Host, state: Adapter): void;
   interrupt(host: Host, original: () => void, state: Adapter): void;
@@ -147,14 +148,21 @@ function decorate(host: Host, state: Adapter): void {
   const original = previous?.original ?? editor.handleInput;
   let prefix: string | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let flushTimer: ReturnType<typeof setImmediate> | undefined;
   let forwarding = 0;
   const framer = new PasteFramer();
   const resetPrefix = () => {
     clearTimeout(timer);
+    clearImmediate(flushTimer);
     timer = undefined;
+    flushTimer = undefined;
     prefix = undefined;
   };
-  const reset = () => { resetPrefix(); framer.reset(); };
+  const reset = () => {
+    resetPrefix();
+    framer.reset();
+    if (editor.handleInput === input) editor.handleInput = original;
+  };
   const current = () => host.session === session && host.editor === editor && state.active.get(session.sessionManager) === registration;
   const forward = (data: string) => {
     forwarding++;
@@ -179,7 +187,11 @@ function decorate(host: Host, state: Adapter): void {
     flush();
     if (!pasteChunk && matchesKey(data, 'ctrl+x')) {
       prefix = data;
-      timer = setTimeout(() => { flush(); host.ui?.requestRender(); }, 750);
+      timer = setTimeout(() => {
+        if (!current() || host.ui?.getFocusedComponent() !== editor) return resetPrefix();
+        flushTimer = setImmediate(() => { flush(); host.ui?.requestRender(); });
+        flushTimer.unref();
+      }, 750);
       timer.unref();
     } else forward(data);
   };
@@ -306,15 +318,14 @@ export function install(): Adapter {
   state.warnedSessions ??= new WeakSet();
   state.hosts ??= new WeakMap();
   const replace = prototype.setCustomEditorComponent;
-  if (typeof replace !== 'function') state.supported = false;
-  else if (!marked(replace, chordInput)) {
+  if (typeof replace === 'function' && !state.editorReplacementPatched) {
     const shared = state;
     const replaceEditor = function (this: Host, factory: unknown) {
       replace.call(this, factory);
       shared.decorate(this, shared);
     };
-    Object.defineProperty(replaceEditor, chordInput, { value: true });
     prototype.setCustomEditorComponent = replaceEditor;
+    state.editorReplacementPatched = true;
   }
   const shutdown = prototype.shutdown;
   if (typeof shutdown !== 'function') state.supported = false;
@@ -322,6 +333,7 @@ export function install(): Adapter {
     const shared = state;
     const stop = function (this: Host, options?: { fromSignal?: boolean }) {
       shared.active.get(this.session.sessionManager)?.pending?.cancel();
+      shared.active.get(this.session.sessionManager)?.input?.reset();
       return shutdown.call(this, options);
     };
     Object.defineProperty(stop, wrapped, { value: true });

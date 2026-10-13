@@ -67,6 +67,8 @@ Selection is a disk check, not evidence of loaded behavior. In the TUI, Escape
 with a queued message should stop the current run and start that message; Escape
 with no queued message should stop. See
 [behavior and compatibility limits](extension-behavior.md#escape-continue).
+Ctrl-X, Ctrl-S invokes the same interrupt action while retaining Vi insert
+mode. It needs no additional keybinding setup.
 
 ## Default thinking
 

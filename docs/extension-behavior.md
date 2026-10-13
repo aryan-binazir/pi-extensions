@@ -40,6 +40,26 @@ and then follow Pi's normal queue modes. Custom-only entries are not promoted as
 user input; they stay queued for subsequent normal boundaries. The unsubmitted editor draft is untouched.
 With no queued user message, normal Escape behavior applies.
 
+Ctrl-X followed by Ctrl-S within 750 ms invokes the live interrupt handler
+directly in the main editor without leaving Vi insert mode. Agent-run
+interruptions preserve the cursor and draft.
+It interrupts immediately even when autocomplete is open, leaving the popup
+alone. Bash commands, retry backoff and compaction use Pi's current Escape
+handling. With no active run, handoff, Bash command, retry or compaction, the
+chord does nothing; it does not open the session tree or clear a Bash draft.
+A second chord stops a pending handoff just as a second Escape does.
+
+Standalone Ctrl-S still stashes the draft. Standalone Ctrl-X is forwarded to Pi
+after the 750 ms wait, or immediately before another key. With default bindings,
+this copies; rebinding Ctrl-X changes the forwarded action but keeps the wait.
+Control bytes inside well-formed bracketed paste never form the chord. Pi treats
+anything after the first paste-end marker as ordinary input.
+Pending prefixes are discarded on
+editor replacement, session shutdown and reload, and a delayed copy is skipped
+if the main editor has lost focus. Selectors and dialogs keep their own keys.
+Legacy, Kitty and modifyOtherKeys encodings are supported without keybinding
+configuration.
+
 A second Escape while cancellation or prompt preparation is pending stops the
 handoff. A held-queue count is visible during cancellation, and stopping shows
 an immediate notice. Queued messages and attachments stay waiting; they are

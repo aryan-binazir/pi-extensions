@@ -1,20 +1,25 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { InteractiveMode, type AgentSession, type CustomEditor, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { matchesKey, type Component } from '@earendil-works/pi-tui';
+import { PasteFramer } from '../vi-mode/paste-framing.ts';
 
 type Message = ReturnType<AgentSession['agent']['peekQueuedMessages']>[number];
 type UserMessage = Extract<Message, { role: 'user' }>;
 type Mode = 'steer' | 'followUp';
-type Host = { session: AgentSession; defaultEditor?: CustomEditor };
+type Host = { session: AgentSession; defaultEditor?: CustomEditor; editor?: CustomEditor; ui?: { getFocusedComponent(): Component | null; requestRender(): void } };
 type Handoff = { cancel(stopRun?: boolean): void; capture(mode: Mode, message: Message): void; restoreAtContext(): void; takeQueue(): { steering: string[]; followUp: string[] } };
-type Registration = { ctx: ExtensionContext; pending?: Handoff; warned: boolean };
+type Registration = { ctx: ExtensionContext; pending?: Handoff; warned: boolean; input?: { editor: CustomEditor; reset(): void } };
 type Checkpoint = { session: AgentSession; check(): void };
 type Adapter = {
   active: WeakMap<ExtensionContext['sessionManager'], Registration>;
+  hosts: WeakMap<ExtensionContext['sessionManager'], Host>;
   checkpoints: AsyncLocalStorage<Checkpoint>;
   rawAborts: WeakMap<AgentSession, () => Promise<void>>;
   warnedSessions: WeakSet<ExtensionContext['sessionManager']>;
   supported: boolean;
+  editorReplacementPatched?: boolean;
   attach(host: Host, state: Adapter): void;
+  decorate(host: Host, state: Adapter): void;
   interrupt(host: Host, original: () => void, state: Adapter): void;
 };
 type Queue = { messages: Message[] };
@@ -27,7 +32,9 @@ const installed = Symbol.for('pi-interactive:escape-continue-adapter');
 const wrapped = Symbol.for('pi-interactive:escape-continue-handler');
 const checkpointed = Symbol.for('pi-interactive:escape-continue-preflight');
 const intercepted = Symbol.for('pi-interactive:escape-continue-queue');
-type Prototype = { bindCurrentSessionExtensions(this: Host): Promise<void>; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; handleReloadCommand(this: Host): Promise<void>; [installed]?: Adapter };
+const chordInput = Symbol.for('pi-interactive:escape-continue-input');
+type InputHandler = CustomEditor['handleInput'] & { [chordInput]?: { original: CustomEditor['handleInput']; reset(): void } };
+type Prototype = { bindCurrentSessionExtensions(this: Host): Promise<void>; setCustomEditorComponent(this: Host, factory: unknown): void; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; handleReloadCommand(this: Host): Promise<void>; [installed]?: Adapter };
 class CancelledHandoff extends Error {}
 class SupersededHandoff extends Error {}
 
@@ -82,6 +89,7 @@ function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter)
     const reload = session.reload.bind(session);
     const guarded: AgentSession['reload'] = (...args) => {
       state.active.get(session.sessionManager)?.pending?.cancel();
+      state.active.get(session.sessionManager)?.input?.reset();
       return reload(...args);
     };
     Object.defineProperty(guarded, intercepted, { value: true });
@@ -114,16 +122,91 @@ function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter)
 }
 
 function attach(host: Host, state: Adapter): void {
+  state.hosts.set(host.session.sessionManager, host);
   const original = host.defaultEditor?.onEscape;
   const registration = state.active.get(host.session.sessionManager);
   if (!state.supported || typeof original !== 'function') { if (registration) warn(registration, state); return; }
   const layout = queueLayout(host.session);
   if (layout) wireSession(host.session, layout, state);
   else if (registration) warn(registration, state);
-  if (marked(original, wrapped)) return;
-  const handler = () => state.interrupt(host, original, state);
-  Object.defineProperty(handler, wrapped, { value: true });
-  host.defaultEditor!.onEscape = handler;
+  if (!marked(original, wrapped)) {
+    const handler = () => state.interrupt(host, original, state);
+    Object.defineProperty(handler, wrapped, { value: true });
+    host.defaultEditor!.onEscape = handler;
+  }
+  state.decorate(host, state);
+}
+
+function decorate(host: Host, state: Adapter): void {
+  const editor = host.editor;
+  const session = host.session;
+  const registration = state.active.get(session.sessionManager);
+  if (!registration || !editor || typeof editor.handleInput !== 'function' || !host.ui?.getFocusedComponent) return;
+  if (registration.input?.editor === editor) return;
+  registration.input?.reset();
+  const previous = (editor.handleInput as InputHandler)[chordInput];
+  previous?.reset();
+  const original = previous?.original ?? editor.handleInput;
+  let prefix: string | undefined;
+  let deadline = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let flushTimer: ReturnType<typeof setImmediate> | undefined;
+  let forwarding = 0;
+  const framer = new PasteFramer();
+  const resetPrefix = () => {
+    clearTimeout(timer);
+    clearImmediate(flushTimer);
+    timer = undefined;
+    flushTimer = undefined;
+    prefix = undefined;
+    deadline = 0;
+  };
+  const reset = () => {
+    resetPrefix();
+    framer.reset();
+    if (editor.handleInput === input) editor.handleInput = original;
+  };
+  const current = () => host.session === session && host.editor === editor && state.active.get(session.sessionManager) === registration;
+  const forward = (data: string) => {
+    forwarding++;
+    try { original.call(editor, data); } finally { forwarding--; }
+  };
+  const flush = () => {
+    const data = prefix;
+    resetPrefix();
+    if (data !== undefined && current() && host.ui?.getFocusedComponent() === editor) forward(data);
+  };
+  const input: InputHandler = (data) => {
+    if (forwarding || !current()) return forward(data);
+    let pasteChunk = framer.pasting || framer.holdingMarker;
+    for (const frame of framer.feed(data)) pasteChunk ||= frame.type === 'paste';
+    pasteChunk ||= framer.pasting || framer.holdingMarker;
+    if (!pasteChunk && prefix !== undefined && performance.now() <= deadline && matchesKey(data, 'ctrl+s')) {
+      resetPrefix();
+      if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
+        (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
+      return;
+    }
+    flush();
+    const focused = host.ui?.getFocusedComponent();
+    if (!current() || focused !== editor) {
+      focused?.handleInput?.(data);
+      return;
+    }
+    if (!pasteChunk && matchesKey(data, 'ctrl+x')) {
+      prefix = data;
+      deadline = performance.now() + 750;
+      timer = setTimeout(() => {
+        if (!current() || host.ui?.getFocusedComponent() !== editor) return resetPrefix();
+        flushTimer = setImmediate(() => { flush(); host.ui?.requestRender(); });
+        flushTimer.unref();
+      }, 750);
+      timer.unref();
+    } else forward(data);
+  };
+  Object.defineProperty(input, chordInput, { value: { original, reset } });
+  editor.handleInput = input;
+  registration.input = { editor, reset };
 }
 
 function interrupt(host: Host, original: () => void, state: Adapter): void {
@@ -232,7 +315,7 @@ export function install(): Adapter {
   let state = prototype[installed];
   if (!state) {
     const bind = prototype.bindCurrentSessionExtensions;
-    state = { active: new WeakMap(), checkpoints: new AsyncLocalStorage(), rawAborts: new WeakMap(), warnedSessions: new WeakSet(), supported: typeof bind === 'function', attach, interrupt };
+    state = { active: new WeakMap(), hosts: new WeakMap(), checkpoints: new AsyncLocalStorage(), rawAborts: new WeakMap(), warnedSessions: new WeakSet(), supported: typeof bind === 'function', attach, decorate, interrupt };
     const shared = state;
     if (shared.supported) prototype.bindCurrentSessionExtensions = async function () {
       await bind.call(this);
@@ -242,12 +325,24 @@ export function install(): Adapter {
   }
   state.rawAborts ??= new WeakMap();
   state.warnedSessions ??= new WeakSet();
+  state.hosts ??= new WeakMap();
+  const replace = prototype.setCustomEditorComponent;
+  if (typeof replace === 'function' && !state.editorReplacementPatched) {
+    const shared = state;
+    const replaceEditor = function (this: Host, factory: unknown) {
+      replace.call(this, factory);
+      shared.decorate(this, shared);
+    };
+    prototype.setCustomEditorComponent = replaceEditor;
+    state.editorReplacementPatched = true;
+  }
   const shutdown = prototype.shutdown;
   if (typeof shutdown !== 'function') state.supported = false;
   else if (!marked(shutdown, wrapped)) {
     const shared = state;
     const stop = function (this: Host, options?: { fromSignal?: boolean }) {
       shared.active.get(this.session.sessionManager)?.pending?.cancel();
+      shared.active.get(this.session.sessionManager)?.input?.reset();
       return shutdown.call(this, options);
     };
     Object.defineProperty(stop, wrapped, { value: true });
@@ -258,13 +353,17 @@ export function install(): Adapter {
   else if (!marked(reload, wrapped)) {
     const shared = state;
     const guarded = function (this: Host) {
-      if (!this.session.isStreaming && !this.session.isCompacting) shared.active.get(this.session.sessionManager)?.pending?.cancel();
+      if (!this.session.isStreaming && !this.session.isCompacting) {
+        shared.active.get(this.session.sessionManager)?.pending?.cancel();
+        shared.active.get(this.session.sessionManager)?.input?.reset();
+      }
       return reload.call(this);
     };
     Object.defineProperty(guarded, wrapped, { value: true });
     prototype.handleReloadCommand = guarded;
   }
   state.attach = attach;
+  state.decorate = decorate;
   state.interrupt = interrupt;
   return state;
 }
@@ -272,8 +371,11 @@ export function install(): Adapter {
 export function enable(ctx: ExtensionContext, state: Adapter): void {
   const previous = state.active.get(ctx.sessionManager);
   previous?.pending?.cancel();
+  previous?.input?.reset();
   const registration: Registration = { ctx, warned: previous?.warned ?? false };
   state.active.set(ctx.sessionManager, registration);
+  const host = state.hosts.get(ctx.sessionManager);
+  if (host) state.attach(host, state);
   if (!state.supported) warn(registration, state);
 }
 
@@ -288,6 +390,7 @@ export function restoreQueuesAtContext(ctx: ExtensionContext, state: Adapter): v
 
 export function disable(ctx: ExtensionContext, state: Adapter): void {
   state.active.get(ctx.sessionManager)?.pending?.cancel();
+  state.active.get(ctx.sessionManager)?.input?.reset();
   state.active.delete(ctx.sessionManager);
   ctx.ui.setStatus('escape-continue', undefined);
 }

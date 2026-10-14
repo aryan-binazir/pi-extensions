@@ -224,7 +224,7 @@ export function sessionPort(session: AgentSession, state: Adapter): SessionPort 
     },
     abort: () => abortRun(session, state),
     streaming: () => session.isStreaming,
-    // Pi 0.87 has no reliable session.isIdle property; activity flags identify foreign runs after abort.
+    // Pi 0.99 activity flags avoid the idle-getter assumption behind 7229077; check only after abort.
     foreignRunActive: () => session.isStreaming || session.isCompacting,
     async prompt(message, check, events) {
       let starting = false;

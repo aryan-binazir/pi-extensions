@@ -197,3 +197,18 @@ test('missing provider keeps tracker-specific wording', async t => {
   assert.equal(f.tracker.status, 'Luna tracker error: openai-codex provider unavailable');
   assert.deepEqual(f.reports, []); f.tracker.stop();
 });
+
+test('a whitespace-only capped report remains an error and is never published', async t => {
+  const f = fixture(t, async function* () {yield {type: 'text_delta', delta: ' '.repeat(2000)};});
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  assert.equal(f.tracker.status, 'Luna tracker error: Provider returned no complete tracking report');
+  assert.deepEqual(f.reports, []); f.tracker.stop();
+});
+
+test('configured tracker model limits do not change its existing token budget', async t => {
+  const f = fixture(t);
+  f.ctx.modelRegistry.find = () => ({provider: 'openai-codex', id: 'gpt-6-luna', maxTokens: 128});
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  assert.equal(f.calls[0][2].maxTokens, 1024); assert.deepEqual(f.reports, ['Tracking']);
+  f.tracker.stop();
+});

@@ -795,3 +795,13 @@ test("reopening after Esc starts a fresh side conversation", async () => {
   h.key("");
   await result;
 });
+
+for (const [maxTokens, expected] of [[128.9, 128], [0.5, 1], [0, 4096], [NaN, 4096], [8192, 4096]]) {
+  test(`BTW retains its selected-model token limit for ${maxTokens}`, async () => {
+    const h = host(); h.ctx.model.maxTokens = maxTokens;
+    const result = h.commands.btw.handler("Question", h.ctx);
+    try {
+      await tick(); assert.equal(h.requests[0].options.maxTokens, expected);
+    } finally { h.key("\u001b"); await result; }
+  });
+}

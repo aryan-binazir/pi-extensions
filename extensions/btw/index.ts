@@ -203,7 +203,11 @@ export default function btw(pi: ExtensionAPI) {
               });
               const result = await sideCompletion({
                 registry: ctx.modelRegistry, model, systemPrompt, messages,
-                limits: { characters: MAX_ANSWER, tokens: 4096 }, signal,
+                limits: {
+                  characters: MAX_ANSWER,
+                  tokens: Number.isFinite(model.maxTokens) && model.maxTokens > 0
+                    ? Math.max(1, Math.min(4096, Math.floor(model.maxTokens))) : 4096,
+                }, signal,
                 sessionId: randomUUID(),
                 onStart: () => {
                   if (closed) return;
@@ -218,12 +222,11 @@ export default function btw(pi: ExtensionAPI) {
               });
               if (closed) return;
               answer = result.text;
-              if (result.ok) status = answer ? "" : "Provider returned no text";
+              if (result.ok || result.kind === "empty" || result.kind === "incomplete")
+                status = answer ? "" : "Provider returned no text";
               else if (result.kind === "tool-use")
                 status = "Provider requested a tool; no tool was run";
               else if (result.kind === "limit") status = "Answer limit reached";
-              else if (result.kind === "empty" || result.kind === "incomplete")
-                status = answer ? "" : "Provider returned no text";
               else if (result.kind === "provider-unavailable")
                 throw new Error("Selected provider is unavailable");
               else throw result.error;

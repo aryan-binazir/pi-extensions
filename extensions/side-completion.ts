@@ -14,12 +14,14 @@ export interface SideCompletionRequest {
   onStart?: () => void;
   onText?: (text: string) => void;
 }
-export type SideCompletionResult = {ok: true; text: string} | {
-  ok: false;
-  kind: 'auth' | 'provider-unavailable' | 'provider' | 'aborted' | 'limit' | 'tool-use' | 'incomplete' | 'empty';
-  text: string;
-  error?: unknown;
-};
+export type SideCompletionResult = {ok: true; text: string} | {ok: false; text: string} & (
+  | {kind: 'auth' | 'provider' | 'aborted'; error: unknown}
+  | {kind: 'provider-unavailable'}
+  | {kind: 'limit'}
+  | {kind: 'tool-use'}
+  | {kind: 'incomplete'}
+  | {kind: 'empty'}
+);
 
 async function abortable<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {
   let abort!: () => void;
@@ -48,8 +50,7 @@ export async function sideCompletion(request: SideCompletionRequest): Promise<Si
     const stream = provider.streamSimple({...model, ...(auth.baseUrl ? {baseUrl: auth.baseUrl} : {})},
       normalizeContext({systemPrompt, messages, tools: []}), {
         apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: transportSignal,
-        maxTokens: Number.isFinite(model.maxTokens) && model.maxTokens > 0
-          ? Math.max(1, Math.min(limits.tokens, Math.floor(model.maxTokens))) : limits.tokens,
+        maxTokens: limits.tokens,
         // Bridge 0.9.2 routes "none" through its verbatim summarizer path.
         cacheRetention: model.provider === 'claude-bridge' ? 'short' : 'none',
         ...(request.reasoning ? {reasoning: request.reasoning} : {}),
@@ -88,6 +89,6 @@ export async function sideCompletion(request: SideCompletionRequest): Promise<Si
   } catch (error) {
     return {ok: false, kind: signal.aborted ? 'aborted' : 'provider', text, error};
   } finally {
-    void iterator?.return?.().catch(() => {});
+    void Promise.resolve().then(() => iterator?.return?.()).catch(() => {});
   }
 }

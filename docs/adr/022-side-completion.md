@@ -19,13 +19,16 @@ and provider lookup, system prompt, messages, character/token limits and an abor
 signal. Optional reasoning, session ID, start/text callbacks and a final-versus-
 delta text choice preserve the two existing callers' request and display policies.
 It returns bounded text or a discriminated failure carrying bounded text and,
-for request errors, the original error value. Caller wording and error clipping
-stay outside the module.
+for thrown errors and aborts, the original error value. Auth failures and
+provider error events carry an `Error` built from their message; an unavailable
+provider has only its failure kind. Caller wording and error clipping stay
+outside the module.
 
 The module resolves auth, applies its `baseUrl`, forwards headers/environment,
-normalizes `tools: []` and calls the provider's public simple stream. It clamps
-requested tokens against a usable model maximum. Claude bridge uses short cache
-retention because bridge 0.9.2 treats `none` as its verbatim summarizer path.
+normalizes `tools: []` and calls the provider's public simple stream. It forwards
+the caller's token budget unchanged. BTW bounds that budget against a usable
+model maximum; the tracker retains its fixed 1,024-token request. Claude bridge
+uses short cache retention because bridge 0.9.2 treats `none` as its verbatim summarizer path.
 Other providers use `none`. Callers do not handle these request options.
 
 Deltas stop at the character limit, including an exact-limit delta, and abort
@@ -67,7 +70,7 @@ call module, consistent with the independent entrypoints in
 ## Verification
 
 `tests/side-completion.test.ts` owns synthetic event tests for bounds, failures,
-cancellation, incomplete streams, token limits, endpoint overrides and bridge
+cancellation, incomplete streams, caller token budgets, endpoint overrides and bridge
 cache policy. Real OpenAI, Codex and pi-messages serializers use injected fetch
 responses and synthetic credentials. Native wire tests and BTW's pi-messages
 transport fixture moved out of caller tests. BTW tests retain prompt projection,

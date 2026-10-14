@@ -40,15 +40,17 @@ test('returns complete final text and preserves inert user content with no tools
   assert.equal(options.cacheRetention, 'none');
 });
 
-test('caps deltas at the limit, aborts transport and returns bounded partial text', async () => {
-  const f = fixture([{type: 'text_delta', delta: '123456789012345'}, {type: 'text_delta', delta: 'after cap'}]);
-  const updates: string[] = [];
-  f.request.onText = text => updates.push(text);
-  assert.deepEqual(await sideCompletion(f.request), {ok: false, kind: 'limit', text: '1234567890'});
-  assert.deepEqual(updates, ['1234567890']);
-  assert.equal(f.calls[0][2].signal.aborted, true);
-  assert.equal(f.controller.signal.aborted, false);
-});
+for (const delta of ['1234567890', '123456789012345']) {
+  test(`caps ${delta.length}-character deltas at the limit, aborts transport and returns bounded partial text`, async () => {
+    const f = fixture([{type: 'text_delta', delta}, {type: 'text_delta', delta: 'after cap'}]);
+    const updates: string[] = [];
+    f.request.onText = text => updates.push(text);
+    assert.deepEqual(await sideCompletion(f.request), {ok: false, kind: 'limit', text: '1234567890'});
+    assert.deepEqual(updates, ['1234567890']);
+    assert.equal(f.calls[0][2].signal.aborted, true);
+    assert.equal(f.controller.signal.aborted, false);
+  });
+}
 
 test('bounds authoritative final text across blocks without aborting completed transport', async () => {
   const f = fixture([{type: 'done', reason: 'length', message: {content: [
@@ -64,6 +66,7 @@ test('returns typed provider errors with the partial draft, never finalized fail
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.equal(result.kind, 'provider'); assert.equal(result.text, 'draft');
+  if (result.kind !== 'provider') return;
   assert.ok(result.error instanceof Error); assert.equal(result.error.message, 'synthetic failure');
 });
 
@@ -149,18 +152,30 @@ test('auth and missing provider failures are typed without fallback', async () =
   f.request.registry.getApiKeyAndHeaders = async () => ({ok: false, error: 'no credentials'});
   const result = await sideCompletion(f.request);
   assert.equal(result.ok, false);
-  if (!result.ok) {assert.equal(result.kind, 'auth'); assert.ok(result.error instanceof Error); assert.equal(result.error.message, 'no credentials');}
+  if (!result.ok && result.kind === 'auth') {assert.ok(result.error instanceof Error); assert.equal(result.error.message, 'no credentials');}
   f.request.registry.getApiKeyAndHeaders = async () => ({ok: true});
   f.request.registry.getProvider = () => undefined;
   assert.deepEqual(await sideCompletion(f.request), {ok: false, kind: 'provider-unavailable', text: ''});
 });
 
-for (const maxTokens of [128, 0, NaN]) {
-  test(`bounds requested tokens against usable model limit ${maxTokens}`, async () => {
-    const f = fixture([{type: 'done', reason: 'stop', message: {content: [{type: 'text', text: 'answer'}]}}]);
-    f.request.model = {...f.request.model, maxTokens};
-    await sideCompletion(f.request);
-    assert.equal(f.calls[0][2].maxTokens, maxTokens === 128 ? 128 : 1024);
+test('preserves the caller token budget even when model metadata has a smaller limit', async () => {
+  const f = fixture([{type: 'done', reason: 'stop', message: {content: [{type: 'text', text: 'answer'}]}}]);
+  f.request.model = {...f.request.model, maxTokens: 128};
+  await sideCompletion(f.request);
+  assert.equal(f.calls[0][2].maxTokens, 1024);
+});
+
+for (const cleanup of ['throws', 'plain result']) {
+  test(`iterator cleanup that ${cleanup} never replaces a typed result`, async () => {
+    const f = fixture([]);
+    f.request.registry.getProvider = () => ({streamSimple: () => ({
+      [Symbol.asyncIterator]: () => ({
+        next: async () => ({done: false, value: {type: 'done', reason: 'stop', message: {content: [{type: 'text', text: 'answer'}]}}}),
+        return: () => {if (cleanup === 'throws') throw new Error('cleanup failure'); return {done: true};},
+      }),
+    })}) as any;
+    assert.deepEqual(await sideCompletion(f.request), {ok: true, text: 'answer'});
+    await new Promise(resolve => setImmediate(resolve));
   });
 }
 

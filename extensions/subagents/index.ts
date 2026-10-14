@@ -1,8 +1,8 @@
 import { join } from 'node:path';
 import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { truncateToWidth } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { terminalLabel } from '../terminal-text.ts';
+import { FramedPanel } from '../framed-panel.ts';
 import { DelegationAdmission } from './scope.ts';
 import { SubagentRegistry } from './registry.ts';
 import { TIMEOUT_BOUNDS } from './task.ts';
@@ -51,44 +51,42 @@ export default function subagents(pi: ExtensionAPI): void {
   };
   let paintedPanel: string | undefined;
   let panelPaintKnown = false;
-  let expanded = false;
+  const panel = new FramedPanel('alt+r', 'truncate');
   const panelSlots = 9;
   const renderActiveAgents = () => {
     if (!context?.hasUI) return;
     const active = registry.isShutdown ? [] : registry.activeTasks().sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
     const total = active.length, running = active.filter(task => task.status === 'running').length;
     const rows = active.slice(0, panelSlots).map(task => [task.id.slice(0, 8), task.status, brief(task.id, task.task)]);
-    const rendered = total ? JSON.stringify([expanded, total, running, rows]) : undefined;
+    const rendered = total ? JSON.stringify([panel.expanded, total, running, rows]) : undefined;
     if (panelPaintKnown && rendered === paintedPanel) return;
     panelPaintKnown = true;
     paintedPanel = rendered;
     context.ui.setWidget('interactive-tools:subagents', rendered === undefined ? undefined : (tui, theme) => {
       const blue = (text: string) => theme.fg('border', text);
-      const summary = `Subagents · ${running} running · ${total - running} queued · ${blue('alt+r')}`;
-      const lines = [`Subagents · ${total} active · ${blue('alt+r')}`, ...rows.map(([id, status, task]) => `${id} · ${blue(status)} · ${task}`)];
+      const summary = `Subagents · ${running} running · ${total - running} queued · ${blue(panel.shortcut)}`;
+      const title = `Subagents · ${total} active · ${blue(panel.shortcut)}`;
+      const lines = rows.map(([id, status, task]) => `${id} · ${blue(status)} · ${task}`);
       return {
         invalidate() {},
         render(width: number) {
-          if (width < 6) return [];
-          if (!expanded) return [truncateToWidth(summary, width)];
-          const inner = width - 4;
-          const slots = Math.max(2, Math.min(panelSlots, Math.floor((tui?.terminal?.rows || 24) / 2) - 3));
-          const shown = total <= slots ? total : slots - 1;
-          const hiddenRunning = Math.max(0, running - shown), hiddenQueued = total - shown - hiddenRunning;
-          const more = [hiddenRunning && `${hiddenRunning} ${blue('running')}`, hiddenQueued && `${hiddenQueued} ${blue('queued')}`].filter(Boolean).join(' · ');
-          return [
-            blue(`╭${'─'.repeat(inner + 2)}╮`),
-            ...[...lines.slice(0, shown + 1), ...(shown < total ? [`… ${total - shown} more · ${more}`] : [])].map(line => `${blue('│')} ${truncateToWidth(line, inner, '…', true)} ${blue('│')}`),
-            blue(`╰${'─'.repeat(inner + 2)}╯`),
-          ];
+          return panel.render(width, theme, { summary, title,
+            maxHeight: Math.max(5, Math.min(panelSlots + 3, Math.floor((tui?.terminal?.rows || 24) / 2))),
+            rows: slots => {
+              const shown = total <= slots ? total : slots - 1;
+              const hiddenRunning = Math.max(0, running - shown), hiddenQueued = total - shown - hiddenRunning;
+              const more = [hiddenRunning && `${hiddenRunning} ${blue('running')}`, hiddenQueued && `${hiddenQueued} ${blue('queued')}`].filter(Boolean).join(' · ');
+              return [...lines.slice(0, shown), ...(shown < total ? [`… ${total - shown} more · ${more}`] : [])];
+            },
+          });
         },
       };
     });
   };
-  pi.registerShortcut('alt+r', {
+  pi.registerShortcut(panel.shortcut, {
     description: 'Toggle compact/full subagent panel',
     handler() {
-      expanded = !expanded;
+      panel.toggle();
       renderActiveAgents();
     },
   });

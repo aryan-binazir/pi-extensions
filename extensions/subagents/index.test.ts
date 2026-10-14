@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { InteractiveMode, ExtensionEditorComponent, CustomEditor, initTheme } from '@earendil-works/pi-coding-agent';
-import { Container, visibleWidth } from '@earendil-works/pi-tui';
+import { Container, visibleWidth, type Component } from '@earendil-works/pi-tui';
 import type { Host } from './test-support.ts';
 import { withPi } from '../../tests/pi-session.ts';
 import subagents from './index.ts';
+import { FramedPanel } from '../framed-panel.ts';
 import { until, withHost } from './test-support.ts';
 
 const echoArgs = `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()})}],usage:{input:3,output:4}}}));`;
@@ -491,6 +492,51 @@ test('source review cancellation restores synchronously and preserves a replacem
     dialog.handleInput('\x1b');
     assert.equal(host.ctx.ui.getEditorText(), 'replacement draft');
   }));
+
+test('real Pi subagent widget follows the shared panel and alt+r toggles both states', async () => {
+  let component: Component | undefined;
+  const theme = { fg: (color: 'border', text: string) => { assert.equal(color, 'border'); return `\x1b[34m${text}\x1b[39m`; } };
+  const blue = (text: string) => theme.fg('border', text);
+  const priorPath = process.env.PATH;
+  try {
+    await withPi({ extensions: [subagents], configure: async ({ cwd, agentDir }, provider) => {
+      await mkdir(agentDir, { recursive: true });
+      await writeFile(join(agentDir, 'subagents.json'), JSON.stringify({ defaultProfile: 'fixture', profiles: { fixture: { model: `pi-test/${provider.getModel().id}`, thinking: 'off' } } }));
+      await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nsetInterval(()=>{},1000);`, { mode: 0o700 });
+      process.env.PATH = `${cwd}:${priorPath ?? ''}`;
+      return { model: provider.getModel() };
+    }, bind: session => {
+      session.setActiveToolsByName(['read', 'subagent', 'subagent_cancel']);
+      return { mode: 'tui', uiContext: { ...session.extensionRunner.createContext().ui,
+        setWidget: (_key, value) => { component = typeof value === 'function' ? value({ terminal: { rows: 24 } } as any, theme as any) : undefined; },
+      } };
+    } }, async ({ session, runner }) => {
+      const execute = (name: string, args: Record<string, unknown>) => session.getToolDefinition(name)!.execute(name, args, undefined, undefined, runner.createToolContext(name, undefined));
+      const task = 'Inspect 界 🧪';
+      const launched = await execute('subagent', { task, preset: 'reader' });
+      const { id } = launched.details as { id: string };
+      const panel = new FramedPanel('alt+r', 'truncate');
+      const content = { summary: `Subagents · 1 running · 0 queued · ${blue('alt+r')}`, title: `Subagents · 1 active · ${blue('alt+r')}`, rows: [`${id.slice(0, 8)} · ${blue('running')} · ${task}`], maxHeight: 12 };
+      const toggle = runner.getShortcuts({}).get('alt+r')!;
+      assert.ok(toggle);
+      assert.deepEqual(runner.getShortcutDiagnostics(), []);
+      assert.deepEqual(component!.render(80), [content.summary]);
+      for (const expanded of [true, false]) {
+        panel.toggle();
+        await toggle.handler(runner.createContext());
+        for (const width of [0, 5, 6, 7, 20, 40, 80, 200]) assert.deepEqual(component!.render(width), panel.render(width, theme, content));
+        assert.equal(component!.render(80).length > 1, expanded);
+      }
+      await toggle.handler(runner.createContext());
+      await execute('subagent_cancel', { id: 'all' });
+      assert.equal(component, undefined);
+      await execute('subagent', { task, preset: 'reader' });
+      assert.ok(component!.render(80).length > 1, 'expanded choice survives an empty batch');
+    });
+  } finally {
+    if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
+  }
+});
 
 test('subagent panel uses terminal labels without changing task briefs', async () =>
   withHost({prefix: 'subagent-label-', pi: 'setInterval(()=>{},1000)'}, async ({execute, widgets, shortcuts, ctx}) => {

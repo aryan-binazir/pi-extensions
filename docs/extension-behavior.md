@@ -14,7 +14,9 @@ and effort handoff. It does not overwrite saved defaults. Plain `/new` keeps
 Pi's normal behavior.
 
 Closing a BTW overlay aborts its request and discards the side conversation; its
-answers never automatically enter the main conversation.
+answers never automatically enter the main conversation. BTW and the subagent
+tracker share a [bounded tool-free provider call](adr/022-side-completion.md);
+their prompts, display and scheduling remain caller-owned.
 
 The prompt stash is memory-only and clears on session start, switch and reload.
 

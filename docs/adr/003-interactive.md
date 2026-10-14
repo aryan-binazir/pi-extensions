@@ -23,8 +23,10 @@ not inherit a pending override. Pi's own `pi.events` facade also becomes stale
 after replacement, so it cannot carry this handoff; listeners on the namespaced
 process event are removed during shutdown and installed by the new runtime.
 
-BTW serializes Pi's compacted context into inert text and invokes the selected
-provider's public `streamSimple` with resolved Pi authentication and `tools: []`.
+BTW serializes Pi's compacted context into inert text and calls
+`extensions/side-completion.ts` with the selected model, prompt, messages and
+limits. The [provider-call module](022-side-completion.md) resolves Pi
+authentication and sends a normalized tool-free request.
 It does not create a Pi agent or execute model-requested tools. It preserves tool result
 text, current system prompt, and an in-memory bounded followup history. Closing
 aborts the request and discards all local conversation state; no answer is added
@@ -50,7 +52,11 @@ checkpoints, while the npm SDK tagged 0.85.1 still implements legacy
 and otherwise uses exported `buildSessionContext`. Regression tests cover both
 formats. This compatibility path can disappear when the published SDK catches up.
 
-Tests exercise registered tools/commands, actual dialog keyboard input, lifecycle
-shutdown, and the public provider/auth boundary. They use synthetic provider
-streams and no credentials. Live provider transport, actual terminal rendering,
+BTW owns the captured main-turn prompt choice and the bridge prompt-cap exception
+because both depend on its session projection. The provider-call module owns
+bridge cache retention. It has no main-turn or session history to choose from.
+
+Tests exercise registered tools/commands, actual dialog keyboard input and lifecycle
+shutdown. Shared module tests own native provider serialization and authentication,
+using injected transport responses and synthetic credentials. Live provider transport, actual terminal rendering,
 and macOS desktop behavior remain separate manual verification surfaces.

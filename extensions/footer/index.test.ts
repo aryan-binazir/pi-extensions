@@ -137,7 +137,6 @@ test('real Pi loader discovers command provenance and dynamically loads the opti
       bind: session => ({ mode: 'rpc', uiContext: { ...session.extensionRunner.createContext().ui, setStatus: (_key, value) => statuses.push(value) } }),
     }, async ({ runtime }) => {
       const loaded = runtime.services.resourceLoader.getExtensions();
-      assert.deepEqual(loaded.errors, []);
       assert.ok(loaded.extensions.find(entry => entry.path === path));
       assert.equal(statuses.at(-1), 'Auto: on · Luna low');
     });

@@ -17,17 +17,23 @@ scripted faux provider, session runtime and isolated workspace/config directorie
 It awaits abort and extension shutdown, disposes the current session, restores
 its environment changes and removes its temporary directory even when setup or
 the callback throws. An externally supplied workspace remains the caller's
-responsibility. Callers that change PATH or argv restore them themselves. Tests run sequentially
-within each process. Nested fixtures temporarily replace the process-wide agent
+responsibility. Callers that change PATH or argv restore them themselves. Tests
+run sequentially within each process. Nested fixtures temporarily replace the process-wide agent
 directory, so outer sessions must not read it while an inner fixture is active.
 
 Factories load in isolation. Settings can select package or path entrypoints.
 The harness fixes loader exclusions, in-memory credentials and offline model
 loading; tests cannot override them. Tests own behavior-specific settings, model
-selection and typed UI bindings. Runtime replacement recreates services, reruns configuration and
-rebinds the extensions. Configuration must tolerate repeated calls. The session
+selection and typed UI bindings. Runtime replacement recreates services, reruns
+configuration and rebinds the extensions. Configuration must tolerate repeated calls. The session
 and runner handles follow the current runtime after new, resume and fork; one
 faux provider and its remaining response script survive those replacements.
+
+Factory cleanup starts when services have loaded, before test configuration or
+session creation can fail. A real unbound Pi runner delivers shutdown to those
+loaded extensions on setup failure. The fixture tracks session invalidation so a
+failed replacement does not shut down the retired session twice. Errors retain
+Pi diagnostics and stacks; combined failures keep every cause.
 
 Each option supports multiple migrated tests: factories in todo and subagents;
 settings in package and fast mode; responses in todo/scripted-tool and editor

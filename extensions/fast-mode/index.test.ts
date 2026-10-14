@@ -461,8 +461,8 @@ test('forking a saved fast branch restores its alias in a fresh runtime',async(t
 import { resolveCliModel, resolveModelScopeWithDiagnostics } from '@earendil-works/pi-coding-agent';
 import { modelsAreEqual } from '@earendil-works/pi-ai';
 
-const cliConfiguredRuntime=async(cwd:string,settings:Parameters<typeof SettingsManager.inMemory>[0],run:(runtime:AgentSessionRuntime)=>Promise<void>,sessionManager=SessionManager.inMemory(cwd))=>withPi({
- cwd,extensions:[fastMode],settings,sessionManager,
+const cliConfiguredRuntime=async(settings:Parameters<typeof SettingsManager.inMemory>[0],run:(runtime:AgentSessionRuntime)=>Promise<void>,sessionManager:SessionManager|((cwd:string)=>SessionManager)=SessionManager.inMemory)=>withPi({
+ extensions:[fastMode],settings,sessionManager,
  configure:async({modelRuntime,settingsManager,sessionManager})=>{
   await modelRuntime.setRuntimeApiKey('openai','fixture-key');
   await modelRuntime.refresh({allowNetwork:false,providers:['openai']});
@@ -476,17 +476,16 @@ const cliConfiguredRuntime=async(cwd:string,settings:Parameters<typeof SettingsM
  },
 },async({runtime})=>run(runtime));
 const selections=async(settings:Parameters<typeof SettingsManager.inMemory>[0],args:string[]=[])=>{
- const cwd=await mkdtemp(join(tmpdir(),'pi-fast-default-'));
  const argv=process.argv;process.argv=[...argv.slice(0,2),...args];
  let result:string[]=[];
  try {
-  await cliConfiguredRuntime(cwd,settings,async runtime=>{
+  await cliConfiguredRuntime(settings,async runtime=>{
    const startup=`${runtime.session.model?.id}:${runtime.session.thinkingLevel}`;
    assert.equal((await runtime.newSession()).cancelled,false);
    result=[startup,`${runtime.session.model?.id}:${runtime.session.thinkingLevel}`];
   });
   return result;
- }finally{process.argv=argv;await rm(cwd,{recursive:true,force:true});}
+ }finally{process.argv=argv;}
 };
 const fastDefault={defaultProvider:'openai',defaultModel:'gpt-5.5~fast'};
 
@@ -512,13 +511,12 @@ test('an explicit --model keeps new sessions off the saved fast default',async()
 
 test('a saved fast default leaves existing sessions on their saved model',async(t)=>{
  for(const kind of ['message','custom message'] as const)await t.test(kind,async()=>{
-  const cwd=await mkdtemp(join(tmpdir(),'pi-fast-default-existing-'));
-  try {
-   const sessionManager=SessionManager.inMemory(cwd);
-   sessionManager.appendModelChange('openai','gpt-4.1');
-   if(kind==='message')sessionManager.appendMessage({role:'user',content:'Saved ordinary branch',timestamp:Date.now()});
-   else sessionManager.appendCustomMessageEntry('synthetic-notice','Saved ordinary branch',true);
-   await cliConfiguredRuntime(cwd,fastDefault,async runtime=>{assert.equal(runtime.session.model?.id,'gpt-4.1');},sessionManager);
-  }finally{await rm(cwd,{recursive:true,force:true});}
+  await cliConfiguredRuntime(fastDefault,async runtime=>{assert.equal(runtime.session.model?.id,'gpt-4.1');},cwd=>{
+   const manager=SessionManager.inMemory(cwd);
+   manager.appendModelChange('openai','gpt-4.1');
+   if(kind==='message')manager.appendMessage({role:'user',content:'Saved ordinary branch',timestamp:Date.now()});
+   else manager.appendCustomMessageEntry('synthetic-notice','Saved ordinary branch',true);
+   return manager;
+  });
  });
 });

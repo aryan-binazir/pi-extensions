@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { access } from 'node:fs/promises';
 import test from 'node:test';
 import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import effort from '../extensions/effort/index.ts';
 import todo from '../extensions/todo/index.ts';
 import { withPi } from './pi-session.ts';
 
@@ -72,3 +73,26 @@ test('runtime replacement consumes the remaining faux responses and exposes the 
   assert.match(JSON.stringify(fixture.session.messages), /After replacement/);
   assert.equal(fixture.provider.state.callCount, 2);
 }));
+
+
+for (const replacement of [false, true]) test(`${replacement ? 'replacement' : 'initial'} setup failure releases factory listeners and shuts down each session once`, async () => {
+  const handoff = 'pi-interactive:effort-handoff';
+  const before = process.listenerCount(handoff);
+  let calls = 0, stopped = 0;
+  const options = { extensions: [effort, (pi: import('@earendil-works/pi-coding-agent').ExtensionAPI) => {
+    pi.on('session_shutdown', () => { stopped++; });
+  }], configure: () => {
+    calls++;
+    if (!replacement || calls > 1) throw new Error('configuration failed');
+    return {};
+  } };
+  if (replacement) await withPi(options, async ({ runtime }) => {
+    assert.equal(process.listenerCount(handoff), before + 1);
+    await assert.rejects(runtime.newSession(), /configuration failed/);
+    assert.equal(process.listenerCount(handoff), before);
+    assert.equal(stopped, 2);
+  });
+  else await assert.rejects(withPi(options, async () => { throw new Error('unreachable'); }), /configuration failed/);
+  assert.equal(process.listenerCount(handoff), before);
+  assert.equal(stopped, replacement ? 2 : 1);
+});

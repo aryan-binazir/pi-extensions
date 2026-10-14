@@ -49,30 +49,51 @@ test('registered background tool launches tool-limited Pi and pushes completion 
     assert.equal(child.args.at(-1), 'Read synthetic checkout');
   }));
 
-test('RPC UI approves extensions once per real spawn and reauthorizes cached workflow stages', async () =>
-  withHost({
-    prefix: 'workflow-rpc-',
-    pi: `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}));`,
-  }, async ({cwd, ctx, execute, notifications}) => {
-    const approvals: string[] = [];
-    let allowExtensions = true;
-    ctx.ui.confirm = async (title: string) => { approvals.push(title); return title.includes('child extensions') ? allowExtensions : true; };
-    await writeFile(join(cwd, 'trusted.ts'), 'export default () => {};');
-    const source = `return await api.spawn({task:'read',preset:'reader',extensions:[${JSON.stringify(join(cwd, 'trusted.ts'))}]},'read');`;
-    const workflow = () => execute('workflow', {source});
-    await workflow();
-    assert.equal(notifications.length, 0, 'workflow owns its child result');
-    assert.equal((await execute('subagent_status')).details.length, 1);
-    assert.equal(approvals.filter(title => title.includes('child extensions')).length, 1);
-    allowExtensions = false;
-    await assert.rejects(workflow(), /Child extension loading was not approved/);
-    assert.equal((await execute('subagent_status')).details.length, 1, 'rejected replay must not launch a child');
-    allowExtensions = true;
-    await workflow();
-    assert.equal((await execute('subagent_status')).details.length, 1, 'approved replay must reuse the cached child');
-    assert.equal(notifications.length, 0);
-    assert.equal(approvals.filter(title => title.includes('child extensions')).length, 3);
-  }));
+test('RPC UI approves extensions once per real spawn and reauthorizes cached workflow stages', async () => {
+  const approvals: string[] = [];
+  let allowExtensions = true;
+  const priorPath = process.env.PATH;
+  try {
+    await withPi({ extensions: [subagents], configure: async ({ cwd, agentDir }, provider) => {
+      await mkdir(agentDir, { recursive: true });
+      await writeFile(join(agentDir, 'subagents.json'), JSON.stringify({ defaultProfile: 'fixture', profiles: { fixture: { model: `pi-test/${provider.getModel().id}`, thinking: 'off' } } }));
+      await writeFile(join(cwd, 'pi'), `#!${process.execPath}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}));`, { mode: 0o700 });
+      process.env.PATH = `${cwd}:${priorPath ?? ''}`;
+      return { model: provider.getModel() };
+    }, bind: session => {
+      session.setActiveToolsByName(['read', 'write', 'edit', 'bash', 'subagent', 'workflow', 'subagent_status']);
+      return { mode: 'rpc', uiContext: { ...session.extensionRunner.createContext().ui,
+        editor: async (_title, source) => source,
+        confirm: async title => { approvals.push(title); return title.includes('child extensions') ? allowExtensions : true; },
+      } };
+    } }, async ({ cwd, session, runner }) => {
+      const execute = (name: string, args: Record<string, unknown> = {}) => session.getToolDefinition(name)!.execute(name, args, undefined, undefined, runner.createToolContext(name, undefined));
+      const tasks = async () => {
+        const value = (await execute('subagent_status')).details;
+        assert.ok(Array.isArray(value));
+        return value;
+      };
+      const notifications = () => session.messages.filter(message => message.role === 'custom' && message.customType === 'subagent-complete');
+      await writeFile(join(cwd, 'trusted.ts'), 'export default () => {};');
+      const source = `return await api.spawn({task:'read',preset:'reader',extensions:[${JSON.stringify(join(cwd, 'trusted.ts'))}]},'read');`;
+      const workflow = () => execute('workflow', {source});
+      await workflow();
+      assert.equal(notifications().length, 0, 'workflow owns its child result');
+      assert.equal((await tasks()).length, 1);
+      assert.equal(approvals.filter(title => title.includes('child extensions')).length, 1);
+      allowExtensions = false;
+      await assert.rejects(workflow(), /Child extension loading was not approved/);
+      assert.equal((await tasks()).length, 1, 'rejected replay must not launch a child');
+      allowExtensions = true;
+      await workflow();
+      assert.equal((await tasks()).length, 1, 'approved replay must reuse the cached child');
+      assert.equal(notifications().length, 0);
+      assert.equal(approvals.filter(title => title.includes('child extensions')).length, 3);
+    });
+  } finally {
+    if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
+  }
+});
 
 test('children keep running until a committed shutdown reaps them', async () =>
   withHost({

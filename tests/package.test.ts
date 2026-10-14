@@ -55,7 +55,6 @@ test('Pi package discovers every declared entrypoint and independently loads eac
         }
       });
     }
-    assert.deepEqual(runtime.services.resourceLoader.getExtensions().errors, []);
     assert.equal(runtime.services.resourceLoader.getExtensions().extensions.length, intended.length);
   });
 });

@@ -1,14 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { InteractiveMode, type AgentSession, type CustomEditor, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { matchesKey, type Component } from '@earendil-works/pi-tui';
+import { isUser, startPromotion, SupersededPromotion, textParts, type Message, type Promotion, type SessionPort } from './promotion.ts';
 import { PasteFramer } from '../vi-mode/paste-framing.ts';
 
-type Message = ReturnType<AgentSession['agent']['peekQueuedMessages']>[number];
-type UserMessage = Extract<Message, { role: 'user' }>;
-type Mode = 'steer' | 'followUp';
 type Host = { session: AgentSession; defaultEditor?: CustomEditor; editor?: CustomEditor; ui?: { getFocusedComponent(): Component | null; requestRender(): void } };
-type Handoff = { cancel(stopRun?: boolean): void; capture(mode: Mode, message: Message): void; restoreAtContext(): void; takeQueue(): { steering: string[]; followUp: string[] } };
-type Registration = { ctx: ExtensionContext; pending?: Handoff; warned: boolean; input?: { editor: CustomEditor; reset(): void } };
+type Registration = { ctx: ExtensionContext; pending?: Promotion; warned: boolean; input?: { editor: CustomEditor; reset(): void } };
 type Checkpoint = { session: AgentSession; check(): void };
 type Adapter = {
   active: WeakMap<ExtensionContext['sessionManager'], Registration>;
@@ -35,8 +32,6 @@ const intercepted = Symbol.for('pi-interactive:escape-continue-queue');
 const chordInput = Symbol.for('pi-interactive:escape-continue-input');
 type InputHandler = CustomEditor['handleInput'] & { [chordInput]?: { original: CustomEditor['handleInput']; reset(): void } };
 type Prototype = { bindCurrentSessionExtensions(this: Host): Promise<void>; setCustomEditorComponent(this: Host, factory: unknown): void; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; handleReloadCommand(this: Host): Promise<void>; [installed]?: Adapter };
-class CancelledHandoff extends Error {}
-class SupersededHandoff extends Error {}
 
 // Pi's extension context exposes neither prepared queue contents nor queue removal.
 function queueLayout(session: AgentSession): QueueLayout | undefined {
@@ -49,12 +44,6 @@ function queueLayout(session: AgentSession): QueueLayout | undefined {
   return { agent, display, preflight };
 }
 
-function textParts(message: UserMessage): string[] {
-  return typeof message.content === 'string' ? [message.content]
-    : message.content.filter(part => part.type === 'text').map(part => part.text);
-}
-
-function isUser(message: Message): message is UserMessage { return message.role === 'user'; }
 function marked(fn: unknown, key: symbol): boolean { return typeof fn === 'function' && (fn as unknown as Record<symbol, boolean>)[key] === true; }
 
 function warn(registration: Registration, state: Adapter): void {
@@ -97,7 +86,7 @@ function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter)
   }
   const normalize = layout.preflight._normalizePromptImages;
   if (!marked(normalize, checkpointed)) {
-    // Pi commits next-turn messages and prompt options after this final async preflight boundary.
+    // Pi commits options and next-turn messages after image preparation, including 0.99 and 1.2.
     const guarded = async (images: unknown) => {
       const scope = state.checkpoints.getStore();
       if (scope?.session === session) scope.check();
@@ -209,106 +198,73 @@ function decorate(host: Host, state: Adapter): void {
   registration.input = { editor, reset };
 }
 
-function interrupt(host: Host, original: () => void, state: Adapter): void {
-  const session = host.session;
-  const registration = state.active.get(session.sessionManager);
-  if (registration?.pending) return registration.pending.cancel();
-  if (!state.supported || !registration || !session.isStreaming || session.isCompacting) return original();
+function sessionPort(session: AgentSession, state: Adapter): SessionPort | undefined {
   const layout = queueLayout(session);
-  if (!layout) { warn(registration, state); return original(); }
-  const held = { steer: [...layout.agent.steeringQueue.messages], followUp: [...layout.agent.followUpQueue.messages] };
-  const selected = [...held.steer, ...held.followUp].find(isUser);
-  if (!selected) return original();
-  session.clearQueue();
-  let delivered = false, restored = false, cancelled = false, starting = false;
-  const current = () => host.session === session && state.active.get(session.sessionManager) === registration;
-  const count = () => [...held.steer, ...held.followUp].filter(isUser).length;
-  const showHeld = () => { if (current()) registration.ctx.ui.setStatus('escape-continue', `Escape Continue: ${count()} queued held · ${cancelled ? 'stopping' : 'handoff'}`); };
-  const release = () => {
-    if (registration.pending !== handoff) return;
-    registration.pending = undefined;
-    if (current()) registration.ctx.ui.setStatus('escape-continue', undefined);
-  };
-  const restore = () => {
-    if (restored) return;
-    restored = true;
-    const restoreQueue = (messages: Message[], queue: Queue, texts: string[]) => {
-      const remaining = messages.filter(message => !delivered || message !== selected);
-      queue.messages.unshift(...remaining);
-      texts.unshift(...remaining.filter(isUser).map(message => textParts(message).join('')));
-    };
-    restoreQueue(held.steer, layout.agent.steeringQueue, layout.display._steeringMessages);
-    restoreQueue(held.followUp, layout.agent.followUpQueue, layout.display._followUpMessages);
-    layout.display._emitQueueUpdate();
-  };
-  const handoff: Handoff = {
-    cancel(stopRun = true) {
-      if (cancelled) return;
-      cancelled = true;
-      showHeld();
-      if (current()) registration.ctx.ui.notify('Escape Continue stopped; queued messages and attachments kept waiting.', 'info');
-      if (stopRun && starting && session.isStreaming) void abortRun(session, state);
+  if (!layout) return;
+  return {
+    queued: { steer: [...layout.agent.steeringQueue.messages], followUp: [...layout.agent.followUpQueue.messages] },
+    clear: () => { session.clearQueue(); },
+    restore(remaining) {
+      for (const mode of ['steer', 'followUp'] as const) {
+        const queue = mode === 'steer' ? layout.agent.steeringQueue : layout.agent.followUpQueue;
+        const texts = mode === 'steer' ? layout.display._steeringMessages : layout.display._followUpMessages;
+        queue.messages.unshift(...remaining[mode]);
+        texts.unshift(...remaining[mode].filter(isUser).map(message => textParts(message).join('')));
+      }
+      layout.display._emitQueueUpdate();
     },
     capture(mode, message) {
-      held[mode].push(message);
       const texts = mode === 'steer' ? layout.display._steeringMessages : layout.display._followUpMessages;
       if (isUser(message)) {
         const index = texts.lastIndexOf(textParts(message).join(''));
         if (index >= 0) texts.splice(index, 1);
       }
       layout.display._emitQueueUpdate();
-      showHeld();
     },
-    restoreAtContext() {
-      if (!delivered || cancelled) return;
-      release();
-      restore();
-    },
-    takeQueue() {
-      const texts = (messages: Message[]) => messages.filter(isUser).filter(message => !delivered || message !== selected).map(message => textParts(message).join(''));
-      const result = { steering: texts(held.steer), followUp: texts(held.followUp) };
-      restored = true;
-      release();
-      if (current()) registration.ctx.ui.notify('Escape Continue: held queued text returned to Pi; normal dequeue/abort attachment handling applies.', 'info');
-      return result;
-    },
-  };
-  registration.pending = handoff;
-  showHeld();
-  const check = () => {
-    if (cancelled || !current()) throw new CancelledHandoff();
-  };
-  const resume = async () => {
-    let unsubscribe: (() => void) | undefined;
-    try {
+    abort: () => abortRun(session, state),
+    streaming: () => session.isStreaming,
+    async prompt(message, check, events) {
       await abortRun(session, state);
       check();
-      if (session.isStreaming || session.isCompacting) throw new SupersededHandoff('Another prompt started during the handoff');
-      unsubscribe = session.subscribe(event => {
-        if (event.type === 'agent_start' && state.checkpoints.getStore()?.check === check) starting = true;
-        if (!starting) return;
-        if (event.type === 'agent_start' && cancelled) void abortRun(session, state);
-        if (event.type === 'message_start' && event.message.role === 'user') delivered = true;
+      // Pi 0.99 supplies activity flags; 7229077 removed reliance on a host's idle getter.
+      if (session.isStreaming || session.isCompacting) throw new SupersededPromotion('Another prompt started during the promotion');
+      const unsubscribe = session.subscribe(event => {
+        // Pi 0.87 reports boolean preflight results; scoped agent_start still proves ownership.
+        if (event.type === 'agent_start' && state.checkpoints.getStore()?.check === check) events.started();
+        if (event.type === 'agent_start') events.runStarted();
+        if (event.type === 'message_start' && event.message.role === 'user') events.delivered();
       });
-      const images = typeof selected.content === 'string' ? undefined : selected.content.filter(part => part.type === 'image');
-      await state.checkpoints.run({ session, check }, () => session.prompt(textParts(selected).join('\n'), {
-        images, expandPromptTemplates: false, source: 'extension',
-        preflightResult: disposition => { if (disposition === 'started') starting = true; },
-      }));
-      if (!delivered && current() && !cancelled) registration.ctx.ui.notify('Escape Continue did not start; queued messages and attachments kept waiting.', 'info');
-    } catch (error) {
-      if (current() && !(error instanceof CancelledHandoff && cancelled)) {
-        const stopped = error instanceof CancelledHandoff || error instanceof SupersededHandoff;
-        const reason = error instanceof Error ? error.message : String(error);
-        registration.ctx.ui.notify(`Escape Continue: ${reason || 'handoff stopped'}; queued messages and attachments kept waiting.`, stopped ? 'info' : 'error');
-      }
-    } finally {
-      unsubscribe?.();
-      restore();
-      release();
-    }
+      try {
+        const images = typeof message.content === 'string' ? undefined : message.content.filter(part => part.type === 'image');
+        // Pi 1.2 sets streaming before image preparation; checkpoints check cancellation and identity.
+        await state.checkpoints.run({ session, check }, () => session.prompt(textParts(message).join('\n'), {
+          images, expandPromptTemplates: false, source: 'extension',
+          preflightResult: disposition => { if (disposition === 'started') events.started(); },
+        }));
+      } finally { unsubscribe(); }
+    },
   };
-  void resume();
+}
+
+function interrupt(host: Host, original: () => void, state: Adapter): void {
+  const session = host.session;
+  const registration = state.active.get(session.sessionManager);
+  if (registration?.pending) return registration.pending.cancel();
+  if (!state.supported || !registration || !session.isStreaming || session.isCompacting) return original();
+  const port = sessionPort(session, state);
+  if (!port) { warn(registration, state); return original(); }
+  const promotion = startPromotion(port, {
+    current: () => host.session === session && state.active.get(session.sessionManager) === registration,
+    notify: (message, level) => registration.ctx.ui.notify(message, level),
+    status: text => registration.ctx.ui.setStatus('escape-continue', text),
+    pending: promotion => { registration.pending = promotion; },
+    release(promotion) {
+      if (registration.pending !== promotion) return false;
+      registration.pending = undefined;
+      return true;
+    },
+  });
+  if (!promotion) original();
 }
 
 export function install(): Adapter {

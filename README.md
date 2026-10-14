@@ -1,6 +1,9 @@
 # Pi extensions
 
-Independent tools and workflows for Pi 0.99.1. Enable only what you use.
+Independent tools and workflows for Pi. Development checks use the Pi 0.99.1 SDK
+packages pinned in `package.json`. Version-sensitive extensions document their
+verified runtime versions in [session and editor behavior](docs/extension-behavior.md)
+and [agent setup](docs/agent-setup.md). Enable only what you use.
 
 ## Install
 

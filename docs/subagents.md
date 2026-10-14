@@ -357,7 +357,7 @@ Snapshot lifetime and provenance:
 
 ## Background tracker
 
-Registered subagents share one report-only `openai-codex/gpt-5.6-luna` tracker
+Registered subagents share one report-only `openai-codex/gpt-6-luna` tracker
 with medium reasoning per owning session, covering direct and workflow children.
 
 - **Cadence.** It starts asynchronously with work, then requests at most once per

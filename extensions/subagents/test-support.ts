@@ -9,7 +9,7 @@ import { runWorkflow } from './workflow.ts';
 export const supervisorAdmission = admissionFixture({cwd: () => tmpdir(), tools: () => ALL_TOOLS, approve: async () => true}).admission;
 
 export function fixtureModelRegistry() {
-  const models = ['test/fixture', 'test/selected', 'test/different', 'openai-codex/gpt-6-astra', 'openai-codex/gpt-5.6-luna'].map(value => {
+  const models = ['test/fixture', 'test/selected', 'test/different', 'openai-codex/gpt-6-astra', 'openai-codex/gpt-6-luna', 'openai-codex/gpt-5.6-luna'].map(value => {
     const [provider, id] = value.split('/'); return {provider, id, reasoning: true};
   });
   return {

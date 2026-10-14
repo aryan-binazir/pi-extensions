@@ -20,7 +20,7 @@ interface Options {
   cwd?: string;
   sessionStartEvent?: SessionStartEvent;
   sessionManager?: SessionManager | ((cwd: string) => SessionManager);
-  configure?: (services: AgentSessionServices, provider: Provider, event?: SessionStartEvent) => Selection | Promise<Selection>;
+  configure?: (services: AgentSessionServices & { sessionManager: SessionManager }, provider: Provider) => Selection | Promise<Selection>;
   bind?: (session: AgentSession) => ExtensionBindings | Promise<ExtensionBindings>;
 }
 export interface PiFixture {
@@ -54,7 +54,7 @@ export async function withPi<T>(options: Options, run: (fixture: PiFixture) => P
           noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true } });
       assert.deepEqual(services.resourceLoader.getExtensions().errors, []);
       assert.deepEqual(services.diagnostics.filter(diagnostic => diagnostic.type === 'error'), []);
-      const selection = options.configure ? await options.configure(services, provider, sessionStartEvent) : { model: provider.getModel() };
+      const selection = options.configure ? await options.configure({ ...services, sessionManager }, provider) : { model: provider.getModel() };
       const result = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, noTools: 'builtin', ...selection });
       pending = result.session;
       return { ...result, services, diagnostics: services.diagnostics };

@@ -456,10 +456,9 @@ test('forking a saved fast branch restores its alias in a fresh runtime',async(t
 import { resolveCliModel, resolveModelScopeWithDiagnostics } from '@earendil-works/pi-coding-agent';
 import { modelsAreEqual } from '@earendil-works/pi-ai';
 
-// Mirrors Pi's main.js createRuntime: --model, --models/enabledModels and --thinking are resolved before aliases exist.
-const defaultRuntime=async(cwd:string,settings:Parameters<typeof SettingsManager.inMemory>[0],run:(runtime:AgentSessionRuntime)=>Promise<void>,sessionManager=SessionManager.inMemory(cwd))=>withPi({
+const cliConfiguredRuntime=async(cwd:string,settings:Parameters<typeof SettingsManager.inMemory>[0],run:(runtime:AgentSessionRuntime)=>Promise<void>,sessionManager=SessionManager.inMemory(cwd))=>withPi({
  cwd,extensions:[fastMode],settings,sessionManager,
- configure:async({modelRuntime,settingsManager})=>{
+ configure:async({modelRuntime,settingsManager,sessionManager})=>{
   await modelRuntime.setRuntimeApiKey('openai','fixture-key');
   await modelRuntime.refresh({allowNetwork:false,providers:['openai']});
   const args=parseArgs(process.argv.slice(2));
@@ -476,7 +475,7 @@ const selections=async(settings:Parameters<typeof SettingsManager.inMemory>[0],a
  const argv=process.argv;process.argv=[...argv.slice(0,2),...args];
  let result:string[]=[];
  try {
-  await defaultRuntime(cwd,settings,async runtime=>{
+  await cliConfiguredRuntime(cwd,settings,async runtime=>{
    const startup=`${runtime.session.model?.id}:${runtime.session.thinkingLevel}`;
    assert.equal((await runtime.newSession()).cancelled,false);
    result=[startup,`${runtime.session.model?.id}:${runtime.session.thinkingLevel}`];
@@ -514,7 +513,7 @@ test('a saved fast default leaves existing sessions on their saved model',async(
    sessionManager.appendModelChange('openai','gpt-4.1');
    if(kind==='message')sessionManager.appendMessage({role:'user',content:'Saved ordinary branch',timestamp:Date.now()});
    else sessionManager.appendCustomMessageEntry('synthetic-notice','Saved ordinary branch',true);
-   await defaultRuntime(cwd,fastDefault,async runtime=>{assert.equal(runtime.session.model?.id,'gpt-4.1');},sessionManager);
+   await cliConfiguredRuntime(cwd,fastDefault,async runtime=>{assert.equal(runtime.session.model?.id,'gpt-4.1');},sessionManager);
   }finally{await rm(cwd,{recursive:true,force:true});}
  });
 });

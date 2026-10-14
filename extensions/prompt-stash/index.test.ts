@@ -197,6 +197,8 @@ test("a replaced stash factory restores through the current UI instead of a deta
     h.ctx.ui.setEditorComponent(other);
     assert.notEqual(h.editor, detached);
     detached.handleInput("\x13");
+    assert.equal(h.editor.getExpandedText(), "");
+    h.editor.handleInput("\x13");
     assert.equal(h.editor.getExpandedText(), "saved vi draft");
     assert.equal(detached.getText(), "");
     assert.equal(h.ctx.ui.getEditorComponent(), other);
@@ -218,36 +220,34 @@ for (const EditorClass of [CustomEditor, ViEditor]) {
   });
 }
 
-test("vi does not turn a reconstructed stalled key into a new stash input", () => {
+test("shared framing recognizes a reconstructed modifyOtherKeys stash key", () => {
   const h = stashHost(ViEditor);
   h.editor.setText("draft");
   h.editor.handleInput("\x1b[2");
   h.editor.handleInput("7;5;115~");
-  assert.equal(h.status, undefined);
+  assert.match(h.status!, /stash/i);
+  assert.equal(h.editor.getExpandedText(), "");
+  h.editor.handleInput("\x13");
   assert.equal(h.editor.getExpandedText(), "draft");
   h.emit("session_shutdown");
 });
 
 for (const EditorClass of [CustomEditor, ViEditor]) {
-  test(`${EditorClass.name}: stash forwards split-paste chunks unchanged and resumes after every closer split`, () => {
+  test(`${EditorClass.name}: shared framing delivers split pastes as text and resumes after every closer split`, () => {
     const start = "\x1b[200~", end = "\x1b[201~";
     const chunksByCase = [
       ["\x1b[20", "0~prefix", "\x13", "suffix\x1b[20", "1~"],
       ...Array.from({ length: 7 }, (_, offset) => [start + "prefix", "\x13", "suffix" + end.slice(0, offset), end.slice(offset)]),
     ];
     for (const chunks of chunksByCase) {
-      const seen: string[] = [];
-      class RecordingEditor extends EditorClass {
-        override handleInput(data: string): void { seen.push(data); super.handleInput(data); }
-      }
-      const h = stashHost(RecordingEditor);
+      const h = stashHost(EditorClass);
       for (const chunk of chunks) h.editor.handleInput(chunk);
-      assert.deepEqual(seen, chunks);
+      assert.equal(h.editor.getExpandedText(), "prefixsuffix");
       assert.equal(h.status, undefined);
       h.editor.handleInput("\x13");
       assert.equal(h.editor.getExpandedText(), "");
       assert.match(h.status!, /stash/i);
-      assert.deepEqual(seen, chunks);
+      assert.equal(h.editor.getExpandedText(), "");
       h.emit("session_shutdown");
     }
   });

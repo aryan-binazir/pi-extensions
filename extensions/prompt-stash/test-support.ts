@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, InteractiveMode, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { editor } from "../vi-mode/test-support.ts";
+import { Container } from "@earendil-works/pi-tui";
+import { KeybindingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 import stash from "./index.ts";
 import viMode from "../vi-mode/index.ts";
 
@@ -8,28 +10,32 @@ type Factory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent
 export function stashHost(EditorClass = CustomEditor, withViMode = false) {
   const hooks = new Map<string, ((...args: any[]) => unknown)[]>();
   let factory: Factory | undefined = EditorClass === CustomEditor ? undefined : (...args) => new EditorClass(...args);
-  let e = editor(EditorClass);
+  const e = editor(EditorClass);
+  const app: any = Object.create(InteractiveMode.prototype);
+  const sessionManager = {};
+  Object.defineProperty(app, "session", { value: { sessionManager } });
+  app.editor = e;
+  app.defaultEditor = editor(CustomEditor);
+  app.editorComponentFactory = factory;
+  app.ui = (e as any).tui;
+  app.ui.setFocus = () => {};
+  app.editorContainer = new Container();
+  app.statusContainer = new Container();
+  app.keybindings = new KeybindingsManager();
+  app.disposeActiveSelector = () => {};
   let status: string | undefined;
   let installs = 0;
-  const make = (f: Factory) => editor(class extends CustomEditor {
-    constructor(...args: ConstructorParameters<typeof CustomEditor>) {
-      super(...args);
-      return f(args[0], args[1], args[2]) as CustomEditor;
-    }
-  });
   const ctx = {
-    mode: "tui", hasUI: true,
+    mode: "tui", hasUI: true, sessionManager,
     ui: {
-      getEditorComponent: () => factory,
+      getEditorComponent: () => app.editorComponentFactory,
       setEditorComponent: (f: Factory | undefined) => {
-        const text = e.getText();
         factory = f; installs++;
-        e = f ? make(f) : editor(CustomEditor);
-        e.setText(text);
+        app.setCustomEditorComponent(f);
       },
-      getEditorText: () => e.getExpandedText(),
-      setEditorText: (text: string) => e.setText(text),
-      pasteToEditor: (text: string) => e.handleInput(`\x1b[200~${text}\x1b[201~`),
+      getEditorText: () => app.editor.getExpandedText(),
+      setEditorText: (text: string) => app.editor.setText(text),
+      pasteToEditor: (text: string) => app.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
       setStatus: (_key: string, text: string | undefined) => { status = text; },
     },
   } as unknown as ExtensionContext;
@@ -44,5 +50,5 @@ export function stashHost(EditorClass = CustomEditor, withViMode = false) {
   stash(pi);
   const emit = (name: string) => { for (const fn of hooks.get(name) ?? []) fn({}, ctx); };
   emit("session_start"); emit("resources_discover");
-  return { ctx, emit, get editor() { return e; }, get status() { return status; }, get installs() { return installs; } };
+  return { ctx, emit, get editor() { return app.editor as CustomEditor; }, get status() { return status; }, get installs() { return installs; } };
 }

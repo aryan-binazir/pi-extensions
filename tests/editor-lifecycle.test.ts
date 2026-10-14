@@ -8,6 +8,10 @@ import { KeybindingsManager } from '../node_modules/@earendil-works/pi-coding-ag
 import { editor, keys } from '../extensions/vi-mode/test-support.ts';
 import viMode from '../extensions/vi-mode/index.ts';
 import stash from '../extensions/prompt-stash/index.ts';
+import escapeContinue from '../extensions/escape-continue/index.ts';
+import { withPi } from './pi-session.ts';
+import { PasteFramer } from '../extensions/paste-framing.ts';
+import { installEditorInput } from '../extensions/editor-input.ts';
 import questionnaire from '../extensions/questionnaire/index.ts';
 import effort from '../extensions/effort/index.ts';
 import btw from '../extensions/btw/index.ts';
@@ -19,6 +23,7 @@ const payload = 'SYNTHETIC_PAYLOAD 😀\t\r\n'.repeat(100);
 const paste = (e: any) => e.handleInput('\x1b[200~' + payload + '\x1b[201~');
 function host(stashFirst: boolean | "stock" = false, useVi = true) {
   const app: any = Object.create(InteractiveMode.prototype);
+  Object.defineProperty(app, "session", { value: { sessionManager: {} } });
   app.defaultEditor = editor(CustomEditor);
   app.editor = app.defaultEditor;
   app.keybindings = new KeybindingsManager();
@@ -48,6 +53,7 @@ function host(stashFirst: boolean | "stock" = false, useVi = true) {
   };
   const ctx: any = {
     mode: 'tui',
+    sessionManager: app.session.sessionManager,
     hasUI: true,
     model: {id: 'synthetic', provider: 'openai', reasoning: false},
     ui: {
@@ -688,4 +694,236 @@ test('standalone stash can undo swaps between identical markers with different p
   } finally {
     h.emit('session_shutdown');
   }
+});
+
+test('editor replacement transfers cursor ownership before construction and retired disposal is harmless', () => {
+  const h = host();
+  const outgoing = h.app.editor;
+  const factory = h.app.editorComponentFactory;
+  h.app.setCustomEditorComponent((...args: ConstructorParameters<typeof CustomEditor>) => new (outgoing.constructor)(...args));
+  outgoing.dispose();
+  assert.equal(h.app.ui.getShowHardwareCursor(), true, 'retired editor cannot disable incoming cursor before render');
+  h.app.setCustomEditorComponent(undefined);
+  assert.equal(h.app.ui.getShowHardwareCursor(), false, 'stock editor inherits original cursor setting');
+  h.app.setCustomEditorComponent(factory);
+  assert.equal(h.app.ui.getShowHardwareCursor(), true);
+  h.emit('session_shutdown');
+});
+
+async function withInputEditors(extensions: Parameters<typeof withPi>[0]["extensions"], run: (app: any) => Promise<void>) {
+  let app: any;
+  await withPi({ extensions, bind(session) {
+    app = Object.create(InteractiveMode.prototype);
+    Object.defineProperty(app, 'session', { value: session });
+    app.defaultEditor = editor(CustomEditor);
+    app.defaultEditor.onEscape = () => {};
+    app.editor = app.defaultEditor;
+    app.editorContainer = new Container();
+    app.statusContainer = new Container();
+    app.pendingMessagesContainer = new Container();
+    app.footerDataProvider = { setExtensionStatus() {} };
+    app.keybindings = new KeybindingsManager();
+    app.compactionQueuedMessages = [];
+    app.disposeActiveSelector = () => {};
+    let focused = app.editor, cursor = false;
+    app.ui = {
+      terminal: { rows: 30, columns: 100, write() {} }, requestRender() {},
+      setFocus(component: any) { focused = component; }, getFocusedComponent: () => focused,
+      getShowHardwareCursor: () => cursor, setShowHardwareCursor(value: boolean) { cursor = value; },
+    };
+    app.setupAutocompleteProvider = app.setupExtensionShortcuts = app.showLoadedResources = app.showStartupNoticesIfNeeded = () => {};
+    app.showExtensionError = (_path: string, error: string) => assert.fail(error);
+    return { uiContext: app.createExtensionUIContext(), mode: 'tui' };
+  } }, async () => {
+    await app.bindCurrentSessionExtensions();
+    await run(app);
+  });
+}
+
+test('main editor frames each raw input once with vi, stash and Escape Continue', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    const feed = PasteFramer.prototype.feed;
+    let calls = 0;
+    PasteFramer.prototype.feed = function* (data) { calls++; yield* feed.call(this, data); };
+    try {
+      app.editor.handleInput('draft');
+      assert.equal(app.editor.getText(), 'draft');
+      assert.equal(calls, 1);
+    } finally { PasteFramer.prototype.feed = feed; }
+  });
+});
+
+const inputOrders = [
+  [viMode, stash, escapeContinue], [viMode, escapeContinue, stash],
+  [stash, viMode, escapeContinue], [stash, escapeContinue, viMode],
+  [escapeContinue, viMode, stash], [escapeContinue, stash, viMode],
+  [viMode], [stash], [escapeContinue], [stash, escapeContinue], [escapeContinue, stash],
+];
+for (const order of inputOrders) test(`input/replacement/reload: ${order.map(extension => extension.name).join(' → ')}`, async () => {
+  await withInputEditors(order, async app => {
+    const hasStash = order.includes(stash), hasEC = order.includes(escapeContinue), hasVi = order.includes(viMode);
+    const exercise = () => {
+      const feed = PasteFramer.prototype.feed;
+      let calls = 0;
+      PasteFramer.prototype.feed = function* (data) { calls++; yield* feed.call(this, data); };
+      try {
+        app.editor.setText('draft');
+        app.editor.handleInput('\x1b[200~paste\x18\x13\x1b[201~');
+        assert.equal(calls, 1, 'one framer for the complete raw paste');
+        assert.equal(app.editor.getExpandedText(), 'draftpaste', 'paste controls never reach bindings');
+        app.editor.onAction('app.message.copy', () => assert.fail('paste and chord cannot copy'));
+        if (hasEC) {
+          app.editor.handleInput('\x18'); app.editor.handleInput('\x13');
+          assert.equal(app.editor.getExpandedText(), 'draftpaste', 'chord consumes Ctrl-S before stash');
+        }
+        if (hasStash) {
+          app.editor.handleInput('\x13'); assert.equal(app.editor.getExpandedText(), '');
+          app.editor.handleInput('\x13'); assert.equal(app.editor.getExpandedText(), 'draftpaste');
+        }
+        if (hasVi) assert.match(stripTerminalSequences(app.editor.render(60).join('\n')), /INSERT/);
+      } finally { PasteFramer.prototype.feed = feed; }
+    };
+    exercise();
+    const factory = app.editorComponentFactory;
+    app.setCustomEditorComponent(factory);
+    exercise();
+    const replacement = (InteractiveMode.prototype as any).setCustomEditorComponent;
+    app.setCustomEditorComponent(undefined);
+    await app.session.reload();
+    assert.equal((InteractiveMode.prototype as any).setCustomEditorComponent, replacement, 'reload does not wrap the owner again');
+    exercise();
+    if (hasVi) {
+      app.ui.setShowHardwareCursor(false);
+      app.editor.focused = true;
+      app.editor.render(60);
+      assert.equal(app.ui.getShowHardwareCursor(), true, 'c5a384b stock runtime cursor overwrite stays repaired');
+    }
+  });
+});
+
+test('draft reset during a fragmented paste cannot expose payload controls to bindings', async () => {
+  await withInputEditors([escapeContinue, stash, viMode], async app => {
+    app.editor.handleInput('\x1b[200~unfinished');
+    app.editor.setText('replacement');
+    app.editor.handleInput('\x18'); app.editor.handleInput('\x13');
+    app.editor.handleInput('\x1b[201~');
+    assert.equal(app.editor.getExpandedText(), 'replacement');
+    app.editor.handleInput('\x13'); assert.equal(app.editor.getExpandedText(), '');
+    app.editor.handleInput('\x13'); assert.equal(app.editor.getExpandedText(), 'replacement');
+  });
+});
+
+test('replacement can reuse an editor or reject its factory without losing cursor ownership', () => {
+  const h = host();
+  const vi = h.app.editor;
+  h.app.setCustomEditorComponent(() => vi);
+  assert.equal(h.app.ui.getShowHardwareCursor(), true);
+  assert.throws(() => h.app.setCustomEditorComponent(() => { throw new Error('factory failure'); }), /factory failure/);
+  assert.equal(h.app.editor, vi);
+  assert.equal(h.app.ui.getShowHardwareCursor(), true);
+  h.emit('session_shutdown');
+});
+
+test('live input wrappers use the latest reloaded implementation without another wrapper', async () => {
+  await withInputEditors([stash, escapeContinue, viMode], async app => {
+    const state = installEditorInput(), input = app.editor.handleInput;
+    const dispatch = state.dispatch, attach = state.attach;
+    const reloaded = await import(new URL('../extensions/editor-input.ts?reload=latest', import.meta.url).href);
+    const latest = reloaded.installEditorInput();
+    assert.equal(latest, state);
+    assert.notEqual(latest.dispatch, dispatch);
+    assert.notEqual(latest.attach, attach);
+    assert.equal(app.editor.handleInput, input);
+    const next = latest.dispatch;
+    let calls = 0;
+    latest.dispatch = (...args: Parameters<typeof next>) => { calls++; return next(...args); };
+    try {
+      app.editor.handleInput('latest');
+      assert.equal(app.editor.getText(), 'latest');
+      assert.equal(calls, 1);
+    } finally { latest.dispatch = next; }
+  });
+});
+test('an explicit null focus suppresses main-editor bindings', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    app.editor.setText('draft');
+    app.ui.getFocusedComponent = () => null;
+    app.editor.handleInput('\x13');
+    assert.equal(app.editor.getExpandedText(), 'draft');
+    app.ui.getFocusedComponent = () => app.editor;
+    app.editor.handleInput('\x13');
+    assert.equal(app.editor.getExpandedText(), '');
+  });
+});
+
+test('programmatic paste retains the main draft while a dialog has focus', async () => {
+  await withInputEditors([viMode, stash], async app => {
+    const dialog = new Container();
+    app.ui.getFocusedComponent = () => dialog;
+    app.editor.handleInput('\x1b[200~raw\t\r\ntext\x1b[201~');
+    assert.equal(app.editor.getExpandedText(), 'raw\t\r\ntext');
+  });
+});
+test('a synchronous extension shortcut can paste with vi sanitization and undo', async () => {
+  await withInputEditors([viMode], async app => {
+    app.editor.setText('draft');
+    app.editor.onExtensionShortcut = (data: string) => {
+      if (data !== '\x07') return false;
+      app.editor.handleInput('\x1b[200~raw\t\r\n\x13text\x1b[201~');
+      return true;
+    };
+    app.editor.handleInput('\x07');
+    assert.equal(app.editor.getExpandedText(), 'draftraw\t\r\ntext');
+    app.editor.handleInput('\x1b'); app.editor.handleInput('u');
+    assert.equal(app.editor.getExpandedText(), 'draft');
+  });
+});
+test('a retired editor cannot reacquire binding instances from an incomplete opener', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    const old = app.editor;
+    old.setText('saved'); old.handleInput('\x13');
+    app.setCustomEditorComponent(app.editorComponentFactory);
+    old.handleInput('\x1b[20');
+    app.editor.handleInput('\x13');
+    assert.equal(app.editor.getExpandedText(), 'saved');
+  });
+});
+
+test('a fresh paste recovers a discarded stream whose closer was lost', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    app.editor.handleInput('\x1b[200~unfinished');
+    app.editor.setText('replacement');
+    app.editor.handleInput('\x1b[200~fresh\x1b[201~');
+    assert.equal(app.editor.getExpandedText(), 'replacementfresh');
+    app.editor.handleInput('\x13'); assert.equal(app.editor.getExpandedText(), '');
+  });
+});
+
+test('background paste clears the chord prefix before main-editor delivery', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    app.editor.setText('draft'); app.editor.handleInput('\x18');
+    app.ui.getFocusedComponent = () => new Container();
+    app.editor.handleInput('\x1b[200~paste\x1b[201~');
+    app.ui.getFocusedComponent = () => app.editor;
+    app.editor.handleInput('\x13');
+    assert.equal(app.editor.getExpandedText(), '');
+    app.editor.handleInput('\x13');
+    assert.equal(app.editor.getExpandedText(), 'draftpaste');
+  });
+});
+test('background paste completion discards payload after draft replacement', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    app.editor.handleInput('\x1b[200~stale'); app.editor.setText('replacement');
+    app.ui.getFocusedComponent = () => new Container();
+    app.editor.handleInput('\x1b[201~');
+    assert.equal(app.editor.getExpandedText(), 'replacement');
+  });
+});
+test('the key after Ctrl-X replaces the editor reaches the incoming editor once', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    app.editor.setText('draft');
+    app.editor.onAction('app.message.copy', () => app.setCustomEditorComponent(undefined));
+    app.editor.handleInput('\x18'); app.editor.handleInput('a');
+    assert.equal(app.editor.getExpandedText(), 'drafta');
+  });
 });

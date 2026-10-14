@@ -1,6 +1,6 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
-import { PasteFramer } from "../vi-mode/paste-framing.ts";
+import { installEditorInput, registerMainEditorBinding } from "../editor-input.ts";
 import { installSinglePassPasteExpansion, readPastes, restoreRawDraft } from "../vi-mode/adapter.ts";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
@@ -18,6 +18,8 @@ export default function promptStash(pi: ExtensionAPI): void {
   let previous: EditorFactory | undefined;
   let enabled = false;
   let active: CustomEditor | undefined;
+  let unregister: (() => void) | undefined;
+  installEditorInput();
 
   const setText = (ctx: ExtensionContext, text: string) => {
     if (text && ctx.ui.pasteToEditor && !CONTROL_BYTES.test(text)) {
@@ -27,7 +29,6 @@ export default function promptStash(pi: ExtensionAPI): void {
   };
 
   const toggle = (ctx: ExtensionContext) => {
-    // Pi 0.85.1 getEditorText calls getExpandedText, including collapsed paste payloads.
     const current = ctx.ui.getEditorText();
     if (slot === undefined && current === "") return;
     const captured: { text: string; restore?: () => boolean } = { text: current };
@@ -46,13 +47,6 @@ export default function promptStash(pi: ExtensionAPI): void {
     );
   };
 
-  // Preserve expanded stock pastes when Pi copies only visible marker text during factory replacement.
-  const replace = (ctx: ExtensionContext, factory: EditorFactory | undefined) => {
-    const text = ctx.ui.getEditorText();
-    ctx.ui.setEditorComponent(factory);
-    if (ctx.ui.getEditorText() !== text) setText(ctx, text);
-  };
-
   pi.on("session_start", (_event, ctx) => {
     slot = undefined;
     enabled = ctx.mode === "tui";
@@ -65,36 +59,30 @@ export default function promptStash(pi: ExtensionAPI): void {
     const base = previous;
     installed = (tui, theme, keybindings) => {
       const editor = base?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
-      active = editor instanceof CustomEditor ? editor : undefined;
-      if (active) installSinglePassPasteExpansion(active);
-      const input = editor.handleInput.bind(editor);
-      const framer = new PasteFramer();
-      let forwarding = 0;
-      editor.handleInput = (data) => {
-        let pasteChunk = framer.pasting || framer.holdingMarker;
-        if (!forwarding)
-          for (const frame of framer.feed(data)) pasteChunk ||= frame.type === "paste";
-        pasteChunk ||= framer.pasting || framer.holdingMarker;
-        const lead = data.charCodeAt(0);
-        const stashKey = lead === CTRL_S_BYTE || (lead === ESC && data.includes(CTRL_S_CODEPOINT));
-        if (enabled && !pasteChunk && stashKey && matchesKey(data, "ctrl+s")) {
-          toggle(ctx);
-          tui.requestRender();
-        } else {
-          forwarding++;
-          try { input(data); } finally { forwarding--; }
-        }
-      };
+      if (editor instanceof CustomEditor) installSinglePassPasteExpansion(editor);
       return editor;
     };
-    replace(ctx, installed);
+    unregister?.();
+    unregister = registerMainEditorBinding(ctx, { id: "prompt-stash", priority: 100, create(editor) {
+      active = editor instanceof CustomEditor ? editor : undefined;
+      return { key(data) {
+        const lead = data.charCodeAt(0);
+        const stashKey = lead === CTRL_S_BYTE || (lead === ESC && data.includes(CTRL_S_CODEPOINT));
+        if (!enabled || !stashKey || !matchesKey(data, "ctrl+s")) return false;
+        toggle(ctx);
+        return true;
+      } };
+    } });
+    ctx.ui.setEditorComponent(installed);
   });
   pi.on("session_shutdown", (_event, ctx) => {
     enabled = false;
+    unregister?.();
+    unregister = undefined;
     slot = undefined;
     ctx.ui.setStatus("prompt-stash", undefined);
     if (installed && ctx.mode === "tui" && ctx.ui.getEditorComponent() === installed)
-      replace(ctx, previous);
+      ctx.ui.setEditorComponent(previous);
     installed = previous = undefined;
     active = undefined;
   });

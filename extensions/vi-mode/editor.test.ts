@@ -1584,13 +1584,16 @@ test("every closer split retains one vi paste undo transaction", () => {
   }
 });
 
-test("draft replacement clears incomplete vi paste framing", () => {
-  for (const chunk of ["\x1b[20", "\x1b[200~unfinished"]) {
-    const e = editor();
-    e.handleInput(chunk);
-    e.setText("replacement");
-    e.handleInput("!");
-    assert.equal(e.getExpandedText(), "replacement!");
-    e.dispose();
-  }
+test("draft replacement clears a held opener and discards an active paste through its closer", () => {
+  const e = editor();
+  e.handleInput("\x1b[20");
+  e.setText("replacement");
+  e.handleInput("!");
+  assert.equal(e.getExpandedText(), "replacement!");
+  e.handleInput("\x1b[200~unfinished");
+  e.setText("new draft");
+  e.handleInput("\x13");
+  e.handleInput("\x1b[201~!");
+  assert.equal(e.getExpandedText(), "new draft!");
+  e.dispose();
 });

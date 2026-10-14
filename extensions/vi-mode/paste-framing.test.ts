@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PasteFramer, type PasteFrame } from "./paste-framing.ts";
+import { PasteFramer, type PasteFrame } from "../paste-framing.ts";
 
 const start = "\x1b[200~", end = "\x1b[201~";
 const key = (data: string): PasteFrame => ({ type: "key", data });

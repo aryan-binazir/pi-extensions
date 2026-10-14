@@ -19,6 +19,13 @@ tracker share a [bounded tool-free provider call](adr/022-side-completion.md);
 their prompts, display and scheduling remain caller-owned.
 
 The prompt stash is memory-only and clears on session start, switch and reload.
+Vi, prompt stash and Escape Continue share one [main-editor input pipeline](adr/021-editor-input.md).
+It frames each raw input once. Escape Continue declares priority 200 and stash
+100, so the chord consumes Ctrl-S before stash. Paste payloads never reach key
+bindings. Editor replacement transfers the visible draft and paste registry,
+reattaches bindings and releases the outgoing Vi cursor before creating its
+replacement. Pi can independently reapply its stock cursor setting after reload;
+Vi still repairs that setting when the focused editor renders.
 
 Vi mode preserves pasted tabs, carriage returns and newlines while editing and
 stashing. It strips unsafe terminal controls at insertion, and normal submission

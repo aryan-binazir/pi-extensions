@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
 import { test } from 'node:test';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { withPi } from '../../tests/pi-session.ts';
 import statusExtension from './index.ts';
 import { findConfigLoader, statusText, type PermissionConfig } from './adapter.ts';
 
@@ -126,35 +127,21 @@ test('unavailable is visible; headless mode performs no discovery or polling', a
 
 test('real Pi loader discovers command provenance and dynamically loads the optional config adapter', async () => {
   const f = await fixture();
-  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
-  let stop: (() => Promise<void>) | undefined;
   try {
     await writeFile(join(f.root, 'index.ts'), `export default function(pi) {
       pi.registerCommand('auto-permissions', {description: 'Synthetic settings', handler: async () => {}});
     }`);
     const path = fileURLToPath(new URL('./index.ts', import.meta.url));
-    const settingsManager = SettingsManager.inMemory({ extensions: [path, join(f.root, 'index.ts')] });
-    const resourceLoader = new DefaultResourceLoader({ cwd: f.root, agentDir: f.root, settingsManager,
-      noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true });
-    await resourceLoader.reload();
-    const loaded = resourceLoader.getExtensions();
-    assert.deepEqual(loaded.errors, []);
-    const modelRuntime = await ModelRuntime.create({ authPath: join(f.root, 'auth.json'), modelsPath: null,
-      allowModelNetwork: false, refreshOnCreate: false });
-    ({ session } = await createAgentSession({ cwd: f.root, agentDir: f.root, settingsManager,
-      resourceLoader, sessionManager: SessionManager.inMemory(f.root), modelRuntime }));
-    await session.bindExtensions({});
-    const extension = loaded.extensions.find(entry => entry.path === path)!;
     const statuses: (string | undefined)[] = [];
-    const ctx = { ...session.extensionRunner!.createContext(), hasUI: true,
-      ui: { ...session.extensionRunner!.createContext().ui, setStatus: (_key: string, value: string | undefined) => statuses.push(value) } };
-    stop = async () => { for (const hook of extension.handlers.get('session_shutdown') ?? []) await hook({type: 'session_shutdown', reason: 'quit'}, ctx); };
-    for (const hook of extension.handlers.get('session_start') ?? []) await hook({type: 'session_start', reason: 'startup'}, ctx);
-    assert.equal(statuses.at(-1), 'Auto: on · Luna low');
-    await stop();
-    stop = undefined;
+    await withPi({ cwd: f.root, settings: { extensions: [path, join(f.root, 'index.ts')] },
+      bind: session => ({ mode: 'rpc', uiContext: { ...session.extensionRunner.createContext().ui, setStatus: (_key, value) => statuses.push(value) } }),
+    }, async ({ runtime }) => {
+      const loaded = runtime.services.resourceLoader.getExtensions();
+      assert.ok(loaded.extensions.find(entry => entry.path === path));
+      assert.equal(statuses.at(-1), 'Auto: on · Luna low');
+    });
     assert.equal(statuses.at(-1), undefined);
-  } finally { await stop?.(); session?.dispose(); await f.close(); }
+  } finally { await f.close(); }
 });
 
 test('TUI installs and restores the compact footer; RPC retains its status API', async t => {

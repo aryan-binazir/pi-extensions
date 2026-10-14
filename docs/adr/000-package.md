@@ -7,7 +7,8 @@ tests must not execute as extensions, and each feature must remain selectable.
 The root manifest therefore lists each `extensions/<feature>/index.ts` file
 explicitly; the manifest and `tests/package.test.ts` own the current count. Each
 directory owns its implementation and tests. There is no shared extension
-framework or implicit loader.
+framework or implicit loader. [ADR 023](023-test-harness.md) permits shared
+headless session setup under `tests/` without changing production ownership.
 
 Development pins Pi's SDK, UI and provider libraries to 0.99.1 because the editor
 adapter and session lifecycle depend on that API version. Local checks use these

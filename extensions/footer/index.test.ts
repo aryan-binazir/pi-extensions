@@ -135,14 +135,13 @@ test('real Pi loader discovers command provenance and dynamically loads the opti
     const statuses: (string | undefined)[] = [];
     await withPi({ cwd: f.root, settings: { extensions: [path, join(f.root, 'index.ts')] },
       bind: session => ({ mode: 'rpc', uiContext: { ...session.extensionRunner.createContext().ui, setStatus: (_key, value) => statuses.push(value) } }),
-    }, async ({ runner, runtime }) => {
+    }, async ({ runtime }) => {
       const loaded = runtime.services.resourceLoader.getExtensions();
       assert.deepEqual(loaded.errors, []);
       assert.ok(loaded.extensions.find(entry => entry.path === path));
       assert.equal(statuses.at(-1), 'Auto: on · Luna low');
-      await runner.emit({ type: 'session_shutdown', reason: 'quit' });
-      assert.equal(statuses.at(-1), undefined);
     });
+    assert.equal(statuses.at(-1), undefined);
   } finally { await f.close(); }
 });
 

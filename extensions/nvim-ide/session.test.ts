@@ -28,12 +28,11 @@ for (const composition of ['isolated', 'package'] as const) test(`real Pi ${comp
     await withPi({ cwd, extensions: composition === 'isolated' ? [nvimIde] : undefined,
       settings: { compaction: { enabled: false }, retry: { enabled: false }, ...(composition === 'package' ? { packages: [join(import.meta.dirname, '../..')] } : {}) },
       responses: [response, response],
+      configure: (_services, provider) => { process.env.CLAUDE_CONFIG_DIR = cwd; return { model: provider.getModel() }; },
     }, async ({ session }) => {
       const manager = session.sessionManager;
       session.setActiveToolsByName(['nvim_context', 'subagent', 'workflow']);
       await until(() => initialized);
-      const errors: unknown[] = [];
-      session.extensionRunner.onError(error => errors.push(error));
       const select = async (text: string) => {
         ide.broadcast('selection_changed', { filePath: join(cwd, 'source.ts'), text, selection: { start: { line: 0, character: 0 }, end: { line: 0, character: text.length }, isEmpty: false } });
         const runner = session.extensionRunner;
@@ -59,7 +58,6 @@ for (const composition of ['isolated', 'package'] as const) test(`real Pi ${comp
       assert.equal(requests.length, 2);
       assert.ok(!session.systemPrompt.includes('INCLUDED_IN_REQUEST'));
       assert.ok(!session.systemPrompt.includes('<editor_context>'));
-      assert.deepEqual(errors, []);
     });
   } finally {
     await ide.close();
@@ -68,44 +66,36 @@ for (const composition of ['isolated', 'package'] as const) test(`real Pi ${comp
   }
 });
 
-test('the follow preference survives real Pi /new, /resume, /fork and /reload', async t => {
-  const cwd = await mkdtemp(join(tmpdir(), 'pi-editor-follow-'));
-  const previous = process.env.CLAUDE_CONFIG_DIR;
+test('the follow preference survives real Pi /new, /resume, /fork and /reload', async () => {
   const registry = globalThis as unknown as Record<symbol, unknown>;
   const followKey = Symbol.for('pi-interactive:nvim-ide.follow.v1');
   delete registry[followKey];
-  process.env.CLAUDE_CONFIG_DIR = join(cwd, 'claude');
-  t.after(async () => {
-    delete registry[followKey];
-    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
-    await rm(cwd, { recursive: true, force: true });
-  });
   const notices: string[] = [];
-  const errors: unknown[] = [];
   const extension = fileURLToPath(new URL('./index.ts', import.meta.url));
-  await withPi({ cwd, settings: { extensions: [extension] },
-    bind: session => ({ uiContext: { ...session.extensionRunner.createContext().ui, notify: message => notices.push(message) }, mode: 'tui', onError: error => errors.push(error) }),
-  }, async ({ runtime }) => {
-    const follow = async (args = '') => {
-      const runner = runtime.session.extensionRunner;
-      await runner.getCommand('vim')!.handler(`follow ${args}`.trim(), runner.createCommandContext());
-      return notices.at(-1);
-    };
-    const userEntry = () => runtime.session.sessionManager.appendMessage({ role: 'user', content: 'persist this session', timestamp: Date.now() });
-    assert.equal(await follow('off'), 'Editor follows pi edits: off');
-    const entry = userEntry();
-    const first = runtime.session.sessionFile!;
-    await runtime.newSession();
-    assert.equal(await follow(), 'Editor follows pi edits: off', '/new');
-    await runtime.switchSession(first);
-    assert.equal(await follow(), 'Editor follows pi edits: off', '/resume');
-    await runtime.fork(entry);
-    assert.equal(await follow(), 'Editor follows pi edits: off', '/fork');
-    await runtime.session.reload();
-    assert.equal(await follow(), 'Editor follows pi edits: off', '/reload');
-    assert.equal(await follow('on'), 'Editor follows pi edits: on');
-    await runtime.newSession();
-    assert.equal(await follow(), 'Editor follows pi edits: on', 'turning follow back on also persists');
-    assert.deepEqual(errors, []);
-  });
+  try {
+    await withPi({ settings: { extensions: [extension] }, sessionStartEvent: { type: 'session_start', reason: 'startup' },
+      bind: session => ({ uiContext: { ...session.extensionRunner.createContext().ui, notify: message => notices.push(message) }, mode: 'tui' }),
+    }, async ({ runtime }) => {
+      const follow = async (args = '') => {
+        const runner = runtime.session.extensionRunner;
+        await runner.getCommand('vim')!.handler(`follow ${args}`.trim(), runner.createCommandContext());
+        return notices.at(-1);
+      };
+      const userEntry = () => runtime.session.sessionManager.appendMessage({ role: 'user', content: 'persist this session', timestamp: Date.now() });
+      assert.equal(await follow('off'), 'Editor follows pi edits: off');
+      const entry = userEntry();
+      const first = runtime.session.sessionFile!;
+      await runtime.newSession();
+      assert.equal(await follow(), 'Editor follows pi edits: off', '/new');
+      await runtime.switchSession(first);
+      assert.equal(await follow(), 'Editor follows pi edits: off', '/resume');
+      await runtime.fork(entry);
+      assert.equal(await follow(), 'Editor follows pi edits: off', '/fork');
+      await runtime.session.reload();
+      assert.equal(await follow(), 'Editor follows pi edits: off', '/reload');
+      assert.equal(await follow('on'), 'Editor follows pi edits: on');
+      await runtime.newSession();
+      assert.equal(await follow(), 'Editor follows pi edits: on', 'turning follow back on also persists');
+    });
+  } finally { delete registry[followKey]; }
 });

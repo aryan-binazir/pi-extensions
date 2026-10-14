@@ -150,7 +150,6 @@ test("new-session handoff applies only on replacement runtime and leaves default
 
 test("in-memory effort handoff changes only its replacement and waits for it", async (t) => {
   const notices: string[] = [];
-  const errors: unknown[] = [];
   let startAuth!: () => void;
   let releaseAuth!: () => void;
   const authStarted = new Promise<void>((resolve) => { startAuth = resolve; });
@@ -174,7 +173,6 @@ test("in-memory effort handoff changes only its replacement and waits for it", a
     sessionManager: SessionManager.inMemory, configure,
     bind: (session: AgentSession) => ({ mode: "tui" as const,
       uiContext: { ...session.extensionRunner.createContext().ui, notify: (message: string) => notices.push(message) },
-      onError: (error: unknown) => errors.push(error),
     }),
   };
   await withPi(options, async ({ runtime: unrelated, cwd }) => {
@@ -207,7 +205,6 @@ test("in-memory effort handoff changes only its replacement and waits for it", a
       assert.equal(unrelated.session.model, unrelatedModel);
       assert.equal(unrelated.session.thinkingLevel, "high");
       assert.deepEqual(unrelated.session.sessionManager.getBranch(), unrelatedBranch);
-      assert.deepEqual(errors, []);
     });
   });
 });

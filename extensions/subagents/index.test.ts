@@ -297,7 +297,7 @@ for (const approval of ['execution', 'replay', 'cached child extensions']) {
 
 
 for (const trusted of [false, true]) {
-  test(`source review external editor respects ${trusted === true ? 'trusted project' : trusted || 'global'} settings`, async () =>
+  test(`source review external editor respects ${trusted ? 'trusted project' : 'global'} settings`, async () =>
     withHost({prefix: 'workflow-external-'}, async host => {
       const script = join(host.cwd, 'editor.cjs');
       await writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(join(host.cwd, 'editor-used'))}, process.argv[2]);`);
@@ -336,7 +336,7 @@ test('source review external editor respects runtime settings on the real Pi hos
     settingsManager.applyOverrides({ externalEditor: `${command} runtime` });
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, 'settings.json'), JSON.stringify({ externalEditor: `${command} global` }));
-    await mkdir(join(cwd, '.pi'));
+    await mkdir(join(cwd, '.pi'), { recursive: true });
     await writeFile(join(cwd, '.pi', 'settings.json'), JSON.stringify({ externalEditor: `${command} project` }));
     return { model: provider.getModel() };
   }, bind: session => {

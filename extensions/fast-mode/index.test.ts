@@ -86,7 +86,7 @@ test('fast aliases preserve auth and pricing metadata and send priority through 
 import fastMode from './index.ts';
 import { withPi, type PiFixture } from '../../tests/pi-session.ts';
 test('toggle and resume keep reasoning; other provider paths remain untouched',async()=>withPi({
- extensions:[fastMode],configure:async({modelRuntime})=>{
+ extensions:[fastMode],settings:{defaultThinkingLevel:'low'},configure:async({modelRuntime})=>{
   await modelRuntime.setRuntimeApiKey('openai','fixture-key');
   return {model:modelRuntime.getModel('openai','gpt-5.5'),thinkingLevel:'high'};
  },
@@ -316,7 +316,7 @@ test('/fast on a model outside the OpenAI Responses paths reports unavailable an
  assert.deepEqual({selections,notices},{selections:0,notices:[['Fast mode is unavailable for this provider path','error']]});
 });
 
-import { parseArgs, SessionManager, SettingsManager, type SessionStartEvent, type AgentSessionServices } from '@earendil-works/pi-coding-agent';
+import { parseArgs, SessionManager, SettingsManager, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
 
 type SavedThinking=Parameters<SessionManager['appendThinkingLevelChange']>[0];
 const savedFastSession=(dir:string,thinking:SavedThinking|null='high')=>{
@@ -327,21 +327,24 @@ const savedFastSession=(dir:string,thinking:SavedThinking|null='high')=>{
  if(thinking!==null){manager.appendThinkingLevelChange('low');manager.appendThinkingLevelChange(thinking);}
  return manager.getSessionFile()!;
 };
-const openFastSession=async(dir:string,file:string,reason:SessionStartEvent['reason'],run:(session:PiFixture['session'])=>Promise<void>)=>withPi({
+const openFastSession=async(dir:string,file:string,reason:SessionStartEvent['reason'],run:(session:PiFixture['session'])=>Promise<void>)=>{
+ const thinkingLevel=reason==='startup'?parseArgs(process.argv.slice(2)).thinking:undefined;
+ return withPi({
  cwd:dir,extensions:[fastMode],sessionManager:SessionManager.open(file),sessionStartEvent:{type:'session_start',reason},
  settings:{defaultProvider:'openai',defaultModel:'gpt-4.1',defaultThinkingLevel:'medium'},
  configure:async({modelRuntime})=>{
   await modelRuntime.setRuntimeApiKey('openai','synthetic-fast-session-key');
   await modelRuntime.refresh({allowNetwork:false,providers:['openai']});
-  return {thinkingLevel:reason==='startup'?parseArgs(process.argv.slice(2)).thinking:undefined};
+  return {thinkingLevel};
  },
  bind:session=>{
   assert.equal(session.model?.id,'gpt-4.1');
   assert.equal(session.thinkingLevel,'off');
-  if(reason==='startup'&&parseArgs(process.argv.slice(2)).thinking!==undefined)session.setThinkingLevel(session.thinkingLevel);
+  if(thinkingLevel!==undefined)session.setThinkingLevel(session.thinkingLevel);
   return {};
  },
 },async({session})=>run(session));
+};
 
 for(const reason of ['startup','resume'] as const) {
  test(`${reason} restores fast reasoning and preserves it across a fresh disk resume`,async()=>{
@@ -419,18 +422,21 @@ import { type AgentSessionRuntime } from '@earendil-works/pi-coding-agent';
 
 test('forking a saved fast branch restores its alias in a fresh runtime',async(t)=>{
  for(const position of ['at','before'] as const)await t.test(position,async()=>{
-  const cwd=await mkdtemp(join(tmpdir(),'pi-fast-fork-'));
-  try {
-   const configure=async({modelRuntime}:AgentSessionServices)=>{
+  let firstUserId='',laterUserId='';
+  await withPi({extensions:[fastMode],settings:{defaultProvider:'openai',defaultModel:'gpt-5.5'},
+   sessionManager:cwd=>{
+    const manager=SessionManager.inMemory(cwd);
+    manager.appendModelChange('openai','gpt-5.5~fast');
+    firstUserId=manager.appendMessage({role:'user',content:'Saved fast branch',timestamp:Date.now()});
+    laterUserId=manager.appendMessage({role:'user',content:'Later message',timestamp:Date.now()});
+    return manager;
+   },
+   configure:async({modelRuntime})=>{
     await modelRuntime.setRuntimeApiKey('openai','fixture-key');
     await modelRuntime.refresh({allowNetwork:false,providers:['openai']});
     return {};
-   };
-   const sessionManager=SessionManager.inMemory(cwd);
-   sessionManager.appendModelChange('openai','gpt-5.5~fast');
-   const firstUserId=sessionManager.appendMessage({role:'user',content:'Saved fast branch',timestamp:Date.now()});
-   const laterUserId=sessionManager.appendMessage({role:'user',content:'Later message',timestamp:Date.now()});
-   await withPi({cwd,extensions:[fastMode],settings:{defaultProvider:'openai',defaultModel:'gpt-5.5'},sessionManager,configure},async({runtime})=>{
+   },
+  },async({runtime})=>{
     const initialServices=runtime.services;
     assert.equal(runtime.session.model?.id,'gpt-5.5~fast');
     await runtime.session.setModel(runtime.services.modelRuntime.getModel('openai','gpt-5.5')!);
@@ -448,8 +454,7 @@ test('forking a saved fast branch restores its alias in a fresh runtime',async(t
     assert.equal(runtime.session.model?.id,'gpt-5.5');
     assert.equal((await runtime.newSession()).cancelled,false);
     assert.equal(runtime.session.model?.id,'gpt-5.5');
-   });
-  }finally{await rm(cwd,{recursive:true,force:true});}
+  });
  });
 });
 

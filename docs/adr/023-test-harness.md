@@ -17,14 +17,17 @@ scripted faux provider, session runtime and isolated workspace/config directorie
 It awaits abort and extension shutdown, disposes the current session, restores
 its environment changes and removes its temporary directory even when setup or
 the callback throws. An externally supplied workspace remains the caller's
-responsibility. Callers that change PATH or argv restore them themselves.
+responsibility. Callers that change PATH or argv restore them themselves. Tests run sequentially
+within each process. Nested fixtures temporarily replace the process-wide agent
+directory, so outer sessions must not read it while an inner fixture is active.
 
 Factories load in isolation. Settings can select package or path entrypoints.
 The harness fixes loader exclusions, in-memory credentials and offline model
 loading; tests cannot override them. Tests own behavior-specific settings, model
-selection and typed UI bindings. Runtime replacement recreates services and
-rebinds the extensions. The session and provider handles follow the current
-runtime after new, resume and fork.
+selection and typed UI bindings. Runtime replacement recreates services, reruns configuration and
+rebinds the extensions. Configuration must tolerate repeated calls. The session
+and runner handles follow the current runtime after new, resume and fork; one
+faux provider and its remaining response script survive those replacements.
 
 Each option supports multiple migrated tests: factories in todo and subagents;
 settings in package and fast mode; responses in todo/scripted-tool and editor
@@ -39,8 +42,9 @@ This is test infrastructure, not an extension framework. Extension directories
 still own their tests and production behavior. The module is outside the package
 manifest's extension entrypoints and production code never imports it.
 
-Real-host tests cover footer session-statistics invalidation and workflow
-external-editor settings. Background activity now runs through real Pi tools,
+Real-host tests cover footer session statistics and workflow external-editor
+settings. The workflow test verifies the getSettings path; footer entries move
+the leaf and therefore do not distinguish the optional getEntryCount path. Background activity now runs through real Pi tools,
 with synthetic child executables at the process boundary. Existing model-runtime
 unit fixtures, malformed host states, legacy APIs without getSettings, and TUI
 component/timing doubles remain local. UI doubles do not replace the host in the

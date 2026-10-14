@@ -20,7 +20,7 @@ test('the shared Pi session executes scripted extension tools and removes its wo
 });
 
 test('a failing test still awaits extension shutdown, restores the environment and removes its workspace', async () => {
-  const previous = process.env.PI_CODING_AGENT_DIR;
+  const previous = { agent: process.env.PI_CODING_AGENT_DIR, claude: process.env.CLAUDE_CONFIG_DIR };
   let workspace = '', stopped = false;
   await assert.rejects(withPi({ extensions: [pi => {
     pi.on('session_shutdown', async () => {
@@ -30,10 +30,12 @@ test('a failing test still awaits extension shutdown, restores the environment a
     });
   }] }, async ({ cwd }) => {
     workspace = cwd;
+    assert.equal(process.env.CLAUDE_CONFIG_DIR, `${cwd}/claude`);
     throw new Error('test failed');
   }), /test failed/);
   assert.equal(stopped, true);
-  assert.equal(process.env.PI_CODING_AGENT_DIR, previous);
+  assert.equal(process.env.PI_CODING_AGENT_DIR, previous.agent);
+  assert.equal(process.env.CLAUDE_CONFIG_DIR, previous.claude);
   await assert.rejects(access(workspace), { code: 'ENOENT' });
 });
 
@@ -44,3 +46,29 @@ test('shutdown errors fail the fixture after its temporary directories are remov
   }] }, async ({ cwd }) => { workspace = cwd; }), /shutdown failed/);
   await assert.rejects(access(workspace), { code: 'ENOENT' });
 });
+
+test('callback and shutdown failures retain both errors after cleanup', async () => {
+  let workspace = '';
+  const failure = new Error('callback failed');
+  await assert.rejects(withPi({ extensions: [pi => {
+    pi.on('session_shutdown', () => { throw new Error('shutdown failed'); });
+  }] }, async ({ cwd }) => { workspace = cwd; throw failure; }), error => {
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.errors[0], failure);
+    assert.match(error.errors[1].message, /shutdown failed/);
+    return true;
+  });
+  await assert.rejects(access(workspace), { code: 'ENOENT' });
+});
+
+test('runtime replacement consumes the remaining faux responses and exposes the live session', async () => withPi({
+  responses: [fauxAssistantMessage('Before replacement'), fauxAssistantMessage('After replacement')],
+}, async fixture => {
+  const first = fixture.session;
+  await first.prompt('First turn');
+  await fixture.runtime.newSession();
+  assert.notEqual(fixture.session, first);
+  await fixture.session.prompt('Second turn');
+  assert.match(JSON.stringify(fixture.session.messages), /After replacement/);
+  assert.equal(fixture.provider.state.callCount, 2);
+}));

@@ -37,16 +37,15 @@ export async function withPi<T>(options: Options, run: (fixture: PiFixture) => P
   const cwd = options.cwd ?? root, agentDir = join(root, 'agent');
   const previous = { agent: process.env.PI_CODING_AGENT_DIR, claude: process.env.CLAUDE_CONFIG_DIR };
   process.env.PI_CODING_AGENT_DIR = agentDir;
-  process.env.CLAUDE_CONFIG_DIR ??= join(root, 'claude');
+  process.env.CLAUDE_CONFIG_DIR = join(root, 'claude');
   let runtime: AgentSessionRuntime | undefined;
-  let pending: AgentSession | undefined;
-  let provider!: Provider;
+  const provider = fauxProvider({ provider: 'pi-test', tokensPerSecond: Infinity });
   const errors: unknown[] = [];
+  let result!: T;
   try {
+    provider.setResponses(options.responses ?? []);
     runtime = await createAgentSessionRuntime(async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
       const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
-      provider = fauxProvider({ provider: 'pi-test', tokensPerSecond: Infinity });
-      provider.setResponses(options.responses ?? []);
       modelRuntime.registerNativeProvider(provider.provider);
       const settingsManager = SettingsManager.inMemory(options.settings ?? {});
       const services = await createAgentSessionServices({ cwd, agentDir, modelRuntime, settingsManager,
@@ -56,42 +55,36 @@ export async function withPi<T>(options: Options, run: (fixture: PiFixture) => P
       assert.deepEqual(services.diagnostics.filter(diagnostic => diagnostic.type === 'error'), []);
       const selection = options.configure ? await options.configure({ ...services, sessionManager }, provider) : { model: provider.getModel() };
       const result = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, noTools: 'builtin', ...selection });
-      pending = result.session;
       return { ...result, services, diagnostics: services.diagnostics };
     }, { cwd, agentDir, sessionStartEvent: options.sessionStartEvent, sessionManager: typeof options.sessionManager === 'function' ? options.sessionManager(cwd) : options.sessionManager ?? SessionManager.create(cwd, join(root, 'sessions')) });
-    pending = undefined;
     const bind = async (session: AgentSession) => {
       const bindings = await options.bind?.(session);
       await session.bindExtensions({ commandContextActions: {
         newSession: options => runtime!.newSession(options), switchSession: (path, options) => runtime!.switchSession(path, options),
         fork: (id, options) => runtime!.fork(id, options), navigateTree: (id, options) => session.navigateTree(id, options),
-        waitForIdle: () => session.agent.waitForIdle(), reload: () => session.reload(),
-      }, ...bindings, onError: error => { errors.push(error); bindings?.onError?.(error); } });
+        waitForIdle: () => session.waitForIdle(), reload: () => session.reload(),
+      }, ...bindings, onError: error => { errors.push(new Error(error.error)); bindings?.onError?.(error); } });
     };
     runtime.setRebindSession(bind);
     await bind(runtime.session);
     const fixture: PiFixture = {
       runtime, cwd, agentDir,
       get session() { return runtime!.session; }, get runner() { return runtime!.session.extensionRunner; },
-      get provider() { return provider; },
+      provider,
     };
-    return await run(fixture);
-  } finally {
-    try {
-      const session = runtime?.session ?? pending;
-      try { await session?.abort(); }
-      finally {
-        let disposed = false;
-        try {
-          if (runtime) { await runtime.dispose(); disposed = true; }
-          else await pending?.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
-        } finally { if (!disposed) session?.dispose(); }
-      }
-    } finally {
-      if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
-      if (previous.claude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous.claude;
-      await rm(root, { recursive: true, force: true });
-      assert.deepEqual(errors, []);
+    result = await run(fixture);
+  } catch (error) { errors.unshift(error); }
+  finally {
+    if (runtime) {
+      try { await runtime.session.abort(); } catch (error) { errors.push(error); }
+      try { await runtime.dispose(); }
+      catch (error) { errors.push(error); runtime.session.dispose(); }
     }
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    if (previous.claude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous.claude;
+    try { await rm(root, { recursive: true, force: true }); } catch (error) { errors.push(error); }
   }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length) throw new AggregateError(errors, 'Pi test session failed');
+  return result;
 }

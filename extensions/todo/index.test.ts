@@ -352,16 +352,24 @@ test('preparation failure saves delivered user accounting without a provider con
   assert.equal(parent?.type, 'message');
 }));
 
-test('queued prompts cancelled before delivery do not count', async () => todoSession(async (session, provider, manager) => {
-  provider.setResponses([async () => {
-    await session.prompt('Cancelled queued prompt', { streamingBehavior: 'followUp' });
-    session.clearQueue();
-    return fauxAssistantMessage('Aborted response');
-  }]);
-  await session.prompt('Initial prompt');
-  assert.equal(manager.getBranch().filter(entry => entry.type === 'message' && entry.message.role === 'user').length, 1);
-  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 1 });
-}));
+test('queued prompts cancelled before delivery do not count', async () => {
+  let active!: PiFixture['session'];
+  await withPi({ extensions: [todo],
+    settings: { compaction: { enabled: false }, retry: { enabled: false }, followUpMode: 'one-at-a-time', steeringMode: 'one-at-a-time' },
+    responses: [async () => {
+      await active.prompt('Cancelled queued prompt', { streamingBehavior: 'followUp' });
+      active.clearQueue();
+      return fauxAssistantMessage('Aborted response');
+    }],
+  }, async ({ session, runner }) => {
+    active = session;
+    await session.getToolDefinition('todo_write')!.execute('seed', { todos: [{ content: 'Still working', status: 'pending' }] }, undefined, undefined, runner.createToolContext('seed', undefined));
+    const manager = session.sessionManager;
+    await session.prompt('Initial prompt');
+    assert.equal(manager.getBranch().filter(entry => entry.type === 'message' && entry.message.role === 'user').length, 1);
+    assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 1 });
+  });
+});
 
 test('repeated provider contexts do not count as user messages', async () => {
   const app = runtime();

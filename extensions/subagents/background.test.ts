@@ -40,7 +40,10 @@ function fixture(run: (host: PiFixture & { activity: { id: string; active: boole
       assert.equal(activity[1].id, activity[0].id);
       assert.match(activity[0].id, /^[0-9a-f-]{36}$/);
     };
-    await run({ ...host, activity, closed, execute });
+    await run({ runtime: host.runtime, cwd: host.cwd, agentDir: host.agentDir,
+      get session() { return host.session; }, get runner() { return host.runner; }, get provider() { return host.provider; },
+      activity, closed, execute,
+    });
   }).finally(() => {
     if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
   });

@@ -1,9 +1,9 @@
 # Pi extensions
 
 Independent tools and workflows for Pi. Development checks use the Pi 0.99.1 SDK
-packages pinned in `package.json`. Version-sensitive extensions document their
-verified runtime versions in [session and editor behavior](docs/extension-behavior.md)
-and [agent setup](docs/agent-setup.md). Enable only what you use.
+packages pinned in `package.json`. [Subagent connector delegation](docs/subagents.md#connector-delegation)
+requires Pi 0.99.1 or newer. [Escape Continue](docs/extension-behavior.md#escape-continue)
+also has TUI verification on Pi 0.87.1, 1.0.2 and 1.2.0. Enable only what you use.
 
 ## Install
 

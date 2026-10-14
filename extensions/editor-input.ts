@@ -175,11 +175,12 @@ function attachHost(host: Host, state: State): void {
 }
 export function registerMainEditorBinding(ctx: ExtensionContext, spec: EditorBinding): () => void {
   const state = sharedState();
-  let registrations = state.registrations.get(ctx.sessionManager);
-  if (!registrations) state.registrations.set(ctx.sessionManager, registrations = new Map());
+  const manager = ctx.sessionManager;
+  let registrations = state.registrations.get(manager);
+  if (!registrations) state.registrations.set(manager, registrations = new Map());
   registrations.set(spec.id, spec);
   const refresh = () => {
-    const host = state.hosts.get(ctx.sessionManager);
+    const host = state.hosts.get(manager);
     if (host) state.attach(host, state);
   };
   refresh();

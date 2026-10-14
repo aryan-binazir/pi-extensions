@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { InteractiveMode, type AgentSession, type CustomEditor, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { matchesKey, type Component } from '@earendil-works/pi-tui';
 import { isUser, startPromotion, SupersededPromotion, textParts, type Message, type Promotion, type SessionPort } from './promotion.ts';
-import { PasteFramer } from '../vi-mode/paste-framing.ts';
+import { installEditorInput, registerMainEditorBinding } from '../editor-input.ts';
 
 type Host = { session: AgentSession; defaultEditor?: CustomEditor; editor?: CustomEditor; ui?: { getFocusedComponent(): Component | null; requestRender(): void } };
 type Registration = { ctx: ExtensionContext; pending?: Promotion; warned: boolean; input?: { editor: CustomEditor; reset(): void } };
@@ -14,7 +14,6 @@ type Adapter = {
   rawAborts: WeakMap<AgentSession, () => Promise<void>>;
   warnedSessions: WeakSet<ExtensionContext['sessionManager']>;
   supported: boolean;
-  editorReplacementPatched?: boolean;
   attach(host: Host, state: Adapter): void;
   decorate(host: Host, state: Adapter): void;
   interrupt(host: Host, original: () => void, state: Adapter): void;
@@ -29,8 +28,6 @@ const installed = Symbol.for('pi-interactive:escape-continue-adapter');
 const wrapped = Symbol.for('pi-interactive:escape-continue-handler');
 const checkpointed = Symbol.for('pi-interactive:escape-continue-preflight');
 const intercepted = Symbol.for('pi-interactive:escape-continue-queue');
-const chordInput = Symbol.for('pi-interactive:escape-continue-input');
-type InputHandler = CustomEditor['handleInput'] & { [chordInput]?: { original: CustomEditor['handleInput']; reset(): void } };
 type Prototype = { bindCurrentSessionExtensions(this: Host): Promise<void>; setCustomEditorComponent(this: Host, factory: unknown): void; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; handleReloadCommand(this: Host): Promise<void>; [installed]?: Adapter };
 
 // Pi's extension context exposes neither prepared queue contents nor queue removal.
@@ -133,69 +130,54 @@ function decorate(host: Host, state: Adapter): void {
   if (!registration || !editor || typeof editor.handleInput !== 'function' || !host.ui?.getFocusedComponent) return;
   if (registration.input?.editor === editor) return;
   registration.input?.reset();
-  const previous = (editor.handleInput as InputHandler)[chordInput];
-  previous?.reset();
-  const original = previous?.original ?? editor.handleInput;
-  let prefix: string | undefined;
-  let deadline = 0;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let flushTimer: ReturnType<typeof setImmediate> | undefined;
-  let forwarding = 0;
-  const framer = new PasteFramer();
-  const resetPrefix = () => {
-    clearTimeout(timer);
-    clearImmediate(flushTimer);
-    timer = undefined;
-    flushTimer = undefined;
-    prefix = undefined;
-    deadline = 0;
-  };
-  const reset = () => {
-    resetPrefix();
-    framer.reset();
-    if (editor.handleInput === input) editor.handleInput = original;
-  };
-  const current = () => host.session === session && host.editor === editor && state.active.get(session.sessionManager) === registration;
-  const forward = (data: string) => {
-    forwarding++;
-    try { original.call(editor, data); } finally { forwarding--; }
-  };
-  const flush = () => {
-    const data = prefix;
-    resetPrefix();
-    if (data !== undefined && current() && host.ui?.getFocusedComponent() === editor) forward(data);
-  };
-  const input: InputHandler = (data) => {
-    if (forwarding || !current()) return forward(data);
-    let pasteChunk = framer.pasting || framer.holdingMarker;
-    for (const frame of framer.feed(data)) pasteChunk ||= frame.type === 'paste';
-    pasteChunk ||= framer.pasting || framer.holdingMarker;
-    if (!pasteChunk && prefix !== undefined && performance.now() <= deadline && matchesKey(data, 'ctrl+s')) {
-      resetPrefix();
-      if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
-        (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
-      return;
-    }
-    flush();
-    const focused = host.ui?.getFocusedComponent();
-    if (!current() || focused !== editor) {
-      focused?.handleInput?.(data);
-      return;
-    }
-    if (!pasteChunk && matchesKey(data, 'ctrl+x')) {
-      prefix = data;
-      deadline = performance.now() + 750;
-      timer = setTimeout(() => {
-        if (!current() || host.ui?.getFocusedComponent() !== editor) return resetPrefix();
-        flushTimer = setImmediate(() => { flush(); host.ui?.requestRender(); });
-        flushTimer.unref();
-      }, 750);
-      timer.unref();
-    } else forward(data);
-  };
-  Object.defineProperty(input, chordInput, { value: { original, reset } });
-  editor.handleInput = input;
-  registration.input = { editor, reset };
+  const unregister = registerMainEditorBinding(registration.ctx, {
+    id: 'escape-continue', priority: 200,
+    create(editor, forward, ready) {
+      let prefix: string | undefined;
+      let deadline = 0;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let flushTimer: ReturnType<typeof setImmediate> | undefined;
+      const resetPrefix = () => {
+        clearTimeout(timer);
+        clearImmediate(flushTimer);
+        timer = undefined;
+        flushTimer = undefined;
+        prefix = undefined;
+        deadline = 0;
+      };
+      const current = () => host.session === session && state.active.get(session.sessionManager) === registration;
+      const flush = () => {
+        const data = prefix;
+        resetPrefix();
+        if (data !== undefined && current()) forward(data);
+      };
+      registration.input = { editor, reset: () => { resetPrefix(); unregister(); } };
+      return {
+        reset: resetPrefix,
+        beforePaste: flush,
+        key(data) {
+          if (!current()) return false;
+          if (prefix !== undefined && performance.now() <= deadline && matchesKey(data, 'ctrl+s')) {
+            resetPrefix();
+            if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
+              (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
+            return true;
+          }
+          flush();
+          if (!matchesKey(data, 'ctrl+x')) return false;
+          prefix = data;
+          deadline = performance.now() + 750;
+          timer = setTimeout(() => {
+            if (!ready()) return resetPrefix();
+            flushTimer = setImmediate(() => { flush(); host.ui?.requestRender(); });
+            flushTimer.unref();
+          }, 750);
+          timer.unref();
+          return true;
+        },
+      };
+    },
+  });
 }
 
 function sessionPort(session: AgentSession, state: Adapter): SessionPort | undefined {
@@ -268,6 +250,7 @@ function interrupt(host: Host, original: () => void, state: Adapter): void {
 }
 
 export function install(): Adapter {
+  installEditorInput();
   const prototype = InteractiveMode.prototype as unknown as Prototype;
   let state = prototype[installed];
   if (!state) {
@@ -283,16 +266,6 @@ export function install(): Adapter {
   state.rawAborts ??= new WeakMap();
   state.warnedSessions ??= new WeakSet();
   state.hosts ??= new WeakMap();
-  const replace = prototype.setCustomEditorComponent;
-  if (typeof replace === 'function' && !state.editorReplacementPatched) {
-    const shared = state;
-    const replaceEditor = function (this: Host, factory: unknown) {
-      replace.call(this, factory);
-      shared.decorate(this, shared);
-    };
-    prototype.setCustomEditorComponent = replaceEditor;
-    state.editorReplacementPatched = true;
-  }
   const shutdown = prototype.shutdown;
   if (typeof shutdown !== 'function') state.supported = false;
   else if (!marked(shutdown, wrapped)) {

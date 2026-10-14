@@ -251,6 +251,7 @@ async function reloadedHost() {
       setShowHardwareCursor() {},
     },
   });
+  Object.defineProperty(app, "session", { value: { sessionManager: {} } });
   app.editor = app.defaultEditor = editor(CustomEditor);
   const ui = { setEditorComponent: (factory: unknown) => app.setCustomEditorComponent(factory) };
   return { app, start: () => start({ type: "session_start" }, { hasUI: true, ui } as any) };
@@ -330,9 +331,9 @@ test("a legacy installed handoff survives its first upgrade without wrapping aga
     const replace = prototype.setCustomEditorComponent, show = prototype.showExtensionCustom;
     const marker = Symbol.for("pi-interactive:editor-handoff");
     Object.defineProperty(prototype, marker, { value: true });
-    const { installEditorHandoff } = await import(${JSON.stringify(new URL("./adapter.ts", import.meta.url).href)});
-    installEditorHandoff();
-    installEditorHandoff();
+    const { installEditorInput } = await import(${JSON.stringify(new URL("../editor-input.ts", import.meta.url).href)});
+    installEditorInput();
+    installEditorInput();
     assert.equal(prototype[marker], true);
     assert.equal(prototype.setCustomEditorComponent, replace);
     assert.equal(prototype.showExtensionCustom, show);

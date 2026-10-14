@@ -1,9 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { installEditorHandoff } from "./adapter.ts";
+import { installEditorInput } from "../editor-input.ts";
 import { ViEditor } from "./editor.ts";
 export default function viMode(pi: ExtensionAPI): void {
   let active: ViEditor | undefined;
-  installEditorHandoff();
+  installEditorInput();
   pi.on("session_start", (_event, ctx) => {
     if (ctx.hasUI) {
       ctx.ui.setEditorComponent(

@@ -1,4 +1,3 @@
-import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import type { Editor } from "@earendil-works/pi-tui";
 export const invalidateTextCache = Symbol.for("pi-interactive:vi-text-cache");
 
@@ -12,7 +11,7 @@ export function setCursorPosition(editor: Editor, line: number, col: number): vo
     snappedFromCursorCol: number | null;
   };
   if (!internal.state || typeof internal.state.cursorLine !== "number")
-    throw new Error("Unsupported Pi editor cursor layout (expected Pi 0.85.1)");
+    throw new Error("Unsupported Pi editor cursor layout (tested with Pi 0.99.1)");
   internal.state.cursorLine = line;
   internal.state.cursorCol = col;
   internal.preferredVisualCol = null;
@@ -40,7 +39,7 @@ export function retainRawText(editor: Editor, text: string): void {
     [invalidateTextCache]?: () => void;
   };
   if (!Array.isArray(internal.state?.lines))
-    throw new Error("Unsupported Pi editor text layout (expected Pi 0.85.1)");
+    throw new Error("Unsupported Pi editor text layout (tested with Pi 0.99.1)");
   internal.state.lines = text.split("\n");
   internal[invalidateTextCache]?.();
 }
@@ -81,7 +80,7 @@ export function renderProjected(
   const state = internal.state;
   if (!Array.isArray(state?.lines) || typeof state.cursorLine !== "number") {
     throw new Error(
-      "Unsupported Pi editor rendering layout (expected Pi 0.85.1)",
+      "Unsupported Pi editor rendering layout (tested with Pi 0.99.1)",
     );
   }
   const saved = { ...state };
@@ -125,7 +124,7 @@ function pasteInternal(editor: Editor) {
     pasteCounter: number;
   };
   if (!(internal.pastes instanceof Map) || typeof internal.pasteCounter !== "number")
-    throw new Error("Unsupported Pi paste registry (expected Pi 0.85.1)");
+    throw new Error("Unsupported Pi paste registry (tested with Pi 0.99.1)");
   return internal;
 }
 export function readPastes(editor: Editor): PasteState {
@@ -180,7 +179,6 @@ export function restoreRawDraft(editor: Editor, text: string, payloads: PasteSta
 }
 
 const viEditor = Symbol.for("pi-interactive:vi-editor");
-const handoffInstalled = Symbol.for("pi-interactive:editor-handoff");
 const singlePassInstalled = Symbol.for("pi-interactive:single-pass-pastes");
 export function installSinglePassPasteExpansion(editor: Editor): void {
   if (singlePassInstalled in editor) return;
@@ -193,88 +191,4 @@ export function installSinglePassPasteExpansion(editor: Editor): void {
 export function markViEditor(editor: Editor): void {
   Object.defineProperty(editor, viEditor, { value: true });
   installSinglePassPasteExpansion(editor);
-}
-// Pi 0.85.1 copies getText() without its paste registry before extension shutdown.
-export function installEditorHandoff(): void {
-  type Host = { editor: Editor };
-  type Replace = (this: Host, factory: unknown) => void;
-  type Show = (this: Host, factory: unknown, options?: { overlay?: boolean }) => Promise<unknown>;
-  type State = {
-    replace: (this: Host, original: Replace, factory: unknown) => void;
-    show: (this: Host, original: Show, factory: unknown, options?: { overlay?: boolean }) => Promise<unknown>;
-  };
-  const prototype = InteractiveMode.prototype as unknown as {
-    [handoffInstalled]?: State | true;
-    setCustomEditorComponent: Replace;
-    showExtensionCustom: Show;
-  };
-  if (prototype[handoffInstalled] === true) return;
-  const replace: State["replace"] = function (original, factory) {
-    const source = this.editor;
-    if (!((source as unknown as { pastes?: unknown }).pastes instanceof Map)) {
-      original.call(this, factory);
-      return;
-    }
-    const text = source.getText();
-    const payloads = readPastes(source);
-    original.call(this, factory);
-    if (!(viEditor in source) && !(viEditor in this.editor) && payloads.pastes.size === 0) return;
-    if (!((this.editor as unknown as { pastes?: unknown }).pastes instanceof Map)) {
-      this.editor.setText(expandPastes(source, text));
-      return;
-    }
-    if (viEditor in this.editor) {
-      restoreRawDraft(this.editor, text, payloads);
-      return;
-    }
-    // Stock rendering relies on setText's CRLF/tab normalization.
-    this.editor.setText(text);
-    writePastes(this.editor, payloads);
-    placeCursor(this.editor, this.editor.getText().length);
-  };
-  // Inline custom UI also restores getText() via setText(), clearing paste data.
-  const show: State["show"] = async function (showCustom, factory, options) {
-    const source = this.editor;
-    if (options?.overlay || !(viEditor in source))
-      return showCustom.call(this, factory, options);
-    const text = source.getText();
-    const payloads = readPastes(source);
-    const expanded = expandPastes(source, text);
-    const getText = source.getText;
-    const captureExpandedDraft = () => {
-      source.getText = getText;
-      return expanded;
-    };
-    source.getText = captureExpandedDraft;
-    try {
-      return await showCustom.call(this, factory, options);
-    } finally {
-      if (source.getText === captureExpandedDraft) source.getText = getText;
-      if (this.editor === source && source.getExpandedText() === expanded) {
-        if (source.getText() === text) {
-          writePastes(source, payloads);
-          source.onChange?.(text);
-        } else {
-          restoreRawDraft(source, text, payloads);
-        }
-      }
-    }
-  };
-  const state = prototype[handoffInstalled];
-  if (state) {
-    state.replace = replace;
-    state.show = show;
-    return;
-  }
-  const original = prototype.setCustomEditorComponent;
-  if (typeof original !== "function") throw new Error("Unsupported Pi editor handoff layout");
-  const showCustom = prototype.showExtensionCustom;
-  const shared: State = { replace, show };
-  prototype.setCustomEditorComponent = function (factory) {
-    return shared.replace.call(this, original, factory);
-  };
-  prototype.showExtensionCustom = function (factory, options) {
-    return shared.show.call(this, showCustom, factory, options);
-  };
-  Object.defineProperty(prototype, handoffInstalled, { value: shared });
 }

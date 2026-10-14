@@ -244,7 +244,7 @@ test('registered direct and workflow children share native monitoring without re
   const calls: any[] = [];
   ctx.modelRegistry = {
     ...fixtureModelRegistry(),
-    find: (provider: string, id: string) => { if (id !== 'gpt-5.6-luna') return fixtureModelRegistry().find(provider, id); assert.equal(provider, 'openai-codex'); assert.equal(id, 'gpt-5.6-luna'); return {provider, id, maxTokens: 128000}; },
+    find: (provider: string, id: string) => { if (id !== 'gpt-6-luna') return fixtureModelRegistry().find(provider, id); assert.equal(provider, 'openai-codex'); assert.equal(id, 'gpt-6-luna'); return {provider, id, maxTokens: 128000}; },
     getApiKeyAndHeaders: async () => ({ok: true, apiKey: 'fake'}),
     getProvider: () => ({streamSimple: (...args: any[]) => {calls.push(args); return (async function* () {yield {type: 'text_delta', delta: 'Observed children'}; yield {type: 'done', reason: 'stop'};})();}}),
   };

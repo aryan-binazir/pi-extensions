@@ -24,6 +24,9 @@ async function fixture(run: (f: any) => Promise<void>) {
 test('missing files use committed defaults; presets do not choose models', async () => fixture(async ({load, ctx, cwd}) => {
   const config = load();
   assert.equal(config.defaultProfile, 'implement');
+  const research = resolveProfile({task: 'research', cwd, profile: 'research'} as any, config, ctx);
+  assert.equal(research.model, 'openai-codex/gpt-6-luna'); assert.equal(research.thinking, 'medium');
+  assert.equal(research.configProvenance?.model, 'bundled');
   assert.deepEqual(Object.keys(config.profiles), ['research', 'implement-small', 'implement', 'implement-complex', 'review']);
   for (const preset of ['reader', 'writer']) {
     const task = resolveProfile({task: 'work', cwd, preset} as any, config, ctx);

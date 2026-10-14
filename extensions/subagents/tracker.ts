@@ -72,8 +72,8 @@ export class SubagentTracker {
         recentCompletions: tasks.filter(task => !['running', 'queued'].includes(task.status)).slice(-4).map(compact),
       });
       const registry = this.context()?.modelRegistry;
-      const model = registry?.find('openai-codex', 'gpt-5.6-luna');
-      if (!model) throw new Error('openai-codex/gpt-5.6-luna unavailable');
+      const model = registry?.find('openai-codex', 'gpt-6-luna');
+      if (!model) throw new Error('openai-codex/gpt-6-luna unavailable');
       const auth = await abortable(registry!.getApiKeyAndHeaders(model), controller.signal);
       if (!auth.ok) throw new Error(auth.error);
       const provider = registry!.getProvider(model.provider);

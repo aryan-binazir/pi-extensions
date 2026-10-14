@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type Message } from "@earendil-works/pi-ai";
+import { type UserMessage } from "@earendil-works/pi-ai";
 import {
   buildSessionContext,
   convertToLlm,
@@ -182,7 +182,7 @@ export default function btw(pi: ExtensionAPI) {
             const question = raw;
             let failure: string | undefined;
             try {
-              const messages: Message[] = [
+              const messages: UserMessage[] = [
                 {
                   role: "user",
                   content: `Conversation snapshot:\n${snapshot}`,

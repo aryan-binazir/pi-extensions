@@ -1,11 +1,11 @@
-import { normalizeContext, type Api, type AssistantMessageEvent, type Message, type Model, type ThinkingLevel } from '@earendil-works/pi-ai';
+import { normalizeContext, type Api, type AssistantMessageEvent, type UserMessage, type Model, type ThinkingLevel } from '@earendil-works/pi-ai';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 
 export interface SideCompletionRequest {
   registry: Pick<ModelRegistry, 'getApiKeyAndHeaders' | 'getProvider'>;
   model: Model<Api>;
   systemPrompt: string;
-  messages: Message[];
+  messages: UserMessage[];
   limits: {characters: number; tokens: number};
   signal: AbortSignal;
   textSource?: 'final' | 'deltas';

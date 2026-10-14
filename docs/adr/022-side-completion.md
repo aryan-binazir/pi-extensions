@@ -15,7 +15,7 @@ bridge cache-retention rule from #77 and the captured main-turn prompt rule from
 
 `extensions/side-completion.ts` exports one async `sideCompletion(request)`
 function. The request contains the selected model, a registry for authentication
-and provider lookup, system prompt, messages, character/token limits and an abort
+and provider lookup, system prompt, user messages, character/token limits and an abort
 signal. Optional reasoning, session ID, start/text callbacks and a final-versus-
 delta text choice preserve the two existing callers' request and display policies.
 It returns bounded text or a discriminated failure carrying bounded text and,
@@ -30,6 +30,9 @@ the caller's token budget unchanged. BTW bounds that budget against a usable
 model maximum; the tracker retains its fixed 1,024-token request. Claude bridge
 uses short cache retention because bridge 0.9.2 treats `none` as its verbatim summarizer path.
 Other providers use `none`. Callers do not handle these request options.
+Messages accept only `UserMessage[]`, matching both callers' inert snapshot/history
+projection. A generic `Message[]` would also admit system tool declarations that
+Pi preserves even with `tools: []`. Those are outside this module's interface.
 
 Deltas stop at the character limit, including an exact-limit delta, and abort
 the transport. Final text is bounded across text blocks without aborting a

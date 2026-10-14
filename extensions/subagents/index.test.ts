@@ -495,7 +495,8 @@ test('source review cancellation restores synchronously and preserves a replacem
 
 test('real Pi subagent widget follows the shared panel and alt+r toggles both states', async () => {
   let component: Component | undefined;
-  const theme = { fg: (_color: 'border', text: string) => text };
+  const theme = { fg: (color: 'border', text: string) => { assert.equal(color, 'border'); return `\x1b[34m${text}\x1b[39m`; } };
+  const blue = (text: string) => theme.fg('border', text);
   const priorPath = process.env.PATH;
   try {
     await withPi({ extensions: [subagents], configure: async ({ cwd, agentDir }, provider) => {
@@ -515,7 +516,7 @@ test('real Pi subagent widget follows the shared panel and alt+r toggles both st
       const launched = await execute('subagent', { task, preset: 'reader' });
       const { id } = launched.details as { id: string };
       const panel = new FramedPanel('alt+r', 'truncate');
-      const content = { summary: 'Subagents · 1 running · 0 queued · alt+r', title: 'Subagents · 1 active · alt+r', rows: [`${id.slice(0, 8)} · running · ${task}`], maxHeight: 12 };
+      const content = { summary: `Subagents · 1 running · 0 queued · ${blue('alt+r')}`, title: `Subagents · 1 active · ${blue('alt+r')}`, rows: [`${id.slice(0, 8)} · ${blue('running')} · ${task}`], maxHeight: 12 };
       const toggle = runner.getShortcuts({}).get('alt+r')!;
       assert.ok(toggle);
       assert.deepEqual(runner.getShortcutDiagnostics(), []);

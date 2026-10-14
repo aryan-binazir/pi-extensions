@@ -8,13 +8,13 @@ interface Content {
 }
 
 export class FramedPanel {
-  #expanded = false;
+  private expandedView = false;
   constructor(readonly shortcut: KeyId, private readonly fit: 'wrap' | 'truncate') {}
-  get expanded() { return this.#expanded; }
-  toggle() { this.#expanded = !this.#expanded; }
+  get expanded() { return this.expandedView; }
+  toggle() { this.expandedView = !this.expandedView; }
   render(width: number, theme: { fg(color: 'border', text: string): string }, { summary, title, rows, maxHeight }: Content): string[] {
     if (width < 6 || maxHeight !== undefined && maxHeight < 1) return [];
-    if (!this.#expanded) return [truncateToWidth(summary, width)];
+    if (!this.expandedView) return [truncateToWidth(summary, width)];
     if (maxHeight !== undefined && maxHeight < 3) return [];
     const blue = (text: string) => theme.fg('border', text);
     const inner = width - 4;

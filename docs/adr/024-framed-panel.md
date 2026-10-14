@@ -19,13 +19,16 @@ property lets Subagents include the view choice in its paint deduplication key.
 
 The module hides both states below six columns. Expanded frames reserve four
 columns for borders and padding. Todo keeps ANSI-aware wrapping; Subagents
-keeps a single padded line per row with its existing ellipsis. Every finished
-line is clipped to the requested width with an empty marker. Fitting output,
+keeps a single padded line per row with its existing ellipsis. Every expanded
+frame line is clipped to the requested width with an empty marker. Compact
+summaries keep the SDK's default truncation marker. Fitting output,
 including hint placement, remains unchanged.
 
-An optional `maxHeight` counts the whole frame. The module reserves the title
+An optional integer `maxHeight` counts the whole frame. The module reserves the title
 and two borders before requesting rows and caps the resulting body. A cap below
 three cannot fit an expanded frame; a cap below one also hides the compact line.
+The cap limits rendered lines, so wrapping can hide trailing content without
+an additional marker. Todo leaves this cap unset; Subagents uses truncation.
 Subagents retains its half-terminal-height policy, nine row slots and five-line
 minimum. Its capacity callback selects running children first and reserves a
 slot for the exact hidden running/queued counts when needed. Those counts stay

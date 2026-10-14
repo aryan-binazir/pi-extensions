@@ -65,7 +65,8 @@ test('compact summary prioritizes the current task and toggles without changing 
 
 test('real Pi todo widget follows the shared panel and alt+t toggles both states', async () => {
   let component: Component | undefined;
-  const theme = { fg: (_color: 'border', text: string) => text };
+  const theme = { fg: (color: 'border', text: string) => { assert.equal(color, 'border'); return `\x1b[34m${text}\x1b[39m`; } };
+  const blue = (text: string) => theme.fg('border', text);
   await withPi({ extensions: [todo], bind: session => ({ mode: 'tui', uiContext: {
     ...session.extensionRunner.createContext().ui,
     setWidget: (_key, value) => { component = typeof value === 'function' ? value(undefined as any, theme as any) : undefined; },
@@ -73,7 +74,7 @@ test('real Pi todo widget follows the shared panel and alt+t toggles both states
     const tasks = [{ content: 'Inspect 界 🧪', status: 'in_progress' }, { content: 'Verify long row '.repeat(8).trim(), status: 'pending' }];
     await session.getToolDefinition('todo_write')!.execute('seed', { todos: tasks }, undefined, undefined, runner.createToolContext('seed', undefined));
     const panel = new FramedPanel('alt+t', 'wrap');
-    const content = { summary: 'Todos 0/2 · alt+t · Inspect 界 🧪', title: 'Todo — declared progress · alt+t', rows: [`→ ${tasks[0].content}`, `○ ${tasks[1].content}`] };
+    const content = { summary: `Todos 0/2 · ${blue('alt+t')} · Inspect 界 🧪`, title: `Todo — declared progress · ${blue('alt+t')}`, rows: [`${blue('→')} ${tasks[0].content}`, `${blue('○')} ${tasks[1].content}`] };
     const toggle = runner.getShortcuts({}).get('alt+t')!;
     assert.ok(toggle);
     assert.deepEqual(runner.getShortcutDiagnostics(), []);

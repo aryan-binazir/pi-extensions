@@ -9,6 +9,7 @@ import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ToolDefiniti
 import { type Component, type Terminal, TuiMainScreen, visibleWidth } from '@earendil-works/pi-tui';
 import todo from './index.js';
 import { withPi, type PiFixture } from '../../tests/pi-session.ts';
+import { FramedPanel } from '../framed-panel.ts';
 
 interface Snapshot { version: 1; todos: { content: string; status: string }[]; staleTurns: number }
 
@@ -60,6 +61,31 @@ test('compact summary prioritizes the current task and toggles without changing 
   const resumed = runtime(saved);
   await resumed.hook('session_start');
   assert.deepEqual(resumed.widget(), ['Todos 1/3 · alt+t · Current']);
+});
+
+test('real Pi todo widget follows the shared panel and alt+t toggles both states', async () => {
+  let component: Component | undefined;
+  const theme = { fg: (_color: 'border', text: string) => text };
+  await withPi({ extensions: [todo], bind: session => ({ mode: 'tui', uiContext: {
+    ...session.extensionRunner.createContext().ui,
+    setWidget: (_key, value) => { component = typeof value === 'function' ? value(undefined as any, theme as any) : undefined; },
+  } }) }, async ({ session, runner }) => {
+    const tasks = [{ content: 'Inspect 界 🧪', status: 'in_progress' }, { content: 'Verify long row '.repeat(8).trim(), status: 'pending' }];
+    await session.getToolDefinition('todo_write')!.execute('seed', { todos: tasks }, undefined, undefined, runner.createToolContext('seed', undefined));
+    const panel = new FramedPanel('alt+t', 'wrap');
+    const content = { summary: 'Todos 0/2 · alt+t · Inspect 界 🧪', title: 'Todo — declared progress · alt+t', rows: [`→ ${tasks[0].content}`, `○ ${tasks[1].content}`] };
+    const toggle = runner.getShortcuts({}).get('alt+t')!;
+    assert.ok(toggle);
+    assert.deepEqual(runner.getShortcutDiagnostics(), []);
+    assert.deepEqual(component!.render(80), [content.summary]);
+    for (const expanded of [true, false]) {
+      panel.toggle();
+      await toggle.handler(runner.createContext());
+      for (const width of [0, 5, 6, 7, 20, 40, 80, 200]) assert.deepEqual(component!.render(width), panel.render(width, theme, content));
+      assert.equal(component!.render(80).length > 1, expanded);
+    }
+    assert.deepEqual(session.sessionManager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: tasks, staleTurns: 0 });
+  });
 });
 
 test('todo renders controls safely without changing saved progress', async () => {

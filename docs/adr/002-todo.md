@@ -18,7 +18,10 @@ startup, resume, fork, reload and tree navigation.
 The widget defaults to a single truncated line with completed/total counts, an
 `alt+t` hint and the in-progress task, or the first pending task. `alt+t` toggles
 the full bordered list with the same hint. The view choice lasts until reload
-and does not change saved progress or reminders.
+and does not change saved progress or reminders. The shared
+[framed panel](024-framed-panel.md) owns this view choice, borders and width
+clipping. Todo supplies the summary, title and rows and retains wrapping
+without a height cap.
 
 Delivered user messages advance the stale-turn count, including queued steering
 and follow-up messages. Each accounting snapshot follows its user message on

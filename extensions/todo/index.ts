@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { StringEnum } from '@earendil-works/pi-ai';
 import { terminalLabel } from '../terminal-text.ts';
+import { FramedPanel } from '../framed-panel.ts';
 
 interface Todo { content: string; status: 'pending' | 'in_progress' | 'completed' }
 interface Snapshot { version: 1; todos: Todo[]; staleTurns: number }
@@ -35,7 +35,7 @@ function parse(data: unknown): Snapshot {
 export default function todo(pi: ExtensionAPI): void {
   let state: Snapshot = { version: 1, todos: [], staleTurns: 0 };
   let dirty = false;
-  let expanded = false;
+  const panel = new FramedPanel('alt+t', 'wrap');
   const persist = () => {
     if (!dirty) return;
     pi.appendEntry(entryType, clone(state));
@@ -48,27 +48,21 @@ export default function todo(pi: ExtensionAPI): void {
     ctx.ui.setWidget('interactive-tools:todo', (_tui, theme) => {
       const blue = (text: string) => theme.fg('border', text);
       const current = state.todos.find(item => item.status === 'in_progress') ?? state.todos.find(item => item.status === 'pending');
-      const summary = `Todos ${state.todos.filter(item => item.status === 'completed').length}/${state.todos.length} · ${blue('alt+t')} · ${terminalLabel(current?.content ?? '')}`;
-      const lines = [`Todo — declared progress · ${blue('alt+t')}`, ...state.todos.map(item => `${blue(item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○')} ${terminalLabel(item.content)}`)];
+      const summary = `Todos ${state.todos.filter(item => item.status === 'completed').length}/${state.todos.length} · ${blue(panel.shortcut)} · ${terminalLabel(current?.content ?? '')}`;
+      const title = `Todo — declared progress · ${blue(panel.shortcut)}`;
+      const rows = state.todos.map(item => `${blue(item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○')} ${terminalLabel(item.content)}`);
       return {
         invalidate() {},
         render(width: number) {
-          if (width < 6) return [];
-          if (!expanded) return [truncateToWidth(summary, width)];
-          const inner = width - 4;
-          return [
-            blue(`╭${'─'.repeat(inner + 2)}╮`),
-            ...lines.flatMap(line => wrapTextWithAnsi(line, inner)).map(line => `${blue('│')} ${line}${' '.repeat(Math.max(0, inner - visibleWidth(line)))} ${blue('│')}`),
-            blue(`╰${'─'.repeat(inner + 2)}╯`),
-          ].map(line => truncateToWidth(line, width, ''));
+          return panel.render(width, theme, { summary, title, rows });
         },
       };
     });
   };
-  pi.registerShortcut('alt+t', {
+  pi.registerShortcut(panel.shortcut, {
     description: 'Toggle compact/full todo list',
     handler(ctx) {
-      expanded = !expanded;
+      panel.toggle();
       paint(ctx);
     },
   });

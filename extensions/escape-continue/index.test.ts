@@ -13,6 +13,7 @@ import { editor } from '../vi-mode/test-support.ts';
 import { KeybindingsManager } from '../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js';
 import { initTheme } from '../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';
 import escapeContinue from './index.ts';
+import { versions, versionSession } from './test-support.ts';
 
 initTheme('dark', false);
 
@@ -101,67 +102,37 @@ test('Escape aborts the current run and starts the queued follow-up without touc
   assert.equal(h.session.pendingMessageCount, 0);
 });
 
-test('the handoff accepts its own busy run during final prompt preparation', async t => {
-  const h = await fixture(t, [viMode, stash]);
-  const first = deferred();
-  h.provider.setResponses([h.blocked(first), fauxAssistantMessage('Next response')]);
-  const running = h.session.prompt('Original');
-  await first.promise;
-  await h.session.followUp('Next');
-  const preparation = h.session as unknown as {
-    _isAgentRunActive: boolean;
-    _normalizePromptImages(images: unknown): Promise<unknown>;
-  };
-  const normalize = preparation._normalizePromptImages;
-  preparation._normalizePromptImages = async images => {
-    const active = preparation._isAgentRunActive;
-    preparation._isAgentRunActive = true;
-    try { return await normalize.call(h.session, images); }
-    finally { preparation._isAgentRunActive = active; }
-  };
-  h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
-  await running;
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(h.users(), ['Original', 'Next']);
-  assert.ok(!h.notices.some(message => /Another prompt started/.test(message)), h.notices.join('\n'));
-  await h.session.waitForIdle();
-  assert.equal(h.app.editor.getText(), 'draft');
-  assert.equal(h.session.pendingMessageCount, 0);
-});
-
-test('Pi 0.87 boolean preflight results release each promoted handoff and allow the next chord', async t => {
-  const h = await fixture(t, [viMode, stash]);
-  const prompt = h.session.prompt.bind(h.session);
-  h.session.prompt = (text, options) => {
-    const observe = options?.preflightResult as unknown as ((success: boolean) => void) | undefined;
-    return prompt(text, { ...options, preflightResult: () => observe?.(true) });
-  };
-  const first = deferred(), second = deferred(), third = deferred();
-  h.provider.setResponses([h.blocked(first), h.blocked(second), h.blocked(third)]);
-  const running = h.session.prompt('Original');
-  await first.promise;
-  await h.session.followUp('Second');
-  await h.session.followUp('Third');
-  h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
-  await second.promise;
-  assert.deepEqual(h.users(), ['Original', 'Second']);
-  assert.deepEqual(h.session.getFollowUpMessages(), ['Third']);
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(h.users(), ['Original', 'Second', 'Third']);
-  await third.promise;
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
-  await h.session.waitForIdle();
-  await running;
-  assert.equal(h.app.editor.getText(), 'draft');
-  assert.equal(h.session.pendingMessageCount, 0);
-  assert.ok(!h.notices.some(message => /Another prompt started/.test(message)));
+test('version adapters promote consecutive queued messages without claiming their own run is foreign', async t => {
+  for (const version of versions) await t.test(version, { timeout: 3000 }, async t => {
+    const h = await fixture(t, [viMode, stash]);
+    versionSession(t, h.session, version);
+    const first = deferred(), second = deferred(), third = deferred();
+    h.provider.setResponses([h.blocked(first), h.blocked(second), h.blocked(third)]);
+    const running = h.session.prompt('Original');
+    await first.promise;
+    await h.session.followUp('Second');
+    await h.session.followUp('Third');
+    h.app.editor.setText('draft');
+    h.app.editor.handleInput('\x18');
+    h.app.editor.handleInput('\x13');
+    await running;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(h.users(), ['Original', 'Second']);
+    await second.promise;
+    assert.deepEqual(h.session.getFollowUpMessages(), ['Third']);
+    h.app.editor.handleInput('\x18');
+    h.app.editor.handleInput('\x13');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(h.users(), ['Original', 'Second', 'Third']);
+    await third.promise;
+    h.app.editor.handleInput('\x18');
+    h.app.editor.handleInput('\x13');
+    await h.session.waitForIdle();
+    await running;
+    assert.equal(h.app.editor.getText(), 'draft');
+    assert.equal(h.session.pendingMessageCount, 0);
+    assert.ok(!h.notices.some(message => /Another prompt started/.test(message)), h.notices.join('\n'));
+  });
 });
 
 test('promotion preserves duplicate steering tails and attachments without folding them into its first request', async t => {
@@ -199,7 +170,7 @@ test('promotion preserves duplicate steering tails and attachments without foldi
   assert.deepEqual(h.users(), ['Original', 'Same text']);
 });
 
-test('a second Escape during cancellation stops the handoff and retains the queued image message', async t => {
+test('a second Escape during cancellation stops the promotion and retains the queued image message', async t => {
   const h = await fixture(t);
   const first = deferred(), release = deferred();
   t.after(() => release.resolve());
@@ -330,7 +301,7 @@ test('custom queued messages survive promotion with their original contents and 
   await running;
 });
 
-for (const lifecycle of ['shutdown', 'reload'] as const) test(`${lifecycle} during cancellation retires the handoff without losing the old queue`, async t => {
+for (const lifecycle of ['shutdown', 'reload'] as const) test(`${lifecycle} during cancellation retires the promotion without losing the old queue`, async t => {
   const h = await fixture(t);
   const first = deferred(), release = deferred();
   t.after(() => release.resolve());
@@ -735,7 +706,7 @@ test('the chord interrupts immediately with autocomplete open and retains the in
   await running;
 });
 
-test('a second chord during prompt preparation stops the handoff and keeps the queued message', async t => {
+test('a second chord during prompt preparation stops the promotion and keeps the queued message', async t => {
   const preparing = deferred(), release = deferred();
   t.after(() => release.resolve());
   const h = await fixture(t, [pi => pi.on('before_agent_start', async event => {
@@ -985,7 +956,7 @@ for (const mode of ['rpc', 'json', 'print'] as const) test(`the extension remain
   assert.equal(h.app.editor.getText(), 'Next');
 });
 
-test('replacing the host with another real session prevents delayed handoff into the replacement', async t => {
+test('replacing the host with another real session prevents delayed promotion into the replacement', async t => {
   const old = await fixture(t), replacement = await fixture(t);
   const first = deferred(), release = deferred();
   t.after(() => release.resolve());
@@ -1044,7 +1015,7 @@ test('manual input cancels a promoted preflight before either completion order c
   });
 });
 
-test('programmatic abort cancels a held handoff and uses stock queue-to-editor behavior', async t => {
+test('programmatic abort cancels a held promotion and uses stock queue-to-editor behavior', async t => {
   const h = await fixture(t);
   const first = deferred(), release = deferred();
   t.after(() => release.resolve());
@@ -1090,7 +1061,7 @@ test('stock dequeue sees held messages and does not duplicate them after cancell
   assert.equal(h.provider.state.callCount, 1);
 });
 
-test('accepted runtime replacement retires a handoff before an earlier async shutdown handler yields', async t => {
+test('accepted runtime replacement retires a promotion before an earlier async shutdown handler yields', async t => {
   const shutdown = deferred(), releaseShutdown = deferred();
   const h = await fixture(t, [], true, [pi => pi.on('session_shutdown', async () => {
     shutdown.resolve();
@@ -1134,7 +1105,7 @@ test('accepted runtime replacement retires a handoff before an earlier async shu
   assert.deepEqual(runtime.session.messages, []);
 });
 
-test('interactive quit retires a handoff before terminal drain or async shutdown handlers', async t => {
+test('interactive quit retires a promotion before terminal drain or async shutdown handlers', async t => {
   const h = await fixture(t);
   const runtime = new AgentSessionRuntime(h.session, h.services, async () => { throw new Error('Quit must not replace the runtime'); });
   const first = deferred(), release = deferred(), draining = deferred(), releaseDrain = deferred();
@@ -1202,7 +1173,7 @@ test('accepted TUI reload cannot start a held prompt while an earlier shutdown h
     releasePrompt.resolve();
     await new Promise(resolve => setImmediate(resolve));
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(h.provider.state.callCount, 1, 'accepted reload must not start the pending handoff');
+    assert.equal(h.provider.state.callCount, 1, 'accepted reload must not start the pending promotion');
     assert.deepEqual(h.users(), ['Original']);
     assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
   } finally {
@@ -1249,7 +1220,7 @@ test('direct session reload retires a held preflight before earlier async shutdo
   assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
 });
 
-test('a rejected TUI reload leaves the pending handoff eligible to continue', async t => {
+test('a rejected TUI reload leaves the pending promotion eligible to continue', async t => {
   const first = deferred(), release = deferred(), promoted = deferred();
   t.after(() => release.resolve());
   const h = await fixture(t);
@@ -1271,7 +1242,7 @@ test('a rejected TUI reload leaves the pending handoff eligible to continue', as
   await h.session.waitForIdle();
 });
 
-test('a cancelled runtime replacement leaves the held handoff eligible to continue', async t => {
+test('a cancelled runtime replacement leaves the held promotion eligible to continue', async t => {
   const h = await fixture(t, [pi => pi.on('session_before_switch', () => ({ cancel: true }))]);
   const runtime = new AgentSessionRuntime(h.session, h.services, async () => { throw new Error('Cancelled replacement must not create a runtime'); });
   const first = deferred(), release = deferred(), promoted = deferred();

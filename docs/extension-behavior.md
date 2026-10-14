@@ -45,9 +45,9 @@ directly in the main editor without leaving Vi insert mode. Agent-run
 interruptions preserve the cursor and draft.
 It interrupts immediately even when autocomplete is open, leaving the popup
 alone. Bash commands, retry backoff and compaction use Pi's current Escape
-handling. With no active run, handoff, Bash command, retry or compaction, the
+handling. With no active run, promotion, Bash command, retry or compaction, the
 chord does nothing; it does not open the session tree or clear a Bash draft.
-A second chord stops a pending handoff just as a second Escape does.
+A second chord stops a pending promotion just as a second Escape does.
 
 Standalone Ctrl-S still stashes the draft. Standalone Ctrl-X is forwarded to Pi
 after the 750 ms wait, or immediately before another key. With default bindings,
@@ -61,21 +61,21 @@ Legacy, Kitty and modifyOtherKeys encodings are supported without keybinding
 configuration.
 
 A second Escape while cancellation or prompt preparation is pending stops the
-handoff. A held-queue count is visible during cancellation, and stopping shows
+promotion. A held-queue count is visible during cancellation, and stopping shows
 an immediate notice. Queued messages and attachments stay waiting; they are
 picked up by a later submitted prompt. Queues are memory-only, not durable
 session entries. A manual submission during prompt preparation takes precedence
-and cancels the handoff before either prompt commits. Accepted session replacement
-or quit retires the handoff before asynchronous teardown; a cancelled replacement
-leaves it eligible to continue. Accepted reload retires the handoff before its
+and cancels the promotion before either prompt commits. Accepted session replacement
+or quit retires the promotion before asynchronous teardown; a cancelled replacement
+leaves it eligible to continue. Accepted reload retires the promotion before its
 first yield; a rejected TUI reload leaves it eligible to continue.
 
 Autocomplete, dialogs, compaction and retry backoff keep their own Escape
 handling. Vi mode keeps insert/visual-mode Escape; only a clean normal-mode
 Escape reaches the interrupt handler. Programmatic `ctx.abort()` and stock dequeue
-cancel a held handoff and restore its queued text using Pi's normal editor behavior;
+cancel a held promotion and restore its queued text using Pi's normal editor behavior;
 this is text-only, unlike second-Escape retention of attachments and custom messages.
-Direct `session.abort()` stops the handoff without dequeuing it. The extension is
+Direct `session.abort()` stops the promotion without dequeuing it. The extension is
 inert in RPC, JSON and print modes.
 
 Promotion uses Pi's normal prompt preflight, including `before_agent_start` and
@@ -85,9 +85,14 @@ image normalization, without repeating skill/template expansion. Third-party
 again. If preflight rejects or handles the prompt without starting it, the
 queue is kept waiting with a notice.
 
-The compatibility adapter uses guarded interactive-handler and prepared-queue
-internals, tested against Pi 0.99.1 and through the Pi 0.87.1, 1.0.2 and 1.2.0
-TUIs. Run-start events support the older boolean prompt-preflight callback.
+The [session seam](adr/020-escape-continue.md) keeps Pi flags, prompt ownership,
+checkpoints and queue internals in `adapter.ts`; `promotion.ts` owns cancellation
+and queue retention through its session interface. The adapter uses guarded
+interactive-handler and prepared-queue internals, tested against Pi 0.99.1 and
+through the Pi 0.87.1, 1.0.2 and 1.2.0 TUIs. Table-driven version fakes cover the 0.87 boolean preflight callback, the
+0.99 baseline, a missing session idle getter and 1.2 early streaming. Scoped
+run-start events support the older boolean prompt-preflight callback. Foreign
+activity is checked after abort; an owned prompt may be busy at its checkpoints.
 Cancellation is checked at Pi's final
 asynchronous image-preparation boundary, before prompt options and next-turn
 notifications are committed. The normal preflight observer is never used to

@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { InteractiveMode, type AgentSession, type CustomEditor, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { matchesKey, type Component } from '@earendil-works/pi-tui';
-import { isUser, startPromotion, textParts, type Message, type Promotion, type SessionPort } from './promotion.ts';
+import { isUser, startPromotion, SupersededPromotion, textParts, type Message, type Promotion, type SessionPort } from './promotion.ts';
 import { PasteFramer } from '../vi-mode/paste-framing.ts';
 
 type Host = { session: AgentSession; defaultEditor?: CustomEditor; editor?: CustomEditor; ui?: { getFocusedComponent(): Component | null; requestRender(): void } };
@@ -86,7 +86,7 @@ function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter)
   }
   const normalize = layout.preflight._normalizePromptImages;
   if (!marked(normalize, checkpointed)) {
-    // Pi 0.99 commits next-turn messages and prompt options after this final async preflight boundary.
+    // Pi commits options and next-turn messages after image preparation, including 0.99 and 1.2.
     const guarded = async (images: unknown) => {
       const scope = state.checkpoints.getStore();
       if (scope?.session === session) scope.check();
@@ -198,10 +198,9 @@ function decorate(host: Host, state: Adapter): void {
   registration.input = { editor, reset };
 }
 
-export function sessionPort(session: AgentSession, state: Adapter): SessionPort | undefined {
+function sessionPort(session: AgentSession, state: Adapter): SessionPort | undefined {
   const layout = queueLayout(session);
   if (!layout) return;
-  wireSession(session, layout, state);
   return {
     queued: { steer: [...layout.agent.steeringQueue.messages], followUp: [...layout.agent.followUpQueue.messages] },
     clear: () => { session.clearQueue(); },
@@ -224,23 +223,23 @@ export function sessionPort(session: AgentSession, state: Adapter): SessionPort 
     },
     abort: () => abortRun(session, state),
     streaming: () => session.isStreaming,
-    // Pi 0.99 activity flags avoid the idle-getter assumption behind 7229077; check only after abort.
-    foreignRunActive: () => session.isStreaming || session.isCompacting,
     async prompt(message, check, events) {
-      let starting = false;
+      await abortRun(session, state);
+      check();
+      // Pi 0.99 supplies activity flags; 7229077 removed reliance on a host's idle getter.
+      if (session.isStreaming || session.isCompacting) throw new SupersededPromotion('Another prompt started during the promotion');
       const unsubscribe = session.subscribe(event => {
         // Pi 0.87 reports boolean preflight results; scoped agent_start still proves ownership.
-        if (event.type === 'agent_start' && state.checkpoints.getStore()?.check === check) { starting = true; events.started(); }
-        if (!starting) return;
+        if (event.type === 'agent_start' && state.checkpoints.getStore()?.check === check) events.started();
         if (event.type === 'agent_start') events.runStarted();
         if (event.type === 'message_start' && event.message.role === 'user') events.delivered();
       });
       try {
         const images = typeof message.content === 'string' ? undefined : message.content.filter(part => part.type === 'image');
-        // Pi 1.2 sets streaming before image preparation; checkpoints check cancellation only.
+        // Pi 1.2 sets streaming before image preparation; checkpoints check cancellation and identity.
         await state.checkpoints.run({ session, check }, () => session.prompt(textParts(message).join('\n'), {
           images, expandPromptTemplates: false, source: 'extension',
-          preflightResult: disposition => { if (disposition === 'started') { starting = true; events.started(); } },
+          preflightResult: disposition => { if (disposition === 'started') events.started(); },
         }));
       } finally { unsubscribe(); }
     },

@@ -86,16 +86,16 @@ again. If preflight rejects or handles the prompt without starting it, the
 queue is kept waiting with a notice.
 
 The [session seam](adr/020-escape-continue.md) keeps Pi flags, prompt ownership,
-checkpoints and queue internals in `adapter.ts`; `promotion.ts` owns cancellation
-and queue retention through its session interface. The adapter uses guarded
-interactive-handler and prepared-queue internals, tested against Pi 0.99.1 and
-through the Pi 0.87.1, 1.0.2 and 1.2.0 TUIs. Table-driven version fakes cover the 0.87 boolean preflight callback, the
-0.99 baseline, a missing session idle getter and 1.2 early streaming. Scoped
-run-start events support the older boolean prompt-preflight callback. Foreign
-activity is checked after abort; an owned prompt may be busy at its checkpoints.
-Cancellation is checked at Pi's final
-asynchronous image-preparation boundary, before prompt options and next-turn
-notifications are committed. The normal preflight observer is never used to
-throw after commit. An unsupported layout warns once per session
-and falls back to normal Escape behavior. No keybinding or personal setting is
+checkpoints and queue internals in `adapter.ts`; `promotion.ts` owns
+cancellation and queue retention through its session interface. The adapter uses
+guarded interactive-handler and prepared-queue internals, tested against Pi
+0.99.1 and through the Pi 0.87.1, 1.0.2 and 1.2.0 TUIs. Table-driven version
+fakes cover the 0.87 boolean preflight callback, the 0.99 baseline, a legacy
+missing idle getter and 1.2 early streaming. Scoped run-start events support the
+older boolean prompt-preflight callback. Foreign activity is checked after
+abort; an owned prompt may be busy at its checkpoints. Cancellation is checked
+at Pi's final asynchronous image-preparation boundary, before prompt options and
+next-turn notifications are committed. The normal preflight observer is never
+used to throw after commit. An unsupported layout warns once per session and
+falls back to normal Escape behavior. No keybinding or personal setting is
 changed by loading the extension.

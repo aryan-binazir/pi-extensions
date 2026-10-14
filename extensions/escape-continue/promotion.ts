@@ -12,7 +12,6 @@ export type SessionPort = {
   capture(mode: Mode, message: Message): void;
   abort(): Promise<void>;
   streaming(): boolean;
-  foreignRunActive(): boolean;
   prompt(message: UserMessage, check: () => void, events: { started(): void; runStarted(): void; delivered(): void }): Promise<void>;
 };
 type PromotionUI = {
@@ -23,7 +22,7 @@ type PromotionUI = {
   release(promotion: Promotion): boolean;
 };
 class CancelledPromotion extends Error {}
-class SupersededPromotion extends Error {}
+export class SupersededPromotion extends Error {}
 
 export function textParts(message: UserMessage): string[] {
   return typeof message.content === 'string' ? [message.content]
@@ -85,9 +84,6 @@ export function startPromotion(port: SessionPort, ui: PromotionUI): Promotion | 
   };
   const resume = async () => {
     try {
-      await port.abort();
-      check();
-      if (port.foreignRunActive()) throw new SupersededPromotion('Another prompt started during the promotion');
       await port.prompt(selected, check, {
         started() { starting = true; },
         runStarted() { if (starting && cancelled) void port.abort(); },

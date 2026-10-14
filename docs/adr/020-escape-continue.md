@@ -6,7 +6,7 @@ Escape Continue promotes the first queued user message after stopping the curren
 
 `adapter.ts` is the sole Pi-facing module. It validates the prepared queue and image-normalization layout, patches the host lifecycle and queue methods, and implements `SessionPort`. Unsupported internals still warn once per session and fall back to normal Escape. The shape probe checks compatibility, not ownership.
 
-`promotion.ts` owns selection, held messages, cancellation, delivery, restoration and release. Its session interface exposes a queue snapshot, clear/restore/capture operations, raw abort, streaming and foreign-run predicates, and a checkpointed prompt with normalized start/delivery events. It never reads Pi flags, private fields, prompt-preflight dispositions or async-local storage. UI callbacks provide registration identity and notices without exposing the host session.
+`promotion.ts` owns selection, held messages, cancellation, delivery, restoration and release. Its session interface exposes a queue snapshot, clear/restore/capture operations, raw abort, a streaming predicate, and an abort-and-prompt operation with cancellation checkpoints and normalized start/delivery events. It never reads Pi flags, private fields, prompt-preflight dispositions or async-local storage. UI callbacks provide registration identity and notices without exposing the host session.
 
 The adapter keeps these version facts as executable code:
 
@@ -19,7 +19,7 @@ The adapter keeps these version facts as executable code:
 
 Preflight start and run start remain distinct events. Preflight only establishes ownership; a run-start event also aborts a cancelled promotion. Once ownership starts, subsequent user-message events mark delivery as before. Restoration excludes the selected message only after delivery. Prepared messages retain attachments and custom contents; stock dequeue remains text-only.
 
-A scripted session adapter tests promotion policy through `SessionPort`. A table of per-version session fakes drives the real AgentSession, faux provider and editor chord through the real Pi adapter. The rows cover 0.87 boolean preflight, 0.99 baseline, a missing idle getter and 1.2 early streaming. Reverting each historical adapter fact must fail the corresponding row. The key-driven behavioral suite remains the integration contract.
+Per-version scripted session adapters test promotion policy through `SessionPort`, including cancellation between preflight start and actual run start. A table of per-version session fakes drives the real AgentSession, faux provider and editor chord through the real Pi adapter. The rows cover 0.87 boolean preflight, 0.99 baseline, a legacy missing idle getter and 1.2 early streaming, plus foreign streaming and compaction after abort. Reverting each historical adapter fact must fail the corresponding row. The key-driven behavioral suite remains the integration contract.
 
 The internal operation is named **promotion**, reserving **handoff** for vi-mode's editor transfer. The status and fallback notice use promotion where they previously literally said handoff. Chord handling and the custom-editor wrapper stay unchanged.
 

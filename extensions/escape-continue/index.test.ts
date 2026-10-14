@@ -3,7 +3,7 @@ import { test, type TestContext } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AgentSessionRuntime, createAgentSession, type CreateAgentSessionRuntimeFactory, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { type AgentSession, AgentSessionRuntime, createAgentSession, type CreateAgentSessionRuntimeFactory, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type FauxResponseFactory } from '@earendil-works/pi-ai';
 import { CombinedAutocompleteProvider, Container, Input, setKittyProtocolActive } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
@@ -13,7 +13,7 @@ import { editor } from '../vi-mode/test-support.ts';
 import { KeybindingsManager } from '../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js';
 import { initTheme } from '../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';
 import escapeContinue from './index.ts';
-import { versions, versionSession } from './test-support.ts';
+import { install } from './adapter.ts';
 
 initTheme('dark', false);
 
@@ -21,6 +21,52 @@ function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>(done => { resolve = done; });
   return { promise, resolve };
+}
+
+const versions = ['0.87 boolean preflight', '0.99 baseline', 'legacy missing idle getter (7229077)', '1.2 early streaming', 'foreign streaming', 'foreign compaction'] as const;
+
+function versionSession(t: TestContext, session: AgentSession, version: typeof versions[number]): void {
+  if (version === 'foreign streaming' || version === 'foreign compaction') {
+    const state = install(), abort = state.rawAborts.get(session)!;
+    const flag = version === 'foreign streaming' ? 'isStreaming' : 'isCompacting';
+    state.rawAborts.set(session, async () => {
+      await abort();
+      Object.defineProperty(session, flag, { value: true, configurable: true });
+      Object.defineProperty(session, 'isIdle', { value: false, configurable: true });
+      setImmediate(() => { delete (session as unknown as Record<string, unknown>)[flag]; delete (session as unknown as { isIdle?: boolean }).isIdle; });
+    });
+  } else if (version === '0.87 boolean preflight') {
+    const prompt = session.prompt.bind(session);
+    session.prompt = (text, options) => {
+      const observe = options?.preflightResult as unknown as ((success: boolean) => void) | undefined;
+      return prompt(text, { ...options, preflightResult: () => observe?.(true) });
+    };
+  } else if (version === 'legacy missing idle getter (7229077)') {
+    const state = install(), abort = state.rawAborts.get(session)!;
+    const prompt = session.prompt.bind(session);
+    session.prompt = (text, options) => {
+      delete (session as unknown as { isIdle?: boolean }).isIdle;
+      return prompt(text, options);
+    };
+    state.rawAborts.set(session, async () => {
+      await abort();
+      Object.defineProperty(session, 'isIdle', { value: undefined, configurable: true });
+      setImmediate(() => { delete (session as unknown as { isIdle?: boolean }).isIdle; });
+    });
+    t.after(() => { delete (session as unknown as { isIdle?: boolean }).isIdle; });
+  } else if (version === '1.2 early streaming') {
+    const preparation = session as unknown as {
+      _isAgentRunActive: boolean;
+      _normalizePromptImages(images: unknown): Promise<unknown>;
+    };
+    const normalize = preparation._normalizePromptImages;
+    preparation._normalizePromptImages = async images => {
+      const active = preparation._isAgentRunActive;
+      preparation._isAgentRunActive = true;
+      try { return await normalize.call(session, images); }
+      finally { preparation._isAgentRunActive = active; }
+    };
+  }
 }
 
 async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [], enabled = true, before: ((pi: ExtensionAPI) => void)[] = []) {
@@ -117,6 +163,13 @@ test('version adapters promote consecutive queued messages without claiming thei
     h.app.editor.handleInput('\x13');
     await running;
     await new Promise(resolve => setImmediate(resolve));
+    if (version.startsWith('foreign')) {
+      assert.deepEqual(h.users(), ['Original']);
+      assert.deepEqual(h.session.getFollowUpMessages(), ['Second', 'Third']);
+      assert.ok(h.notices.some(message => /Another prompt started/.test(message)), h.notices.join('\n'));
+      assert.equal(h.app.editor.getText(), 'draft');
+      return;
+    }
     assert.deepEqual(h.users(), ['Original', 'Second']);
     await second.promise;
     assert.deepEqual(h.session.getFollowUpMessages(), ['Third']);

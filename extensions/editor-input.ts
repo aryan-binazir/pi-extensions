@@ -77,7 +77,18 @@ function bindings(input: Input, state: State): Binding[] {
   });
 }
 function deliver(input: Input, frame: PasteFrame, state: State, nested: boolean, redirect = false): void {
-  if (!current(input)) return;
+  if (!current(input)) {
+    const next = (input.host?.editor as WiredEditor | undefined)?.[editorInput];
+    if (next && next !== input) deliver(next, frame, state, nested, redirect);
+    return;
+  }
+  const handlers = nested ? [] : bindings(input, state);
+  if (frame.type === "paste") {
+    const wasReady = ready(input);
+    for (const binding of handlers) binding.beforePaste?.();
+    if (input.discardPaste) { input.discardPaste = false; return; }
+    if (wasReady && !ready(input)) { deliver(input, frame, state, true, true); return; }
+  }
   const target = focused(input);
   if (target !== undefined && target !== input.editor) {
     if (!redirect && frame.type === "paste") {
@@ -88,7 +99,6 @@ function deliver(input: Input, frame: PasteFrame, state: State, nested: boolean,
     target?.handleInput?.(frame.type === "paste" ? `\x1b[200~${frame.data}\x1b[201~` : frame.data);
     return;
   }
-  const handlers = nested ? [] : bindings(input, state);
   if (frame.type === "key") {
     for (const binding of handlers) {
       if (binding.key(frame.data)) return;
@@ -98,16 +108,12 @@ function deliver(input: Input, frame: PasteFrame, state: State, nested: boolean,
     }
     forward(input, frame.data);
   } else {
-    for (const binding of handlers) binding.beforePaste?.();
-    if (input.discardPaste) { input.discardPaste = false; return; }
-    if (!ready(input)) {
-      deliver(input, frame, state, true, true); return;
-    }
     if (input.backend) input.backend.paste(frame.data);
     else forward(input, `\x1b[200~${frame.data}\x1b[201~`);
   }
 }
 function dispatch(input: Input, data: string): void {
+  if (!current(input)) return;
   if (input.forwarding && !data.includes("\x1b[2") && !input.framer.pasting && !input.framer.holdingMarker) {
     (input.backend?.key ?? input.original.bind(input.editor))(data);
     return;

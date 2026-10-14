@@ -898,3 +898,32 @@ test('a fresh paste recovers a discarded stream whose closer was lost', async ()
     app.editor.handleInput('\x13'); assert.equal(app.editor.getExpandedText(), '');
   });
 });
+
+test('background paste clears the chord prefix before main-editor delivery', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    app.editor.setText('draft'); app.editor.handleInput('\x18');
+    app.ui.getFocusedComponent = () => new Container();
+    app.editor.handleInput('\x1b[200~paste\x1b[201~');
+    app.ui.getFocusedComponent = () => app.editor;
+    app.editor.handleInput('\x13');
+    assert.equal(app.editor.getExpandedText(), '');
+    app.editor.handleInput('\x13');
+    assert.equal(app.editor.getExpandedText(), 'draftpaste');
+  });
+});
+test('background paste completion discards payload after draft replacement', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    app.editor.handleInput('\x1b[200~stale'); app.editor.setText('replacement');
+    app.ui.getFocusedComponent = () => new Container();
+    app.editor.handleInput('\x1b[201~');
+    assert.equal(app.editor.getExpandedText(), 'replacement');
+  });
+});
+test('the key after Ctrl-X replaces the editor reaches the incoming editor once', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    app.editor.setText('draft');
+    app.editor.onAction('app.message.copy', () => app.setCustomEditorComponent(undefined));
+    app.editor.handleInput('\x18'); app.editor.handleInput('a');
+    assert.equal(app.editor.getExpandedText(), 'drafta');
+  });
+});

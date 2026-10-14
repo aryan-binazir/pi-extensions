@@ -27,7 +27,7 @@ for (const scenario of [...versions, 'foreign run', 'cancelled preparation', 'ha
         check();
         if (scenario === 'handled input') return;
         if (scenario !== '0.87 event start') events.started();
-        if (scenario === 'cancelled before run start') pending!.cancel();
+        if (scenario === 'cancelled before run start' || scenario === '1.2 early streaming') pending!.cancel();
         streaming = true;
         if (scenario === '0.87 event start') events.started();
         events.runStarted();
@@ -48,6 +48,6 @@ for (const scenario of [...versions, 'foreign run', 'cancelled preparation', 'ha
     assert.deepEqual(restored, retained ? [selected, tail] : [tail]);
     assert.equal(calls.includes('prompt'), !retained);
     assert.equal(notices.some(message => /Another prompt started/.test(message)), scenario === 'foreign run');
-    assert.equal(calls.filter(call => call === 'abort').length, scenario === 'cancelled before run start' ? 2 : 1);
+    assert.equal(calls.filter(call => call === 'abort').length, scenario === '1.2 early streaming' ? 3 : scenario === 'cancelled before run start' ? 2 : 1);
   });
 }

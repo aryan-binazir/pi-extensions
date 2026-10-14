@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createAgentSession, ModelRuntime, SessionManager, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
-import { InMemoryCredentialStore, fauxProvider, fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
+import { SessionManager } from '@earendil-works/pi-coding-agent';
+import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { type Component, type Terminal, TuiMainScreen, visibleWidth } from '@earendil-works/pi-tui';
 import todo from './index.js';
+import { withPi, type PiFixture } from '../../tests/pi-session.ts';
 
 interface Snapshot { version: 1; todos: { content: string; status: string }[]; staleTurns: number }
 
@@ -242,27 +242,11 @@ test('the reminder strengthens on exactly the third unchanged turn', async () =>
   assert.equal((await app.turn()), 'This todo list has not changed for several turns. Update actual progress or explain the blocker.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
 });
 
-async function todoSession(run: (session: Awaited<ReturnType<typeof createAgentSession>>['session'], provider: ReturnType<typeof fauxProvider>, manager: SessionManager) => Promise<void>) {
-  const cwd = await mkdtemp(join(tmpdir(), 'pi-todo-queue-'));
-  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
-  try {
-    const agentDir = join(cwd, 'agent');
-    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, followUpMode: 'one-at-a-time', steeringMode: 'one-at-a-time' });
-    const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, extensionFactories: [todo], noExtensions: true, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true });
-    await resourceLoader.reload();
-    assert.deepEqual(resourceLoader.getExtensions().errors, []);
-    const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
-    const provider = fauxProvider({ provider: 'todo-queue-regression', tokensPerSecond: 100000 });
-    modelRuntime.registerNativeProvider(provider.provider);
-    const manager = SessionManager.create(cwd, join(cwd, 'sessions'));
-    ({ session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader, sessionManager: manager, modelRuntime, model: provider.getModel(), noTools: 'builtin' }));
-    await session.bindExtensions({});
-    const errors: unknown[] = [];
-    session.extensionRunner!.onError(error => errors.push(error));
-    await session.getToolDefinition('todo_write')!.execute('seed', { todos: [{ content: 'Still working', status: 'pending' }] }, undefined, undefined, session.extensionRunner!.createToolContext('seed', undefined));
-    await run(session, provider, manager);
-    assert.deepEqual(errors, []);
-  } finally { session?.dispose(); await rm(cwd, { recursive: true, force: true }); }
+async function todoSession(run: (session: PiFixture['session'], provider: PiFixture['provider'], manager: SessionManager) => Promise<void>) {
+  return withPi({ extensions: [todo], settings: { compaction: { enabled: false }, retry: { enabled: false }, followUpMode: 'one-at-a-time', steeringMode: 'one-at-a-time' } }, async ({ session, provider, runner }) => {
+    await session.getToolDefinition('todo_write')!.execute('seed', { todos: [{ content: 'Still working', status: 'pending' }] }, undefined, undefined, runner.createToolContext('seed', undefined));
+    await run(session, provider, session.sessionManager);
+  });
 }
 
 function providerText(context: TranscriptContext): string {

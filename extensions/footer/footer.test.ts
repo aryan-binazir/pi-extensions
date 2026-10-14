@@ -5,6 +5,7 @@ import { ModelRuntime, ModelRegistry, SessionManager, type ExecResult, type Exte
 import { InMemoryCredentialStore, InMemoryModelsStore, type OAuthCredential } from '@earendil-works/pi-ai';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { getCapabilities, getOsc8LinkAtColumn, setCapabilities, visibleWidth } from '@earendil-works/pi-tui';
+import { withPi } from '../../tests/pi-session.ts';
 import { permissionFooter, rightAligned, STATUS_KEY } from './footer.ts';
 import { pullRequests } from './pull-request.ts';
 
@@ -422,3 +423,22 @@ test('stats follow the entry list length when getEntryCount is unavailable', () 
   assert.match(f.footer.render(140)[1], /\$0.150/);
   f.footer.dispose();
 });
+
+
+test('footer statistics refresh when the real Pi host appends session entries', async () => withPi({}, async ({ session, runner }) => {
+  const ctx = runner.createContext();
+  const data: ReadonlyFooterDataProvider = {
+    getGitBranch: () => null, getAvailableProviderCount: () => 1, getExtensionStatuses: () => new Map(),
+    onBranchChange: () => () => {},
+  };
+  const footer = permissionFooter(() => ctx, theme, data, () => {});
+  try {
+    assert.doesNotMatch(footer.render(140)[1], /↑/);
+    session.sessionManager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'First reply' }],
+      api: 'faux', provider: 'pi-test', model: session.model!.id, usage, stopReason: 'stop', timestamp: 0 });
+    assert.match(footer.render(140)[1], /↑1\.0k.*↓100.*R1\.0k/);
+    session.sessionManager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Second reply' }],
+      api: 'faux', provider: 'pi-test', model: session.model!.id, usage, stopReason: 'stop', timestamp: 1 });
+    assert.match(footer.render(140)[1], /↑2\.0k.*↓200.*R2\.0k/);
+  } finally { footer.dispose(); }
+}));

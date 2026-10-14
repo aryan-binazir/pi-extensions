@@ -3,9 +3,11 @@ import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { InteractiveMode, ExtensionEditorComponent, CustomEditor, SettingsManager, initTheme } from '@earendil-works/pi-coding-agent';
+import { InteractiveMode, ExtensionEditorComponent, CustomEditor, initTheme } from '@earendil-works/pi-coding-agent';
 import { Container, visibleWidth } from '@earendil-works/pi-tui';
 import type { Host } from './test-support.ts';
+import { withPi } from '../../tests/pi-session.ts';
+import subagents from './index.ts';
 import { until, withHost } from './test-support.ts';
 
 const echoArgs = `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()})}],usage:{input:3,output:4}}}));`;
@@ -146,7 +148,7 @@ test('a child launches with discovery disabled and receives a dash-prefixed brie
 
 initTheme('dark', false);
 
-function interactiveUI({ctx}: Host) {
+function interactiveUI({ctx}: Pick<Host, 'ctx'>) {
   const mode: any = Object.create(InteractiveMode.prototype);
   let draft = 'parent draft';
   mode.editor = {getText: () => draft, setText: (text: string) => { draft = text; }, focused: true};
@@ -294,14 +296,12 @@ for (const approval of ['execution', 'replay', 'cached child extensions']) {
 }
 
 
-for (const trusted of [false, true, 'runtime']) {
-  const settings = SettingsManager.inMemory({});
+for (const trusted of [false, true]) {
   test(`source review external editor respects ${trusted === true ? 'trusted project' : trusted || 'global'} settings`, async () =>
-    withHost({prefix: 'workflow-external-', getSettings: typeof trusted === 'string' ? () => 'getSettings' in settings && typeof settings.getSettings === 'function' ? settings.getSettings() : {externalEditor: settings.getExternalEditorCommand()} : undefined}, async host => {
+    withHost({prefix: 'workflow-external-'}, async host => {
       const script = join(host.cwd, 'editor.cjs');
       await writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(join(host.cwd, 'editor-used'))}, process.argv[2]);`);
       const command = `${process.execPath} ${script}`;
-      if (typeof trusted === 'string') settings.applyOverrides({externalEditor: `${command} runtime`});
       await writeFile(join(host.agentDir, 'settings.json'), JSON.stringify({externalEditor: `${command} global`}));
       await mkdir(join(host.cwd, '.pi'));
       await writeFile(join(host.cwd, '.pi', 'settings.json'), JSON.stringify({externalEditor: `${command} project`}));
@@ -317,7 +317,7 @@ for (const trusted of [false, true, 'runtime']) {
       dialog.handleInput('\x07');
       try {
         await until(() => restarted, 'the synthetic external editor to finish');
-        assert.equal(await readFile(join(host.cwd, 'editor-used'), 'utf8'), trusted === true ? 'project' : trusted === 'runtime' ? 'runtime' : 'global');
+        assert.equal(await readFile(join(host.cwd, 'editor-used'), 'utf8'), trusted === true ? 'project' : 'global');
         dialog.handleInput('\r');
         assert.equal((await run).details, 1);
       } finally {
@@ -326,6 +326,44 @@ for (const trusted of [false, true, 'runtime']) {
       }
     }));
 }
+
+test('source review external editor respects runtime settings on the real Pi host', async () => {
+  let mode: ReturnType<typeof interactiveUI>;
+  await withPi({ extensions: [subagents], configure: async ({ cwd, agentDir, settingsManager }, provider) => {
+    const script = join(cwd, 'editor.cjs');
+    await writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(join(cwd, 'editor-used'))}, process.argv[2]);`);
+    const command = `${process.execPath} ${script}`;
+    settingsManager.applyOverrides({ externalEditor: `${command} runtime` });
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, 'settings.json'), JSON.stringify({ externalEditor: `${command} global` }));
+    await mkdir(join(cwd, '.pi'));
+    await writeFile(join(cwd, '.pi', 'settings.json'), JSON.stringify({ externalEditor: `${command} project` }));
+    return { model: provider.getModel() };
+  }, bind: session => {
+    const context = session.extensionRunner.createContext();
+    const ctx = { ...context, mode: 'tui' as const, ui: { ...context.ui } };
+    mode = interactiveUI({ ctx });
+    ctx.ui.confirm = async () => true;
+    return { mode: 'tui', uiContext: ctx.ui };
+  } }, async ({ cwd, session, runner }) => {
+    let restarted = false;
+    mode.ui.stop = () => {};
+    mode.ui.start = () => { restarted = true; };
+    mode.keybindings.matches = (data: string, action: string) => data === '\x07' && action === 'app.editor.external';
+    const run = session.getToolDefinition('workflow')!.execute('workflow', { source: 'return 1;', timeout: 5000 }, undefined, undefined, runner.createToolContext('workflow', undefined));
+    const dialog = await until(() => mode.focus instanceof ExtensionEditorComponent && mode.focus, 'source review');
+    dialog.handleInput('\x07');
+    try {
+      await until(() => restarted, 'the synthetic external editor to finish');
+      assert.equal(await readFile(join(cwd, 'editor-used'), 'utf8'), 'runtime');
+      dialog.handleInput('\r');
+      assert.equal((await run).details, 1);
+    } finally {
+      dialog.handleInput('\x1b');
+      await run.catch(() => {});
+    }
+  });
+});
 
 for (const firstTool of ['subagent', 'workflow']) {
   for (const stop of ['timeout', 'owner']) {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { normalizeContext, type Message } from "@earendil-works/pi-ai";
+import { type Message } from "@earendil-works/pi-ai";
 import {
   buildSessionContext,
   convertToLlm,
@@ -18,6 +18,7 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 
+import { sideCompletion } from "../side-completion.ts";
 import { terminalText } from "../terminal-text.ts";
 
 const MAX_ANSWER = 32000;
@@ -181,12 +182,6 @@ export default function btw(pi: ExtensionAPI) {
             const question = raw;
             let failure: string | undefined;
             try {
-              const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-              if (closed) return;
-              if (!auth.ok) throw new Error(auth.error);
-              const provider = ctx.modelRegistry.getProvider(model.provider);
-              if (!provider)
-                throw new Error("Selected provider is unavailable");
               const messages: Message[] = [
                 {
                   role: "user",
@@ -206,64 +201,32 @@ export default function btw(pi: ExtensionAPI) {
                 content: question,
                 timestamp: Date.now(),
               });
-              const stream = provider.streamSimple(
-                {
-                  ...model,
-                  ...(auth.baseUrl ? { baseUrl: auth.baseUrl } : {}),
-                },
-                normalizeContext({ systemPrompt, messages, tools: [] }),
-                {
-                  apiKey: auth.apiKey,
-                  headers: auth.headers,
-                  env: auth.env,
-                  signal,
-                  maxTokens:
-                    Number.isFinite(model.maxTokens) && model.maxTokens > 0
-                      ? Math.max(1, Math.min(4096, Math.floor(model.maxTokens)))
-                      : 4096,
-                  // Bridge 0.9.2 routes "none" through its verbatim summarizer path.
-                  cacheRetention: usesClaudeBridge ? "short" : "none",
-                  sessionId: randomUUID(),
-                },
-              );
-              let answering = true;
-              status = "Answering…";
-              tui.requestRender();
-              for await (const event of stream) {
-                if (closed) break;
-                if (event.type === "text_delta") {
-                  const remaining = MAX_ANSWER - answer.length;
-                  answer += event.delta.slice(0, remaining);
-                  if (answer.length >= MAX_ANSWER) {
-                    answering = false;
-                    status = "Answer limit reached";
-                    controller.abort();
-                    break;
-                  }
+              const result = await sideCompletion({
+                registry: ctx.modelRegistry, model, systemPrompt, messages,
+                limits: { characters: MAX_ANSWER, tokens: 4096 }, signal,
+                sessionId: randomUUID(),
+                onStart: () => {
+                  if (closed) return;
+                  status = "Answering…";
                   tui.requestRender();
-                }
-                if (event.type === "error")
-                  throw new Error(
-                    event.error.errorMessage || "Provider request failed",
-                  );
-                if (event.type === "done") {
-                  answer = "";
-                  for (const block of event.message.content) {
-                    if (block.type === "text")
-                      answer += block.text.slice(0, MAX_ANSWER - answer.length);
-                    if (answer.length >= MAX_ANSWER) break;
-                  }
-                  if (event.reason === "toolUse") {
-                    answering = false;
-                    status = "Provider requested a tool; no tool was run";
-                  } else if (answer.length >= MAX_ANSWER) {
-                    answering = false;
-                    status = "Answer limit reached";
-                  }
-                }
-                }
-              if (!closed && answering)
+                },
+                onText: (text) => {
+                  if (closed) return;
+                  answer = text;
+                  tui.requestRender();
+                },
+              });
+              if (closed) return;
+              answer = result.text;
+              if (result.ok) status = answer ? "" : "Provider returned no text";
+              else if (result.kind === "tool-use")
+                status = "Provider requested a tool; no tool was run";
+              else if (result.kind === "limit") status = "Answer limit reached";
+              else if (result.kind === "empty" || result.kind === "incomplete")
                 status = answer ? "" : "Provider returned no text";
+              else if (result.kind === "provider-unavailable")
+                throw new Error("Selected provider is unavailable");
+              else throw result.error;
             } catch (error) {
               if (!closed)
                 status = failure = `Side request failed: ${error instanceof Error ? error.message.slice(0, 2000) : "Unknown provider error"}`;

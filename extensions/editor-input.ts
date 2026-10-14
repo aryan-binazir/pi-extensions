@@ -1,7 +1,7 @@
 import { InteractiveMode, type CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component, Editor } from "@earendil-works/pi-tui";
 import { PasteFramer, type PasteFrame } from "./paste-framing.ts";
-import { expandPastes, placeCursor, readPastes, restoreRawDraft, writePastes } from "./vi-mode/adapter.ts";
+import { expandPastes, placeCursor, readPastes, restoreRawDraft, writePastes, viEditor } from "./vi-mode/adapter.ts";
 
 type Host = {
   editor: Editor;
@@ -33,13 +33,13 @@ type State = {
   hosts: WeakMap<object, Host>;
   registrations: WeakMap<object, Map<string, EditorBinding>>;
   dispatch(input: Input, data: string): void;
+  attach(host: Host, state: State): void;
   replace: (this: Host, original: Replace, factory: unknown) => void;
   show: (this: Host, original: Show, factory: unknown, options?: { overlay?: boolean }) => Promise<unknown>;
 };
 const handoffInstalled = Symbol.for("pi-interactive:editor-handoff");
 const inputInstalled = Symbol.for("pi-interactive:editor-input-owner");
 const editorInput = Symbol.for("pi-interactive:editor-input");
-const viEditor = Symbol.for("pi-interactive:vi-editor");
 type Prototype = {
   [handoffInstalled]?: State | true;
   [inputInstalled]?: State;
@@ -51,8 +51,12 @@ type WiredEditor = Editor & { [editorInput]?: Input };
 
 function current(input: Input): boolean { return !input.host || (!input.retired && input.host.editor === input.editor); }
 function focused(input: Input): Component | null | undefined { return input.host?.ui?.getFocusedComponent?.(); }
-function forward(input: Input, data: string): void {
-  if (!current(input) || (focused(input) != null && focused(input) !== input.editor)) return;
+function ready(input: Input): boolean {
+  const target = focused(input);
+  return current(input) && (target === undefined || target === input.editor);
+}
+function forward(input: Input, data: string, programmatic = false): void {
+  if (!current(input) || (!programmatic && !ready(input))) return;
   input.forwarding++;
   try { (input.backend?.key ?? input.original.bind(input.editor))(data); }
   finally { input.forwarding--; }
@@ -66,49 +70,58 @@ function bindings(input: Input, state: State): Binding[] {
   return [...registrations?.values() ?? []].sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id)).map(spec => {
     let binding = input.bindings.get(spec);
     if (!binding) {
-      binding = spec.create(input.editor as CustomEditor, data => forward(input, data), () => current(input) && (focused(input) == null || focused(input) === input.editor));
+      binding = spec.create(input.editor as CustomEditor, data => forward(input, data), () => ready(input));
       input.bindings.set(spec, binding);
     }
     return binding;
   });
 }
-function deliver(input: Input, frame: PasteFrame, state: State, nested: boolean): void {
+function deliver(input: Input, frame: PasteFrame, state: State, nested: boolean, redirect = false): void {
   if (!current(input)) return;
   const target = focused(input);
-  if (target != null && target !== input.editor) {
-    target.handleInput?.(frame.type === "paste" ? `\x1b[200~${frame.data}\x1b[201~` : frame.data);
+  if (target !== undefined && target !== input.editor) {
+    if (!redirect && frame.type === "paste") {
+      if (input.backend) input.backend.paste(frame.data);
+      else forward(input, `\x1b[200~${frame.data}\x1b[201~`, true);
+      return;
+    }
+    target?.handleInput?.(frame.type === "paste" ? `\x1b[200~${frame.data}\x1b[201~` : frame.data);
     return;
   }
   const handlers = nested ? [] : bindings(input, state);
   if (frame.type === "key") {
     for (const binding of handlers) {
       if (binding.key(frame.data)) return;
-      if (!current(input) || (focused(input) != null && focused(input) !== input.editor)) {
-        deliver(input, frame, state, true); return;
+      if (!ready(input)) {
+        deliver(input, frame, state, true, true); return;
       }
     }
     forward(input, frame.data);
   } else {
     for (const binding of handlers) binding.beforePaste?.();
     if (input.discardPaste) { input.discardPaste = false; return; }
-    if (!current(input) || (focused(input) != null && focused(input) !== input.editor)) {
-      deliver(input, frame, state, true); return;
+    if (!ready(input)) {
+      deliver(input, frame, state, true, true); return;
     }
     if (input.backend) input.backend.paste(frame.data);
     else forward(input, `\x1b[200~${frame.data}\x1b[201~`);
   }
 }
 function dispatch(input: Input, data: string): void {
-  if (input.forwarding) {
+  if (input.forwarding && !data.includes("\x1b[2") && !input.framer.pasting && !input.framer.holdingMarker) {
     (input.backend?.key ?? input.original.bind(input.editor))(data);
     return;
   }
   const state = sharedState();
+  if (input.discardPaste && data.startsWith("\x1b[200~")) {
+    input.framer.reset(); input.discardPaste = false;
+  }
   const nested = input.depth++ > 0;
+  const startedFocused = ready(input);
   const held = input.framer.pasting || input.framer.holdingMarker;
   try {
-    for (const frame of input.framer.feed(data)) deliver(input, frame, state, nested);
-    if (!nested && !held && (input.framer.pasting || input.framer.holdingMarker))
+    for (const frame of input.framer.feed(data)) deliver(input, frame, state, nested, startedFocused && !ready(input));
+    if (!nested && ready(input) && !held && (input.framer.pasting || input.framer.holdingMarker))
       for (const binding of bindings(input, state)) binding.beforePaste?.();
   }
   finally { input.depth--; }
@@ -161,7 +174,7 @@ export function registerMainEditorBinding(ctx: ExtensionContext, spec: EditorBin
   registrations.set(spec.id, spec);
   const refresh = () => {
     const host = state.hosts.get(ctx.sessionManager);
-    if (host) attachHost(host, state);
+    if (host) state.attach(host, state);
   };
   refresh();
   return () => { if (registrations.get(spec.id) === spec) { registrations.delete(spec.id); refresh(); } };
@@ -173,7 +186,7 @@ function replace(this: Host, original: Replace, factory: unknown): void {
   const payloads = registry ? readPastes(source) : undefined;
   retireEditorInput(source);
   try { original.call(this, factory); }
-  finally { attachHost(this, sharedState()); }
+  finally { const state = sharedState(); state.attach(this, state); }
   if (!payloads || (!(viEditor in source) && !(viEditor in this.editor) && payloads.pastes.size === 0)) return;
   if (!((this.editor as unknown as { pastes?: unknown }).pastes instanceof Map)) {
     this.editor.setText(expandPastes(source, text)); return;
@@ -222,7 +235,7 @@ export function installEditorInput(): State {
   let state = prototype[inputInstalled];
   if (!state) {
     const previous = prototype[handoffInstalled];
-    state = previous && previous !== true ? previous : { hosts: new WeakMap(), registrations: new WeakMap(), dispatch, replace, show };
+    state = previous && previous !== true ? previous : { hosts: new WeakMap(), registrations: new WeakMap(), dispatch, replace, show, attach: attachHost };
     state.hosts ??= new WeakMap();
     state.registrations ??= new WeakMap();
     const shared = state;
@@ -236,11 +249,12 @@ export function installEditorInput(): State {
     }
     const bind = prototype.bindCurrentSessionExtensions;
     prototype.bindCurrentSessionExtensions = async function () {
-      attachHost(this, shared);
+      shared.attach(this, shared);
       await bind.call(this);
-      attachHost(this, shared);
+      shared.attach(this, shared);
     };
   }
+  state.attach = attachHost;
   state.dispatch = dispatch;
   state.replace = replace;
   state.show = show;

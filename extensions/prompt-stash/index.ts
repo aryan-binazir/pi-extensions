@@ -29,7 +29,6 @@ export default function promptStash(pi: ExtensionAPI): void {
   };
 
   const toggle = (ctx: ExtensionContext) => {
-    // Pi 0.85.1 getEditorText calls getExpandedText, including collapsed paste payloads.
     const current = ctx.ui.getEditorText();
     if (slot === undefined && current === "") return;
     const captured: { text: string; restore?: () => boolean } = { text: current };
@@ -60,13 +59,12 @@ export default function promptStash(pi: ExtensionAPI): void {
     const base = previous;
     installed = (tui, theme, keybindings) => {
       const editor = base?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
-      active = editor instanceof CustomEditor ? editor : undefined;
-      if (active) installSinglePassPasteExpansion(active);
+      if (editor instanceof CustomEditor) installSinglePassPasteExpansion(editor);
       return editor;
     };
     unregister?.();
     unregister = registerMainEditorBinding(ctx, { id: "prompt-stash", priority: 100, create(editor) {
-      active = editor;
+      active = editor instanceof CustomEditor ? editor : undefined;
       return { key(data) {
         const lead = data.charCodeAt(0);
         const stashKey = lead === CTRL_S_BYTE || (lead === ESC && data.includes(CTRL_S_CODEPOINT));

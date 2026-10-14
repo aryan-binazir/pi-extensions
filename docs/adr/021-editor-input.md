@@ -19,11 +19,13 @@ never reaches bindings. A no-payload `beforePaste` callback flushes a pending
 chord prefix, including when an opener is still incomplete.
 
 The pipeline handles synchronous forwarding and programmatic re-entry. Native
-recursive key dispatch bypasses framing; nested programmatic paste is framed
-and bypasses bindings. Input frames run in order, with focus checked between
-callbacks. If a callback opens a dialog, the remaining input reaches that
+recursive key dispatch bypasses framing; nested programmatic input bypasses
+bindings while bracketed paste still passes through the framer. Input frames run in order, with focus checked between
+callbacks. If a callback changes focus synchronously, the remaining input reaches that
 focused component. A Vi draft reset during an unfinished paste discards the
-payload through its closer, keeping its controls away from bindings. These
+payload through its closer, keeping its controls away from bindings. A fresh complete paste opener abandons that
+discarded stream if its closer never arrives. Programmatic paste directed at
+the main editor still reaches it while a dialog has focus. These
 rules replace the old per-extension raw-chunk observers.
 
 The sole `setCustomEditorComponent` owner snapshots the visible draft and paste
@@ -47,7 +49,8 @@ The first extension installs the wrappers; later loads replace implementation
 functions in that state. Live editor wrappers call the shared dispatch function.
 The existing editor-handoff state is reused when upgrading a running process.
 The legacy immutable boolean handoff marker retains its original replacement
-wrapper until restart. Legacy Escape Continue own-input decorators are detached
+wrapper until restart; that legacy installation requires a restart before
+new binding reattachment is supported. Legacy Escape Continue own-input decorators are detached
 when the pipeline first attaches. `/reload` neither stacks wrappers nor keeps
 old binding registrations active.
 

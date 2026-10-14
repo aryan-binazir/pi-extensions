@@ -11,7 +11,7 @@ export function setCursorPosition(editor: Editor, line: number, col: number): vo
     snappedFromCursorCol: number | null;
   };
   if (!internal.state || typeof internal.state.cursorLine !== "number")
-    throw new Error("Unsupported Pi editor cursor layout (tested with Pi 0.99.1)");
+    throw new Error("Unsupported Pi editor cursor layout (tested with Pi 0.85.1 and 0.99.1)");
   internal.state.cursorLine = line;
   internal.state.cursorCol = col;
   internal.preferredVisualCol = null;
@@ -39,7 +39,7 @@ export function retainRawText(editor: Editor, text: string): void {
     [invalidateTextCache]?: () => void;
   };
   if (!Array.isArray(internal.state?.lines))
-    throw new Error("Unsupported Pi editor text layout (tested with Pi 0.99.1)");
+    throw new Error("Unsupported Pi editor text layout (tested with Pi 0.85.1 and 0.99.1)");
   internal.state.lines = text.split("\n");
   internal[invalidateTextCache]?.();
 }
@@ -80,7 +80,7 @@ export function renderProjected(
   const state = internal.state;
   if (!Array.isArray(state?.lines) || typeof state.cursorLine !== "number") {
     throw new Error(
-      "Unsupported Pi editor rendering layout (tested with Pi 0.99.1)",
+      "Unsupported Pi editor rendering layout (tested with Pi 0.85.1 and 0.99.1)",
     );
   }
   const saved = { ...state };
@@ -124,7 +124,7 @@ function pasteInternal(editor: Editor) {
     pasteCounter: number;
   };
   if (!(internal.pastes instanceof Map) || typeof internal.pasteCounter !== "number")
-    throw new Error("Unsupported Pi paste registry (tested with Pi 0.99.1)");
+    throw new Error("Unsupported Pi paste registry (tested with Pi 0.85.1 and 0.99.1)");
   return internal;
 }
 export function readPastes(editor: Editor): PasteState {
@@ -178,7 +178,7 @@ export function restoreRawDraft(editor: Editor, text: string, payloads: PasteSta
   editor.onChange?.(text);
 }
 
-const viEditor = Symbol.for("pi-interactive:vi-editor");
+export const viEditor = Symbol.for("pi-interactive:vi-editor");
 const singlePassInstalled = Symbol.for("pi-interactive:single-pass-pastes");
 export function installSinglePassPasteExpansion(editor: Editor): void {
   if (singlePassInstalled in editor) return;

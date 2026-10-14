@@ -788,8 +788,8 @@ for (const order of inputOrders) test(`input/replacement/reload: ${order.map(ext
     app.setCustomEditorComponent(factory);
     exercise();
     const replacement = (InteractiveMode.prototype as any).setCustomEditorComponent;
+    app.setCustomEditorComponent(undefined);
     await app.session.reload();
-    await app.bindCurrentSessionExtensions();
     assert.equal((InteractiveMode.prototype as any).setCustomEditorComponent, replacement, 'reload does not wrap the owner again');
     exercise();
     if (hasVi) {
@@ -827,11 +827,12 @@ test('replacement can reuse an editor or reject its factory without losing curso
 test('live input wrappers use the latest reloaded implementation without another wrapper', async () => {
   await withInputEditors([stash, escapeContinue, viMode], async app => {
     const state = installEditorInput(), input = app.editor.handleInput;
-    const dispatch = state.dispatch;
+    const dispatch = state.dispatch, attach = state.attach;
     const reloaded = await import(new URL('../extensions/editor-input.ts?reload=latest', import.meta.url).href);
     const latest = reloaded.installEditorInput();
     assert.equal(latest, state);
     assert.notEqual(latest.dispatch, dispatch);
+    assert.notEqual(latest.attach, attach);
     assert.equal(app.editor.handleInput, input);
     const next = latest.dispatch;
     let calls = 0;
@@ -841,5 +842,59 @@ test('live input wrappers use the latest reloaded implementation without another
       assert.equal(app.editor.getText(), 'latest');
       assert.equal(calls, 1);
     } finally { latest.dispatch = next; }
+  });
+});
+test('an explicit null focus suppresses main-editor bindings', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    app.editor.setText('draft');
+    app.ui.getFocusedComponent = () => null;
+    app.editor.handleInput('\x13');
+    assert.equal(app.editor.getExpandedText(), 'draft');
+    app.ui.getFocusedComponent = () => app.editor;
+    app.editor.handleInput('\x13');
+    assert.equal(app.editor.getExpandedText(), '');
+  });
+});
+
+test('programmatic paste retains the main draft while a dialog has focus', async () => {
+  await withInputEditors([viMode, stash], async app => {
+    const dialog = new Container();
+    app.ui.getFocusedComponent = () => dialog;
+    app.editor.handleInput('\x1b[200~raw\t\r\ntext\x1b[201~');
+    assert.equal(app.editor.getExpandedText(), 'raw\t\r\ntext');
+  });
+});
+test('a synchronous extension shortcut can paste with vi sanitization and undo', async () => {
+  await withInputEditors([viMode], async app => {
+    app.editor.setText('draft');
+    app.editor.onExtensionShortcut = (data: string) => {
+      if (data !== '\x07') return false;
+      app.editor.handleInput('\x1b[200~raw\t\r\n\x13text\x1b[201~');
+      return true;
+    };
+    app.editor.handleInput('\x07');
+    assert.equal(app.editor.getExpandedText(), 'draftraw\t\r\ntext');
+    app.editor.handleInput('\x1b'); app.editor.handleInput('u');
+    assert.equal(app.editor.getExpandedText(), 'draft');
+  });
+});
+test('a retired editor cannot reacquire binding instances from an incomplete opener', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    const old = app.editor;
+    old.setText('saved'); old.handleInput('\x13');
+    app.setCustomEditorComponent(app.editorComponentFactory);
+    old.handleInput('\x1b[20');
+    app.editor.handleInput('\x13');
+    assert.equal(app.editor.getExpandedText(), 'saved');
+  });
+});
+
+test('a fresh paste recovers a discarded stream whose closer was lost', async () => {
+  await withInputEditors([viMode, stash, escapeContinue], async app => {
+    app.editor.handleInput('\x1b[200~unfinished');
+    app.editor.setText('replacement');
+    app.editor.handleInput('\x1b[200~fresh\x1b[201~');
+    assert.equal(app.editor.getExpandedText(), 'replacementfresh');
+    app.editor.handleInput('\x13'); assert.equal(app.editor.getExpandedText(), '');
   });
 });

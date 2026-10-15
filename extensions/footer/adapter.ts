@@ -8,7 +8,7 @@ export interface PermissionConfig {
   rules: unknown[];
   reviewer?: { provider: string; model: string; reasoningEffort: string; prefilter?: boolean };
 }
-export type ConfigLoader = () => PermissionConfig;
+export interface ConfigLoader { load(): PermissionConfig; path: string }
 
 export async function findConfigLoader(commands: ReturnType<ExtensionAPI['getCommands']>): Promise<ConfigLoader | undefined> {
   for (const command of commands) {
@@ -20,8 +20,8 @@ export async function findConfigLoader(commands: ReturnType<ExtensionAPI['getCom
     if (manifest.name !== '@hank-warren/pi-auto-permissions') continue;
     if (manifest.version !== '0.16.2' && manifest.version !== '0.21.0') throw new Error('Unsupported Auto Permissions version');
     const helper = await import(join(root, 'config.ts'));
-    if (typeof helper.loadAutoPermissionsConfig !== 'function') throw new Error('Config loader unavailable');
-    return helper.loadAutoPermissionsConfig as ConfigLoader;
+    if (typeof helper.loadAutoPermissionsConfig !== 'function' || typeof helper.autoPermissionsConfigPath !== 'function') throw new Error('Config loader unavailable');
+    return { load: helper.loadAutoPermissionsConfig, path: helper.autoPermissionsConfigPath() };
   }
 }
 

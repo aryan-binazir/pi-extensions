@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { beforeEach, describe, test, type TestContext } from 'node:test';
 import { stripVTControlCharacters } from 'node:util';
 import { ModelRuntime, ModelRegistry, SessionManager, type ExecResult, type ExtensionAPI, type ExtensionContext, type ReadonlyFooterDataProvider, type Theme } from '@earendil-works/pi-coding-agent';
 import { InMemoryCredentialStore, InMemoryModelsStore, type OAuthCredential } from '@earendil-works/pi-ai';
@@ -8,6 +8,9 @@ import { getCapabilities, getOsc8LinkAtColumn, setCapabilities, visibleWidth } f
 import { withPi } from '../../tests/pi-session.ts';
 import { permissionFooter, rightAligned, STATUS_KEY } from './footer.ts';
 import { pullRequests } from './pull-request.ts';
+
+let clock: TestContext['mock']['timers'];
+const advance = async (ms = 1500) => { clock.tick(ms); await new Promise(setImmediate); };
 
 const theme = { fg: (_color: string, text: string) => text } as Theme;
 const usage = { input: 1000, output: 100, cacheRead: 1000, cacheWrite: 0, totalTokens: 2100,
@@ -26,7 +29,8 @@ const prUrl = 'https://github.com/owner/repo/pull/42';
 const prJson = (fields: object = {}) => JSON.stringify({ number: 42, url: prUrl, state: 'OPEN', isDraft: false, headRefName: 'main', ...fields });
 setCapabilities({ ...getCapabilities(), hyperlinks: true });
 
-function fixture(exec?: ExtensionAPI['exec']) {
+function fixture(exec?: ExtensionAPI['exec'], reuse = false) {
+  if (!reuse) delete (globalThis as unknown as Record<symbol, unknown>)[Symbol.for('pi-interactive:footer.pull-requests.v1')];
   const statuses = new Map([[STATUS_KEY, 'Auto: on · Luna low']]);
   let branch: string | null = 'main', onChange = () => {}, renders = 0, disposals = 0;
   const data: ReadonlyFooterDataProvider = {
@@ -48,9 +52,18 @@ function fixture(exec?: ExtensionAPI['exec']) {
   return { footer, prs, statuses, ctx, changeBranch: (next: string | null = 'feature') => { branch = next; onChange(); }, renders: () => renders, disposals: () => disposals };
 }
 
+const pathRow = (f: ReturnType<typeof fixture>) => stripVTControlCharacters(f.footer.render(140)[0]).replace(/\s+Auto:.*$/, '');
+
+describe('PR links', () => {
+beforeEach(t => {
+  delete (globalThis as unknown as Record<symbol, unknown>)[Symbol.for('pi-interactive:footer.pull-requests.v1')];
+  clock = (t as TestContext).mock.timers;
+  clock.enable({ apis: ['setTimeout', 'Date'], now: 100000 });
+});
 test('links the PR number right after the branch once gh reports it', async () => {
   const gh = fakeGh(), f = fixture(gh.exec);
   assert.match(f.footer.render(140)[0], /^\/workspace\/project \(main\) • Task\s+Auto: on · Luna low$/);
+  await advance();
   assert.deepEqual(gh.calls.map(call => [call.command, call.args, call.options?.cwd]),
     [['gh', ['pr', 'view', '--json', 'number,url,state,isDraft,headRefName', '--', 'main'], '/workspace/project']]);
   await gh.calls[0].answer({ stdout: prJson() });
@@ -72,7 +85,7 @@ test('terminals without hyperlink support get the plain PR number', async () => 
   setCapabilities({ ...capabilities, hyperlinks: false });
   try {
     const gh = fakeGh(), f = fixture(gh.exec);
-    f.footer.render(140);
+    f.footer.render(140); await advance();
     await gh.calls[0].answer({ stdout: prJson({ isDraft: true }) });
     const line = f.footer.render(140)[0];
     assert.match(line, /^\/workspace\/project \(main\) #42 draft • Task\s+Auto/);
@@ -84,7 +97,7 @@ test('terminals without hyperlink support get the plain PR number', async () => 
 test('a PR for another head branch is not shown, as when gh reads a numeric branch name as a PR number', async () => {
   const gh = fakeGh(), f = fixture(gh.exec);
   f.changeBranch('1');
-  const before = f.footer.render(140);
+  const before = f.footer.render(140); await advance();
   await gh.calls[0].answer({ stdout: prJson({ number: 1, headRefName: 'amb/interactive-tools' }) });
   assert.deepEqual(f.footer.render(140), before);
   f.footer.dispose();
@@ -99,7 +112,7 @@ test('gh output that is malformed or could smuggle terminal controls never reach
     prJson({ state: 'DRAFT' }), prJson({ isDraft: 'false' }),
   ]) {
     const gh = fakeGh(), f = fixture(gh.exec);
-    const before = f.footer.render(140);
+    const before = f.footer.render(140); await advance();
     await gh.calls[0].answer({ stdout });
     assert.deepEqual(f.footer.render(140), before, stdout);
     f.footer.dispose();
@@ -115,7 +128,7 @@ test('names draft, merged and closed PRs outside the link; terminal states win o
     [{ state: 'MERGED', isDraft: true }, '#42 merged'],
   ] as const) {
     const gh = fakeGh(), f = fixture(gh.exec);
-    f.footer.render(140);
+    f.footer.render(140); await advance();
     await gh.calls[0].answer({ stdout: prJson(fields) });
     const line = f.footer.render(140)[0], visible = stripVTControlCharacters(line);
     assert.match(visible, new RegExp(`^/workspace/project \\(main\\) ${shown} • Task\\s`), JSON.stringify(fields));
@@ -124,9 +137,8 @@ test('names draft, merged and closed PRs outside the link; terminal states win o
   }
 });
 
-const pathRow = (f: ReturnType<typeof fixture>) => stripVTControlCharacters(f.footer.render(140)[0]).replace(/\s+Auto:.*$/, '');
 
-test('footer labels use the terminal label policy before theme styling', () => {
+test('footer labels use the terminal label policy before theme styling', async () => {
   const f = fixture();
   f.ctx.sessionManager.getCwd = () => '/work\n\u202espace';
   f.changeBranch('feature\u202ename');
@@ -134,7 +146,7 @@ test('footer labels use the terminal label policy before theme styling', () => {
   f.ctx.model!.id = 'model\u202ename';
   f.statuses.set(STATUS_KEY, 'Auto: on\u202estatus');
   f.statuses.set('other', 'Other\u202estatus');
-  const lines = f.footer.render(140);
+  const lines = f.footer.render(140); await advance();
   assert.match(lines[0], /^\/work space \(feature name\) • Task name +Auto: on status$/);
   assert.match(lines[1], /model name/);
   assert.equal(lines[2], 'Other status');
@@ -145,7 +157,7 @@ test('footer labels use the terminal label policy before theme styling', () => {
 test('narrow footers never exceed the width or leave a PR link open', async () => {
   const gh = fakeGh(), f = fixture(gh.exec);
   f.changeBranch('evil\u001b[2J\u202ebranch');
-  f.footer.render(140);
+  f.footer.render(140); await advance();
   await gh.calls[0].answer({ stdout: prJson({ headRefName: 'evil\u001b[2J\u202ebranch' }) });
   for (let width = 0; width <= 140; width++) {
     const lines = f.footer.render(width);
@@ -160,71 +172,70 @@ test('narrow footers never exceed the width or leave a PR link open', async () =
   f.footer.dispose();
 });
 
-test('a branch or cwd change hides the old PR at once, aborts its lookup and ignores its late answer', async () => {
+test('branch and cwd changes hide stale PRs and reuse fresh completed answers', async () => {
   const gh = fakeGh(), f = fixture(gh.exec);
-  f.footer.render(140);
+  f.footer.render(140); await advance();
   f.changeBranch('feature');
   assert.equal(pathRow(f), '/workspace/project (feature) • Task');
+  await advance();
   assert.deepEqual(gh.calls.map(call => call.args.at(-1)), ['main', 'feature']);
-  assert.equal(gh.calls[0].options?.signal?.aborted, true);
   const renders = f.renders();
   await gh.calls[0].answer({ stdout: prJson() });
   assert.equal(pathRow(f), '/workspace/project (feature) • Task');
   assert.equal(f.renders(), renders, 'a stale answer requests no render');
   await gh.calls[1].answer({ stdout: prJson({ number: 7, url: 'https://github.com/owner/repo/pull/7', headRefName: 'feature' }) });
   assert.equal(pathRow(f), '/workspace/project (feature) #7 • Task');
-  f.changeBranch('feature');
-  assert.equal(pathRow(f), '/workspace/project (feature) #7 • Task');
-  assert.equal(gh.calls.length, 2, 'an unchanged branch asks nothing');
   for (const detached of ['detached', null]) {
     f.changeBranch(detached);
     assert.doesNotMatch(pathRow(f), /#7/);
-    f.prs!.refresh();
+    f.prs!.refresh(false); await advance();
   }
-  assert.equal(gh.calls.length, 2, 'detached HEAD and non-repositories ask nothing, even on refresh');
+  assert.equal(gh.calls.length, 2);
   f.changeBranch('feature');
-  assert.equal(pathRow(f), '/workspace/project (feature) • Task', 'reattaching asks again rather than trusting the old answer');
-  assert.equal(gh.calls.length, 3);
+  assert.equal(pathRow(f), '/workspace/project (feature) #7 • Task');
+  await advance();
+  assert.equal(gh.calls.length, 2, 'reattaching reuses the fresh answer');
   f.ctx.sessionManager.getCwd = () => '/workspace/other';
-  f.footer.render(140);
-  assert.equal(gh.calls[3].options?.cwd, '/workspace/other');
-  assert.equal(gh.calls[2].options?.signal?.aborted, true);
+  assert.equal(pathRow(f), '/workspace/other (feature) • Task');
+  await advance();
+  assert.equal(gh.calls[2].options?.cwd, '/workspace/other');
   f.footer.dispose();
 });
 
-test('refresh asks again for the shown branch, keeping the current link until gh answers', async () => {
+test('refresh coalesces while keeping the link, including a trigger during an in-flight lookup', async () => {
   const gh = fakeGh(), f = fixture(gh.exec);
-  f.footer.render(140);
+  f.footer.render(140); await advance();
   await gh.calls[0].answer({ stdout: prJson() });
-  f.prs!.refresh();
-  assert.deepEqual(gh.calls.map(call => call.args.at(-1)), ['main', 'main']);
+  f.prs!.refresh(); f.prs!.refresh();
   assert.equal(pathRow(f), '/workspace/project (main) #42 • Task');
-  f.prs!.refresh();
-  assert.equal(gh.calls[1].options?.signal?.aborted, true, 'a newer refresh supersedes an older one');
+  await advance();
+  assert.equal(gh.calls.length, 2);
+  f.prs!.refresh(); await advance();
+  assert.equal(gh.calls.length, 2, 'an in-flight lookup is never aborted and respawned');
+  await gh.calls[1].answer({ stdout: prJson({ state: 'MERGED' }) });
+  await advance();
+  assert.equal(gh.calls.length, 3, 'a change during the lookup gets one trailing refresh');
   await gh.calls[2].answer({ stdout: prJson({ state: 'MERGED' }) });
-  await gh.calls[1].answer({ stdout: prJson({ isDraft: true }) });
   assert.equal(pathRow(f), '/workspace/project (main) #42 merged • Task');
-  const renders = f.renders();
-  f.prs!.refresh();
-  await gh.calls[3].answer({ stdout: prJson({ state: 'MERGED' }) });
-  assert.equal(f.renders(), renders, 'an unchanged answer requests no render');
-  f.prs!.refresh();
-  await gh.calls[4].answer({ code: 1, stderr: 'error connecting to api.github.com' });
-  assert.equal(pathRow(f), '/workspace/project (main) • Task');
   f.footer.dispose();
 });
 
-test('disposing the footer aborts the lookup and leaves its tracker inert', async () => {
-  const gh = fakeGh(), f = fixture(gh.exec);
-  f.footer.render(140);
-  f.footer.dispose();
-  assert.equal(gh.calls[0].options?.signal?.aborted, true);
-  const renders = f.renders();
+test('disposing cancels scheduled lookups and running lookups survive a replacement footer', async () => {
+  const gh = fakeGh(), cancelled = fixture(gh.exec);
+  cancelled.footer.render(140); cancelled.footer.dispose(); await advance();
+  assert.equal(gh.calls.length, 0);
+  const first = fixture(gh.exec);
+  first.footer.render(140); await advance();
+  first.footer.dispose();
+  const replacement = fixture(gh.exec, true);
+  replacement.footer.render(140); await advance();
+  assert.equal(gh.calls.length, 1, 'a replacement subscribes to the running lookup');
   await gh.calls[0].answer({ stdout: prJson() });
-  assert.equal(f.renders(), renders);
-  f.prs!.refresh();
-  assert.equal(f.prs!.get('/workspace/project', 'feature'), undefined);
-  assert.equal(gh.calls.length, 1);
+  assert.equal(pathRow(replacement), '/workspace/project (main) #42 • Task');
+  assert.equal(replacement.renders(), 1);
+  first.prs!.refresh();
+  assert.equal(first.prs!.get('/workspace/project', 'feature'), undefined);
+  replacement.footer.dispose();
 });
 
 test('no PR, a missing or failing gh, or a killed lookup leaves the footer as it is today', async () => {
@@ -232,10 +243,11 @@ test('no PR, a missing or failing gh, or a killed lookup leaves the footer as it
     { code: 1, stderr: 'no pull requests found for branch "main"' },
     { code: 1, stderr: 'To get started with GitHub CLI, please run:  gh auth login' },
     { code: 1, stderr: 'spawn gh ENOENT' },
+      { code: 1, stderr: 'no git remotes found' },
     { code: 0, killed: true, stdout: prJson() },
   ]) {
     const gh = fakeGh(), f = fixture(gh.exec);
-    const before = f.footer.render(140);
+    const before = f.footer.render(140); await advance();
     await gh.calls[0].answer(answer);
     assert.deepEqual(f.footer.render(140), before, JSON.stringify(answer));
     f.footer.dispose();
@@ -243,11 +255,137 @@ test('no PR, a missing or failing gh, or a killed lookup leaves the footer as it
   const rejecting = fixture(() => Promise.reject(new Error('exec failed')));
   const throwing = fixture(() => { throw new Error('exec threw'); });
   for (const f of [rejecting, throwing]) {
-    const before = f.footer.render(140);
+    const before = f.footer.render(140); await advance();
     await new Promise(setImmediate);
     assert.deepEqual(f.footer.render(140), before);
     f.footer.dispose();
   }
+});
+
+});
+
+describe('PR lookup lifecycle', () => {
+  beforeEach(t => {
+    delete (globalThis as unknown as Record<symbol, unknown>)[Symbol.for('pi-interactive:footer.pull-requests.v1')];
+    clock = (t as TestContext).mock.timers;
+    clock.enable({ apis: ['setTimeout', 'Date'], now: 100000 });
+  });
+  test('offline skips initial lookups, triggers and expired turns', async () => {
+    const previous = process.env.PI_OFFLINE;
+    try {
+      for (const flag of ['1', 'yes', 'TRUE']) {
+        process.env.PI_OFFLINE = flag;
+        const gh = fakeGh(), f = fixture(gh.exec);
+        f.footer.render(140); await advance();
+        f.prs!.refresh(); f.prs!.refresh(false); await advance(120000);
+        assert.equal(gh.calls.length, 0, flag);
+        f.footer.dispose();
+      }
+      process.env.PI_OFFLINE = '0';
+      const gh = fakeGh(), f = fixture(gh.exec);
+      f.footer.render(140); await advance();
+      assert.equal(gh.calls.length, 1);
+      f.footer.dispose();
+    } finally {
+      if (previous === undefined) delete process.env.PI_OFFLINE; else process.env.PI_OFFLINE = previous;
+    }
+  });
+  test('missing gh and non-GitHub repos stay suppressed across replacement until a mutation or branch change', async () => {
+    for (const failure of [
+      { code: 1, stderr: '' },
+      { code: 1, stderr: 'spawn gh ENOENT' },
+      { code: 1, stderr: 'no git remotes found' },
+      { code: 1, stderr: 'none of the git remotes configured for this repository point to a known GitHub host' },
+    ]) {
+      const gh = fakeGh(), f = fixture(gh.exec);
+      f.footer.render(140); await advance();
+      await gh.calls[0].answer(failure);
+      f.prs!.refresh(false); await advance(120000);
+      f.prs!.refresh(false); await advance();
+      assert.equal(gh.calls.length, 1);
+      f.footer.dispose();
+      const replacement = fixture(gh.exec, true);
+      replacement.footer.render(140); replacement.prs!.refresh(false); await advance();
+      assert.equal(gh.calls.length, 1, 'new session preserves suppression');
+      replacement.prs!.refresh(); await advance();
+      assert.equal(gh.calls.length, 2, 'a triggering command retries');
+      await gh.calls[1].answer(failure);
+      replacement.changeBranch('feature'); replacement.footer.render(140); await advance();
+      assert.equal(gh.calls.length, 3, 'a branch change retries');
+      await gh.calls[2].answer(failure);
+      replacement.changeBranch('main'); replacement.footer.render(140); await advance();
+      assert.equal(gh.calls.length, 4, 'returning to a suppressed branch retries');
+      replacement.footer.dispose();
+    }
+  });
+  test('a mutation queued before replacement refreshes the cached answer', async () => {
+    const gh = fakeGh(), first = fixture(gh.exec);
+    first.footer.render(140); await advance();
+    await gh.calls[0].answer({ stdout: prJson() });
+    first.prs!.refresh(); first.footer.dispose();
+    const replacement = fixture(gh.exec, true);
+    replacement.footer.render(140); await advance();
+    assert.equal(gh.calls.length, 2);
+    replacement.footer.dispose();
+  });
+  test('a mutation during a running lookup survives replacement even when its answer is unchanged', async () => {
+    const gh = fakeGh(), first = fixture(gh.exec);
+    first.footer.render(140); await advance();
+    first.prs!.refresh(); first.footer.dispose();
+    const replacement = fixture(gh.exec, true);
+    replacement.footer.render(140);
+    await gh.calls[0].answer({ stdout: '' });
+    await advance();
+    assert.equal(gh.calls.length, 2);
+    replacement.footer.dispose();
+  });
+  test('a triggering command carries invalidation to a freshly cached branch before its next render', async () => {
+    const gh = fakeGh(), f = fixture(gh.exec);
+    f.footer.render(140); await advance();
+    await gh.calls[0].answer({ stdout: prJson() });
+    f.changeBranch('feature'); f.footer.render(140); await advance();
+    await gh.calls[1].answer({ stdout: prJson({ headRefName: 'feature' }) });
+    f.changeBranch('main'); f.footer.render(140);
+    f.prs!.refresh();
+    f.changeBranch('feature'); f.footer.render(140); await advance();
+    assert.equal(gh.calls.length, 3);
+    assert.equal(gh.calls[2].args.at(-1), 'feature');
+    f.footer.dispose();
+  });
+  test('a trigger while detached refreshes a cached branch after reattachment', async () => {
+    const gh = fakeGh(), f = fixture(gh.exec);
+    f.footer.render(140); await advance();
+    await gh.calls[0].answer({ stdout: prJson() });
+    f.changeBranch('detached'); f.footer.render(140);
+    f.prs!.refresh();
+    f.changeBranch('main'); f.footer.render(140); await advance();
+    assert.equal(gh.calls.length, 2);
+    f.footer.dispose();
+  });
+  test('quitting aborts running lookups without affecting replacement disposal', async () => {
+    const gh = fakeGh(), first = fixture(gh.exec);
+    first.footer.render(140); await advance();
+    first.prs!.dispose(true);
+    assert.equal(gh.calls[0].options?.signal?.aborted, true);
+    first.footer.dispose();
+  });
+  test('a fresh completed answer survives new sessions and a freshly loaded module', async () => {
+    const gh = fakeGh(), first = fixture(gh.exec);
+    first.footer.render(140); await advance();
+    await gh.calls[0].answer({ stdout: prJson() });
+    first.footer.dispose();
+    const replacement = fixture(gh.exec, true);
+    assert.equal(pathRow(replacement), '/workspace/project (main) #42 • Task');
+    await advance();
+    assert.equal(gh.calls.length, 1, 'new session reuses the answer');
+    replacement.footer.dispose();
+    const reloaded = await import(new URL('./pull-request.ts?reload=footer', import.meta.url).href);
+    const prs = reloaded.pullRequests(gh.exec, () => {});
+    assert.equal(prs.get('/workspace/project', 'main')?.number, 42);
+    await advance();
+    assert.equal(gh.calls.length, 1, 'reload reuses the process registry');
+    prs.dispose();
+  });
 });
 
 test('right-aligns Auto on path row without adding height; retains usage/model and other statuses', () => {

@@ -1,4 +1,5 @@
 import { WebSocketServer, type WebSocket } from 'ws';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const token = 'a3f1c2d4e5f60718293a4b5c6d7e8f90';
 
@@ -8,6 +9,7 @@ export type CallResponder = (call: IdeCall, reply: (result: unknown) => void, so
 export function fakeIde(onClient?: (socket: WebSocket) => void, onCall?: CallResponder, serverName = 'claudecode-neovim') {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: (info: { req: { headers: Record<string, unknown> } }) => info.req.headers['x-claude-code-ide-authorization'] === token });
   const calls: IdeCall[] = [];
+  let nextPing = 0;
   server.on('connection', socket => {
     onClient?.(socket);
     socket.on('message', raw => {
@@ -25,11 +27,23 @@ export function fakeIde(onClient?: (socket: WebSocket) => void, onCall?: CallRes
   });
   const port = () => (server.address() as { port: number }).port;
   const broadcast = (method: string, params: unknown) => { for (const client of server.clients) client.send(JSON.stringify({ jsonrpc: '2.0', method, params })); };
-  return { server, calls, port, broadcast, close: () => new Promise<void>(done => { for (const client of server.clients) client.terminate(); server.close(() => done()); }) };
+  const ping = () => Promise.all([...server.clients].map(socket => new Promise<void>(resolve => {
+    const id = `test-ping-${++nextPing}`;
+    const reply = (raw: import('ws').RawData) => {
+      if (JSON.parse(raw.toString()).id !== id) return;
+      socket.off('message', reply);
+      resolve();
+    };
+    socket.on('message', reply);
+    socket.send(JSON.stringify({ jsonrpc: '2.0', id, method: 'ping' }));
+  })));
+  return { server, calls, port, broadcast, ping, close: () => new Promise<void>(done => { for (const client of server.clients) client.terminate(); server.close(() => done()); }) };
 }
 
-export const until = (check: () => boolean, ms = 3000) => new Promise<void>((resolve, reject) => {
+export async function until(check: () => boolean, ms = 3000): Promise<void> {
   const start = performance.now();
-  const tick = () => check() ? resolve() : performance.now() - start > ms ? reject(new Error('timeout')) : setTimeout(tick, 10);
-  tick();
-});
+  while (!check()) {
+    if (performance.now() - start > ms) throw new Error('timeout');
+    await delay(10);
+  }
+}

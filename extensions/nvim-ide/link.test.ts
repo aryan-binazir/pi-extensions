@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -942,6 +943,112 @@ test('mentions never fall back to Pi cwd or stale lock folders when live workspa
     await link.stop();
     for (const client of server.clients) client.terminate();
     await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('refused handshakes double retry delays up to five minutes', async t => {
+  let refusals = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { refusals++; return false; } });
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  const failed = async (count: number) => {
+    await until(() => refusals === count && link.state.port === undefined);
+    t.mock.timers.tick(0);
+    await link.retarget();
+  };
+  try {
+    await writeFile(join(dir, `${port}.lock`), lockFile());
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    link.start();
+    await failed(1);
+    assert.equal(refusals, 1);
+    for (const [index, wait] of [15_000, 30_000, 60_000, 120_000, 240_000, 300_000, 300_000].entries()) {
+      t.mock.timers.tick(wait - 1);
+      await delay(20);
+      assert.equal(refusals, index + 1, `no early retry before ${wait}ms`);
+      t.mock.timers.tick(1);
+      await failed(index + 2);
+      assert.equal(refusals, index + 2, `retry after ${wait}ms`);
+    }
+  } finally {
+    t.mock.timers.reset();
+    await link.stop();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+for (const reset of ['watcher', 'reconnect'] as const) test(`${reset} wakes a refused editor and resets its retry delay`, async t => {
+  let refusals = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { refusals++; return false; } });
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const file = join(dir, `${port}.lock`);
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  const failed = async (count: number) => {
+    await until(() => refusals === count && link.state.port === undefined);
+    t.mock.timers.tick(0);
+    await link.retarget();
+  };
+  try {
+    await writeFile(file, lockFile());
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    link.start();
+    await failed(1);
+    t.mock.timers.tick(15_000);
+    await failed(2);
+    assert.equal(refusals, 2);
+    if (reset === 'watcher') await writeFile(file, lockFile());
+    else link.reconnect();
+    for (let i = 0; i < 30 && refusals < 3; i++) {
+      await delay(10);
+      if (refusals < 3) t.mock.timers.tick(200);
+    }
+    await failed(3);
+    assert.equal(refusals, 3, 'rediscovery does not wait for the growing retry deadline');
+    t.mock.timers.tick(14_999);
+    await delay(20);
+    assert.equal(refusals, 3);
+    t.mock.timers.tick(1);
+    await failed(4);
+    assert.equal(refusals, 4, 'the next failure starts again at fifteen seconds');
+  } finally {
+    t.mock.timers.reset();
+    await link.stop();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('unrelated watcher events preserve a healthy fallback and its selection', async () => {
+  let refusals = 0;
+  const broken = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { refusals++; return false; } });
+  const healthy = fakeIde();
+  await Promise.all([once(broken, 'listening'), once(healthy.server, 'listening')]);
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (broken.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w/branch', lockDir: dir, alive: () => true });
+  try {
+    await writeFile(join(dir, `${healthy.port()}.lock`), lockFile());
+    await writeFile(join(dir, `${port}.lock`), lockFile({ workspaceFolders: ['/w/branch'] }));
+    link.start();
+    await until(() => link.connected);
+    healthy.broadcast('selection_changed', { text: 'keep', filePath: '/w/branch/a.ts', selection: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 }, isEmpty: false } });
+    await healthy.ping();
+    for (let revision = 0; revision < 3; revision++) {
+      await writeFile(join(dir, '12345.lock'), lockFile({ workspaceFolders: ['/elsewhere'], revision }));
+      await delay(250);
+      assert.equal(link.state.port, healthy.port());
+      assert.equal(link.state.selection?.text, 'keep');
+      assert.equal(refusals, 1);
+    }
+  } finally {
+    await link.stop(); await healthy.close();
+    await new Promise<void>(done => broken.close(() => done()));
     await rm(dir, { recursive: true, force: true });
   }
 });

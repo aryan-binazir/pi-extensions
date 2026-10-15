@@ -86,6 +86,8 @@ export class IdeLink {
   private started = false;
   private timer?: NodeJS.Timeout;
   private retryTimer?: NodeJS.Timeout;
+  private watchTimer?: NodeJS.Timeout;
+  private nextRetryMs = 0;
   private watcher?: FSWatcher;
   private parentWatcher?: FSWatcher;
   private lockDirMissing = false;
@@ -111,6 +113,8 @@ export class IdeLink {
   start(): void { if (this.started) return; this.started = true; this.watchParent(); this.watchLocks(); void this.attempt(); }
   async stop(): Promise<void> {
     this.started = false;
+    this.nextRetryMs = 0;
+    if (this.watchTimer) { clearTimeout(this.watchTimer); this.watchTimer = undefined; }
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
     this.watcher?.close(); this.watcher = undefined;
@@ -125,8 +129,7 @@ export class IdeLink {
     });
   }
   reconnect(): void {
-    this.failedLocks.clear();
-    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
+    this.resetRetry();
     const socket = this.socket;
     this.drop(new Error('reconnecting'));
     socket?.terminate();
@@ -210,7 +213,7 @@ export class IdeLink {
     trace?.(`lock ${lock ? lock.port : 'none'}`);
     if (!lock) {
       if (chooseLock([...this.failedLocks.values()], this.cwd())) this.scheduleRetry();
-      else this.schedule();
+      this.schedule();
       return;
     }
     const WebSocket = await loadWs();
@@ -250,6 +253,7 @@ export class IdeLink {
           const serverInfo = result && typeof result === 'object' && 'serverInfo' in result ? result.serverInfo : undefined;
           this.zeroBasedMentionLines = !!serverInfo && typeof serverInfo === 'object' && 'name' in serverInfo && serverInfo.name === 'claudecode-neovim';
           this.notify('notifications/initialized'); this.ready = true;
+          this.nextRetryMs = 0;
           if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
           for (const params of this.pendingMentions) this.handleNotification('at_mentioned', params, false);
           this.pendingMentions = []; trace?.('ready'); this.emit();
@@ -276,8 +280,7 @@ export class IdeLink {
         trace?.(`parent watch ${event} ${name}`);
         this.watcher?.close(); this.watcher = undefined;
         this.watchLocks();
-        if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
-        this.schedule(200);
+        this.wake();
       });
       this.parentWatcher = watcher;
       watcher.on('error', error => lost(`error ${error.message}`));
@@ -295,8 +298,7 @@ export class IdeLink {
       const watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (event, name) => {
         trace?.(`watch ${event} ${name} socket=${!!this.socket} timer=${!!this.timer}`);
         if (!this.started || (name && !name.endsWith('.lock'))) return;
-        if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
-        this.schedule(200);
+        this.wake();
       });
       this.watcher = watcher;
       watcher.on('error', error => {
@@ -308,14 +310,29 @@ export class IdeLink {
       this.lockDirMissing = false;
     } catch (error) { this.lockDirMissing = (error as NodeJS.ErrnoException).code === 'ENOENT'; }
   }
+  private wake(): void {
+    if (this.socket) this.nextRetryMs = 0;
+    else this.resetRetry();
+    if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
+    if (this.watchTimer) return;
+    this.watchTimer = setTimeout(() => { this.watchTimer = undefined; void this.retarget(); }, 200);
+    this.watchTimer.unref();
+  }
+  private resetRetry(): void {
+    this.failedLocks.clear();
+    this.nextRetryMs = 0;
+    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
+  }
   private scheduleRetry(): void {
     if (!this.started || this.retryTimer) return;
+    const delay = this.nextRetryMs || (this.options.retryMs ?? 15000);
+    this.nextRetryMs = Math.min(delay * 2, 300_000);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
       if (this.socket) return;
       this.failedLocks.clear();
       void this.retarget();
-    }, this.options.retryMs ?? 15000);
+    }, delay);
     this.retryTimer.unref();
   }
   private schedule(delay?: number): void {

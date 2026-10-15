@@ -1,7 +1,7 @@
 import { readFile, realpath } from 'node:fs/promises';
 import { basename, dirname, join, sep } from 'node:path';
 import { resolveToolPath } from '../tool-path.ts';
-import { enabledIn, parseSwitches, unknownIds } from './config.ts';
+import { enabledIn, parseSwitches, unknownIds, type SwitchesFile } from './config.ts';
 import { invocations } from './shell.ts';
 import type { ToolCall } from './types.ts';
 
@@ -26,7 +26,7 @@ async function canonical(path: string): Promise<string> {
   }
 }
 
-function safeGit(args: string[]): boolean {
+function safeGit(args: readonly string[]): boolean {
   let i = 0;
   for (; i < args.length && args[i].startsWith('-'); i++) {
     if (args[i] === '-C') i++;
@@ -35,7 +35,7 @@ function safeGit(args: string[]): boolean {
   return readOnlyGit.has(args[i]) && !args.some(arg => arg.startsWith('--output') || arg === '--ext-diff');
 }
 
-function isProse(name: string, args: string[], i: number): boolean {
+function isProse(name: string, args: readonly string[], i: number): boolean {
   const options = proseOptions[basename(name)] ?? [];
   return options.includes(args[i - 1]) || options.some(option => option.startsWith('--') && args[i].startsWith(`${option}=`));
 }
@@ -57,7 +57,7 @@ function onlyReadsOrCommits(command: string): boolean {
 
 /** The always-on rule that lets agents switch hooks on but never off. */
 export function createProtection(configPath: string, known: ReadonlySet<string>) {
-  return async function protect(call: ToolCall): Promise<string | undefined> {
+  return async function protect(call: ToolCall, readLive?: () => Promise<SwitchesFile>): Promise<string | undefined> {
     if (call.toolName === 'bash' && typeof call.input.command === 'string') {
       const command = call.input.command;
       if (!mentionsSwitches(command) || onlyReadsOrCommits(command)) return;
@@ -71,15 +71,17 @@ export function createProtection(configPath: string, known: ReadonlySet<string>)
     if (call.toolName === 'edit') return `Change ${requested} with the write tool with the whole file. Edits apply to whatever the file holds when they run, so they cannot be checked.`;
 
     let current = '';
+    let snapshot: SwitchesFile | undefined;
     try {
-      current = await readFile(path, 'utf8');
+      if (live && readLive) { snapshot = await readLive(); current = snapshot.text; }
+      else current = await readFile(path, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return `Cannot read ${path}: ${message(error)}`;
     }
     let before = new Set<string>();
     if (current) {
       try {
-        before = enabledIn(parseSwitches(current));
+        before = enabledIn(snapshot ? snapshot.switches : parseSwitches(current));
       } catch (error) {
         return `${path} is currently invalid (${message(error)}); only the user can repair it.`;
       }

@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { parseFrontmatter } from '@earendil-works/pi-coding-agent';
 
 const isPlainMapping = (value: unknown): value is Record<string, unknown> =>
@@ -30,8 +30,27 @@ export function unknownIds(switches: Map<string, boolean>, known: ReadonlySet<st
   return [...switches.keys()].filter(id => !known.has(id));
 }
 
-/** Enabled hooks this code knows, and enabled ids it does not, which a newer checkout added. */
-export async function loadSwitches(path: string, known: ReadonlySet<string>): Promise<{ enabled: Set<string>; unloaded: string[] }> {
-  const enabled = enabledIn(parseSwitches(await readFile(path, 'utf8')));
-  return { enabled: new Set([...enabled].filter(id => known.has(id))), unloaded: [...enabled].filter(id => !known.has(id)) };
+export interface SwitchesFile {
+  text: string;
+  switches: Map<string, boolean>;
+}
+
+export function createSwitchesReader(path: string): () => Promise<SwitchesFile> {
+  let cached: { key: string; file: SwitchesFile } | undefined;
+  return async () => {
+    const info = await stat(path, { bigint: true });
+    const key = `${info.dev}:${info.ino}:${info.mtimeNs}:${info.ctimeNs}:${info.size}`;
+    if (cached?.key === key) return cached.file;
+    const text = await readFile(path, 'utf8');
+    let parsed: Map<string, boolean> | { error: unknown } | undefined;
+    const file = { text, get switches() {
+      if (!parsed) {
+        try { parsed = parseSwitches(text); } catch (error) { parsed = { error }; }
+      }
+      if ('error' in parsed) throw parsed.error;
+      return parsed;
+    } };
+    cached = { key, file };
+    return file;
+  };
 }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test, { beforeEach } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -776,4 +777,48 @@ test('switching to a workspace whose editor is already open links it on the next
     await editor.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+
+test('selection status coalesces a burst and paints the final line after activity stops', async t => {
+  await withConnectedIde(async ({ ide, project, status }) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const paints = status.length;
+    const send = async (line: number) => {
+      ide.broadcast('selection_changed', { text: '', filePath: join(project, 'a.ts'), selection: { start: { line, character: 0 }, end: { line, character: 0 }, isEmpty: true } });
+      await delay(15);
+    };
+    try {
+      await send(1);
+      t.mock.timers.tick(100);
+      await send(2);
+      t.mock.timers.tick(100);
+      await send(3);
+      assert.equal(status.length, paints);
+      t.mock.timers.tick(99);
+      assert.equal(status.length, paints);
+      t.mock.timers.tick(1);
+      assert.equal(status.at(-1), 'Neovim ✓ a.ts:4');
+      assert.equal(status.length, paints + 1);
+      await send(4);
+      t.mock.timers.tick(300);
+      assert.equal(status.at(-1), 'Neovim ✓ a.ts:5');
+      assert.equal(status.length, paints + 2);
+    } finally { t.mock.timers.reset(); }
+  });
+});
+
+test('shutdown cancels a pending selection paint', async t => {
+  await withConnectedIde(async ({ ide, project, fire, ctx, status }) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      ide.broadcast('selection_changed', { text: '', filePath: join(project, 'a.ts'), selection: { start: { line: 10, character: 0 }, end: { line: 10, character: 0 }, isEmpty: true } });
+      await delay(20);
+      await fire('session_shutdown', {}, ctx);
+      assert.equal(status.at(-1), undefined);
+      const paints = status.length;
+      t.mock.timers.tick(1000);
+      assert.equal(status.length, paints);
+    } finally { t.mock.timers.reset(); }
+  });
 });

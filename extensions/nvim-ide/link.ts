@@ -86,6 +86,7 @@ export class IdeLink {
   private started = false;
   private timer?: NodeJS.Timeout;
   private retryTimer?: NodeJS.Timeout;
+  private retryDelay = 0;
   private watcher?: FSWatcher;
   private parentWatcher?: FSWatcher;
   private lockDirMissing = false;
@@ -125,8 +126,7 @@ export class IdeLink {
     });
   }
   reconnect(): void {
-    this.failedLocks.clear();
-    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
+    this.resetRetry();
     const socket = this.socket;
     this.drop(new Error('reconnecting'));
     socket?.terminate();
@@ -250,6 +250,7 @@ export class IdeLink {
           const serverInfo = result && typeof result === 'object' && 'serverInfo' in result ? result.serverInfo : undefined;
           this.zeroBasedMentionLines = !!serverInfo && typeof serverInfo === 'object' && 'name' in serverInfo && serverInfo.name === 'claudecode-neovim';
           this.notify('notifications/initialized'); this.ready = true;
+          this.retryDelay = 0;
           if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
           for (const params of this.pendingMentions) this.handleNotification('at_mentioned', params, false);
           this.pendingMentions = []; trace?.('ready'); this.emit();
@@ -276,6 +277,7 @@ export class IdeLink {
         trace?.(`parent watch ${event} ${name}`);
         this.watcher?.close(); this.watcher = undefined;
         this.watchLocks();
+        this.resetRetry();
         if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
         this.schedule(200);
       });
@@ -295,6 +297,9 @@ export class IdeLink {
       const watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (event, name) => {
         trace?.(`watch ${event} ${name} socket=${!!this.socket} timer=${!!this.timer}`);
         if (!this.started || (name && !name.endsWith('.lock'))) return;
+        const failed = this.failedLocks.size > 0;
+        this.resetRetry();
+        if (failed) { void this.retarget(); return; }
         if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
         this.schedule(200);
       });
@@ -308,14 +313,21 @@ export class IdeLink {
       this.lockDirMissing = false;
     } catch (error) { this.lockDirMissing = (error as NodeJS.ErrnoException).code === 'ENOENT'; }
   }
+  private resetRetry(): void {
+    this.failedLocks.clear();
+    this.retryDelay = 0;
+    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
+  }
   private scheduleRetry(): void {
     if (!this.started || this.retryTimer) return;
+    const delay = this.retryDelay || (this.options.retryMs ?? 15000);
+    this.retryDelay = Math.min(delay * 2, 300000);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined;
       if (this.socket) return;
       this.failedLocks.clear();
       void this.retarget();
-    }, this.options.retryMs ?? 15000);
+    }, delay);
     this.retryTimer.unref();
   }
   private schedule(delay?: number): void {

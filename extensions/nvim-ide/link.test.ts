@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -941,6 +942,75 @@ test('mentions never fall back to Pi cwd or stale lock folders when live workspa
   } finally {
     await link.stop();
     for (const client of server.clients) client.terminate();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('refused handshakes double retry delays up to five minutes', async t => {
+  let refusals = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { refusals++; return false; } });
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  const settle = async () => { await delay(30); t.mock.timers.tick(0); await delay(30); };
+  try {
+    await writeFile(join(dir, `${port}.lock`), lockFile());
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    link.start();
+    for (let i = 0; i < 300 && refusals === 0; i++) await delay(10);
+    await settle();
+    assert.equal(refusals, 1);
+    for (const [index, wait] of [15_000, 30_000, 60_000, 120_000, 240_000, 300_000, 300_000].entries()) {
+      t.mock.timers.tick(wait - 1);
+      await settle();
+      assert.equal(refusals, index + 1, `no early retry before ${wait}ms`);
+      t.mock.timers.tick(1);
+      await settle();
+      assert.equal(refusals, index + 2, `retry after ${wait}ms`);
+    }
+  } finally {
+    t.mock.timers.reset();
+    await link.stop();
+    await new Promise<void>(done => server.close(() => done()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+for (const reset of ['watcher', 'reconnect'] as const) test(`${reset} wakes a refused editor and resets its retry delay`, async t => {
+  let refusals = 0;
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0, verifyClient: () => { refusals++; return false; } });
+  await once(server, 'listening');
+  const dir = await mkdtemp(join(tmpdir(), 'pi-ide-'));
+  const port = (server.address() as { port: number }).port;
+  const file = join(dir, `${port}.lock`);
+  const link = new IdeLink({ cwd: '/w', lockDir: dir, alive: () => true });
+  const settle = async () => { await delay(40); t.mock.timers.tick(0); await delay(40); };
+  try {
+    await writeFile(file, lockFile());
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    link.start();
+    for (let i = 0; i < 300 && refusals === 0; i++) await delay(10);
+    await settle();
+    t.mock.timers.tick(15_000);
+    await settle();
+    assert.equal(refusals, 2);
+    if (reset === 'watcher') await writeFile(file, lockFile());
+    else link.reconnect();
+    await settle();
+    t.mock.timers.tick(200);
+    await settle();
+    assert.equal(refusals, 3, 'rediscovery does not wait for the growing retry deadline');
+    t.mock.timers.tick(14_799);
+    await settle();
+    assert.equal(refusals, 3);
+    t.mock.timers.tick(1);
+    await settle();
+    assert.equal(refusals, 4, 'the next failure starts again at fifteen seconds');
+  } finally {
+    t.mock.timers.reset();
+    await link.stop();
     await new Promise<void>(done => server.close(() => done()));
     await rm(dir, { recursive: true, force: true });
   }

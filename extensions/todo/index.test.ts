@@ -29,10 +29,10 @@ function runtime(initial: any[] = [], colored = false) {
   const hook = (name: string, event: object = {}) => hooks.get(name)?.({ messages: [], ...event }, ctx);
   const turn = async () => {
     await hook('message_start', { message: { role: 'user', content: 'User prompt' } });
-    const result = await hook('context');
+    const result = await hook('context_with_system');
     return result?.messages.at(-1)?.content;
   };
-  return { turn, reminder: async () => (await hook('context'))?.messages.at(-1)?.content, call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, toolContext), hook, branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, render: (width: number) => component?.render(width) ?? [], toggle: () => toggle(ctx), shortcut: () => shortcut, warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
+  return { turn, reminder: async () => (await hook('context_with_system'))?.messages.at(-1)?.content, call: (todos: object[]) => tool.execute('test', { todos }, undefined, undefined, toolContext), hook, branch: () => structuredClone(branch), switchTo: (entries: any[]) => { branch = entries; }, widget: () => widget, render: (width: number) => component?.render(width) ?? [], toggle: () => toggle(ctx), shortcut: () => shortcut, warnings: () => warnings, appended: () => branch.map((entry: any) => entry.data) };
 }
 
 test('compact summary prioritizes the current task and toggles without changing saved progress', async () => {
@@ -269,6 +269,83 @@ test('the reminder strengthens on exactly the third unchanged turn', async () =>
   assert.equal((await app.turn()), 'This todo list has not changed for several turns. Update actual progress or explain the blocker.\nPersisted todos are declared progress, not verified completion:\n[in_progress] Unfinished work');
 });
 
+test('active todo preserves the request prefix and mid-conversation system updates', async () => withPi({ extensions: [todo] }, async ({ session, runner }) => {
+  await session.getToolDefinition('todo_write')!.execute('seed', { todos: [{ content: 'Active task', status: 'in_progress' }] }, undefined, undefined, runner.createToolContext('seed', undefined));
+  const initial = [
+    { role: 'system' as const, content: 'You are Pi', sections: { editor_context: '<editor_context>file A line 1</editor_context>', subagent_profiles: 'Original profiles' }, timestamp: 1 },
+    { role: 'user' as const, content: 'First prompt', timestamp: 2 },
+    fauxAssistantMessage('First reply'),
+  ];
+  const update = { role: 'system' as const, content: '', sections: { editor_context: '<editor_context>file B line 9</editor_context>', subagent_profiles: 'Updated profiles' }, toolsAdded: [{ name: 'new_tool', description: 'Added tool', parameters: { type: 'object' } }], toolsRemoved: [{ name: 'old_tool' }], timestamp: 4 };
+  const first = await runner.emitContext(initial);
+  const next = await runner.emitContext([...initial, update, { role: 'user', content: 'Second prompt', timestamp: 5 }]);
+  assert.deepEqual(first.slice(0, -1), initial);
+  assert.deepEqual(next.slice(0, initial.length), initial);
+  assert.deepEqual(next[initial.length], update);
+  assert.equal(JSON.stringify(next).slice(0, JSON.stringify(initial).length - 1), JSON.stringify(initial).slice(0, -1));
+  const reminder = first.at(-1)!;
+  assert.equal(reminder.role, 'custom');
+  assert.ok('content' in reminder);
+  assert.match(String(reminder.content), /Keep the todo list current[\s\S]*\[in_progress\] Active task/);
+  assert.equal(next.filter(message => message.role === 'custom').length, 1);
+}));
+
+test('provider requests retain the cached prefix when editor context changes between turns', async () => {
+  let turn = 0;
+  const requests: TranscriptContext[] = [];
+  await withPi({ extensions: [todo, pi => {
+    pi.on('before_agent_start', event => { event.systemPromptOptions.sections.editor_context = ++turn === 1 ? '<editor_context>file A line 1</editor_context>' : '<editor_context>file B line 9</editor_context>'; });
+  }], responses: Array.from({ length: 2 }, () => (context: TranscriptContext) => { requests.push(structuredClone(context)); return fauxAssistantMessage('Reply'); }) }, async ({ session, runner }) => {
+    await session.getToolDefinition('todo_write')!.execute('seed', { todos: [{ content: 'Active task', status: 'pending' }] }, undefined, undefined, runner.createToolContext('seed', undefined));
+    await session.prompt('First prompt');
+    await session.prompt('Second prompt');
+    const first = requests[0].messages, next = requests[1].messages;
+    assert.deepEqual(next[0], first[0]);
+    assert.equal(next.filter(message => message.role === 'system').length, 2);
+    assert.deepEqual(next.slice(0, first.length - 1), first.slice(0, -1));
+    const prefix = JSON.stringify(first.slice(0, -1)).slice(0, -1);
+    assert.equal(JSON.stringify(next).slice(0, prefix.length), prefix);
+    assert.deepEqual(next.at(-1)?.content, [{ type: 'text', text: 'Keep the todo list current as work progresses.\nPersisted todos are declared progress, not verified completion:\n[pending] Active task' }]);
+  });
+});
+
+test('unchanged todos stop saving after six turns and preserve reminders on disk resume', async () => withPi({ extensions: [todo], settings: { compaction: { enabled: false }, retry: { enabled: false } } }, async fixture => {
+  const tasks = [{ content: 'Still working', status: 'pending' }];
+  const write = (todos: typeof tasks) => fixture.session.getToolDefinition('todo_write')!.execute('write', { todos }, undefined, undefined, fixture.runner.createToolContext('write', undefined));
+  const snapshots = () => fixture.session.sessionManager.getBranch().filter(entry => entry.type === 'custom' && entry.customType === 'interactive-tools:todo');
+  const reminders: string[] = [];
+  await write(tasks);
+  for (let turn = 1; turn <= 12; turn++) {
+    fixture.provider.setResponses([context => { reminders.push(providerText(context)); return fauxAssistantMessage('Reply'); }]);
+    await fixture.session.prompt(`Turn ${turn}`);
+    assert.equal(snapshots().length, Math.min(turn, 6) + 1);
+    if ([2, 5, 6, 12].includes(turn)) {
+      const path = fixture.session.sessionManager.getSessionFile()!;
+      await fixture.runtime.switchSession(path);
+      const context = await fixture.runner.emitContext([]);
+      const reminder = context.at(-1)!;
+      assert.ok('content' in reminder);
+      assert.ok(reminders.at(-1)!.includes(String(reminder.content)));
+    }
+  }
+  assert.match(reminders[1], /Keep the todo list current/);
+  assert.match(reminders[2], /not changed for several turns/);
+  assert.match(reminders[4], /not changed for several turns/);
+  assert.match(reminders[5], /STALE TODO/);
+  assert.match(reminders[11], /STALE TODO/);
+  const saved = snapshots();
+  await write(tasks);
+  assert.deepEqual(snapshots(), saved);
+  await write([{ content: 'New actual progress', status: 'pending' }]);
+  assert.equal(snapshots().length, 8);
+  const changed = snapshots().at(-1)!;
+  assert.equal(changed.type, 'custom');
+  if (changed.type === 'custom') assert.equal((changed.data as Snapshot).staleTurns, 0);
+  await write([]);
+  assert.equal(snapshots().length, 9);
+  assert.deepEqual(await fixture.runner.emitContext([]), []);
+}));
+
 async function todoSession(run: (session: PiFixture['session'], provider: PiFixture['provider'], manager: SessionManager) => Promise<void>) {
   return withPi({ extensions: [todo], settings: { compaction: { enabled: false }, retry: { enabled: false }, followUpMode: 'one-at-a-time', steeringMode: 'one-at-a-time' } }, async ({ session, provider, runner }) => {
     await session.getToolDefinition('todo_write')!.execute('seed', { todos: [{ content: 'Still working', status: 'pending' }] }, undefined, undefined, runner.createToolContext('seed', undefined));
@@ -299,8 +376,8 @@ for (const mode of ['steer', 'followUp'] as const) {
     const branch = manager.getBranch();
     assert.equal(branch.filter(entry => entry.type === 'message' && entry.message.role === 'user').length, 7);
     const snapshots = branch.filter(entry => entry.type === 'custom').filter(entry => entry.customType === 'interactive-tools:todo');
-    assert.equal(snapshots.length, 8, 'one seed and seven saved counts, without an agent_end duplicate');
-    assert.deepEqual(snapshots.at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 7 });
+    assert.equal(snapshots.length, 7, 'one seed and counts through six, without an agent_end duplicate');
+    assert.deepEqual(snapshots.at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 6 });
     for (const entry of snapshots.slice(1)) {
       const parent = manager.getEntry(entry.parentId!);
       assert.equal(parent?.type, 'message');
@@ -355,8 +432,8 @@ test('batched prompts count users rather than provider requests', async () => to
   await session.prompt('Initial prompt');
   assert.equal(requests.length, 2);
   assert.match(requests[1], /STALE TODO/);
-  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 7 });  const snapshots = manager.getBranch().filter(entry => entry.type === 'custom');
-  assert.equal(snapshots.length, 8);
+  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 6 });  const snapshots = manager.getBranch().filter(entry => entry.type === 'custom');
+  assert.equal(snapshots.length, 7);
   for (const entry of snapshots.slice(1)) {
     const parent = manager.getEntry(entry.parentId!);
     assert.equal(parent?.type, 'message');
@@ -396,6 +473,18 @@ test('queued prompts cancelled before delivery do not count', async () => {
     assert.equal(manager.getBranch().filter(entry => entry.type === 'message' && entry.message.role === 'user').length, 1);
     assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 1 });
   });
+});
+
+test('legacy counts above six retain the stale warning without more snapshots', async () => {
+  const app = runtime([{ type: 'custom', customType: 'interactive-tools:todo', data: { version: 1, todos: [{ content: 'Legacy work', status: 'pending' }], staleTurns: 20 } }]);
+  await app.hook('session_start');
+  const saved = app.branch();
+  for (let turn = 0; turn < 8; turn++) assert.match(await app.turn(), /STALE TODO[\s\S]*Legacy work/);
+  await app.call([{ content: 'Legacy work', status: 'pending' }]);
+  assert.deepEqual(app.branch(), saved);
+  await app.call([{ content: 'Reconciled work', status: 'pending' }]);
+  assert.equal(app.appended().at(-1).staleTurns, 0);
+  assert.match(await app.turn(), /Keep the todo list current/);
 });
 
 test('repeated provider contexts do not count as user messages', async () => {

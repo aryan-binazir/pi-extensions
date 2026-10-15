@@ -127,7 +127,7 @@ export default function todo(pi: ExtensionAPI): void {
       const previous = state.todos;
       const changed = todos.length !== previous.length || todos.some((item, index) => item.content !== previous[index].content || item.status !== previous[index].status);
       const next: Snapshot = { version: 1, todos, staleTurns: changed ? 0 : state.staleTurns };
-      pi.appendEntry(entryType, clone(next));
+      if (changed || dirty) pi.appendEntry(entryType, clone(next));
       state = next;
       dirty = false;
       paint(ctx);
@@ -137,11 +137,12 @@ export default function todo(pi: ExtensionAPI): void {
   pi.on('message_start', event => {
     if (event.message.role !== 'user' || !active()) return;
     persist();
+    if (state.staleTurns >= 6) return;
     state = { ...state, staleTurns: state.staleTurns + 1 };
     dirty = true;
   });
   pi.on('agent_end', () => persist());
-  pi.on('context', event => {
+  pi.on('context_with_system', event => {
     persist();
     if (!active()) return;
     const warning = state.staleTurns >= 6 ? 'STALE TODO: Before proceeding, reconcile this list with actual work; explain blockers or clear obsolete tasks. Do not mark tasks complete without evidence.' : state.staleTurns >= 3 ? 'This todo list has not changed for several turns. Update actual progress or explain the blocker.' : 'Keep the todo list current as work progresses.';

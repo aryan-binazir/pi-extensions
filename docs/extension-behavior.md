@@ -9,6 +9,13 @@ and tree navigation. Only one task may be `in_progress`. Send `todos: []` to
 clear. A fully completed list hides its widget and reminders. Saved statuses
 record declared progress; they do not prove completion.
 
+Todo appends request-only reminders through Pi's public `context_with_system`
+event, available in the pinned 0.99.1 SDK, preserving system updates in their
+original transcript positions. Stale reminders strengthen at three and six
+delivered user messages. Accounting stops at six until the list changes; resume
+keeps the same reminder strength, including older snapshots with higher counts.
+Identical declarations do not write another snapshot.
+
 `/effort new [LEVEL] [provider/model]` creates a session with a temporary model
 and effort handoff. It does not overwrite saved defaults. Plain `/new` keeps
 Pi's normal behavior.

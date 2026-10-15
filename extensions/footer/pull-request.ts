@@ -63,7 +63,7 @@ interface CachedRequest {
   controller?: AbortController;
   listeners: Set<(changed: boolean) => void>;
 }
-interface RequestCache { entries: Map<string, CachedRequest>; lastKey?: string }
+interface RequestCache { entries: Map<string, CachedRequest>; lastKey?: string; changed?: boolean }
 const cacheKey = Symbol.for('pi-interactive:footer.pull-requests.v1');
 const unavailable = (message: string) => /ENOENT|command not found|not found in PATH|none of the git remotes|no git remotes found|known GitHub host|not a git repository|not a GitHub (?:host|repository)/i.test(message);
 const offline = () => /^(1|true|yes)$/i.test(process.env.PI_OFFLINE ?? '');
@@ -116,7 +116,8 @@ export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): 
         if (next) {
           const entry = cache.entries.get(next) ?? { listeners: new Set<(changed: boolean) => void>() };
           cache.entries.set(next, entry);
-          entry.dirty ||= dirty;
+          entry.dirty ||= dirty || cache.changed;
+          cache.changed = false;
           if (cache.lastKey !== next && entry.unavailable) { entry.unavailable = false; entry.completed = undefined; }
           entry.listeners.add(updated);
           target = { cwd, branch: branch!, entry };
@@ -127,7 +128,8 @@ export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): 
       return target?.entry.pr;
     },
     refresh(changed = true) {
-      if (disposed || !target || offline()) return;
+      if (disposed || offline()) return;
+      if (!target) { cache.changed ||= changed; return; }
       const entry = target.entry;
       if (changed) { entry.unavailable = false; entry.dirty = true; schedule(); }
       else if (!entry.unavailable && !entry.pending && !timer && (entry.dirty || entry.completed === undefined || Date.now() - entry.completed >= 60000)) schedule();

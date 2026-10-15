@@ -1,5 +1,5 @@
-import { statSync, watch, type FSWatcher } from 'node:fs';
-import { dirname } from 'node:path';
+import { readlinkSync, realpathSync, statSync, watch, type FSWatcher } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { isBashToolResult, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { findConfigLoader, statusText, type ConfigLoader, type PermissionConfig } from './adapter.ts';
 
@@ -10,8 +10,8 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined, changeTimer: ReturnType<typeof setTimeout> | undefined;
   let loader: ConfigLoader | undefined;
-  let config: PermissionConfig | undefined, watcher: FSWatcher | undefined;
-  let stamp: string | undefined, watching: string | undefined, watchingInode: number | undefined;
+  let config: PermissionConfig | undefined, stamp: string | undefined;
+  const watchers = new Map<string, { watcher: FSWatcher; inode: number }>();
   let unavailable = 'Auto: unavailable';
   let previous: string | undefined;
   let generation = 0;
@@ -42,28 +42,35 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   };
   const observeConfig = () => {
     if (!loader) return;
-    const parent = dirname(loader.path);
-    let directory = parent;
-    for (;;) {
-      try {
-        const inode = statSync(directory).ino;
-        if (directory === watching && inode === watchingInode) return;
-        const next = watch(directory, { persistent: false }, () => {
-          // Bun can report only the temporary filename for an atomic replacement.
-          if (changeTimer) clearTimeout(changeTimer);
-          changeTimer = setTimeout(() => { changeTimer = undefined; observeConfig(); readConfig(); }, 50);
-          changeTimer.unref();
-        });
-        next.unref();
-        next.on('error', () => { next.close(); if (watcher === next) { watcher = undefined; watching = undefined; watchingInode = undefined; } });
-        watcher?.close(); watcher = next; watching = directory; watchingInode = inode;
-        return;
-      } catch {
-        const ancestor = dirname(directory);
-        if (ancestor === directory) return;
-        directory = ancestor;
+    let target = loader.path;
+    try { target = realpathSync(target); }
+    catch { try { target = resolve(dirname(target), readlinkSync(target)); } catch {} }
+    const retained = new Set<string>();
+    for (const parent of new Set([dirname(loader.path), dirname(target)])) {
+      let directory = parent;
+      for (;;) {
+        try {
+          const inode = statSync(directory).ino, current = watchers.get(directory);
+          if (current?.inode !== inode) {
+            const next = watch(directory, { persistent: false }, () => {
+              // Bun can report only the temporary filename for an atomic replacement.
+              if (changeTimer) clearTimeout(changeTimer);
+              changeTimer = setTimeout(() => { changeTimer = undefined; observeConfig(); readConfig(); }, 50);
+              changeTimer.unref();
+            });
+            next.unref();
+            next.on('error', () => { next.close(); if (watchers.get(directory)?.watcher === next) watchers.delete(directory); });
+            current?.watcher.close(); watchers.set(directory, { watcher: next, inode });
+          }
+          retained.add(directory); break;
+        } catch {
+          const ancestor = dirname(directory);
+          if (ancestor === directory) break;
+          directory = ancestor;
+        }
       }
     }
+    for (const [directory, current] of watchers) if (!retained.has(directory)) { current.watcher.close(); watchers.delete(directory); }
   };
   const stop = (event?: { reason?: string }) => {
     ++generation;
@@ -71,7 +78,8 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
     if (timer) clearTimeout(timer);
     if (changeTimer) clearTimeout(changeTimer);
     timer = changeTimer = undefined;
-    watcher?.close(); watcher = undefined; watching = undefined; watchingInode = undefined; stamp = undefined; config = undefined;
+    for (const { watcher } of watchers.values()) watcher.close();
+    watchers.clear(); stamp = undefined; config = undefined;
     if (context?.hasUI) context.ui.setStatus(KEY, undefined);
     if (ownsFooter) context?.ui.setFooter(undefined);
     ownsFooter = false;

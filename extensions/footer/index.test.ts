@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { mkdtemp, mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rename, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -308,5 +308,23 @@ test('an atomically replaced config directory is watched again while idle', asyn
     await until(() => h.statuses.at(-1) === 'Auto: off');
     await writeFile(f.file, JSON.stringify(config));
     await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
+  } finally { await h.emit('session_shutdown'); await f.close(); }
+});
+
+test('config symlinks observe target edits and atomic retargeting while idle', async () => {
+  const f = await fixture(), h = harness(commands(f.root));
+  const target = join(f.root, 'target', 'config.json'), other = join(f.root, 'other', 'config.json');
+  try {
+    await mkdir(dirname(target)); await mkdir(dirname(other));
+    await rename(f.file, target); await symlink(target, f.file);
+    h.emit('session_start');
+    await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
+    await writeFile(target, JSON.stringify({ ...config, enabled: false }));
+    await until(() => h.statuses.at(-1) === 'Auto: off');
+    await writeFile(other, JSON.stringify(config));
+    await symlink(other, f.file + '.next'); await rename(f.file + '.next', f.file);
+    await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
+    await writeFile(other, JSON.stringify({ ...config, enabled: false }));
+    await until(() => h.statuses.at(-1) === 'Auto: off');
   } finally { await h.emit('session_shutdown'); await f.close(); }
 });

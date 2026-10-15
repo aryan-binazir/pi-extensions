@@ -188,7 +188,7 @@ test('branch and cwd changes hide stale PRs and reuse fresh completed answers', 
   for (const detached of ['detached', null]) {
     f.changeBranch(detached);
     assert.doesNotMatch(pathRow(f), /#7/);
-    f.prs!.refresh(); await advance();
+    f.prs!.refresh(false); await advance();
   }
   assert.equal(gh.calls.length, 2);
   f.changeBranch('feature');
@@ -350,6 +350,16 @@ describe('PR lookup lifecycle', () => {
     f.changeBranch('feature'); f.footer.render(140); await advance();
     assert.equal(gh.calls.length, 3);
     assert.equal(gh.calls[2].args.at(-1), 'feature');
+    f.footer.dispose();
+  });
+  test('a trigger while detached refreshes a cached branch after reattachment', async () => {
+    const gh = fakeGh(), f = fixture(gh.exec);
+    f.footer.render(140); await advance();
+    await gh.calls[0].answer({ stdout: prJson() });
+    f.changeBranch('detached'); f.footer.render(140);
+    f.prs!.refresh();
+    f.changeBranch('main'); f.footer.render(140); await advance();
+    assert.equal(gh.calls.length, 2);
     f.footer.dispose();
   });
   test('quitting aborts running lookups without affecting replacement disposal', async () => {

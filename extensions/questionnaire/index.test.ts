@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import questionnaire from "./index.ts";
 
-function host(onEmit?: (value: any) => void) {
+function host(onEmit?: (value: any) => void, fg = (_: string, s: string) => s) {
   let tool: any;
   let component: any;
   let uiOptions: any;
@@ -37,7 +37,7 @@ function host(onEmit?: (value: any) => void) {
           uiOptions = options;
           component = factory(
             { requestRender() {}, terminal },
-            { fg: (_: string, s: string) => s },
+            { fg },
             {},
             resolve,
           );
@@ -661,4 +661,35 @@ test("custom answers preserve literal paste markers inside earlier payloads", as
   h.key(`\x1b[200~${second}\x1b[201~`);
   h.key("\r");
   assert.equal((await result).details.answers[0].value, first + second);
+});
+
+test("styled questionnaire frames stay identical when warmed, resized and revisited", async () => {
+  const fg = (_: string, s: string) => `\x1b[38;2;95;135;255m${s}\x1b[39m`;
+  const h = host(undefined, fg);
+  const questions = [{ ...question("日本語"), prompt: "Choose 日本語 👩‍💻 ".repeat(20),
+    options: [{ value: "yes", label: "日本語 👩‍💻 ".repeat(10), description: "Details ".repeat(30) }] }, question("next")];
+  const pending = h.run(questions);
+  try {
+    for (const width of [80, 12, 1, 37, 80]) {
+      const fresh = host(undefined, fg);
+      const reference = fresh.run(structuredClone(questions));
+      try {
+        const expected = fresh.render(width);
+        assert.ok(expected.every((line: string) => visibleWidth(line) <= width));
+        if (width >= 7) {
+          assert.match(stripTerminalSequences(expected[0]), /^╭─+╮$/);
+          assert.match(stripTerminalSequences(expected.at(-1)!), /^╰─+╯$/);
+          for (const line of expected.slice(1, -1)) {
+            assert.match(stripTerminalSequences(line), /^│.*│$/);
+            assert.equal(visibleWidth(line), width);
+          }
+        }
+        for (let i = 0; i < 3; i++) assert.deepEqual(h.render(width), expected);
+      } finally {
+        fresh.key("\x1b");await reference;
+      }
+    }
+  } finally {
+    h.key("\x1b");await pending;
+  }
 });

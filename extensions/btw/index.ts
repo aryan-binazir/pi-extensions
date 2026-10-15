@@ -26,6 +26,7 @@ const MAX_HISTORY = 64000;
 const MAX_SNAPSHOT = 96000;
 const MAX_QUESTION = 16000;
 const MAX_PAINTED = 2048;
+const ANSWER_REPAINT_MS = 100;
 const QUEUED = Symbol("queued");
 
 type Block = {
@@ -124,6 +125,8 @@ export default function btw(pi: ExtensionAPI) {
           let closed = false;
           let busy = false;
           let answer = "";
+          let displayedAnswer = "";
+          let answerTimer: ReturnType<typeof setTimeout> | undefined;
           let currentQuestion = "";
           const pending: string[] = [];
           let status = "";
@@ -146,6 +149,7 @@ export default function btw(pi: ExtensionAPI) {
             if (closed) return;
             closed = true;
             controller?.abort();
+            clearTimeout(answerTimer);
             snapshot = "";
             systemPrompt = "";
             editor.setText("");
@@ -175,12 +179,21 @@ export default function btw(pi: ExtensionAPI) {
             busy = true;
             currentQuestion = raw;
             answer = "";
+            displayedAnswer = "";
             status = "Connecting…";
             scroll = 0;
             controller = new AbortController();
             const signal = controller.signal;
             const question = raw;
             let failure: string | undefined;
+            let lastPublished = -Infinity;
+            const publish = () => {
+              answerTimer = undefined;
+              if (closed) return;
+              displayedAnswer = answer;
+              lastPublished = performance.now();
+              tui.requestRender();
+            };
             try {
               const messages: UserMessage[] = [
                 {
@@ -217,7 +230,13 @@ export default function btw(pi: ExtensionAPI) {
                 onText: (text) => {
                   if (closed) return;
                   answer = text;
-                  tui.requestRender();
+                  const remaining = ANSWER_REPAINT_MS - (performance.now() - lastPublished);
+                  if (remaining <= 0) {
+                    clearTimeout(answerTimer);
+                    publish();
+                  } else if (answerTimer === undefined) {
+                    answerTimer = setTimeout(publish, remaining);
+                  }
                 },
               });
               if (closed) return;
@@ -234,6 +253,8 @@ export default function btw(pi: ExtensionAPI) {
               if (!closed)
                 status = failure = `Side request failed: ${error instanceof Error ? error.message.slice(0, 2000) : "Unknown provider error"}`;
             } finally {
+              clearTimeout(answerTimer);
+              answerTimer = undefined;
               busy = false;
               if (!closed) {
                 turns.push({ question, answer, error: failure });
@@ -322,8 +343,8 @@ export default function btw(pi: ExtensionAPI) {
                 if (busy && index === turns.length)
                   return {
                     source: currentQuestion,
-                    revision: answer,
-                    lines: () => turnLines(currentQuestion, answer || "…"),
+                    revision: displayedAnswer,
+                    lines: () => turnLines(currentQuestion, displayedAnswer || "…"),
                   };
                 const queued = pending[index - turns.length - (busy ? 1 : 0)];
                 return {

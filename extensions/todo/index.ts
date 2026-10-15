@@ -52,7 +52,8 @@ export default function todo(pi: ExtensionAPI): void {
       const title = `Todo — declared progress · ${blue(panel.shortcut)}`;
       const rows = state.todos.map(item => `${blue(item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○')} ${terminalLabel(item.content)}`);
       return {
-        invalidate() {},
+        invalidate() { panel.invalidate(); },
+        dispose() { panel.invalidate(); },
         render(width: number) {
           return panel.render(width, theme, { summary, title, rows });
         },

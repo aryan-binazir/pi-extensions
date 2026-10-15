@@ -43,8 +43,7 @@ export default function subagents(pi: ExtensionAPI): void {
   const brief = (id: string, task: string) => {
     let label = collapsedBriefById.get(id);
     if (label === undefined) {
-      if (collapsedBriefById.size > 1024) collapsedBriefById.clear();
-      label = terminalLabel(terminalLabel(task).slice(0, 100));
+      label = Buffer.from(terminalLabel(terminalLabel(task).slice(0, 100)), 'utf8').toString('utf8');
       collapsedBriefById.set(id, label);
     }
     return label;
@@ -54,10 +53,13 @@ export default function subagents(pi: ExtensionAPI): void {
   const panel = new FramedPanel('alt+r', 'truncate');
   const panelSlots = 9;
   const renderActiveAgents = () => {
-    if (!context?.hasUI) return;
+    if (!context?.hasUI) { collapsedBriefById.clear(); return; }
     const active = registry.isShutdown ? [] : registry.activeTasks().sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
+    const visible = active.slice(0, panelSlots);
+    const ids = new Set(visible.map(task => task.id));
+    for (const id of collapsedBriefById.keys()) if (!ids.has(id)) collapsedBriefById.delete(id);
     const total = active.length, running = active.filter(task => task.status === 'running').length;
-    const rows = active.slice(0, panelSlots).map(task => [task.id.slice(0, 8), task.status, brief(task.id, task.task)]);
+    const rows = visible.map(task => [task.id.slice(0, 8), task.status, brief(task.id, task.task)]);
     const rendered = total ? JSON.stringify([panel.expanded, total, running, rows]) : undefined;
     if (panelPaintKnown && rendered === paintedPanel) return;
     panelPaintKnown = true;
@@ -67,17 +69,18 @@ export default function subagents(pi: ExtensionAPI): void {
       const summary = `Subagents · ${running} running · ${total - running} queued · ${blue(panel.shortcut)}`;
       const title = `Subagents · ${total} active · ${blue(panel.shortcut)}`;
       const lines = rows.map(([id, status, task]) => `${id} · ${blue(status)} · ${task}`);
+      const panelRows = (slots: number) => {
+        const shown = total <= slots ? total : slots - 1;
+        const hiddenRunning = Math.max(0, running - shown), hiddenQueued = total - shown - hiddenRunning;
+        const more = [hiddenRunning && `${hiddenRunning} ${blue('running')}`, hiddenQueued && `${hiddenQueued} ${blue('queued')}`].filter(Boolean).join(' · ');
+        return [...lines.slice(0, shown), ...(shown < total ? [`… ${total - shown} more · ${more}`] : [])];
+      };
       return {
-        invalidate() {},
+        invalidate() { panel.invalidate(); },
         render(width: number) {
           return panel.render(width, theme, { summary, title,
             maxHeight: Math.max(5, Math.min(panelSlots + 3, Math.floor((tui?.terminal?.rows || 24) / 2))),
-            rows: slots => {
-              const shown = total <= slots ? total : slots - 1;
-              const hiddenRunning = Math.max(0, running - shown), hiddenQueued = total - shown - hiddenRunning;
-              const more = [hiddenRunning && `${hiddenRunning} ${blue('running')}`, hiddenQueued && `${hiddenQueued} ${blue('queued')}`].filter(Boolean).join(' · ');
-              return [...lines.slice(0, shown), ...(shown < total ? [`… ${total - shown} more · ${more}`] : [])];
-            },
+            rows: panelRows,
           });
         },
       };

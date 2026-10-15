@@ -98,11 +98,11 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
  try {
  const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }, reportDiagnostics: true });
  const error = compiled.diagnostics?.find(d => d.category === ts.DiagnosticCategory.Error);
- process.stdout.write(JSON.stringify({version: ts.version, outputText: compiled.outputText, firstError: error ? ts.flattenDiagnosticMessageText(error.messageText, '\\n') : null}));
+ process.stdout.write(JSON.stringify({version: ts.version, outputText: error ? '' : compiled.outputText, firstError: error ? ts.flattenDiagnosticMessageText(error.messageText, '\\n') : null}));
  } catch (error) {
  process.stdout.write(JSON.stringify({version: ts.version, outputText: '', firstError: error.message, errorName: error.name}));
  }
- `, fileURLToPath(import.meta.resolve('typescript'))], { env: {PATH: process.env.PATH}, signal: options.signal, maxBuffer: 16 * 1024 * 1024 });
+ `, fileURLToPath(import.meta.resolve('typescript'))], { env: {PATH: process.env.PATH}, signal: options.signal, maxBuffer: 128 * 1024 * 1024 });
   transpiling.child.stdin?.on('error', () => {});
   transpiling.child.stdin?.end(JSON.stringify(`async function workflow(api: any) {\n${options.source}\n}`));
   const compiled: {version: string; outputText: string; firstError: string | null; errorName?: string} = JSON.parse((await transpiling.catch(error => {

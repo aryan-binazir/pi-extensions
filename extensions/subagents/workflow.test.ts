@@ -124,6 +124,19 @@ test('workflow preserves compiler exception text', async () => {
  } finally {await rm(cwd, {recursive: true, force: true});}
 });
 
+test('workflow preserves large emitted output and its first diagnostic within the source limit', {timeout: 30000}, async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-expanded-output-'));
+ const base = {cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'expanded-output', approve: async () => true, spawn: async () => {throw new Error('must not spawn');}};
+ try {
+  const invalid = 'namespace A {'.repeat(100) + ';'.repeat(60000) + '}'.repeat(100) + 'const n: = 2;';
+  assert.equal(invalid.length, 61413);
+  await assert.rejects(runWorkflow({...base, source: invalid}), {message: 'Type expected.'});
+  const source = 'namespace A {'.repeat(150) + '0;'.repeat(30945) + '}'.repeat(150) + 'return 2;';
+  assert.equal(source.length, 63999);
+  assert.equal(await runWorkflow({...base, source}), 2);
+ } finally {await rm(cwd, {recursive: true, force: true});}
+});
+
 test('workflow rejects unapproved source, executes approved TS, and replays successful stages', async () => {
  const cwd = await mkdtemp(join(tmpdir(),'workflow-'));
  let calls = 0;

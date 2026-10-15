@@ -663,7 +663,6 @@ test("custom answers preserve literal paste markers inside earlier payloads", as
   assert.equal((await result).details.answers[0].value, first + second);
 });
 
-
 test("styled questionnaire frames stay identical when warmed, resized and revisited", async () => {
   const fg = (_: string, s: string) => `\x1b[38;2;95;135;255m${s}\x1b[39m`;
   const h = host(undefined, fg);
@@ -677,6 +676,14 @@ test("styled questionnaire frames stay identical when warmed, resized and revisi
       try {
         const expected = fresh.render(width);
         assert.ok(expected.every((line: string) => visibleWidth(line) <= width));
+        if (width >= 7) {
+          assert.match(stripTerminalSequences(expected[0]), /^╭─+╮$/);
+          assert.match(stripTerminalSequences(expected.at(-1)!), /^╰─+╯$/);
+          for (const line of expected.slice(1, -1)) {
+            assert.match(stripTerminalSequences(line), /^│.*│$/);
+            assert.equal(visibleWidth(line), width);
+          }
+        }
         for (let i = 0; i < 3; i++) assert.deepEqual(h.render(width), expected);
       } finally {
         fresh.key("\x1b");await reference;

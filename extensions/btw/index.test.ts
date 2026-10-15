@@ -838,6 +838,22 @@ test("BTW coalesces streaming frames, publishes the trailing delta by 100ms and 
     advance(1);
     assert.match(h.render(), /alpha beta gamma/);
     assert.equal(h.renderRequests, requests + 1);
+    const fresh = host();
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    fresh.ctx.modelRegistry.getProvider = () => ({ streamSimple: () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "text_delta", delta: "alpha beta gamma" };
+        await waiting;
+      },
+    }) });
+    const reference = fresh.commands.btw.handler("Question", fresh.ctx);
+    try {
+      await tick();
+      assert.deepEqual(h.lines(), fresh.lines());
+    } finally {
+      release();fresh.key("\x1b");await reference;
+    }
     advance(20);
     next({ type: "text_delta", delta: " obsolete draft" });await tick();
     assert.doesNotMatch(h.render(), /obsolete/);
@@ -944,9 +960,13 @@ test("BTW starts queued streaming answers immediately after cancelling the prior
   const h = host();
   let next!: (chunk: any) => void;
   let turns = 0;
+  let connect!: () => void;
+  const connected = new Promise<void>((resolve) => { connect = resolve; });
   h.ctx.modelRegistry.getProvider = () => ({ streamSimple: () => ({
     async *[Symbol.asyncIterator]() {
-      yield { type: "text_delta", delta: ++turns === 1 ? "First draft" : "Second immediate" };
+      const turn = ++turns;
+      if (turn > 1) await connected;
+      yield { type: "text_delta", delta: turn === 1 ? "First draft" : "Second immediate" };
       while (true) yield await new Promise((resolve) => { next = resolve; });
     },
   }) });
@@ -959,12 +979,14 @@ test("BTW starts queued streaming answers immediately after cancelling the prior
     next({ type: "done", reason: "stop", message: { content: [{ type: "text", text: "First final" }] } });
     await tick();
     assert.match(h.render(), /First final/);
-    assert.match(h.render(), /Second immediate/);
-    assert.doesNotMatch(h.render(), /First draft|pending/);
+    assert.match(h.render(), /Answering/);
+    assert.doesNotMatch(h.render(), /First draft|pending|Second immediate/);
     const requests = h.renderRequests;
     now = 100;t.mock.timers.tick(75);
     assert.equal(h.renderRequests, requests);
+    connect();await tick();
+    assert.match(h.render(), /Second immediate/);
   } finally {
-    h.key("\x1b");await result;
+    connect();h.key("\x1b");await result;
   }
 });

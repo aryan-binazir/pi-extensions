@@ -26,6 +26,7 @@ const MAX_HISTORY = 64000;
 const MAX_SNAPSHOT = 96000;
 const MAX_QUESTION = 16000;
 const MAX_PAINTED = 2048;
+const ANSWER_REPAINT_MS = 100;
 const QUEUED = Symbol("queued");
 
 type Block = {
@@ -229,7 +230,7 @@ export default function btw(pi: ExtensionAPI) {
                 onText: (text) => {
                   if (closed) return;
                   answer = text;
-                  const remaining = 100 - (performance.now() - lastPublished);
+                  const remaining = ANSWER_REPAINT_MS - (performance.now() - lastPublished);
                   if (remaining <= 0) {
                     clearTimeout(answerTimer);
                     publish();

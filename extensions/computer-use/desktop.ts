@@ -4,7 +4,7 @@ export type DesktopAction =
   | { action: 'click'; output: string; x: number; y: number; button?: 'left'|'right'|'middle' }
   | { action: 'type'; text: string }
   | { action: 'scroll'; output: string; dx: number; dy: number };
-export interface DesktopResult { [key: string]: unknown; image?: string; mimeType?: string }
+export interface DesktopResult { [key: string]: unknown; image?: string; mimeType?: 'image/png' }
 export interface DesktopBackend { run(action: DesktopAction, signal: AbortSignal): Promise<DesktopResult>; close(): void | Promise<void> }
 
 function validateAction(value: unknown): asserts value is DesktopAction {

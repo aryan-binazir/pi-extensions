@@ -1,18 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { isAbsolute, join } from 'node:path';
-import { resizeImage } from '@earendil-works/pi-coding-agent';
 import { WaylandPointer } from './wayland.ts';
 import { linuxSessionEnvironment } from './linux-session.ts';
 import type { DesktopAction, DesktopBackend, DesktopResult } from './desktop.ts';
 
-const maxBytes = 16 * 1024 * 1024, maxDimension = 2000;
-export async function screenshotResult(bytes: Buffer, output: string): Promise<DesktopResult> {
+const maxBytes = 16 * 1024 * 1024;
+export function pngResult(bytes: Buffer, output: string): DesktopResult {
   if (bytes.length < 24 || bytes.length > maxBytes || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || bytes.toString('ascii', 12, 16) !== 'IHDR') throw new Error('Desktop returned an invalid or oversized PNG');
   const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
   if (!width || !height || width > 32768 || height > 32768 || width * height > 64_000_000) throw new Error('Desktop screenshot dimensions exceed limits');
-  const image = width > maxDimension || height > maxDimension ? await resizeImage(bytes, 'image/png', { maxWidth: maxDimension, maxHeight: maxDimension }) : { data: bytes.toString('base64'), mimeType: 'image/png', width, height };
-  if (!image) throw new Error('Desktop screenshot could not be resized');
-  return { image: image.data, mimeType: image.mimeType, output, width: image.width, height: image.height, originalWidth: width, originalHeight: height, coordinates: 'Click x/y are fractions from 0 to 1 within this output.' };
+  return { image: bytes.toString('base64'), mimeType: 'image/png', output, width, height, coordinates: 'Click x/y are fractions from 0 to 1 within this output.' };
 }
 export class LinuxDesktop implements DesktopBackend {
   private pointer?: WaylandPointer;
@@ -47,7 +44,7 @@ export class LinuxDesktop implements DesktopBackend {
     if (action.action === 'screenshot') {
       const outputs = await this.wayland().outputs(signal), output = action.output ?? outputs[0];
       if (!output || !outputs.includes(output)) throw new Error('Named Wayland output unavailable; wl_output v4 is required');
-      return screenshotResult(await this.command('grim', ['-o', output, '-s', '1', '-t', 'png', '-'], signal), output);
+      return pngResult(await this.command('grim', ['-o', output, '-s', '1', '-t', 'png', '-'], signal), output);
     }
     if (action.action === 'click') await this.wayland().click(action.output, action.x, action.y, action.button ?? 'left', signal);
     else await this.wayland().scroll(action.output, action.dx, action.dy, signal);

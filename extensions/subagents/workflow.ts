@@ -95,16 +95,26 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
   const transpiling = execFileAsync(runtime.execPath, ['-e', `
  const ts = require(process.argv[1]);
  const source = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+ try {
  const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }, reportDiagnostics: true });
  const error = compiled.diagnostics?.find(d => d.category === ts.DiagnosticCategory.Error);
  process.stdout.write(JSON.stringify({version: ts.version, outputText: compiled.outputText, firstError: error ? ts.flattenDiagnosticMessageText(error.messageText, '\\n') : null}));
+ } catch (error) {
+ process.stdout.write(JSON.stringify({version: ts.version, outputText: '', firstError: error.message, errorName: error.name}));
+ }
  `, fileURLToPath(import.meta.resolve('typescript'))], { env: {PATH: process.env.PATH}, signal: options.signal, maxBuffer: 16 * 1024 * 1024 });
   transpiling.child.stdin?.on('error', () => {});
   transpiling.child.stdin?.end(JSON.stringify(`async function workflow(api: any) {\n${options.source}\n}`));
-  const compiled: {version: string; outputText: string; firstError: string | null} = JSON.parse((await transpiling).stdout);
+  const compiled: {version: string; outputText: string; firstError: string | null; errorName?: string} = JSON.parse((await transpiling.catch(error => {
+    if (options.signal?.aborted) throw new Error('Workflow aborted', {cause: error});
+    throw error;
+  })).stdout);
   const identity = digest(JSON.stringify({ version: 2, source: options.source, cwd, policy: admission.policyIdentity, defaults: admission.identityDefaults, profiles: admission.profileIdentity, node: runtime.version, typescript: compiled.version, platform: process.platform }));
-  if (compiled.firstError !== null)
-    throw new Error(compiled.firstError);
+  if (compiled.firstError !== null) {
+    const errorTypes: Record<string, new (message: string) => Error> = {Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError};
+    const ErrorType = errorTypes[compiled.errorName ?? 'Error'] ?? Error;
+    throw new ErrorType(compiled.firstError);
+  }
   const controller = new AbortController();
   const abort = () => controller.abort();
   options.signal?.addEventListener('abort', abort, { once: true });

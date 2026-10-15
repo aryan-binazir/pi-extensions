@@ -8,7 +8,6 @@ export interface PullRequest { number: number; url: string; state: 'OPEN' | 'CLO
 export interface PullRequests {
   /** Reads cached state and schedules discovery for an unseen cwd and branch. */
   get(cwd: string, branch: string | null): PullRequest | undefined;
-  /** Coalesces changes; a non-forced refresh requires an answer at least a minute old. */
   refresh(changed?: boolean): void;
   dispose(): void;
 }

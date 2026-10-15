@@ -48,10 +48,11 @@ export const NEEDS_PROJECTION = /[\x00-\x09\x0b-\x1f\x7f-\x9f]/;
 
 export function projectDisplay(text: string): {
   text: string;
-  offsets: number[];
+  offsets: Uint32Array;
+  lines: string[];
 } {
   let display = "";
-  const offsets = [0];
+  const offsets = new Uint32Array(text.length + 1);
   for (let i = 0; i < text.length; i++) {
     const code = text.charCodeAt(i);
     if (code === 9) display += "    ";
@@ -60,19 +61,17 @@ export function projectDisplay(text: string): {
     else if (code === 127) display += "␡";
     else if (code >= 128 && code < 160) display += `\\x${code.toString(16)}`;
     else display += text[i];
-    offsets.push(display.length);
+    offsets[i + 1] = display.length;
   }
-  return { text: display, offsets };
+  return { text: display, offsets, lines: display.split("\n") };
 }
 
 export function renderProjected(
   editor: Editor,
   render: () => string[],
-  draft = editor.getText(),
+  projection: ReturnType<typeof projectDisplay>,
+  offset: number,
 ): string[] {
-  if (!NEEDS_PROJECTION.test(draft)) return render();
-  const projection = projectDisplay(draft);
-  if (projection.text === draft) return render();
   const internal = editor as unknown as {
     state: { lines: string[]; cursorLine: number; cursorCol: number };
     preferredVisualCol: number | null;
@@ -85,12 +84,9 @@ export function renderProjected(
   }
   const saved = { ...state };
   const preferred = internal.preferredVisualCol;
-  const offset =
-    state.lines
-      .slice(0, state.cursorLine)
-      .reduce((sum, line) => sum + line.length + 1, 0) + state.cursorCol;
-  state.lines = projection.text.split("\n");
-  placeCursor(editor, projection.offsets[offset], projection.text);
+  const col = projection.offsets[offset] - projection.offsets[offset - state.cursorCol];
+  state.lines = projection.lines;
+  setCursorPosition(editor, state.cursorLine, col);
   try {
     return render();
   } finally {

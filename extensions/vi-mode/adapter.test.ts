@@ -193,7 +193,8 @@ test("projectDisplay leaves safe text and its offsets untouched", () => {
   const raw = "plain\ntext";
   const { text, offsets } = projectDisplay(raw);
   assert.equal(text, raw);
-  assert.deepEqual(offsets, Array.from({ length: raw.length + 1 }, (_, i) => i));
+  assert.ok(offsets instanceof Uint32Array);
+  assert.deepEqual(Array.from(offsets), Array.from({ length: raw.length + 1 }, (_, i) => i));
 });
 
 test("cancelAutocomplete closes Pi's popup and rejects an editor without one", async () => {

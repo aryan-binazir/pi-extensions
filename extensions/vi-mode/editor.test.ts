@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { editor, keys } from "./test-support.ts";
 import type { ViEditor } from "./editor.ts";
+import { restoreRawDraft, placeCursor } from "./adapter.ts";
 function undoRedoRestoresPut(e: ViEditor, before: string) {
   const visible = e.getText(),
     expanded = e.getExpandedText();
@@ -1424,7 +1425,6 @@ test("yy2p puts the line twice", () => {
   assert.equal(e.getText(), "a\na\na\nb");
 });
 
-
 test("counted puts separate copies of the final unterminated line", () => {
   const e = editor();
   e.setText("a\nb");
@@ -1595,5 +1595,125 @@ test("draft replacement clears a held opener and discards an active paste throug
   e.handleInput("\x13");
   e.handleInput("\x1b[201~!");
   assert.equal(e.getExpandedText(), "new draft!");
+  e.dispose();
+});
+
+test("warm visual frames do not segment the whole draft", () => {
+  const e = editor();
+  e.insertTextAtCursor("界👩‍👩‍👦 abc\n".repeat(100));
+  keys(e, "\x1bggv");
+  e.render(40);
+  const segment = Intl.Segmenter.prototype.segment;
+  const inputs: string[] = [];
+  Intl.Segmenter.prototype.segment = function (input: string) {
+    inputs.push(input);
+    return segment.call(this, input);
+  };
+  try {
+    const draft = e.getText();
+    for (const key of ["", "\x1b[C", "\x1b[D", "\x1b[B", "\x1b[A"]) {
+      if (key) e.handleInput(key);
+      inputs.length = 0;
+      e.render(40);
+      assert.equal(e.getText(), draft);
+      assert.ok(inputs.every(input => input.length < 100), `warm frame after ${JSON.stringify(key)} only segments labels`);
+    }
+  } finally {
+    Intl.Segmenter.prototype.segment = segment;
+    e.dispose();
+  }
+});
+
+test("cached rendering equals fresh rendering after randomized draft edits and selection changes", () => {
+  let seed = 0x70b71;
+  const random = (n: number) => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % n; };
+  const atoms = ["a", " b ", "\t", "\r", "\r\n", "\n", "界", "e\u0301", "👩‍👩‍👦", "🇺🇸", "\u0600a", "\u0301", "[paste #9]", "\x01", "\x9b"];
+  for (let trial = 0; trial < 120; trial++) {
+    const draft = Array.from({ length: 4 + random(4) }, () => atoms[random(atoms.length)]).join("");
+    const edits = ["\x1bggvll", "\x1b0x", "u", "\x12", "i界\x1b", "A\t!\x1b", "u"];
+    const make = () => {
+      const e = editor();
+      e.focused = !!(trial % 2);
+      e.setPaddingX(trial % 3);
+      restoreRawDraft(e, draft, { pastes: new Map([[9, "payload\n".repeat(12)]]), counter: 9 });
+      return e;
+    };
+    const warm = make();
+    for (let step = 0; step < edits.length; step++) {
+      keys(warm, edits[step]);
+      warm.render(40 + random(40));
+    }
+    const cold = make();
+    for (const edit of edits) keys(cold, edit);
+    assert.deepEqual(warm.render(80), cold.render(80), `normal projection trial ${trial}`);
+    const selection = trial % 2 ? "\x1bggv" : "\x1bggV";
+    keys(warm, selection); keys(cold, selection);
+    for (const motion of ["", "lll", "w", "j", "G", "k", "gg", "$"]) {
+      keys(warm, motion); keys(cold, motion);
+      for (const width of [40, 60, 80, 40]) {
+        const expected = cold.render(width);
+        assert.deepEqual(warm.render(width), expected, `trial ${trial}, motion ${motion}, width ${width}`);
+        assert.deepEqual(warm.render(width), expected, `warm trial ${trial}`);
+      }
+    }
+    warm.dispose(); cold.dispose();
+  }
+});
+
+test("visual wrapping preserves oversized graphemes and projected combining boundaries", () => {
+  const e = editor(); e.focused = true;
+  e.insertTextAtCursor("界a"); keys(e, "\x1bggv");
+  assert.deepEqual(e.render(2).slice(1, -1), ["", CURSOR_MARKER + "\x1b[7m界\x1b[0m", "a"]);
+  e.setText("a\t́b"); keys(e, "0llv");
+  assert.deepEqual(e.render(20).slice(1, -1), ["a    ́b"]);
+  e.dispose();
+});
+
+test("visual end-of-buffer wrapping includes its cursor row in the viewport", () => {
+  const e = editor(); e.focused = true;
+  e.insertTextAtCursor("abcdefghijklmnopqr"); keys(e, "\x1bggv");
+  placeCursor(e, 18);
+  const atEnd = e.render(3);
+  assert.equal(atEnd[0], "...");
+  assert.equal(atEnd.at(-2), CURSOR_MARKER);
+  placeCursor(e, 17);
+  const beforeEnd = e.render(3);
+  assert.equal(beforeEnd[0], "───");
+  assert.equal(beforeEnd.at(-2), "\x1b[7mq\x1b[0m" + CURSOR_MARKER + "\x1b[7mr\x1b[0m");
+  e.dispose();
+});
+
+test("same-width visual renders invalidate cached rows after edits and replacements", () => {
+  const cases = [
+    { draft: "abc\ndef", before: "\x1bggv", after: "\x1bggddv" },
+    { draft: "abcdefghijklmnop", before: "\x1bggv$", after: "\x1b0iXYZ\x1bv" },
+    { draft: "界👩‍👩‍👦ab\n".repeat(8), before: "\x1bggVG", after: "\x1bggddv" },
+    { draft: "a\t́b\r\n界abcdef\nlast", before: "\x1bggVG", after: "\x1bgg0iXX\x1bv" },
+  ];
+  for (const { draft, before, after } of cases) {
+    for (const width of [2, 3, 5, 9, 20]) {
+      for (const rows of [6, 12]) {
+        const make = () => {
+          const e = editor(); e.focused = true;
+          (e as unknown as { tui: { terminal: { rows: number } } }).tui.terminal.rows = rows;
+          e.insertTextAtCursor(draft); keys(e, before);
+          return e;
+        };
+        const warm = make(); warm.render(width);
+        const cold = make();
+        keys(warm, after); keys(cold, after);
+        const expected = cold.render(width);
+        assert.deepEqual(warm.render(width), expected, `${JSON.stringify(draft)} @ ${width}, rows ${rows}`);
+        assert.deepEqual(warm.render(width), expected, "repeated edited frame");
+        warm.setText("new\t界\nreplacement"); cold.setText("new\t界\nreplacement");
+        keys(warm, "ggv$"); keys(cold, "ggv$");
+        assert.deepEqual(warm.render(width), cold.render(width), "public replacement invalidates rows");
+        warm.dispose(); cold.dispose();
+      }
+    }
+  }
+  const e = editor(); e.insertTextAtCursor("abc\ndef"); keys(e, "\x1bggv"); e.render(20);
+  keys(e, "\x1bggddv");
+  assert.deepEqual(e.render(20).slice(1, -1), ["\x1b[7md\x1b[0mef"]);
   e.dispose();
 });

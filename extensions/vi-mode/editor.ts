@@ -109,6 +109,15 @@ export class ViEditor extends CustomEditor {
   private lineStarts: number[] = [0];
   private scanText: string | undefined;
   private scanned = { project: false, segment: false };
+  private projection: ReturnType<typeof projectDisplay> | undefined;
+  private visualLayout: {
+    text: string;
+    width: number;
+    starts: number[];
+    ends: number[];
+    characters: number[] | undefined;
+    cols: number;
+  } | undefined;
   private draft: string | undefined;
 
   constructor(...args: ConstructorParameters<typeof CustomEditor>) {
@@ -130,17 +139,22 @@ export class ViEditor extends CustomEditor {
   }
   [invalidateTextCache](): void {
     this.draft = undefined;
+    this.visualLayout = undefined;
   }
   private scan(): { project: boolean; segment: boolean } {
     const text = this.text();
     if (this.scanText !== text) {
       this.scanText = text;
+      this.projection = undefined;
       this.scanned = {
         project: NEEDS_PROJECTION.test(text),
         segment: NEEDS_SEGMENTING.test(text),
       };
     }
     return this.scanned;
+  }
+  private projected(): ReturnType<typeof projectDisplay> | undefined {
+    return this.scan().project ? (this.projection ??= projectDisplay(this.text())) : undefined;
   }
   private starts(): number[] {
     const text = this.text();
@@ -198,6 +212,7 @@ export class ViEditor extends CustomEditor {
       this.draft = undefined;
       const historyReset = history !== this.undoHistory;
       if (before && !historyReset && before.text !== this.text()) {
+        this.visualLayout = undefined;
         this.checkpoint(before);
         // A native edit cancels pending commands and arguments, so a following u undoes it.
         this.discardArgument = false;
@@ -206,6 +221,7 @@ export class ViEditor extends CustomEditor {
       }
     } finally {
       this.draft = undefined;
+      if (this.mode === "insert") this.visualLayout = undefined;
       this.onSubmit = submit;
     }
   }
@@ -244,6 +260,7 @@ export class ViEditor extends CustomEditor {
   }
   private writeText(text: string): void {
     text = safeDraft(text);
+    this.visualLayout = undefined;
     this.boundaryText = "";
     this.markerText = undefined;
     const payloads = readPastes(this);
@@ -888,8 +905,9 @@ export class ViEditor extends CustomEditor {
       this.cursorShape();
     }
     if (this.mode !== "visual" && this.mode !== "line") {
-      const lines = this.scan().project
-        ? renderProjected(this, () => super.render(width), this.text())
+      const projection = this.projected();
+      const lines = projection
+        ? renderProjected(this, () => super.render(width), projection, this.pos())
         : super.render(width);
       if (this.mode !== "insert" || !this.focused) return lines;
       return lines.map((line) => {
@@ -904,7 +922,7 @@ export class ViEditor extends CustomEditor {
     }
     const [rawStart, rawEnd] = this.range();
     const raw = this.text();
-    const projection = this.scan().project ? projectDisplay(raw) : undefined;
+    const projection = this.projected();
     const display = (offset: number) => (projection ? projection.offsets[offset] : offset);
     const a = display(rawStart),
       b = display(rawEnd);
@@ -915,90 +933,105 @@ export class ViEditor extends CustomEditor {
       Math.max(0, Math.floor((width - 1) / 2)),
     );
     const layoutWidth = Math.max(1, width - 2 * padding - (padding ? 0 : 1));
-    const rows: string[] = [];
-    const mark = this.focused ? CURSOR_MARKER : "";
-    let row = "",
-      cols = 0,
-      cursorRow = 0;
-    if (this.scan().segment) {
-      for (const { segment: char, index: i } of segmenter().segment(text)) {
-        if (char === "\n") {
-          if (i === cursor) {
-            cursorRow = rows.length;
-            row += mark;
+    let layout = this.visualLayout;
+    if (!layout || layout.text !== raw || layout.width !== layoutWidth) {
+      const starts = [0], ends: number[] = [];
+      const characters: number[] | undefined = this.scan().segment ? [] : undefined;
+      let cols = 0;
+      if (characters) {
+        for (const { segment: char, index } of segmenter().segment(text)) {
+          characters.push(index);
+          if (char === "\n") {
+            ends.push(index);
+            starts.push(index + 1);
+            cols = 0;
+            continue;
           }
-          rows.push(row);
-          row = "";
-          cols = 0;
-          continue;
-        }
-        const w = visibleWidth(char);
-        if (cols + w > layoutWidth) {
-          rows.push(row);
-          row = "";
-          cols = 0;
-        }
-        if (i === cursor) cursorRow = rows.length;
-        row +=
-          (i === cursor ? mark : "") +
-          (i >= a && i < b ? "\x1b[7m" + char + "\x1b[0m" : char);
-        cols += w;
-      }
-    } else {
-      for (let i = 0; i < text.length; ) {
-        if (text.charCodeAt(i) === 10) {
-          if (i === cursor) {
-            cursorRow = rows.length;
-            row += mark;
+          const w = visibleWidth(char);
+          if (cols + w > layoutWidth) {
+            ends.push(index);
+            starts.push(index);
+            cols = 0;
           }
-          rows.push(row);
-          row = "";
-          cols = 0;
-          i++;
-          continue;
+          cols += w;
         }
-        if (cols >= layoutWidth) {
-          rows.push(row);
-          row = "";
-          cols = 0;
+        characters.push(text.length);
+      } else {
+        for (let i = 0; i < text.length; i++) {
+          if (text.charCodeAt(i) === 10) {
+            ends.push(i);
+            starts.push(i + 1);
+            cols = 0;
+          } else {
+            if (cols >= layoutWidth) {
+              ends.push(i);
+              starts.push(i);
+              cols = 0;
+            }
+            cols++;
+          }
         }
-        if (i === cursor) {
-          cursorRow = rows.length;
-          row += mark;
-        }
-        let limit = Math.min(text.length, i + layoutWidth - cols);
-        const line = text.indexOf("\n", i);
-        if (line >= 0 && line < limit) limit = line;
-        if (cursor > i && cursor < limit) limit = cursor;
-        if (a > i && a < limit) limit = a;
-        if (b > i && b < limit) limit = b;
-        if (i >= a && i < b)
-          for (let k = i; k < limit; k++) row += "\x1b[7m" + text[k] + "\x1b[0m";
-        else row += text.slice(i, limit);
-        cols += limit - i;
-        i = limit;
       }
+      ends.push(text.length);
+      layout = this.visualLayout = { text: raw, width: layoutWidth, starts, ends, characters, cols };
     }
-    if (cursor === text.length) {
-      if (cols >= layoutWidth) {
-        rows.push(row);
-        row = "";
+    const { starts, ends, characters } = layout;
+    const extra = cursor === text.length && layout.cols >= layoutWidth;
+    const rowCount = starts.length + (extra ? 1 : 0);
+    let cursorRow = 0;
+    let charIndex = 0;
+    if (characters) {
+      let low = 0, high = characters.length;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (characters[mid] < cursor) low = mid + 1;
+        else high = mid;
       }
-      cursorRow = rows.length;
-      row += this.focused ? CURSOR_MARKER : "";
+      charIndex = low;
     }
-    rows.push(row);
+    if (!characters || characters[charIndex] === cursor) {
+      let low = 0, high = starts.length - 1;
+      while (low < high) {
+        const mid = (low + high + 1) >>> 1;
+        if (starts[mid] <= cursor) low = mid;
+        else high = mid - 1;
+      }
+      cursorRow = extra ? rowCount - 1 : low;
+    }
     const max = Math.max(5, Math.floor(this.tui.terminal.rows * 0.3));
     if (cursorRow < this.visualScroll) this.visualScroll = cursorRow;
     if (cursorRow >= this.visualScroll + max)
       this.visualScroll = cursorRow - max + 1;
-    const start = Math.max(0, Math.min(this.visualScroll, rows.length - max));
+    const start = Math.max(0, Math.min(this.visualScroll, rowCount - max));
+    const rows: string[] = [];
+    const mark = this.focused ? CURSOR_MARKER : "";
+    let character = 0;
+    if (characters) {
+      let low = 0, high = characters.length;
+      while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (characters[mid] < starts[start]) low = mid + 1;
+        else high = mid;
+      }
+      character = low;
+    }
+    for (let r = start; r < Math.min(rowCount, start + max); r++) {
+      const from = starts[r] ?? text.length, to = ends[r] ?? text.length;
+      let row = "";
+      for (let i = from; i < to; ) {
+        const next = characters ? characters[++character] : i + 1;
+        const char = text.slice(i, next);
+        row += (i === cursor ? mark : "") + (i >= a && i < b ? "\x1b[7m" + char + "\x1b[0m" : char);
+        i = next;
+      }
+      if (to === cursor && (text.charCodeAt(to) === 10 || (cursor === text.length && r === cursorRow))) row += mark;
+      rows.push(" ".repeat(padding) + row + " ".repeat(padding));
+      if (characters && text.charCodeAt(to) === 10) character++;
+    }
     return [
       this.renderTopBorder(width, start),
-      ...rows
-        .slice(start, start + max)
-        .map((row) => " ".repeat(padding) + row + " ".repeat(padding)),
-      this.renderBottomBorder(width, Math.max(0, rows.length - start - max)),
+      ...rows,
+      this.renderBottomBorder(width, Math.max(0, rowCount - start - max)),
     ];
   }
 }

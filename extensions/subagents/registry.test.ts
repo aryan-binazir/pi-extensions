@@ -1,6 +1,8 @@
 import { supervisorAdmission, admissionFixture } from './test-support.ts';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +10,42 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { piInvocation, SubagentRegistry } from './registry.ts';
 import { assertChildTask, validateTask } from './scope.ts';
+
+test('compiled Pi launches the parent executable while Node and generic Bun keep PATH lookup', async () => {
+  const spec = await validateTask({task: 'literal', cwd: tmpdir(), tools: []}, []);
+  const execPath = Object.getOwnPropertyDescriptor(process, 'execPath')!;
+  const bun = Object.getOwnPropertyDescriptor(process.versions, 'bun');
+  try {
+    for (const [runtime, executable, expected] of [
+      [undefined, '/usr/bin/node', 'pi'],
+      ['1.3.14', '/usr/bin/bun', 'pi'],
+      [undefined, '/tools/pi', 'pi'],
+      ['1.3.14', '/tools/pi', '/tools/pi'],
+      ['1.3.14', '/tools/pi.exe', '/tools/pi.exe'],
+    ] as const) {
+      Object.defineProperty(process.versions, 'bun', {configurable: true, value: runtime});
+      Object.defineProperty(process, 'execPath', {configurable: true, value: executable});
+      const invocation = piInvocation(spec);
+      assert.equal(invocation.command, 'node');
+      assert.equal(invocation.supervised, true);
+      assert.equal(invocation.args[1], expected);
+    }
+  } finally {
+    Object.defineProperty(process, 'execPath', execPath);
+    if (bun) Object.defineProperty(process.versions, 'bun', bun); else delete (process.versions as {bun?: string}).bun;
+  }
+});
+
+test('an explicit child model also scopes Pi model cycling', async () => {
+  const entry = import.meta.resolve('@earendil-works/pi-coding-agent');
+  const {parseArgs} = await import(new URL('./cli/args.js', entry).href);
+  const spec = await validateTask({task: 'read', cwd: tmpdir(), model: 'openai-codex/gpt-6-astra'}, []);
+  const selected = parseArgs(piInvocation(spec).args.slice(2));
+  assert.equal(selected.model, 'openai-codex/gpt-6-astra');
+  assert.deepEqual(selected.models, ['openai-codex/gpt-6-astra']);
+  const inherited = parseArgs(piInvocation({...spec, model: undefined}).args.slice(2));
+  assert.equal(inherited.models, undefined);
+});
 
 test('explicit task briefs remain literal messages through Pi attachment parsing with no tools', async () => {
   const entry = import.meta.resolve('@earendil-works/pi-coding-agent');
@@ -39,6 +77,36 @@ test('explicit task briefs remain literal messages through Pi attachment parsing
       assert.deepEqual(await processFileArguments(parsed.fileArgs), {text: '', images: []}, brief);
     }
   } finally { await rm(root, {recursive: true, force: true}); }
+});
+
+test('unused stream records avoid JSON decoding without changing accounting, updates or oversized drops', async t => {
+  const child = Object.assign(new EventEmitter(), {stdout: new PassThrough(), stderr: new PassThrough(), stdio: []}) as unknown as ChildProcess;
+  const ignored = ['message_start', 'tool_execution_update', 'turn_end', 'agent_end', 'entry_appended', 'compaction_end'].map(type => JSON.stringify({type, payload: 'unused'.repeat(1000)}));
+  let decoded = 0;
+  const parse = JSON.parse;
+  t.mock.method(JSON, 'parse', (text: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
+    if (ignored.includes(text)) decoded++;
+    return parse(text, reviver);
+  });
+  const updates: string[] = [];
+  const registry = new SubagentRegistry({admission: supervisorAdmission, invocation: () => child, onUpdate: task => updates.push(task.output)});
+  try {
+    const handle = await registry.spawn({task: 'stream', cwd: tmpdir()});
+    const terminal = {type: 'message_end', message: {role: 'assistant', stopReason: 'stop', usage: {input: 3, output: 2}, content: [{type: 'text', text: 'Complete'}]}};
+    for (const line of ignored) child.stdout!.emit('data', line + '\n');
+    child.stdout!.emit('data', '{"assistantMessageEvent":{"type":"text_delta","delta":"partial"},"type":"message_update"}\n');
+    child.stdout!.emit('data', JSON.stringify(terminal) + '\n');
+    child.stdout!.emit('data', JSON.stringify({type: 'turn_end', payload: 'x'.repeat(300000)}) + '\n');
+    child.emit('exit', 0, null); child.emit('close', 0, null);
+    const result = await handle.done;
+    assert.equal(result.status, 'succeeded');
+    assert.equal(result.output, 'Complete');
+    assert.deepEqual(result.usage, {input: 3, output: 2});
+    assert.equal(result.usageIncomplete, undefined);
+    assert.equal(result.droppedRecords, 1);
+    assert.deepEqual(updates, ['partial']);
+    assert.equal(decoded, 0);
+  } finally { await registry.shutdown(); }
 });
 
 test('isolated processes stream text and usage and push completion without polling', async () => {
@@ -166,7 +234,7 @@ test('split UTF-8 stdout and stderr retain non-ASCII text', async () => {
   } finally { await registry.shutdown(); }
 });
 
-test('streamed deltas and stderr keep only the last 64 KiB, mid-stream and at completion', async () => {
+test('finished entries keep 64 KiB of output and an 8 KiB diagnostic tail', async () => {
   const script = `
     const line = text => JSON.stringify({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:text}});
     for (let i = 0; i < 4000; i++) { console.log(line(String(i % 10).repeat(40))); process.stderr.write(String(i % 10).repeat(40)); }
@@ -180,7 +248,7 @@ test('streamed deltas and stderr keep only the last 64 KiB, mid-stream and at co
     assert.equal(result.status, 'succeeded');
     assert.equal(result.output.length, 64 * 1024);
     assert.equal(result.output, expected.slice(-64 * 1024));
-    assert.equal(result.stderr, expected.slice(-64 * 1024));
+    assert.equal(result.stderr, expected.slice(-8 * 1024));
     assert.ok(updates.length >= 1);
     for (const update of updates) {
       assert.ok(update.length <= 64 * 1024);

@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import computerUse from './index.ts';
-import { pngResult } from './native.ts';
 
 const register = () => {
   const handlers = new Map<string, () => Promise<void>>(); const tools: any[] = [];
@@ -19,12 +18,6 @@ test('Linux registers five desktop tools and keeps click coordinates normalized'
   const { tools } = register();
   assert.deepEqual(tools.map(tool => tool.name), ['computer_screenshot', 'computer_accessibility', 'computer_click', 'computer_type', 'computer_scroll']);
   assert.equal(tools.find(tool => tool.name === 'computer_click').parameters.properties.x.maximum, 1);
-});
-
-test('screenshot rejects invalid output and retains PNG dimensions', async () => {
-  await assert.rejects(() => pngResult(Buffer.from('not an image'), 'test'), /invalid/);
-  const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO2kAAAAASUVORK5CYII=', 'base64');
-  const result = await pngResult(pixel, 'HEADLESS-1'); assert.equal(result.width, 1); assert.equal(result.height, 1); assert.equal(result.output, 'HEADLESS-1');
 });
 
 test('session shutdown blocks further desktop use', async () => {

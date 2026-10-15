@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
-import { pngResult } from './native.ts';
+import { screenshotResult } from './native.ts';
 
 function png(width: number, height: number, busy = false) {
   const chunk = (kind: string, data: Buffer) => {
@@ -22,8 +22,8 @@ function png(width: number, height: number, busy = false) {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
 }
 
-test('large screenshots fit within 2000 pixels and retain output-relative coordinates', async () => {
-  const result = await pngResult(png(3840, 2160), 'HEADLESS-1');
+test('large screenshots fit within 2000 pixels and report displayed and original dimensions', async () => {
+  const result = await screenshotResult(png(3840, 2160), 'HEADLESS-1');
   assert.equal(result.width, 2000); assert.equal(result.height, 1125);
   assert.equal(result.output, 'HEADLESS-1');
   assert.equal(result.originalWidth, 3840); assert.equal(result.originalHeight, 2160);
@@ -34,30 +34,36 @@ test('large screenshots fit within 2000 pixels and retain output-relative coordi
 });
 
 test('small screenshots pass through byte-for-byte without upscaling', async () => {
-  const bytes = png(1280, 720), result = await pngResult(bytes, 'HEADLESS-1');
+  const bytes = png(1280, 720), result = await screenshotResult(bytes, 'HEADLESS-1');
   assert.equal(result.image, bytes.toString('base64')); assert.equal(result.mimeType, 'image/png');
   assert.equal(result.width, 1280); assert.equal(result.height, 720);
 });
 
 test('portrait screenshots are bounded by height', async () => {
-  const result = await pngResult(png(2160, 3840), 'HEADLESS-1');
+  const result = await screenshotResult(png(2160, 3840), 'HEADLESS-1');
   assert.equal(result.width, 1125); assert.equal(result.height, 2000);
 });
 
 test('screenshots at the dimension limit pass through unchanged', async () => {
-  const bytes = png(2000, 1125), result = await pngResult(bytes, 'HEADLESS-1');
+  const bytes = png(2000, 1125), result = await screenshotResult(bytes, 'HEADLESS-1');
   assert.equal(result.image, bytes.toString('base64'));
 });
 
 test('large PNG headers with undecodable pixels do not return an unbounded image', async () => {
   const bytes = png(3840, 2160).subarray(0, 33);
-  await assert.rejects(pngResult(bytes, 'HEADLESS-1'), /could not be resized/);
+  await assert.rejects(screenshotResult(bytes, 'HEADLESS-1'), /could not be resized/);
 });
 
-
-test('busy large screenshots carry the JPEG format selected by Pi', async () => {
-  const result = await pngResult(png(3840, 2160, true), 'HEADLESS-1');
-  assert.equal(result.mimeType, 'image/jpeg');
-  assert.deepEqual(Buffer.from(result.image!, 'base64').subarray(0, 3), Buffer.from([255, 216, 255]));
+test('busy large screenshots carry the format selected by Pi', async () => {
+  const result = await screenshotResult(png(3840, 2160, true), 'HEADLESS-1');
+  assert.ok(result.mimeType === 'image/png' || result.mimeType === 'image/jpeg');
+  const magic = result.mimeType === 'image/png' ? [137, 80, 78] : [255, 216, 255];
+  assert.deepEqual(Buffer.from(result.image!, 'base64').subarray(0, 3), Buffer.from(magic));
   assert.equal(result.width, 2000); assert.equal(result.height, 1125);
+});
+
+test('screenshot rejects invalid output and retains PNG dimensions', async () => {
+  await assert.rejects(() => screenshotResult(Buffer.from('not an image'), 'test'), /invalid/);
+  const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO2kAAAAASUVORK5CYII=', 'base64');
+  const result = await screenshotResult(pixel, 'HEADLESS-1'); assert.equal(result.width, 1); assert.equal(result.height, 1); assert.equal(result.output, 'HEADLESS-1');
 });

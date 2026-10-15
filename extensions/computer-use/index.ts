@@ -43,7 +43,7 @@ export default function computerUse(pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: 'computer_scroll', label: 'Computer scroll', executionMode: 'sequential',
-    description: 'Scroll at the current pointer position. output must match the screenshot used to position the pointer. dx positive scrolls right, dy positive scrolls down; units are pixels. Never automatically repeat a failed mutation.',
+    description: 'Scroll at the current pointer position. output must match the screenshot used to position the pointer. dx positive scrolls right, dy positive scrolls down; units are original desktop pixels, using originalWidth/originalHeight from the screenshot. Never automatically repeat a failed mutation.',
     parameters: Type.Object({ output, dx: Type.Number({ minimum: -1000, maximum: 1000 }), dy: Type.Number({ minimum: -1000, maximum: 1000 }) }, { additionalProperties: false }),
     async execute(_id, params, signal) { return result(await session.run({ action: 'scroll', ...params }, signal)); },
   });

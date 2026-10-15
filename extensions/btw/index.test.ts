@@ -805,3 +805,166 @@ for (const [maxTokens, expected] of [[128.9, 128], [0.5, 1], [0, 4096], [NaN, 40
     } finally { h.key("\u001b"); await result; }
   });
 }
+
+test("BTW coalesces streaming frames, publishes the trailing delta by 100ms and flushes final text", async (t) => {
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const advance = (ms: number) => { now += ms;t.mock.timers.tick(ms); };
+  const h = host();
+  let next!: (chunk: any) => void;
+  h.ctx.modelRegistry.getProvider = () => ({
+    streamSimple: () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "text_delta", delta: "alpha" };
+        while (true) yield await new Promise((resolve) => { next = resolve; });
+      },
+    }),
+  });
+  const result = h.commands.btw.handler("Question", h.ctx);
+  try {
+    await tick();
+    const first = h.lines();
+    assert.match(first.join("\n"), /alpha/);
+    const requests = h.renderRequests;
+    advance(25);
+    next({ type: "text_delta", delta: " beta" });await tick();
+    assert.deepEqual(h.lines(), first);
+    assert.equal(h.renderRequests, requests);
+    advance(50);
+    next({ type: "text_delta", delta: " gamma" });await tick();
+    advance(24);
+    assert.deepEqual(h.lines(), first);
+    advance(1);
+    assert.match(h.render(), /alpha beta gamma/);
+    assert.equal(h.renderRequests, requests + 1);
+    advance(20);
+    next({ type: "text_delta", delta: " obsolete draft" });await tick();
+    assert.doesNotMatch(h.render(), /obsolete/);
+    next({ type: "done", reason: "stop", message: { content: [{ type: "text", text: "Authoritative final tail" }] } });
+    await tick();
+    assert.match(h.render(), /Authoritative final tail/);
+    assert.doesNotMatch(h.render(), /alpha|obsolete/);
+    const completed = h.lines();
+    const completedRequests = h.renderRequests;
+    advance(100);
+    assert.deepEqual(h.lines(), completed);
+    assert.equal(h.renderRequests, completedRequests);
+  } finally {
+    h.key("\x1b");await result;
+  }
+});
+
+test("BTW cached streaming Markdown matches a fresh overlay after resize and paging", async () => {
+  const h = host();
+  const reply = "# Heading\n\n**Bold** 日本語 👩‍💻\n\n- one\n- two\n\n```ts\nconst x = 1;\n```\n\n".repeat(8);
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => { finish = resolve; });
+  const provider = () => ({ streamSimple: () => ({
+    async *[Symbol.asyncIterator]() {
+      yield { type: "text_delta", delta: reply };
+      await gate;
+    },
+  }) });
+  h.ctx.modelRegistry.getProvider = provider;
+  const result = h.commands.btw.handler("Question", h.ctx);
+  try {
+    await tick();
+    for (const width of [80, 24, 1, 47, 80]) {
+      const fresh = host();
+      fresh.ctx.modelRegistry.getProvider = provider;
+      const reference = fresh.commands.btw.handler("Question", fresh.ctx);
+      try {
+        await tick();
+        const expected = fresh.lines(width);
+        for (let i = 0; i < 3; i++) assert.deepEqual(h.lines(width), expected);
+        assert.ok(expected.every((line) => visibleWidth(line) <= width));
+        h.key("\x1b[5~");fresh.key("\x1b[5~");
+        assert.deepEqual(h.lines(width), fresh.lines(width));
+        h.key("\x1b[6~");
+      } finally {
+        fresh.key("\x1b");await reference;
+      }
+    }
+  } finally {
+    finish();h.key("\x1b");await result;
+  }
+});
+
+for (const outcome of ["empty", "error", "incomplete", "close"]) {
+  test(`BTW clears a pending streaming repaint on ${outcome} without losing retained text`, async (t) => {
+    let now = 0;
+    t.mock.method(performance, "now", () => now);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let push!: () => void;
+    let finish!: () => void;
+    const tail = new Promise<void>((resolve) => { push = resolve; });
+    const end = new Promise<void>((resolve) => { finish = resolve; });
+    const h = host();
+    h.ctx.modelRegistry.getProvider = () => ({ streamSimple: () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "text_delta", delta: "First" };
+        await tail;
+        yield { type: "text_delta", delta: " retained tail" };
+        await end;
+        if (outcome === "empty") yield { type: "done", reason: "stop", message: { content: [] } };
+        if (outcome === "error") yield { type: "error", error: { errorMessage: "synthetic failure" } };
+      },
+    }) });
+    const result = h.commands.btw.handler("Question", h.ctx);
+    try {
+      await tick();
+      now = 25;t.mock.timers.tick(25);
+      push();await tick();
+      assert.doesNotMatch(h.render(), /retained tail/);
+      if (outcome === "close") h.key("\x1b");
+      else {
+        finish();await tick();
+        if (outcome === "empty") {
+          assert.match(h.render(), /Provider returned no text/);
+          assert.doesNotMatch(h.render(), /First|retained tail/);
+        } else {
+          assert.match(h.render(), /First retained tail/);
+          if (outcome === "error") assert.match(h.render(), /synthetic failure/);
+        }
+      }
+      const requests = h.renderRequests;
+      now = 125;t.mock.timers.tick(100);
+      assert.equal(h.renderRequests, requests);
+    } finally {
+      finish();h.key("\x1b");await result;
+    }
+  });
+}
+
+test("BTW starts queued streaming answers immediately after cancelling the prior turn's timer", async (t) => {
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = host();
+  let next!: (chunk: any) => void;
+  let turns = 0;
+  h.ctx.modelRegistry.getProvider = () => ({ streamSimple: () => ({
+    async *[Symbol.asyncIterator]() {
+      yield { type: "text_delta", delta: ++turns === 1 ? "First draft" : "Second immediate" };
+      while (true) yield await new Promise((resolve) => { next = resolve; });
+    },
+  }) });
+  const result = h.commands.btw.handler("First question", h.ctx);
+  try {
+    await tick();
+    now = 25;t.mock.timers.tick(25);
+    next({ type: "text_delta", delta: " pending" });await tick();
+    h.key("Second question");h.key("\r");
+    next({ type: "done", reason: "stop", message: { content: [{ type: "text", text: "First final" }] } });
+    await tick();
+    assert.match(h.render(), /First final/);
+    assert.match(h.render(), /Second immediate/);
+    assert.doesNotMatch(h.render(), /First draft|pending/);
+    const requests = h.renderRequests;
+    now = 100;t.mock.timers.tick(75);
+    assert.equal(h.renderRequests, requests);
+  } finally {
+    h.key("\x1b");await result;
+  }
+});

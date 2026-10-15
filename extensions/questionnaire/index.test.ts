@@ -662,3 +662,26 @@ test("custom answers preserve literal paste markers inside earlier payloads", as
   h.key("\r");
   assert.equal((await result).details.answers[0].value, first + second);
 });
+
+
+test("styled questionnaire frames stay identical when warmed, resized and revisited", async () => {
+  const h = host();
+  const questions = [{ ...question("日本語"), prompt: "Choose 日本語 👩‍💻 ".repeat(20),
+    options: [{ value: "yes", label: "日本語 👩‍💻 ".repeat(10), description: "Details ".repeat(30) }] }, question("next")];
+  const pending = h.run(questions);
+  try {
+    for (const width of [80, 12, 1, 37, 80]) {
+      const fresh = host();
+      const reference = fresh.run(structuredClone(questions));
+      try {
+        const expected = fresh.render(width);
+        assert.ok(expected.every((line: string) => visibleWidth(line) <= width));
+        for (let i = 0; i < 3; i++) assert.deepEqual(h.render(width), expected);
+      } finally {
+        fresh.key("\x1b");await reference;
+      }
+    }
+  } finally {
+    h.key("\x1b");await pending;
+  }
+});

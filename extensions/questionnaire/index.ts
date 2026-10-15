@@ -173,6 +173,7 @@ export default function questionnaire(pi: ExtensionAPI) {
             };
             const wrapCache = new Map<string, string[]>();
             const truncCache = new Map<string, string>();
+            const clipCache = new Map<string, string>();
             const headerCache = new Map<string, string>();
             let cachedWidth = -1;
             const submit = (cancelled: boolean, reason?: string) => {
@@ -311,6 +312,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                   cachedWidth = width;
                   wrapCache.clear();
                   truncCache.clear();
+                  clipCache.clear();
                   headerCache.clear();
                 }
                 const wrap = (text: string) =>
@@ -395,7 +397,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 const edge = (left: string, right: string) => blue(`${left}${"─".repeat(Math.max(0, width - 2))}${right}`);
                 const frame = (line: string) => {
                   if (!framed) return fit(` ${line}`);
-                  const clipped = truncateToWidth(line, w);
+                  const clipped = memo(clipCache, line, () => truncateToWidth(line, w));
                   return fit(`${blue("│")} ${clipped}${" ".repeat(Math.max(0, w - visibleWidth(clipped)))} ${blue("│")}`);
                 };
                 return [

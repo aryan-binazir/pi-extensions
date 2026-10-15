@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import questionnaire from "./index.ts";
 
-function host(onEmit?: (value: any) => void) {
+function host(onEmit?: (value: any) => void, fg = (_: string, s: string) => s) {
   let tool: any;
   let component: any;
   let uiOptions: any;
@@ -37,7 +37,7 @@ function host(onEmit?: (value: any) => void) {
           uiOptions = options;
           component = factory(
             { requestRender() {}, terminal },
-            { fg: (_: string, s: string) => s },
+            { fg },
             {},
             resolve,
           );
@@ -665,13 +665,14 @@ test("custom answers preserve literal paste markers inside earlier payloads", as
 
 
 test("styled questionnaire frames stay identical when warmed, resized and revisited", async () => {
-  const h = host();
+  const fg = (_: string, s: string) => `\x1b[38;2;95;135;255m${s}\x1b[39m`;
+  const h = host(undefined, fg);
   const questions = [{ ...question("日本語"), prompt: "Choose 日本語 👩‍💻 ".repeat(20),
     options: [{ value: "yes", label: "日本語 👩‍💻 ".repeat(10), description: "Details ".repeat(30) }] }, question("next")];
   const pending = h.run(questions);
   try {
     for (const width of [80, 12, 1, 37, 80]) {
-      const fresh = host();
+      const fresh = host(undefined, fg);
       const reference = fresh.run(structuredClone(questions));
       try {
         const expected = fresh.render(width);

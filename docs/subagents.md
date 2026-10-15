@@ -363,11 +363,12 @@ with medium reasoning per owning session, covering direct and workflow children.
 - **Cadence.** It starts asynchronously with work and checks fingerprints every
   minute, with a 30-second request deadline. Task identity, owner, status, brief
   or error changes report on the next tick and reset the output-only interval to
-  60 seconds. When only output changes, reports wait 60, then 120, then 240,
-  then at most 300 seconds between requests. Unchanged state skips the call and
+  60 seconds. Output-only reports become eligible after one, then two, then four,
+  then five minute ticks, capped at five. Unchanged state skips the call and
   report even after that interval; token/cost usage changes alone do not count.
   Failed requests retry on the next minute tick without advancing the backoff.
-  Stopping tracking resets deduplication and backoff.
+  Stopping or invalidating tracking clears deduplication, forcing a status report
+  that resets backoff.
 - **Snapshot.** At most four running children, queued counts and four recent
   completed children, with clipped briefs/output and usage. No parent history is
   sent.

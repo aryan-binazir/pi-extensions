@@ -12,8 +12,8 @@ export class SubagentTracker {
   private nextAt = 0;
   private reportedStatus?: string;
   private reportedOutput?: string;
-  private reportAt = 0;
-  private outputInterval = 60000;
+  private outputIntervalTicks = 1;
+  private ticksUntilOutput = 0;
   constructor(
     private context: () => ExtensionContext | undefined,
     private tasks: () => TaskResult[],
@@ -44,8 +44,6 @@ export class SubagentTracker {
     this.nextAt = 0;
     this.reportedStatus = undefined;
     this.reportedOutput = undefined;
-    this.reportAt = 0;
-    this.outputInterval = 60000;
     clearTimeout(this.timer); this.timer = undefined;
     this.request?.abort(); this.request = undefined;
     this.status = 'Luna tracker idle';
@@ -54,8 +52,7 @@ export class SubagentTracker {
     const generation = this.generation;
     const controller = new AbortController();
     this.request = controller;
-    const now = Date.now();
-    this.nextAt = now + 60000;
+    this.nextAt = Date.now() + 60000;
     const deadline = setTimeout(() => controller.abort(new Error('30-second tracker deadline exceeded')), 30000);
     const current = () => generation === this.generation;
     try {
@@ -69,7 +66,10 @@ export class SubagentTracker {
       const statusFingerprint = statusState.digest('hex');
       const outputFingerprint = outputState.digest('hex');
       const statusChanged = statusFingerprint !== this.reportedStatus;
-      if (!statusChanged && (outputFingerprint === this.reportedOutput || now < this.reportAt)) return;
+      if (!statusChanged) {
+        this.ticksUntilOutput = Math.max(0, this.ticksUntilOutput - 1);
+        if (outputFingerprint === this.reportedOutput || this.ticksUntilOutput > 0) return;
+      }
       this.status = 'Luna tracker observing';
       const compact = (task: TaskResult) => ({
         id: task.id, owner: task.owner, status: task.status,
@@ -103,8 +103,8 @@ export class SubagentTracker {
         if (current()) {
           this.reportedStatus = statusFingerprint;
           this.reportedOutput = outputFingerprint;
-          this.outputInterval = statusChanged ? 60000 : Math.min(this.outputInterval * 2, 300000);
-          this.reportAt = now + this.outputInterval;
+          this.outputIntervalTicks = statusChanged ? 1 : Math.min(this.outputIntervalTicks * 2, 5);
+          this.ticksUntilOutput = this.outputIntervalTicks;
           this.status = 'Luna tracker report available';
         }
       }

@@ -125,7 +125,7 @@ test('unchanged work and usage-only churn do not call Luna or publish again', as
   f.tracker.stop();
 });
 
-test('output, task identity, status and error changes report at the existing cadence', async t => {
+test('the first output change and subsequent task identity, status and error changes report next tick', async t => {
   const f = fixture(t);
   f.tracker.update(); t.mock.timers.tick(0); await tick();
   const changes = [
@@ -159,6 +159,20 @@ test('streaming output backs reports off through 60, 120, 240 and capped 300 sec
   assert.equal(f.reports.length, 7); f.tracker.stop();
 });
 
+test('slightly early timer callbacks do not postpone output reports by a minute', async t => {
+  const f = fixture(t);
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  const now = Date.now;
+  t.mock.method(Date, 'now', () => now() - 1);
+  f.tasks[0].output = 'New progress';
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 2);
+  for (let minute = 2; minute <= 12; minute++) {
+    f.tasks[0].output = `Progress ${minute}`;
+    t.mock.timers.tick(60000); await tick();
+  }
+  assert.equal(f.calls.length, 5); f.tracker.stop();
+});
+
 test('status changes bypass output backoff on the next tick and reset the output interval', async t => {
   const f = fixture(t);
   f.tasks.push({...f.tasks[0], id: 'queued', status: 'queued'});
@@ -185,7 +199,7 @@ test('status changes bypass output backoff on the next tick and reset the output
   f.tracker.stop();
 });
 
-test('restarting clears output backoff and unchanged work stays silent beyond its cap', async t => {
+test('restarting forces a status report that resets backoff, and unchanged work stays silent beyond its cap', async t => {
   const f = fixture(t);
   f.tracker.update(); t.mock.timers.tick(0); await tick();
   for (let minute = 1; minute <= 7; minute++) {

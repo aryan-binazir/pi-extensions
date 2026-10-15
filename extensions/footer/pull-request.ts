@@ -6,10 +6,10 @@ import { terminalLabel } from '../terminal-text.ts';
 
 export interface PullRequest { number: number; url: string; state: 'OPEN' | 'CLOSED' | 'MERGED'; isDraft: boolean }
 export interface PullRequests {
-  /** Reads cached state and schedules discovery for an unseen cwd and branch. */
+  /** Selects a target and schedules a lookup when its cache is stale. */
   get(cwd: string, branch: string | null): PullRequest | undefined;
   refresh(changed?: boolean): void;
-  dispose(): void;
+  dispose(quit?: boolean): void;
 }
 
 const stateWords = { MERGED: ' merged', CLOSED: ' closed', OPEN: '' };
@@ -59,11 +59,13 @@ interface CachedRequest {
   completed?: number;
   unavailable?: boolean;
   pending?: Promise<void>;
-  listeners: Set<() => void>;
+  dirty?: boolean;
+  controller?: AbortController;
+  listeners: Set<(changed: boolean) => void>;
 }
 interface RequestCache { entries: Map<string, CachedRequest>; lastKey?: string }
 const cacheKey = Symbol.for('pi-interactive:footer.pull-requests.v1');
-const unavailable = (message: string) => /ENOENT|command not found|not found in PATH|none of the git remotes|known GitHub host|not a git repository|not a GitHub (?:host|repository)/i.test(message);
+const unavailable = (message: string) => /ENOENT|command not found|not found in PATH|none of the git remotes|no git remotes found|known GitHub host|not a git repository|not a GitHub (?:host|repository)/i.test(message);
 const offline = () => /^(1|true|yes)$/i.test(process.env.PI_OFFLINE ?? '');
 
 export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): PullRequests {
@@ -71,8 +73,12 @@ export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): 
   const cache: RequestCache = registry[cacheKey] ??= { entries: new Map() };
   let key: string | undefined, target: { cwd: string; branch: string; entry: CachedRequest } | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let disposed = false, waiting = false;
-  const updated = () => { if (!disposed) onChange(); };
+  let disposed = false;
+  const updated = (changed: boolean) => {
+    if (disposed) return;
+    if (target?.entry.dirty) schedule();
+    if (changed) onChange();
+  };
   const schedule = () => {
     if (disposed || !target || offline()) return;
     if (timer) clearTimeout(timer);
@@ -83,21 +89,17 @@ export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): 
     timer = undefined;
     if (disposed || !target || offline()) return;
     const { cwd, branch, entry } = target;
-    if (entry.pending) {
-      if (!waiting) {
-        waiting = true;
-        void entry.pending.then(() => { waiting = false; if (target?.entry === entry) schedule(); });
-      }
-      return;
-    }
+    if (entry.pending) return;
+    entry.dirty = false;
+    const signal = (entry.controller = new AbortController()).signal;
     const previous = entry.pr;
     const args = ['pr', 'view', '--json', 'number,url,state,isDraft,headRefName', '--', branch];
-    entry.pending = Promise.resolve().then(() => exec('gh', args, { cwd, timeout: 10000 }))
+    entry.pending = Promise.resolve().then(() => exec('gh', args, { cwd, signal, timeout: 10000 }))
       .then(result => { entry.unavailable = !result.killed && ((result.code !== 0 && !result.stderr.trim()) || unavailable(result.stderr)); entry.pr = parse(result, branch); })
       .catch(error => { entry.unavailable = unavailable(String(error)); entry.pr = undefined; })
       .then(() => {
-        entry.completed = Date.now(); entry.pending = undefined;
-        if (!same(previous, entry.pr)) for (const listener of entry.listeners) listener();
+        entry.completed = Date.now(); entry.pending = undefined; entry.controller = undefined;
+        for (const listener of entry.listeners) listener(!same(previous, entry.pr));
       });
   };
   return {
@@ -107,29 +109,32 @@ export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): 
       const next = branch && branch !== 'detached' ? `${cwd}\0${branch}` : undefined;
       if (next !== key) {
         if (timer) clearTimeout(timer);
-        timer = undefined; waiting = false;
+        timer = undefined;
+        const dirty = target?.entry.dirty;
         target?.entry.listeners.delete(updated);
         key = next; target = undefined;
         if (next) {
-          const entry = cache.entries.get(next) ?? { listeners: new Set<() => void>() };
+          const entry = cache.entries.get(next) ?? { listeners: new Set<(changed: boolean) => void>() };
           cache.entries.set(next, entry);
+          entry.dirty ||= dirty;
           if (cache.lastKey !== next && entry.unavailable) { entry.unavailable = false; entry.completed = undefined; }
           entry.listeners.add(updated);
           target = { cwd, branch: branch!, entry };
-          if (!entry.pending && !entry.unavailable && (entry.completed === undefined || Date.now() - entry.completed >= 60000)) schedule();
+          if (!entry.pending && !entry.unavailable && (entry.dirty || entry.completed === undefined || Date.now() - entry.completed >= 60000)) schedule();
         }
-        cache.lastKey = next;
       }
+      cache.lastKey = next;
       return target?.entry.pr;
     },
     refresh(changed = true) {
       if (disposed || !target || offline()) return;
       const entry = target.entry;
-      if (changed) { entry.unavailable = false; schedule(); }
-      else if (!entry.unavailable && !entry.pending && !timer && (entry.completed === undefined || Date.now() - entry.completed >= 60000)) schedule();
+      if (changed) { entry.unavailable = false; entry.dirty = true; schedule(); }
+      else if (!entry.unavailable && !entry.pending && !timer && (entry.dirty || entry.completed === undefined || Date.now() - entry.completed >= 60000)) schedule();
     },
-    dispose() {
+    dispose(quit = false) {
       disposed = true;
+      if (quit) for (const entry of cache.entries.values()) entry.controller?.abort();
       if (timer) clearTimeout(timer);
       timer = undefined;
       target?.entry.listeners.delete(updated);

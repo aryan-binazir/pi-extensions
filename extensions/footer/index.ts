@@ -11,7 +11,7 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   let timer: ReturnType<typeof setTimeout> | undefined, changeTimer: ReturnType<typeof setTimeout> | undefined;
   let loader: ConfigLoader | undefined;
   let config: PermissionConfig | undefined, watcher: FSWatcher | undefined;
-  let stamp: string | undefined, watching: string | undefined;
+  let stamp: string | undefined, watching: string | undefined, watchingInode: number | undefined;
   let unavailable = 'Auto: unavailable';
   let previous: string | undefined;
   let generation = 0;
@@ -44,8 +44,10 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
     if (!loader) return;
     const parent = dirname(loader.path);
     let directory = parent;
-    while (directory !== watching) {
+    for (;;) {
       try {
+        const inode = statSync(directory).ino;
+        if (directory === watching && inode === watchingInode) return;
         const next = watch(directory, { persistent: false }, () => {
           // Bun can report only the temporary filename for an atomic replacement.
           if (changeTimer) clearTimeout(changeTimer);
@@ -53,8 +55,8 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
           changeTimer.unref();
         });
         next.unref();
-        next.on('error', () => { next.close(); if (watcher === next) { watcher = undefined; watching = undefined; } });
-        watcher?.close(); watcher = next; watching = directory;
+        next.on('error', () => { next.close(); if (watcher === next) { watcher = undefined; watching = undefined; watchingInode = undefined; } });
+        watcher?.close(); watcher = next; watching = directory; watchingInode = inode;
         return;
       } catch {
         const ancestor = dirname(directory);
@@ -63,13 +65,13 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
       }
     }
   };
-  const stop = () => {
+  const stop = (event?: { reason?: string }) => {
     ++generation;
-    prs?.dispose();
+    prs?.dispose(event?.reason === 'quit');
     if (timer) clearTimeout(timer);
     if (changeTimer) clearTimeout(changeTimer);
     timer = changeTimer = undefined;
-    watcher?.close(); watcher = undefined; watching = undefined; stamp = undefined; config = undefined;
+    watcher?.close(); watcher = undefined; watching = undefined; watchingInode = undefined; stamp = undefined; config = undefined;
     if (context?.hasUI) context.ui.setStatus(KEY, undefined);
     if (ownsFooter) context?.ui.setFooter(undefined);
     ownsFooter = false;

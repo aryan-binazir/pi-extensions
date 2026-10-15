@@ -243,6 +243,7 @@ test('no PR, a missing or failing gh, or a killed lookup leaves the footer as it
     { code: 1, stderr: 'no pull requests found for branch "main"' },
     { code: 1, stderr: 'To get started with GitHub CLI, please run:  gh auth login' },
     { code: 1, stderr: 'spawn gh ENOENT' },
+      { code: 1, stderr: 'no git remotes found' },
     { code: 0, killed: true, stdout: prJson() },
   ]) {
     const gh = fakeGh(), f = fixture(gh.exec);
@@ -293,6 +294,7 @@ describe('PR lookup lifecycle', () => {
     for (const failure of [
       { code: 1, stderr: '' },
       { code: 1, stderr: 'spawn gh ENOENT' },
+      { code: 1, stderr: 'no git remotes found' },
       { code: 1, stderr: 'none of the git remotes configured for this repository point to a known GitHub host' },
     ]) {
       const gh = fakeGh(), f = fixture(gh.exec);
@@ -315,6 +317,47 @@ describe('PR lookup lifecycle', () => {
       assert.equal(gh.calls.length, 4, 'returning to a suppressed branch retries');
       replacement.footer.dispose();
     }
+  });
+  test('a mutation queued before replacement refreshes the cached answer', async () => {
+    const gh = fakeGh(), first = fixture(gh.exec);
+    first.footer.render(140); await advance();
+    await gh.calls[0].answer({ stdout: prJson() });
+    first.prs!.refresh(); first.footer.dispose();
+    const replacement = fixture(gh.exec, true);
+    replacement.footer.render(140); await advance();
+    assert.equal(gh.calls.length, 2);
+    replacement.footer.dispose();
+  });
+  test('a mutation during a running lookup survives replacement even when its answer is unchanged', async () => {
+    const gh = fakeGh(), first = fixture(gh.exec);
+    first.footer.render(140); await advance();
+    first.prs!.refresh(); first.footer.dispose();
+    const replacement = fixture(gh.exec, true);
+    replacement.footer.render(140);
+    await gh.calls[0].answer({ stdout: '' });
+    await advance();
+    assert.equal(gh.calls.length, 2);
+    replacement.footer.dispose();
+  });
+  test('a triggering command carries invalidation to a freshly cached branch before its next render', async () => {
+    const gh = fakeGh(), f = fixture(gh.exec);
+    f.footer.render(140); await advance();
+    await gh.calls[0].answer({ stdout: prJson() });
+    f.changeBranch('feature'); f.footer.render(140); await advance();
+    await gh.calls[1].answer({ stdout: prJson({ headRefName: 'feature' }) });
+    f.changeBranch('main'); f.footer.render(140);
+    f.prs!.refresh();
+    f.changeBranch('feature'); f.footer.render(140); await advance();
+    assert.equal(gh.calls.length, 3);
+    assert.equal(gh.calls[2].args.at(-1), 'feature');
+    f.footer.dispose();
+  });
+  test('quitting aborts running lookups without affecting replacement disposal', async () => {
+    const gh = fakeGh(), first = fixture(gh.exec);
+    first.footer.render(140); await advance();
+    first.prs!.dispose(true);
+    assert.equal(gh.calls[0].options?.signal?.aborted, true);
+    first.footer.dispose();
   });
   test('a fresh completed answer survives new sessions and a freshly loaded module', async () => {
     const gh = fakeGh(), first = fixture(gh.exec);

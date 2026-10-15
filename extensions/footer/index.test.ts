@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rename, rm } from 'node:fs/promises';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { mkdtemp, mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
 import { test } from 'node:test';
@@ -25,7 +27,8 @@ const commands = (root: string, version = '0.21.0'): ReturnType<ExtensionAPI['ge
 async function fixture(version = '0.21.0', fixtureConfig = config) {
   const root = await mkdtemp(join(tmpdir(), 'pi-auto-status-'));
   await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@hank-warren/pi-auto-permissions', version, type: 'module' }));
-  const file = join(root, 'config.json');
+  const file = join(root, 'settings', 'config.json');
+  await mkdir(dirname(file));
   await writeFile(join(root, 'config.ts'), `import {readFileSync} from 'node:fs';
 export function autoPermissionsConfigPath() { return ${JSON.stringify(file)}; }
 export function loadAutoPermissionsConfig() { return JSON.parse(readFileSync(${JSON.stringify(file)}, 'utf8')); }`);
@@ -136,20 +139,29 @@ test('model and turn events recompute cached config labels for the active model'
   } finally { await h.emit('session_shutdown'); await f.close(); }
 });
 
-test('unavailable is visible; headless mode performs no discovery or polling', async t => {
-  t.mock.timers.enable({ apis: ['setInterval'] });
-  const interval = t.mock.method(globalThis, 'setInterval');
+test('unavailable settles without any timer or watcher; headless mode never discovers', async t => {
+  const timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+  const watcher = t.mock.method(fs, 'watch'); syncBuiltinESMExports();
+  t.after(() => { watcher.mock.restore(); syncBuiltinESMExports(); });
   const h = harness();
   await h.emit('session_start');
-  await delay(20);
-  assert.equal(interval.mock.callCount(), 0, 'no loader means no polling timer');
+  await until(() => h.discoveryCount() === 1);
+  await new Promise(setImmediate);
   assert.equal(h.statuses.at(-1), 'Auto: unavailable');
+  assert.equal(timeout.mock.callCount(), 1, 'only the completed discovery timeout was scheduled');
+  assert.equal(interval.mock.callCount(), 0);
+  assert.equal(watcher.mock.callCount(), 0);
+  await delay(30);
+  assert.equal(timeout.mock.callCount(), 1, 'no timeout polling after discovery settles');
   await h.emit('session_shutdown');
   const count = h.statuses.length, discoveries = h.discoveryCount();
   await h.emit('session_start', { ...h.ctx, hasUI: false });
-  t.mock.timers.tick(10000);
+  await delay(30);
   assert.equal(h.statuses.length, count);
-  assert.equal(h.discoveryCount(), discoveries);
+  assert.equal(h.discoveryCount(), discoveries, 'flush the deferred startup before checking');
+  assert.equal(timeout.mock.callCount(), 1);
+  assert.equal(interval.mock.callCount(), 0);
+  assert.equal(watcher.mock.callCount(), 0);
 });
 
 test('real Pi loader discovers command provenance and dynamically loads the optional config adapter', async () => {
@@ -171,8 +183,7 @@ test('real Pi loader discovers command provenance and dynamically loads the opti
   } finally { await f.close(); }
 });
 
-test('TUI installs and restores the compact footer; RPC retains its status API', async t => {
-  t.mock.timers.enable({ apis: ['setInterval'] });
+test('TUI installs and restores the compact footer; RPC retains its status API', async () => {
   const h = harness();
   const footers: unknown[] = [];
   const ctx = { ...h.ctx, mode: 'tui' as const, ui: { ...h.ctx.ui, setFooter: (factory: unknown) => { footers.push(factory); } } };
@@ -236,6 +247,19 @@ test('the TUI footer schedules PR lookups, coalesces mutations and throttles tur
   assert.equal(asked.length, 4, 'an old completed lookup refreshes on the next turn end');
   footer.dispose?.();
   await h.emit('session_shutdown', ctx);
+  await h.emit('session_start', ctx);
+  const next = factory!({ requestRender: () => {} } as never, { fg: (_color: string, text: string) => text } as never, data);
+  assert.match(stripVTControlCharacters(next.render(120)[0]), /#42/);
+  t.mock.timers.tick(1500); await new Promise(setImmediate);
+  assert.equal(asked.length, 4, 'session_start reuses process PR state');
+  next.dispose?.(); await h.emit('session_shutdown', ctx);
+  const reloaded = harness([], exec);
+  await reloaded.emit('session_start', ctx);
+  const latest = factory!({ requestRender: () => {} } as never, { fg: (_color: string, text: string) => text } as never, data);
+  assert.match(stripVTControlCharacters(latest.render(120)[0]), /#42/);
+  t.mock.timers.tick(1500); await new Promise(setImmediate);
+  assert.equal(asked.length, 4, 'a newly registered extension reuses process PR state');
+  latest.dispose?.(); await reloaded.emit('session_shutdown', ctx);
 });
 
 test('mutation command words handle quoting, assignments, global flags and command chains', async t => {
@@ -252,16 +276,37 @@ test('mutation command words handle quoting, assignments, global flags and comma
   }
 });
 
-test('shutdown during async discovery prevents late status and timers', async t => {
-  t.mock.timers.enable({ apis: ['setInterval'] });
-  const f = await fixture(); const h = harness(commands(f.root));
+for (const fails of [false, true]) test(`late ${fails ? 'failed' : 'successful'} config discovery cannot attach to a replacement session`, async t => {
+  const f = await fixture(), list = commands(f.root), h = harness(list);
+  const watcher = t.mock.method(fs, 'watch'); syncBuiltinESMExports();
+  t.after(() => { watcher.mock.restore(); syncBuiltinESMExports(); });
   try {
-    const starting = h.emit('session_start');
-    await h.emit('session_shutdown');
-    const count = h.statuses.length;
-    await starting;
-    t.mock.timers.tick(5000);
-    assert.equal(h.statuses.length, count);
-    assert.equal(h.statuses.at(-1), undefined);
-  } finally { await f.close(); }
+    const module = join(f.root, 'config.ts');
+    await writeFile(module, `await new Promise(resolve => setTimeout(resolve, 50));
+${fails ? "throw new Error('synthetic discovery failure');" : ''}
+` + await readFile(module, 'utf8'));
+    h.emit('session_start');
+    await until(() => h.discoveryCount() === 1);
+    list.length = 0;
+    h.emit('session_start');
+    await until(() => h.discoveryCount() === 2);
+    await delay(150);
+    assert.equal(h.statuses.at(-1), 'Auto: unavailable');
+    assert.equal(watcher.mock.callCount(), 0, 'stale discovery must not install a watcher');
+  } finally { await h.emit('session_shutdown'); await f.close(); }
+});
+
+test('an atomically replaced config directory is watched again while idle', async () => {
+  const f = await fixture(), h = harness(commands(f.root));
+  try {
+    h.emit('session_start');
+    await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
+    await rm(dirname(f.file), { recursive: true });
+    await delay(100);
+    await mkdir(dirname(f.file));
+    await writeFile(f.file, JSON.stringify({ ...config, enabled: false }));
+    await until(() => h.statuses.at(-1) === 'Auto: off');
+    await writeFile(f.file, JSON.stringify(config));
+    await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
+  } finally { await h.emit('session_shutdown'); await f.close(); }
 });

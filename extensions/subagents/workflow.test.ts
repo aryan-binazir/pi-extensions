@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,134 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { assertChildTask } from './scope.ts';
 import { runFixtureWorkflow as runWorkflow, workflowFixture } from './test-support.ts';
+
+async function fakeWorkflowNode(cwd: string, options: {version?: string; beforeCompile?: string} = {}) {
+ const candidate = join(cwd, 'node');
+ await writeFile(candidate, `#!/bin/sh
+if [ "$1" = '-p' ]; then
+ printf '%s' '${JSON.stringify({execPath: candidate, version: options.version ?? process.versions.node})}'
+elif [ "$2" = '--input-type=module' ]; then
+ printf permissions-ok
+else
+ if [ "$1" = '-e' ]; then ${options.beforeCompile ?? ':'}; fi
+ exec '${process.execPath}' "$@"
+fi
+`, {mode: 0o700});
+}
+
+test('workflow preserves the journal identity produced by main 9e2efae', {skip: process.platform !== 'linux'}, async () => {
+ assert.equal(JSON.parse(await readFile(fileURLToPath(import.meta.resolve('typescript/package.json')), 'utf8')).version, '5.9.3', 'Golden identity was captured on main 9e2efae with TypeScript 5.9.3; recapture the baseline when updating the compiler');
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-golden-'));
+ const previousPath = process.env.PATH;
+ try {
+  await fakeWorkflowNode(cwd, {version: '24.18.0'});
+  process.env.PATH = cwd;
+  const journalDirectory = join(cwd, 'journal');
+  const admission = {...workflowFixture('/'), policyIdentity: 'golden', identityDefaults: {model: 'test/fixture', thinking: 'low' as const}, profileIdentity: 'fixture-config'};
+  assert.equal(await runWorkflow({source: 'const n: number = 2; return await api.checkpoint("answer", async () => n);', cwd: '/', journalDirectory, policyIdentity: 'golden', admission, approve: async () => true, spawn: async () => {throw new Error('must not spawn');}}), 2);
+  assert.deepEqual(await readdir(journalDirectory), ['78f6664a170d4f77e900e7d8be7f8d4c9b5b1822f60475ef2887d2d76f3bdac9']);
+ } finally {if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; await rm(cwd, {recursive: true, force: true});}
+});
+
+test('workflow preserves the first TypeScript syntax diagnostic', async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-syntax-'));
+ try {
+  await assert.rejects(runWorkflow({source: 'const n: = 2; return n;', cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'syntax', approve: async () => true, spawn: async () => {throw new Error('must not spawn');}}), {message: 'Type expected.'});
+  assert.deepEqual(await readdir(cwd), []);
+ } finally {await rm(cwd, {recursive: true, force: true});}
+});
+
+test('workflow executes TypeScript without loading the compiler into the parent', async () => {
+ const workflow = new URL('./workflow.ts', import.meta.url).href;
+ const {stdout} = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+  import assert from 'node:assert/strict';
+  import {createRequire, registerHooks} from 'node:module';
+  import {mkdtemp, rm} from 'node:fs/promises';
+  import {tmpdir} from 'node:os';
+  import {join} from 'node:path';
+  registerHooks({load(url, context, nextLoad) {
+   if (/[/\\\\]node_modules[/\\\\]typescript[/\\\\]/.test(url)) throw new Error('TypeScript loaded in parent: ' + url);
+   return nextLoad(url, context);
+  }});
+  const {runWorkflow} = await import(${JSON.stringify(workflow)});
+  const cwd = await mkdtemp(join(tmpdir(), 'workflow-module-graph-'));
+  try {
+   assert.equal(await runWorkflow({source: 'const n: number = 2; return n;', cwd, journalDirectory: join(cwd, 'journal'), admission: {policyIdentity: 'graph'}, approve: async () => true, spawn: async () => {throw new Error('must not spawn');}}), 2);
+   assert.deepEqual(Object.keys(createRequire(import.meta.url).cache).filter(path => /[/\\\\]node_modules[/\\\\]typescript[/\\\\]/.test(path)), []);
+   await assert.rejects(import('typescript'), /TypeScript loaded in parent/);
+   process.stdout.write('compiler stayed out of parent');
+  } finally {await rm(cwd, {recursive: true, force: true});}
+ `], {timeout: 15000, maxBuffer: 65536});
+ assert.equal(stdout, 'compiler stayed out of parent');
+});
+
+test("workflow preserves main's emitted TypeScript enum and accepts the full source limit", async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-output-'));
+ const base = {cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'output', approve: async () => true, spawn: async () => {throw new Error('must not spawn');}};
+ try {
+  assert.deepEqual(await runWorkflow({...base, source: 'enum Choice { No, Yes }; const n: Choice = Choice.Yes; return [n, workflow.toString()];'}), [1, `async function workflow(api) {
+    let Choice;
+    (function (Choice) {
+        Choice[Choice["No"] = 0] = "No";
+        Choice[Choice["Yes"] = 1] = "Yes";
+    })(Choice || (Choice = {}));
+    ;
+    const n = Choice.Yes;
+    return [n, workflow.toString()];
+}`]);
+  const source = ('const text: string = "' + 'é'.repeat(60000) + '"; return text.length;').padEnd(64000);
+  assert.equal(await runWorkflow({...base, source}), 60000);
+ } finally {await rm(cwd, {recursive: true, force: true});}
+});
+
+test('workflow preserves lone UTF-16 surrogates in approved source', async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-surrogate-'));
+ try {
+  assert.deepEqual(await runWorkflow({source: 'return ["\ud800", "\udc00"].map(value => value.charCodeAt(0));', cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'surrogates', approve: async () => true, spawn: async () => {throw new Error('must not spawn');}}), [55296, 56320]);
+ } finally {await rm(cwd, {recursive: true, force: true});}
+});
+
+test('workflow transpilation uses the workflow deadline instead of the probe timeout', {skip: process.platform === 'win32'}, async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-slow-compiler-'));
+ const previousPath = process.env.PATH;
+ try {
+  await fakeWorkflowNode(cwd, {beforeCompile: '/bin/sleep 6'});
+  process.env.PATH = cwd;
+  assert.equal(await runWorkflow({source: 'const n: number = 2; return n;', cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'slow-compiler', timeout: 20000, approve: async () => true, spawn: async () => {throw new Error('must not spawn');}}), 2);
+ } finally {if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; await rm(cwd, {recursive: true, force: true});}
+});
+
+test('workflow deadline aborts a stalled transpiler with the existing cancellation message', {skip: process.platform === 'win32', timeout: 10000}, async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-compiler-abort-'));
+ const previousPath = process.env.PATH;
+ try {
+  const marker = join(cwd, 'compiling');
+  await fakeWorkflowNode(cwd, {beforeCompile: `printf started > '${marker}'; exec /bin/sleep 30`});
+  process.env.PATH = cwd;
+  await assert.rejects(runWorkflow({source: 'return 2;', cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'compiler-abort', timeout: 1000, approve: async () => true, spawn: async () => {throw new Error('must not spawn');}}), {message: 'Workflow aborted'});
+  assert.equal(await readFile(marker, 'utf8'), 'started');
+ } finally {if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; await rm(cwd, {recursive: true, force: true});}
+});
+
+test('workflow preserves compiler exception text', async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-compiler-error-'));
+ try {
+  await assert.rejects(runWorkflow({source: 'return ' + '['.repeat(31000) + ']'.repeat(31000) + ';', cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'compiler-error', approve: async () => true, spawn: async () => {throw new Error('must not spawn');}}), {name: 'RangeError', message: 'Maximum call stack size exceeded'});
+ } finally {await rm(cwd, {recursive: true, force: true});}
+});
+
+test('workflow preserves large emitted output and its first diagnostic within the source limit', {timeout: 30000}, async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-expanded-output-'));
+ const base = {cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'expanded-output', approve: async () => true, spawn: async () => {throw new Error('must not spawn');}};
+ try {
+  const invalid = 'namespace A {'.repeat(100) + ';'.repeat(60000) + '}'.repeat(100) + 'const n: = 2;';
+  assert.equal(invalid.length, 61413);
+  await assert.rejects(runWorkflow({...base, source: invalid}), {message: 'Type expected.'});
+  const source = 'namespace A {'.repeat(150) + '0;'.repeat(30945) + '}'.repeat(150) + 'return 2;';
+  assert.equal(source.length, 63999);
+  assert.equal(await runWorkflow({...base, source}), 2);
+ } finally {await rm(cwd, {recursive: true, force: true});}
+});
 
 test('workflow rejects unapproved source, executes approved TS, and replays successful stages', async () => {
  const cwd = await mkdtemp(join(tmpdir(),'workflow-'));

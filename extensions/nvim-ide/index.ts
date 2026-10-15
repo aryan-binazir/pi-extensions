@@ -34,7 +34,12 @@ export default function nvimIde(pi: ExtensionAPI): void {
   const editPaths = new Map<string, { path: string; cwd: string }>();
   let shown: string | undefined;
   let paintTimer: NodeJS.Timeout | undefined;
-  const paint = (state: LinkState) => { if (paintTimer) { clearTimeout(paintTimer); paintTimer = undefined; } const text = statusText(state); if (text === shown || !ctx?.hasUI) return; shown = text; ctx.ui.setStatus(statusKey, text); };
+  const paint = (state: LinkState) => {
+    if (paintTimer) { clearTimeout(paintTimer); paintTimer = undefined; }
+    const text = statusText(state);
+    if (text === shown || !ctx?.hasUI) return;
+    shown = text; ctx.ui.setStatus(statusKey, text);
+  };
   const need = (): IdeLink => { if (!link?.connected) throw new Error('Open Neovim with claudecode.nvim in the session directory.'); return link; };
 
   pi.on('session_start', async (_event, context) => {

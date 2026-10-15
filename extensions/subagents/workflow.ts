@@ -3,9 +3,9 @@ import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { open, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import type ts from 'typescript';
 import { validateTimeout, type TaskSpec, type ValidTask } from './task.ts';
 import { abortable } from './cancellation.ts';
 import { WorkflowJournal } from './workflow-journal.ts';
@@ -23,8 +23,6 @@ interface WorkflowOptions {
 }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const execFileAsync = promisify(execFile);
-let compiler: Promise<typeof ts> | undefined;
-const typescript = () => (compiler ??= import('typescript').then(module => module.default));
 // Pi may itself be a Bun executable. Probe Node independently and use the
 // returned absolute executable, never Pi's emulated process.versions.node.
 async function workflowRuntime(signal?: AbortSignal) {
@@ -70,7 +68,6 @@ async function workflowRuntime(signal?: AbortSignal) {
 }
 export async function runWorkflow(options: WorkflowOptions): Promise<unknown> {
   const timeout = validateTimeout(options.timeout, 'Workflow timeout');
-  await typescript();
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), timeout);
   const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
@@ -94,14 +91,21 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
   if (!approved)
     throw new Error('Workflow requires explicit source approval');
   const runtime = await workflowRuntime(options.signal);
-  const tsc = await typescript();
   const cwd = await realpath(options.cwd);
   const admission = options.admission;
-  const identity = digest(JSON.stringify({ version: 2, source: options.source, cwd, policy: admission.policyIdentity, defaults: admission.identityDefaults, profiles: admission.profileIdentity, node: runtime.version, typescript: tsc.version, platform: process.platform }));
-  const compiled = tsc.transpileModule(`async function workflow(api: any) {\n${options.source}\n}`, { compilerOptions: { target: tsc.ScriptTarget.ES2022, module: tsc.ModuleKind.None }, reportDiagnostics: true });
-  const errors = compiled.diagnostics?.filter(d => d.category === tsc.DiagnosticCategory.Error) ?? [];
-  if (errors.length)
-    throw new Error(tsc.flattenDiagnosticMessageText(errors[0].messageText, '\n'));
+  const transpiling = execFileAsync(runtime.execPath, ['-e', `
+ const ts = require(process.argv[1]);
+ const source = require('node:fs').readFileSync(0, 'utf8');
+ const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }, reportDiagnostics: true });
+ const error = compiled.diagnostics?.find(d => d.category === ts.DiagnosticCategory.Error);
+ process.stdout.write(JSON.stringify({version: ts.version, outputText: compiled.outputText, firstError: error ? ts.flattenDiagnosticMessageText(error.messageText, '\\n') : null}));
+ `, createRequire(import.meta.url).resolve('typescript')], { env: {PATH: process.env.PATH}, signal: options.signal, timeout: 5000, maxBuffer: 16 * 1024 * 1024 });
+  transpiling.child.stdin?.on('error', () => {});
+  transpiling.child.stdin?.end(`async function workflow(api: any) {\n${options.source}\n}`);
+  const compiled: {version: string; outputText: string; firstError: string | null} = JSON.parse((await transpiling).stdout);
+  const identity = digest(JSON.stringify({ version: 2, source: options.source, cwd, policy: admission.policyIdentity, defaults: admission.identityDefaults, profiles: admission.profileIdentity, node: runtime.version, typescript: compiled.version, platform: process.platform }));
+  if (compiled.firstError !== null)
+    throw new Error(compiled.firstError);
   const controller = new AbortController();
   const abort = () => controller.abort();
   options.signal?.addEventListener('abort', abort, { once: true });

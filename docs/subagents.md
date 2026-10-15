@@ -360,12 +360,15 @@ Snapshot lifetime and provenance:
 Registered subagents share one report-only `openai-codex/gpt-6-luna` tracker
 with medium reasoning per owning session, covering direct and workflow children.
 
-- **Cadence.** It starts asynchronously with work, then requests at most once per
-  minute with a 30-second deadline. After a successful report, unchanged task state
-  skips both the model call and the report; token/cost usage changes alone do not
-  count as progress. Task identity, status, brief, output or error changes can
-  trigger the next report. Failed requests retry at the same cadence, and stopping
-  tracking resets deduplication.
+- **Cadence.** It starts asynchronously with work and checks fingerprints every
+  minute, with a 30-second request deadline. Task identity, owner, status, brief
+  or error changes report on the next tick and reset the output-only interval to
+  60 seconds. Output-only reports become eligible after one, then two, then four,
+  then five minute ticks, capped at five. Unchanged state skips the call and
+  report even after that interval; token/cost usage changes alone do not count.
+  Failed requests retry on the next minute tick without advancing the backoff.
+  Stopping or invalidating tracking clears deduplication, forcing a status report
+  that resets backoff.
 - **Snapshot.** At most four running children, queued counts and four recent
   completed children, with clipped briefs/output and usage. No parent history is
   sent.

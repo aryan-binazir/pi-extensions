@@ -125,7 +125,7 @@ test('unchanged work and usage-only churn do not call Luna or publish again', as
   f.tracker.stop();
 });
 
-test('output, task identity, status and error changes report at the existing cadence', async t => {
+test('the first output change and subsequent task identity, status and error changes report next tick', async t => {
   const f = fixture(t);
   f.tracker.update(); t.mock.timers.tick(0); await tick();
   const changes = [
@@ -141,6 +141,121 @@ test('output, task identity, status and error changes report at the existing cad
     t.mock.timers.tick(1); await tick(); assert.equal(f.calls.length, i + 2);
   }
   assert.equal(f.reports.length, 6); f.tracker.stop();
+});
+
+test('streaming output backs reports off through 60, 120, 240 and capped 300 second intervals', async t => {
+  const f = fixture(t);
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  const reportMinutes = new Set([1, 3, 7, 12, 17, 22]);
+  let expected = 1;
+  for (let minute = 1; minute <= 22; minute++) {
+    f.tasks[0].output = `Streaming minute ${minute}`;
+    f.tracker.update();
+    t.mock.timers.tick(59999); await tick(); assert.equal(f.calls.length, expected);
+    t.mock.timers.tick(1); await tick();
+    if (reportMinutes.has(minute)) expected++;
+    assert.equal(f.calls.length, expected, `minute ${minute}`);
+  }
+  assert.equal(f.reports.length, 7); f.tracker.stop();
+});
+
+test('slightly early timer callbacks do not postpone output reports by a minute', async t => {
+  const f = fixture(t);
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  const now = Date.now;
+  t.mock.method(Date, 'now', () => now() - 1);
+  f.tasks[0].output = 'New progress';
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 2);
+  for (let minute = 2; minute <= 12; minute++) {
+    f.tasks[0].output = `Progress ${minute}`;
+    t.mock.timers.tick(60000); await tick();
+  }
+  assert.equal(f.calls.length, 5); f.tracker.stop();
+});
+
+test('status changes bypass output backoff on the next tick and reset the output interval', async t => {
+  const f = fixture(t);
+  f.tasks.push({...f.tasks[0], id: 'queued', status: 'queued'});
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  for (let minute = 1; minute <= 7; minute++) {
+    f.tasks[0].output = `Progress ${minute}`;
+    t.mock.timers.tick(60000); await tick();
+  }
+  assert.equal(f.calls.length, 4);
+  const changes = [
+    () => { f.tasks[1].status = 'running'; },
+    () => { f.tasks[0].error = 'A concern'; },
+    () => { f.tasks.push({...f.tasks[0], id: 'new'}); },
+    () => { f.tasks[0].task = 'Revised brief'; },
+  ];
+  for (const change of changes) {
+    change(); f.tracker.update();
+    const before: number = f.calls.length;
+    t.mock.timers.tick(59999); await tick(); assert.equal(f.calls.length, before);
+    t.mock.timers.tick(1); await tick(); assert.equal(f.calls.length, before + 1);
+    f.tasks[0].output += ' More progress';
+    t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, before + 2);
+  }
+  f.tracker.stop();
+});
+
+test('restarting forces a status report that resets backoff, and unchanged work stays silent beyond its cap', async t => {
+  const f = fixture(t);
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  for (let minute = 1; minute <= 7; minute++) {
+    f.tasks[0].output = `Progress ${minute}`;
+    t.mock.timers.tick(60000); await tick();
+  }
+  assert.equal(f.calls.length, 4);
+  for (let minute = 0; minute < 10; minute++) {
+    t.mock.timers.tick(60000); await tick();
+  }
+  assert.equal(f.calls.length, 4);
+  f.tracker.stop(); f.tracker.update(); t.mock.timers.tick(0); await tick();
+  assert.equal(f.calls.length, 5);
+  f.tasks[0].output = 'Fresh output';
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 6);
+  f.tracker.stop();
+});
+
+test('a failed output report retries next minute without advancing the backoff', async t => {
+  let fail = false;
+  const f = fixture(t, async function* () {
+    if (fail) { yield {type: 'error', error: {errorMessage: 'temporary failure'}}; return; }
+    yield {type: 'text_delta', delta: 'Observed'}; yield {type: 'done', reason: 'stop'};
+  });
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  f.tasks[0].output = 'First output';
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 2);
+  f.tasks[0].output = 'Later output'; fail = true;
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 2);
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 3);
+  assert.match(f.tracker.status, /temporary failure/);
+  fail = false;
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 4);
+  f.tasks[0].output = 'More output';
+  for (let minute = 0; minute < 3; minute++) {
+    t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 4);
+  }
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 5);
+  f.tracker.stop();
+});
+
+test('slow reports keep output eligibility anchored to request start', async t => {
+  let release!: () => void;
+  const f = fixture(t, async function* () {
+    await new Promise<void>(r => {release = r;});
+    yield {type: 'text_delta', delta: 'Observed'}; yield {type: 'done', reason: 'stop'};
+  });
+  f.tracker.update(); t.mock.timers.tick(0); await tick();
+  t.mock.timers.tick(20000); release(); await tick();
+  f.tasks[0].output = 'First output';
+  t.mock.timers.tick(40000); await tick(); assert.equal(f.calls.length, 2);
+  t.mock.timers.tick(20000); release(); await tick();
+  f.tasks[0].output = 'More output';
+  t.mock.timers.tick(40000); await tick(); assert.equal(f.calls.length, 2);
+  t.mock.timers.tick(60000); await tick(); assert.equal(f.calls.length, 3);
+  release(); await tick(); f.tracker.stop();
 });
 
 test('failed reports retry unchanged work; successful reports dedup until lifecycle reset', async t => {

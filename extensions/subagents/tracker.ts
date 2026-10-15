@@ -10,7 +10,10 @@ export class SubagentTracker {
   private request?: AbortController;
   private generation = 0;
   private nextAt = 0;
-  private reportedState?: string;
+  private reportedStatus?: string;
+  private reportedOutput?: string;
+  private outputIntervalTicks = 1;
+  private ticksUntilOutput = 0;
   constructor(
     private context: () => ExtensionContext | undefined,
     private tasks: () => TaskResult[],
@@ -39,7 +42,8 @@ export class SubagentTracker {
   stop(): void {
     this.generation++;
     this.nextAt = 0;
-    this.reportedState = undefined;
+    this.reportedStatus = undefined;
+    this.reportedOutput = undefined;
     clearTimeout(this.timer); this.timer = undefined;
     this.request?.abort(); this.request = undefined;
     this.status = 'Luna tracker idle';
@@ -53,12 +57,19 @@ export class SubagentTracker {
     const current = () => generation === this.generation;
     try {
       const tasks = this.tasks();
-      const state = createHash('sha256');
+      const statusState = createHash('sha256');
+      const outputState = createHash('sha256');
       for (const task of [...tasks].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
-        state.update(JSON.stringify([task.id, task.owner, task.status, task.task, task.output, task.error]));
+        statusState.update(JSON.stringify([task.id, task.owner, task.status, task.task, task.error]));
+        outputState.update(JSON.stringify([task.id, task.output]));
       }
-      const fingerprint = state.digest('hex');
-      if (fingerprint === this.reportedState) return;
+      const statusFingerprint = statusState.digest('hex');
+      const outputFingerprint = outputState.digest('hex');
+      const statusChanged = statusFingerprint !== this.reportedStatus;
+      if (!statusChanged) {
+        this.ticksUntilOutput = Math.max(0, this.ticksUntilOutput - 1);
+        if (outputFingerprint === this.reportedOutput || this.ticksUntilOutput > 0) return;
+      }
       this.status = 'Luna tracker observing';
       const compact = (task: TaskResult) => ({
         id: task.id, owner: task.owner, status: task.status,
@@ -89,7 +100,13 @@ export class SubagentTracker {
       if (!report.trim()) throw new Error('Provider returned no complete tracking report');
       if (current()) {
         this.publish(report);
-        if (current()) { this.reportedState = fingerprint; this.status = 'Luna tracker report available'; }
+        if (current()) {
+          this.reportedStatus = statusFingerprint;
+          this.reportedOutput = outputFingerprint;
+          this.outputIntervalTicks = statusChanged ? 1 : Math.min(this.outputIntervalTicks * 2, 5);
+          this.ticksUntilOutput = this.outputIntervalTicks;
+          this.status = 'Luna tracker report available';
+        }
       }
     } catch (error) {
       if (current()) this.status = `Luna tracker error: ${error instanceof Error ? error.message.slice(0, 500) : 'Provider request failed'}`;

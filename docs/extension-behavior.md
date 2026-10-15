@@ -14,7 +14,7 @@ event, available in the pinned 0.99.1 SDK, preserving system updates in their
 original transcript positions. Stale reminders strengthen at three and six
 delivered user messages. Accounting stops at six until the list changes; resume
 keeps the same reminder strength, including older snapshots with higher counts.
-Identical declarations do not write another snapshot.
+Identical declarations only write a snapshot when stale accounting is pending.
 
 `/effort new [LEVEL] [provider/model]` creates a session with a temporary model
 and effort handoff. It does not overwrite saved defaults. Plain `/new` keeps

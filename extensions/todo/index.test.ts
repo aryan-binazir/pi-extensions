@@ -282,7 +282,6 @@ test('active todo preserves the request prefix and mid-conversation system updat
   assert.deepEqual(first.slice(0, -1), initial);
   assert.deepEqual(next.slice(0, initial.length), initial);
   assert.deepEqual(next[initial.length], update);
-  assert.equal(JSON.stringify(next).slice(0, JSON.stringify(initial).length - 1), JSON.stringify(initial).slice(0, -1));
   const reminder = first.at(-1)!;
   assert.equal(reminder.role, 'custom');
   assert.ok('content' in reminder);
@@ -300,7 +299,6 @@ test('provider requests retain the cached prefix when editor context changes bet
     await session.prompt('First prompt');
     await session.prompt('Second prompt');
     const first = requests[0].messages, next = requests[1].messages;
-    assert.deepEqual(next[0], first[0]);
     assert.equal(next.filter(message => message.role === 'system').length, 2);
     assert.deepEqual(next.slice(0, first.length - 1), first.slice(0, -1));
     const prefix = JSON.stringify(first.slice(0, -1)).slice(0, -1);
@@ -358,7 +356,7 @@ function providerText(context: TranscriptContext): string {
 }
 
 for (const mode of ['steer', 'followUp'] as const) {
-  test(`queued ${mode} prompts count each delivered user and refresh stale reminders`, async () => todoSession(async (session, provider, manager) => {
+  test(`queued ${mode} prompts account through six delivered users and keep stale reminders`, async () => todoSession(async (session, provider, manager) => {
     const requests: string[] = [];
     provider.setResponses(Array.from({ length: 7 }, (_, index) => async context => {
       requests.push(providerText(context));
@@ -377,6 +375,7 @@ for (const mode of ['steer', 'followUp'] as const) {
     assert.equal(branch.filter(entry => entry.type === 'message' && entry.message.role === 'user').length, 7);
     const snapshots = branch.filter(entry => entry.type === 'custom').filter(entry => entry.customType === 'interactive-tools:todo');
     assert.equal(snapshots.length, 7, 'one seed and counts through six, without an agent_end duplicate');
+    assert.deepEqual(snapshots.slice(1).map(entry => entry.parentId), branch.filter(entry => entry.type === 'message' && entry.message.role === 'user').slice(0, 6).map(entry => entry.id));
     assert.deepEqual(snapshots.at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 6 });
     for (const entry of snapshots.slice(1)) {
       const parent = manager.getEntry(entry.parentId!);
@@ -434,6 +433,7 @@ test('batched prompts count users rather than provider requests', async () => to
   assert.match(requests[1], /STALE TODO/);
   assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 6 });  const snapshots = manager.getBranch().filter(entry => entry.type === 'custom');
   assert.equal(snapshots.length, 7);
+  assert.deepEqual(snapshots.slice(1).map(entry => entry.parentId), manager.getBranch().filter(entry => entry.type === 'message' && entry.message.role === 'user').slice(0, 6).map(entry => entry.id));
   for (const entry of snapshots.slice(1)) {
     const parent = manager.getEntry(entry.parentId!);
     assert.equal(parent?.type, 'message');
@@ -473,6 +473,19 @@ test('queued prompts cancelled before delivery do not count', async () => {
     assert.equal(manager.getBranch().filter(entry => entry.type === 'message' && entry.message.role === 'user').length, 1);
     assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'custom').at(-1)?.data, { version: 1, todos: [{ content: 'Still working', status: 'pending' }], staleTurns: 1 });
   });
+});
+
+test('an identical declaration saves pending accounting before resume', async () => {
+  const app = runtime();
+  const tasks = [{ content: 'Unfinished work', status: 'pending' }];
+  await app.call(tasks);
+  await app.turn();
+  await app.hook('message_start', { message: { role: 'user', content: 'Second prompt' } });
+  await app.call(tasks);
+  assert.equal(app.appended().at(-1).staleTurns, 2);
+  const resumed = runtime(app.branch());
+  await resumed.hook('session_start');
+  assert.equal(await resumed.turn(), 'This todo list has not changed for several turns. Update actual progress or explain the blocker.\nPersisted todos are declared progress, not verified completion:\n[pending] Unfinished work');
 });
 
 test('legacy counts above six retain the stale warning without more snapshots', async () => {

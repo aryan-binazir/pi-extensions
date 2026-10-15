@@ -12,7 +12,7 @@ function stop() {
 const watch = setInterval(() => {
   if (process.ppid !== parent) return stop();
   try { process.kill(parent, 0); } catch { stop(); }
-}, 250);
+}, 1000);
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, stop);
 child.on('error', () => { clearInterval(watch); clearTimeout(killTimer); process.exitCode = 1; });
 child.on('exit', code => { clearInterval(watch); clearTimeout(killTimer); process.exitCode = code ?? 1; });

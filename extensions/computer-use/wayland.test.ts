@@ -48,6 +48,9 @@ test('real Unix wire transport discovers output, binds pointer to it, clicks and
     await pointer.click('HEADLESS-1', 1, 1, 'left', new AbortController().signal);
     const absolute = requests.find(r => r.op === 1 && r.id > 2 && r.body.length === 20)!;
     assert.equal(absolute.body.readUInt32LE(4), 250000);
+    assert.equal(absolute.body.readUInt32LE(8), 500000);
+    assert.equal(absolute.body.readUInt32LE(12), 1000000);
+    assert.equal(absolute.body.readUInt32LE(16), 1000000);
     const creation = requests.findIndex(r => r.op === 2 && r.body.length === 12 && r.body.readUInt32LE(0) === 0);
     const motion = requests.indexOf(absolute);
     const press = requests.findIndex(r => r.id === absolute.id && r.op === 2);

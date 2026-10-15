@@ -1,15 +1,18 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { resizeImage } from '@earendil-works/pi-coding-agent';
 import { isAbsolute, join } from 'node:path';
 import { WaylandPointer } from './wayland.ts';
 import { linuxSessionEnvironment } from './linux-session.ts';
 import type { DesktopAction, DesktopBackend, DesktopResult } from './desktop.ts';
 
 const maxBytes = 16 * 1024 * 1024;
-export function pngResult(bytes: Buffer, output: string): DesktopResult {
+export async function pngResult(bytes: Buffer, output: string): Promise<DesktopResult> {
   if (bytes.length < 24 || bytes.length > maxBytes || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || bytes.toString('ascii', 12, 16) !== 'IHDR') throw new Error('Desktop returned an invalid or oversized PNG');
   const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
   if (!width || !height || width > 32768 || height > 32768 || width * height > 64_000_000) throw new Error('Desktop screenshot dimensions exceed limits');
-  return { image: bytes.toString('base64'), mimeType: 'image/png', output, width, height, coordinates: 'Click x/y are fractions from 0 to 1 within this output.' };
+  const image = width > 2000 || height > 2000 ? await resizeImage(bytes, 'image/png', { maxWidth: 2000, maxHeight: 2000 }) : { data: bytes.toString('base64'), mimeType: 'image/png', width, height };
+  if (!image) throw new Error('Desktop screenshot could not be resized');
+  return { image: image.data, mimeType: image.mimeType, output, width: image.width, height: image.height, originalWidth: width, originalHeight: height, coordinates: 'Click x/y are fractions from 0 to 1 within this output.' };
 }
 export class LinuxDesktop implements DesktopBackend {
   private pointer?: WaylandPointer;

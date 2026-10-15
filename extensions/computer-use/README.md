@@ -36,7 +36,7 @@ Results mark their service source and untrusted content; text is bounded to 64 K
 
 ## Linux tool surface
 
-Linux retains five tools: `computer_screenshot(output?)`, `computer_accessibility()`, `computer_click(output,x,y,button?)`, `computer_type(text)`, and `computer_scroll(output,dx,dy)`. Screenshots return PNG and output dimensions; clicks use normalized 0..1 coordinates within that output. Scroll uses pixels at the current pointer, positive dx right/dy down. Accessibility explicitly reports unavailable. Linux deadlines are 15 seconds; inspection may reconnect once after transport failure.
+Linux retains five tools: `computer_screenshot(output?)`, `computer_accessibility()`, `computer_click(output,x,y,button?)`, `computer_type(text)`, and `computer_scroll(output,dx,dy)`. Screenshots larger than 2000 pixels on either axis are downscaled using Pi’s public image helper; results carry the encoded format and displayed/original dimensions. Smaller screenshots pass through unchanged. Clicks use normalized 0..1 coordinates within that output. Scroll uses pixels at the current pointer, positive dx right/dy down. Accessibility explicitly reports unavailable. Linux deadlines are 15 seconds; inspection may reconnect once after transport failure.
 
 ## Linux, including Hyprland
 

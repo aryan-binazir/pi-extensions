@@ -1,13 +1,15 @@
+import { basename } from 'node:path';
+import { invocations } from '../hooks/shell.ts';
 import type { ExecResult, ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { getCapabilities, hyperlink } from '@earendil-works/pi-tui';
 import { terminalLabel } from '../terminal-text.ts';
 
 export interface PullRequest { number: number; url: string; state: 'OPEN' | 'CLOSED' | 'MERGED'; isDraft: boolean }
 export interface PullRequests {
-  /** The PR for this cwd and branch; a pair not seen last time starts a lookup and returns undefined until it answers. */
+  /** Reads cached state and schedules discovery for an unseen cwd and branch. */
   get(cwd: string, branch: string | null): PullRequest | undefined;
-  /** Asks gh again for the last pair, keeping the current answer until the new one arrives. */
-  refresh(): void;
+  /** Coalesces changes; a non-forced refresh requires an answer at least a minute old. */
+  refresh(changed?: boolean): void;
   dispose(): void;
 }
 
@@ -34,40 +36,104 @@ const parse = (result: ExecResult, branch: string): PullRequest | undefined => {
   return { number: pr.number as number, url, state: pr.state as PullRequest['state'], isDraft: pr.isDraft };
 };
 
+export function changesPullRequest(command: string): boolean {
+  return invocations(command).some(invocation => {
+    let name = basename(invocation.name), args = invocation.args;
+    if (name === 'command' || name === 'env') {
+      let i = 0;
+      while (args[i] === '--' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(args[i] ?? '')) i++;
+      name = basename(args[i] ?? ''); args = args.slice(i + 1);
+    }
+    if (name !== 'git' && name !== 'gh') return false;
+    let i = 0;
+    while (args[i]?.startsWith('-')) {
+      const flag = args[i++];
+      if (['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '-R', '--repo', '--hostname'].includes(flag)) i++;
+      if (flag === '--') break;
+    }
+    return name === 'gh' ? args[i] === 'pr' : ['push', 'pull', 'switch', 'checkout', 'merge', 'rebase', 'reset', 'branch'].includes(args[i]);
+  });
+}
+
+interface CachedRequest {
+  pr?: PullRequest;
+  completed?: number;
+  unavailable?: boolean;
+  pending?: Promise<void>;
+  listeners: Set<() => void>;
+}
+interface RequestCache { entries: Map<string, CachedRequest>; lastKey?: string }
+const cacheKey = Symbol.for('pi-interactive:footer.pull-requests.v1');
+const unavailable = (message: string) => /ENOENT|command not found|not found in PATH|none of the git remotes|known GitHub host|not a git repository|not a GitHub (?:host|repository)/i.test(message);
+const offline = () => /^(1|true|yes)$/i.test(process.env.PI_OFFLINE ?? '');
+
 export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): PullRequests {
-  let key: string | undefined, target: { cwd: string; branch: string } | undefined;
-  let current: PullRequest | undefined, controller: AbortController | undefined;
-  let generation = 0, disposed = false;
+  const registry = globalThis as unknown as Record<symbol, RequestCache | undefined>;
+  const cache: RequestCache = registry[cacheKey] ??= { entries: new Map() };
+  let key: string | undefined, target: { cwd: string; branch: string; entry: CachedRequest } | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false, waiting = false;
+  const updated = () => { if (!disposed) onChange(); };
+  const schedule = () => {
+    if (disposed || !target || offline()) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(lookup, 1500);
+    timer.unref();
+  };
   const lookup = () => {
-    controller?.abort(); controller = undefined;
-    const version = ++generation;
-    if (!target) return;
-    const { cwd, branch } = target, signal = (controller = new AbortController()).signal;
+    timer = undefined;
+    if (disposed || !target || offline()) return;
+    const { cwd, branch, entry } = target;
+    if (entry.pending) {
+      if (!waiting) {
+        waiting = true;
+        void entry.pending.then(() => { waiting = false; if (target?.entry === entry) schedule(); });
+      }
+      return;
+    }
+    const previous = entry.pr;
     const args = ['pr', 'view', '--json', 'number,url,state,isDraft,headRefName', '--', branch];
-    void new Promise<ExecResult>(resolve => resolve(exec('gh', args, { cwd, signal, timeout: 10000 })))
-      .then(result => parse(result, branch)).catch(() => undefined).then(pr => {
-        if (version !== generation || same(pr, current)) return;
-        current = pr;
-        onChange();
+    entry.pending = Promise.resolve().then(() => exec('gh', args, { cwd, timeout: 10000 }))
+      .then(result => { entry.unavailable = !result.killed && ((result.code !== 0 && !result.stderr.trim()) || unavailable(result.stderr)); entry.pr = parse(result, branch); })
+      .catch(error => { entry.unavailable = unavailable(String(error)); entry.pr = undefined; })
+      .then(() => {
+        entry.completed = Date.now(); entry.pending = undefined;
+        if (!same(previous, entry.pr)) for (const listener of entry.listeners) listener();
       });
   };
   return {
     get(cwd, branch) {
       if (disposed) return undefined;
-      // Pi reports a detached HEAD as the branch name "detached" and a non-repository as null.
+      // Pi reports a detached HEAD as "detached" and a non-repository as null.
       const next = branch && branch !== 'detached' ? `${cwd}\0${branch}` : undefined;
       if (next !== key) {
-        key = next; current = undefined;
-        target = next ? { cwd, branch: branch! } : undefined;
-        lookup();
+        if (timer) clearTimeout(timer);
+        timer = undefined; waiting = false;
+        target?.entry.listeners.delete(updated);
+        key = next; target = undefined;
+        if (next) {
+          const entry = cache.entries.get(next) ?? { listeners: new Set<() => void>() };
+          cache.entries.set(next, entry);
+          if (cache.lastKey !== next && entry.unavailable) { entry.unavailable = false; entry.completed = undefined; }
+          entry.listeners.add(updated);
+          target = { cwd, branch: branch!, entry };
+          if (!entry.pending && !entry.unavailable && (entry.completed === undefined || Date.now() - entry.completed >= 60000)) schedule();
+        }
+        cache.lastKey = next;
       }
-      return current;
+      return target?.entry.pr;
     },
-    refresh() { if (!disposed && target) lookup(); },
+    refresh(changed = true) {
+      if (disposed || !target || offline()) return;
+      const entry = target.entry;
+      if (changed) { entry.unavailable = false; schedule(); }
+      else if (!entry.unavailable && !entry.pending && !timer && (entry.completed === undefined || Date.now() - entry.completed >= 60000)) schedule();
+    },
     dispose() {
       disposed = true;
-      controller?.abort(); controller = undefined;
-      ++generation;
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      target?.entry.listeners.delete(updated);
     },
   };
 }

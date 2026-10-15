@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import test, { beforeEach } from 'node:test';
-import { setTimeout as delay } from 'node:timers/promises';
 import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -786,7 +785,7 @@ test('selection status coalesces a burst and paints the final line after activit
     const paints = status.length;
     const send = async (line: number) => {
       ide.broadcast('selection_changed', { text: '', filePath: join(project, 'a.ts'), selection: { start: { line, character: 0 }, end: { line, character: 0 }, isEmpty: true } });
-      await delay(15);
+      await ide.ping();
     };
     try {
       await send(1);
@@ -813,7 +812,7 @@ test('shutdown cancels a pending selection paint', async t => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     try {
       ide.broadcast('selection_changed', { text: '', filePath: join(project, 'a.ts'), selection: { start: { line: 10, character: 0 }, end: { line: 10, character: 0 }, isEmpty: true } });
-      await delay(20);
+      await ide.ping();
       await fire('session_shutdown', {}, ctx);
       assert.equal(status.at(-1), undefined);
       const paints = status.length;

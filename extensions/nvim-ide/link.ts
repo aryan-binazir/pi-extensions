@@ -86,6 +86,7 @@ export class IdeLink {
   private started = false;
   private timer?: NodeJS.Timeout;
   private retryTimer?: NodeJS.Timeout;
+  private watchTimer?: NodeJS.Timeout;
   private retryDelay = 0;
   private watcher?: FSWatcher;
   private parentWatcher?: FSWatcher;
@@ -112,6 +113,8 @@ export class IdeLink {
   start(): void { if (this.started) return; this.started = true; this.watchParent(); this.watchLocks(); void this.attempt(); }
   async stop(): Promise<void> {
     this.started = false;
+    this.retryDelay = 0;
+    if (this.watchTimer) { clearTimeout(this.watchTimer); this.watchTimer = undefined; }
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
     this.watcher?.close(); this.watcher = undefined;
@@ -210,7 +213,7 @@ export class IdeLink {
     trace?.(`lock ${lock ? lock.port : 'none'}`);
     if (!lock) {
       if (chooseLock([...this.failedLocks.values()], this.cwd())) this.scheduleRetry();
-      else this.schedule();
+      this.schedule();
       return;
     }
     const WebSocket = await loadWs();
@@ -277,9 +280,7 @@ export class IdeLink {
         trace?.(`parent watch ${event} ${name}`);
         this.watcher?.close(); this.watcher = undefined;
         this.watchLocks();
-        this.resetRetry();
-        if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
-        this.schedule(200);
+        this.wake();
       });
       this.parentWatcher = watcher;
       watcher.on('error', error => lost(`error ${error.message}`));
@@ -297,11 +298,7 @@ export class IdeLink {
       const watcher = watch(this.options.lockDir ?? defaultLockDir(), { persistent: false }, (event, name) => {
         trace?.(`watch ${event} ${name} socket=${!!this.socket} timer=${!!this.timer}`);
         if (!this.started || (name && !name.endsWith('.lock'))) return;
-        const failed = this.failedLocks.size > 0;
-        this.resetRetry();
-        if (failed) { void this.retarget(); return; }
-        if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
-        this.schedule(200);
+        this.wake();
       });
       this.watcher = watcher;
       watcher.on('error', error => {
@@ -312,6 +309,14 @@ export class IdeLink {
       });
       this.lockDirMissing = false;
     } catch (error) { this.lockDirMissing = (error as NodeJS.ErrnoException).code === 'ENOENT'; }
+  }
+  private wake(): void {
+    this.retryDelay = 0;
+    if (!this.socket) this.resetRetry();
+    if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
+    if (this.watchTimer) return;
+    this.watchTimer = setTimeout(() => { this.watchTimer = undefined; void this.retarget(); }, 200);
+    this.watchTimer.unref();
   }
   private resetRetry(): void {
     this.failedLocks.clear();

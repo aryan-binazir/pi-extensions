@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { catalog } from './catalog/index.ts';
-import { createSwitchesReader, loadSwitches } from './config.ts';
+import { createSwitchesReader, enabledIn } from './config.ts';
 import { createProtection } from './protection.ts';
 import type { AdviseHook, Awaitable, BlockHook, GateHook, Hook, ToolCall } from './types.ts';
 
@@ -30,8 +30,8 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
   const protect = createProtection(configPath, known);
   let reportedUnloaded = '';
   const switchedOn = async <T extends Hook>(type: T['type'], ctx: ExtensionContext, read = readConfig): Promise<T[]> => {
-    const { enabled, unloaded } = await loadSwitches(configPath, known, read);
-    const names = unloaded.join(', ');
+    const enabled = enabledIn((await read()).switches);
+    const names = [...enabled].filter(id => !known.has(id)).join(', ');
     if (names && names !== reportedUnloaded && ctx.hasUI) ctx.ui.notify(`hooks.yaml switches on hooks this session has not loaded: ${names}. Run /reload to load them.`, 'warning');
     reportedUnloaded = names;
     return catalog.filter((hook): hook is T => hook.type === type && enabled.has(hook.id));

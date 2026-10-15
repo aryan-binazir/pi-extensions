@@ -40,16 +40,16 @@ function commands(source: string): string[][] {
 }
 
 export interface Invocation {
-  assignments: string[];
-  name: string;
-  args: string[];
+  readonly assignments: readonly string[];
+  readonly name: string;
+  readonly args: readonly string[];
 }
 
 let lastSource: string | undefined;
-let lastInvocations: Invocation[] = [];
+let lastInvocations: readonly Invocation[] = [];
 
 /** Simple Bash commands as unquoted words, with leading VAR=value assignments split off. Expansion, substitution and redirection are not interpreted. */
-export function invocations(source: string): Invocation[] {
+export function invocations(source: string): readonly Invocation[] {
   if (source === lastSource) return lastInvocations;
   const parsed = commands(source).map(words => {
     let start = 0;

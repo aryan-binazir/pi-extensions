@@ -12,7 +12,7 @@ const longWithValue = new Set([
   '--hyperlink-format', '--path-separator', '--sort', '--sortr', '--generate',
 ]);
 
-function replaces(args: string[]): boolean {
+function replaces(args: readonly string[]): boolean {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--') return false;

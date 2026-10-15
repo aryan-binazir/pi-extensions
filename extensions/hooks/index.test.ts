@@ -139,7 +139,7 @@ test('a missing or malformed config blocks every tool except reads and questions
 });
 
 test('settle is subscribed only when the loaded catalog contains a gate, including disabled gates', () => {
-  for (const [entries, expected] of [[catalog, 0], [[{ id: 'gate', type: 'gate', check: () => undefined }], 1]] as const) {
+  for (const [entries, expected] of [[[blockEcho], 0], [[{ id: 'gate', type: 'gate', check: () => undefined }], 1]] as const) {
     const events: string[] = [];
     createHooks({ catalog: entries, configPath: '/unused/hooks.yaml' })({ on: (event: string) => { events.push(event); } } as any);
     assert.equal(events.filter(event => event === 'agent_before_settle').length, expected);

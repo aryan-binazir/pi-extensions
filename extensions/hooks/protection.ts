@@ -26,7 +26,7 @@ async function canonical(path: string): Promise<string> {
   }
 }
 
-function safeGit(args: string[]): boolean {
+function safeGit(args: readonly string[]): boolean {
   let i = 0;
   for (; i < args.length && args[i].startsWith('-'); i++) {
     if (args[i] === '-C') i++;
@@ -35,7 +35,7 @@ function safeGit(args: string[]): boolean {
   return readOnlyGit.has(args[i]) && !args.some(arg => arg.startsWith('--output') || arg === '--ext-diff');
 }
 
-function isProse(name: string, args: string[], i: number): boolean {
+function isProse(name: string, args: readonly string[], i: number): boolean {
   const options = proseOptions[basename(name)] ?? [];
   return options.includes(args[i - 1]) || options.some(option => option.startsWith('--') && args[i].startsWith(`${option}=`));
 }

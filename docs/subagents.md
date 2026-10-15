@@ -186,8 +186,7 @@ explicitly.
 The `workflow` tool accepts a TypeScript async function body. The user reviews
 the exact source and confirms execution. A short-lived real Node subprocess
 transpiles approved source with the extension's TypeScript package; the compiler
-stays out of Pi's process. Compiler options, output and journal identity remain
-unchanged. For example:
+stays out of Pi's process. For example:
 
 ```ts
 const plan = await api.spawn({

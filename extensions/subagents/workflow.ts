@@ -95,13 +95,13 @@ async function runApprovedWorkflow(options: WorkflowOptions & {timeout: number})
   const admission = options.admission;
   const transpiling = execFileAsync(runtime.execPath, ['-e', `
  const ts = require(process.argv[1]);
- const source = require('node:fs').readFileSync(0, 'utf8');
+ const source = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
  const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }, reportDiagnostics: true });
  const error = compiled.diagnostics?.find(d => d.category === ts.DiagnosticCategory.Error);
  process.stdout.write(JSON.stringify({version: ts.version, outputText: compiled.outputText, firstError: error ? ts.flattenDiagnosticMessageText(error.messageText, '\\n') : null}));
- `, createRequire(import.meta.url).resolve('typescript')], { env: {PATH: process.env.PATH}, signal: options.signal, timeout: 5000, maxBuffer: 16 * 1024 * 1024 });
+ `, createRequire(import.meta.url).resolve('typescript')], { env: {PATH: process.env.PATH}, signal: options.signal, maxBuffer: 16 * 1024 * 1024 });
   transpiling.child.stdin?.on('error', () => {});
-  transpiling.child.stdin?.end(`async function workflow(api: any) {\n${options.source}\n}`);
+  transpiling.child.stdin?.end(JSON.stringify(`async function workflow(api: any) {\n${options.source}\n}`));
   const compiled: {version: string; outputText: string; firstError: string | null} = JSON.parse((await transpiling).stdout);
   const identity = digest(JSON.stringify({ version: 2, source: options.source, cwd, policy: admission.policyIdentity, defaults: admission.identityDefaults, profiles: admission.profileIdentity, node: runtime.version, typescript: compiled.version, platform: process.platform }));
   if (compiled.firstError !== null)

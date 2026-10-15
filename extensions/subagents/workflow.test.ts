@@ -43,7 +43,7 @@ test('workflow executes TypeScript without loading the compiler into the parent'
  const workflow = new URL('./workflow.ts', import.meta.url).href;
  const {stdout} = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
   import assert from 'node:assert/strict';
-  import {registerHooks} from 'node:module';
+  import {createRequire, registerHooks} from 'node:module';
   import {mkdtemp, rm} from 'node:fs/promises';
   import {tmpdir} from 'node:os';
   import {join} from 'node:path';
@@ -55,6 +55,8 @@ test('workflow executes TypeScript without loading the compiler into the parent'
   const cwd = await mkdtemp(join(tmpdir(), 'workflow-module-graph-'));
   try {
    assert.equal(await runWorkflow({source: 'const n: number = 2; return n;', cwd, journalDirectory: join(cwd, 'journal'), admission: {policyIdentity: 'graph'}, approve: async () => true, spawn: async () => {throw new Error('must not spawn');}}), 2);
+   assert.deepEqual(Object.keys(createRequire(import.meta.url).cache).filter(path => /[/\\\\]typescript[/\\\\]/.test(path)), []);
+   await assert.rejects(import('typescript'), /TypeScript loaded in parent/);
    process.stdout.write('compiler stayed out of parent');
   } finally {await rm(cwd, {recursive: true, force: true});}
  `], {timeout: 15000, maxBuffer: 65536});
@@ -78,6 +80,33 @@ test("workflow preserves main's emitted TypeScript enum and accepts the full sou
   const source = ('const text: string = "' + 'é'.repeat(60000) + '"; return text.length;').padEnd(64000);
   assert.equal(await runWorkflow({...base, source}), 60000);
  } finally {await rm(cwd, {recursive: true, force: true});}
+});
+
+test('workflow preserves lone UTF-16 surrogates in approved source', async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-surrogate-'));
+ try {
+  assert.deepEqual(await runWorkflow({source: 'return ["\ud800", "\udc00"].map(value => value.charCodeAt(0));', cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'surrogates', approve: async () => true, spawn: async () => {throw new Error('must not spawn');}}), [55296, 56320]);
+ } finally {await rm(cwd, {recursive: true, force: true});}
+});
+
+test('workflow transpilation uses the workflow deadline instead of the probe timeout', {skip: process.platform !== 'linux'}, async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'workflow-slow-compiler-'));
+ const previousPath = process.env.PATH;
+ try {
+  const candidate = join(cwd, 'node');
+  await writeFile(candidate, `#!/bin/sh
+if [ "$1" = '-p' ]; then
+ printf '%s' '${JSON.stringify({execPath: candidate, version: process.versions.node})}'
+elif [ "$2" = '--input-type=module' ]; then
+ printf permissions-ok
+else
+ if [ "$1" = '-e' ]; then /bin/sleep 6; fi
+ exec '${process.execPath}' "$@"
+fi
+`, {mode: 0o700});
+  process.env.PATH = cwd;
+  assert.equal(await runWorkflow({source: 'const n: number = 2; return n;', cwd, journalDirectory: join(cwd, 'journal'), policyIdentity: 'slow-compiler', timeout: 20000, approve: async () => true, spawn: async () => {throw new Error('must not spawn');}}), 2);
+ } finally {process.env.PATH = previousPath; await rm(cwd, {recursive: true, force: true});}
 });
 
 test('workflow rejects unapproved source, executes approved TS, and replays successful stages', async () => {

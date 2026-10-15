@@ -15,14 +15,17 @@ test('compiled Pi launches the parent executable while Node and generic Bun keep
   const spec = await validateTask({task: 'literal', cwd: tmpdir(), tools: []}, []);
   const execPath = Object.getOwnPropertyDescriptor(process, 'execPath')!;
   const bun = Object.getOwnPropertyDescriptor(process.versions, 'bun');
+  const entrypoint = process.argv[1];
   try {
-    for (const [runtime, executable, expected] of [
-      [undefined, '/usr/bin/node', 'pi'],
-      ['1.3.14', '/usr/bin/bun', 'pi'],
-      [undefined, '/tools/pi', 'pi'],
-      ['1.3.14', '/tools/pi', '/tools/pi'],
-      ['1.3.14', '/tools/pi.exe', '/tools/pi.exe'],
+    for (const [runtime, executable, main, expected] of [
+      [undefined, '/usr/bin/node', '/scripts/run.ts', 'pi'],
+      ['1.3.14', '/usr/bin/bun', '/scripts/run.ts', 'pi'],
+      [undefined, '/tools/pi', '/$bunfs/root/pi', 'pi'],
+      ['1.3.14', '/tools/pi', '/$bunfs/root/pi', '/tools/pi'],
+      ['1.3.14', '/tools/pi.exe', 'B:/~BUN/root/pi.exe', '/tools/pi.exe'],
+      ['1.3.14', '/tools/pi', '/scripts/run.ts', 'pi'],
     ] as const) {
+      process.argv[1] = main;
       Object.defineProperty(process.versions, 'bun', {configurable: true, value: runtime});
       Object.defineProperty(process, 'execPath', {configurable: true, value: executable});
       const invocation = piInvocation(spec);
@@ -32,6 +35,7 @@ test('compiled Pi launches the parent executable while Node and generic Bun keep
     }
   } finally {
     Object.defineProperty(process, 'execPath', execPath);
+    process.argv[1] = entrypoint;
     if (bun) Object.defineProperty(process.versions, 'bun', bun); else delete (process.versions as {bun?: string}).bun;
   }
 });

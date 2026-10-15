@@ -530,10 +530,11 @@ export function piInvocation(spec: ValidTask, connectors = false) {
   for (const extension of new Set(spec.extensions)) args.push('-e', extension);
   args.push('--', spec.task.startsWith('@') ? `\n${spec.task}` : spec.task);
   const env = childEnv(process.env, {PI_SUBAGENT_TIMEOUT_MS: String(spec.timeout), PI_SUBAGENT_TOOL_BRIDGE: connectors ? '1' : ''});
+  const compiledPi = process.versions.bun && /^pi(?:\.exe)?$/i.test(basename(process.execPath)) && /\$bunfs|~BUN|%7EBUN/.test(process.argv[1] ?? '');
   return {
     command: 'node',
     supervised: true,
-    args: [SUPERVISOR, process.versions.bun && /^pi(?:\.exe)?$/i.test(basename(process.execPath)) ? process.execPath : 'pi', ...args],
+    args: [SUPERVISOR, compiledPi ? process.execPath : 'pi', ...args],
     env,
   };
 }

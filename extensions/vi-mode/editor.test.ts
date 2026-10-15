@@ -1601,7 +1601,7 @@ test("draft replacement clears a held opener and discards an active paste throug
 test("warm visual frames do not segment the whole draft", () => {
   const e = editor();
   e.insertTextAtCursor("界👩‍👩‍👦 abc\n".repeat(100));
-  keys(e, "\x1bggVG");
+  keys(e, "\x1bggv");
   e.render(40);
   const segment = Intl.Segmenter.prototype.segment;
   const inputs: string[] = [];
@@ -1610,8 +1610,14 @@ test("warm visual frames do not segment the whole draft", () => {
     return segment.call(this, input);
   };
   try {
-    e.render(40);
-    assert.ok(inputs.every(input => input.length < 100), "only visible rows and border labels need segmentation");
+    const draft = e.getText();
+    for (const key of ["", "\x1b[C", "\x1b[D", "\x1b[B", "\x1b[A"]) {
+      if (key) e.handleInput(key);
+      inputs.length = 0;
+      e.render(40);
+      assert.equal(e.getText(), draft);
+      assert.ok(inputs.every(input => input.length < 100), `warm frame after ${JSON.stringify(key)} only segments labels`);
+    }
   } finally {
     Intl.Segmenter.prototype.segment = segment;
     e.dispose();

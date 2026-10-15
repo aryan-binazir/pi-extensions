@@ -212,6 +212,7 @@ export class ViEditor extends CustomEditor {
       this.draft = undefined;
       const historyReset = history !== this.undoHistory;
       if (before && !historyReset && before.text !== this.text()) {
+        this.visualLayout = undefined;
         this.checkpoint(before);
         // A native edit cancels pending commands and arguments, so a following u undoes it.
         this.discardArgument = false;
@@ -220,7 +221,7 @@ export class ViEditor extends CustomEditor {
       }
     } finally {
       this.draft = undefined;
-      this.visualLayout = undefined;
+      if (this.mode === "insert") this.visualLayout = undefined;
       this.onSubmit = submit;
     }
   }

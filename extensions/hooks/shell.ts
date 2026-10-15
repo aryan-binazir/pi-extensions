@@ -45,11 +45,18 @@ export interface Invocation {
   args: string[];
 }
 
+let lastSource: string | undefined;
+let lastInvocations: Invocation[] = [];
+
 /** Simple Bash commands as unquoted words, with leading VAR=value assignments split off. Expansion, substitution and redirection are not interpreted. */
 export function invocations(source: string): Invocation[] {
-  return commands(source).map(words => {
+  if (source === lastSource) return lastInvocations;
+  const parsed = commands(source).map(words => {
     let start = 0;
     while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[start] ?? '')) start++;
     return { assignments: words.slice(0, start), name: words[start] ?? '', args: words.slice(start + 1) };
   });
+  lastSource = source;
+  lastInvocations = parsed;
+  return parsed;
 }

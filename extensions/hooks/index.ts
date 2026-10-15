@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { catalog } from './catalog/index.ts';
-import { loadSwitches } from './config.ts';
+import { createSwitchesReader, loadSwitches } from './config.ts';
 import { createProtection } from './protection.ts';
 import type { AdviseHook, Awaitable, BlockHook, GateHook, Hook, ToolCall } from './types.ts';
 
@@ -26,10 +26,11 @@ async function ask(check: () => Awaitable<string | undefined>): Promise<{ said?:
 
 export function createHooks({ catalog, configPath }: HooksOptions) {
   const known = new Set(catalog.map(hook => hook.id));
+  const readConfig = createSwitchesReader(configPath);
   const protect = createProtection(configPath, known);
   let reportedUnloaded = '';
-  const switchedOn = async <T extends Hook>(type: T['type'], ctx: ExtensionContext): Promise<T[]> => {
-    const { enabled, unloaded } = await loadSwitches(configPath, known);
+  const switchedOn = async <T extends Hook>(type: T['type'], ctx: ExtensionContext, read = readConfig): Promise<T[]> => {
+    const { enabled, unloaded } = await loadSwitches(configPath, known, read);
     const names = unloaded.join(', ');
     if (names && names !== reportedUnloaded && ctx.hasUI) ctx.ui.notify(`hooks.yaml switches on hooks this session has not loaded: ${names}. Run /reload to load them.`, 'warning');
     reportedUnloaded = names;
@@ -40,13 +41,15 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
 
   return function hooks(pi: ExtensionAPI) {
     pi.on('tool_call', async (event, ctx) => {
+      let snapshot: ReturnType<typeof readConfig> | undefined;
+      const read = () => snapshot ??= readConfig();
       const call = toolCall(event, ctx);
-      const { said: unprotected, failed: protectionFailed } = await ask(() => protect(call));
+      const { said: unprotected, failed: protectionFailed } = await ask(() => protect(call, read));
       if (protectionFailed !== undefined) return { block: true, reason: label('protection', `The check failed, so the call was blocked: ${protectionFailed}`) };
       if (unprotected) return { block: true, reason: label('protection', unprotected) };
       let blockers: BlockHook[];
       try {
-        blockers = await switchedOn<BlockHook>('block', ctx);
+        blockers = await switchedOn<BlockHook>('block', ctx, read);
       } catch (error) {
         if (usableWhileSwitchesAreBroken.has(event.toolName)) return;
         return { block: true, reason: `[hooks] ${configPath} is invalid: ${message(error)}. Ask the user to fix it; agents cannot edit it.` };
@@ -70,6 +73,7 @@ export function createHooks({ catalog, configPath }: HooksOptions) {
       return { content: [...event.content, ...notes], ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) };
     });
 
+    if (!catalog.some(hook => hook.type === 'gate')) return;
     let continuationsThisPrompt = 0;
     pi.on('session_start', () => { continuationsThisPrompt = 0; });
     pi.on('input', event => { if (event.source !== 'extension') continuationsThisPrompt = 0; });

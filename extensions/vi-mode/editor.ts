@@ -139,6 +139,7 @@ export class ViEditor extends CustomEditor {
   }
   [invalidateTextCache](): void {
     this.draft = undefined;
+    this.visualLayout = undefined;
   }
   private scan(): { project: boolean; segment: boolean } {
     const text = this.text();
@@ -219,6 +220,7 @@ export class ViEditor extends CustomEditor {
       }
     } finally {
       this.draft = undefined;
+      this.visualLayout = undefined;
       this.onSubmit = submit;
     }
   }
@@ -257,6 +259,7 @@ export class ViEditor extends CustomEditor {
   }
   private writeText(text: string): void {
     text = safeDraft(text);
+    this.visualLayout = undefined;
     this.boundaryText = "";
     this.markerText = undefined;
     const payloads = readPastes(this);
@@ -901,8 +904,9 @@ export class ViEditor extends CustomEditor {
       this.cursorShape();
     }
     if (this.mode !== "visual" && this.mode !== "line") {
-      const lines = this.scan().project
-        ? renderProjected(this, () => super.render(width), this.projected()!, this.pos())
+      const projection = this.projected();
+      const lines = projection
+        ? renderProjected(this, () => super.render(width), projection, this.pos())
         : super.render(width);
       if (this.mode !== "insert" || !this.focused) return lines;
       return lines.map((line) => {

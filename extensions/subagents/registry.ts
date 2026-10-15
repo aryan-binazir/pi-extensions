@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
+import { basename, isAbsolute } from 'node:path';
 import { thinkingLevel, thinkingPattern } from './thinking.ts';
 import { abortable } from './cancellation.ts';
 import { fileURLToPath } from 'node:url';
@@ -371,6 +371,7 @@ export class SubagentRegistry {
     const toolCalls = new Map<string, string>();
     let lastUpdateAt = 0;
     const consume = (line: string) => {
+      if (/^\{"type":"(?:message_start|tool_execution_update|turn_end|agent_end|entry_appended|compaction_end)"[,}]/.test(line)) return;
       try {
         const event = JSON.parse(line);
         if (event.type === 'tool_execution_start' && typeof event.toolCallId === 'string' && event.toolCallId.length <= 256) {
@@ -500,6 +501,9 @@ export class SubagentRegistry {
     clearTimeout(entry.timer); clearTimeout(entry.killTimer);
     const heldRunSlot = Boolean(entry.process) || entry.result.status === 'failed';
     if (heldRunSlot) { this.running--; if (entry.writer) this.writers.delete(entry.spec.cwd); }
+    entry.result.output = structuredClone(entry.result.output);
+    entry.result.stderr = structuredClone(entry.result.stderr.slice(-8192));
+    entry.process = undefined;
     const snapshot = cloneResult(entry.result);
     try { this.options.onComplete?.(snapshot); this.emitActivity({tasks: 'completed'}); this.queueNotice(snapshot); } catch (error) { entry.result.notificationError = `Completion notification failed: ${String(error).slice(0,1000)}`; }
     finally {
@@ -519,17 +523,18 @@ export class SubagentRegistry {
 
 export function piInvocation(spec: ValidTask, connectors = false) {
   const args = ['--mode', 'json', '-p', '--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--tools', spec.tools.join(','), '--system-prompt', 'You are a delegated agent. Your only task context is the explicit brief below. Use only the configured tools and assigned workspace. Do not assume parent conversation context.'];
-  if (spec.model) args.push('--model', spec.model);
+  if (spec.model) args.push('--model', spec.model, '--models', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
   args.push('-e', spec.hooks);
   if (connectors) args.push('-e', fileURLToPath(new URL('./connector-bridge.ts', import.meta.url)));
   for (const extension of new Set(spec.extensions)) args.push('-e', extension);
   args.push('--', spec.task.startsWith('@') ? `\n${spec.task}` : spec.task);
   const env = childEnv(process.env, {PI_SUBAGENT_TIMEOUT_MS: String(spec.timeout), PI_SUBAGENT_TOOL_BRIDGE: connectors ? '1' : ''});
+  const compiledPi = process.versions.bun && /^pi(?:\.exe)?$/i.test(basename(process.execPath)) && /\$bunfs|~BUN|%7EBUN/.test(process.argv[1] ?? '');
   return {
     command: 'node',
     supervised: true,
-    args: [SUPERVISOR, 'pi', ...args],
+    args: [SUPERVISOR, compiledPi ? process.execPath : 'pi', ...args],
     env,
   };
 }

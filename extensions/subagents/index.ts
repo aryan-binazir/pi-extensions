@@ -43,6 +43,7 @@ export default function subagents(pi: ExtensionAPI): void {
   const brief = (id: string, task: string) => {
     let label = collapsedBriefById.get(id);
     if (label === undefined) {
+      // Sliced strings can retain the entire task brief.
       label = Buffer.from(terminalLabel(terminalLabel(task).slice(0, 100)), 'utf8').toString('utf8');
       collapsedBriefById.set(id, label);
     }
@@ -77,6 +78,7 @@ export default function subagents(pi: ExtensionAPI): void {
       };
       return {
         invalidate() { panel.invalidate(); },
+        dispose() { panel.invalidate(); },
         render(width: number) {
           return panel.render(width, theme, { summary, title,
             maxHeight: Math.max(5, Math.min(panelSlots + 3, Math.floor((tui?.terminal?.rows || 24) / 2))),

@@ -76,9 +76,9 @@ test('height changes rebuild capacity rows and explicit invalidation refreshes a
   assert.notStrictEqual(recolored, first);
   assert.match(recolored[0], /^\x1b\[31m/);
   assert.strictEqual(panel.render(20, mutableTheme, content), recolored);
-  const other = new FramedPanel('alt+r', 'truncate');
-  other.toggle();
-  assert.notStrictEqual(other.render(20, mutableTheme, content), recolored);
+  const replaced = panel.render(20, theme, content);
+  assert.notStrictEqual(replaced, recolored);
+  assert.match(replaced[0], /^\x1b\[34m/);
 });
 
 test('failed row rendering does not populate the panel cache', () => {

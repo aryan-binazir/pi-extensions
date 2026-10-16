@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { delimiter } from 'node:path';
 import { CustomEditor, InteractiveMode } from '@earendil-works/pi-coding-agent';
 import { Container, stripTerminalSequences } from '@earendil-works/pi-tui';
 import { fauxAssistantMessage, fauxProvider } from '@earendil-works/pi-ai';
@@ -27,13 +28,23 @@ for (const order of ['ghost first', 'ghost last', 'stash before vi', 'background
     PI_GHOST_PROVIDER: 'pi', PI_GHOST_MODEL: 'ghost-codex-test/gpt-6-luna', PI_GHOST_DEBOUNCE_MS: '10',
     PI_GHOST_MIN_CONFIDENCE: '0', PI_GHOST_PROVISIONAL: 'off', PI_GHOST_PROFILE: 'off', PI_GHOST_TURN_PREFETCH: 'off',
   };
-  const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  const previous = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PI_GHOST_')));
+  for (const key of Object.keys(previous)) delete process.env[key];
+  const previousPath = process.env.PATH;
+  // Ghost scans the entire process report for musl, including unrelated PATH entries.
+  if (previousPath !== undefined) process.env.PATH = previousPath.split(delimiter).filter(entry => !entry.includes('musl')).join(delimiter);
   Object.assign(process.env, env);
   t.after(() => {
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
+    for (const key of Object.keys(process.env)) if (key.startsWith('PI_GHOST_')) delete process.env[key];
+    Object.assign(process.env, previous);
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
   });
+  let networkRequests = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    networkRequests++;
+    throw new Error('Unexpected network request in synthetic Ghost fixture');
+  });
+  t.after(() => assert.equal(networkRequests, 0, 'Ghost tests use synthetic providers only'));
   const extensions = order === 'ghost first' || order === 'background after ghost' ? [ghostPath, ...localExtensions]
     : order === 'ghost last' ? [...localExtensions, ghostPath]
       : [localExtensions[1], localExtensions[0], localExtensions[2], ghostPath];

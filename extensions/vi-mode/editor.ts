@@ -134,7 +134,7 @@ class ViMode {
     this.base = {
       getText: editor.getText.bind(editor),
       setText: editor.setText.bind(editor),
-      handleInput: editor.handleInput.bind(editor),
+      handleInput: attachEditorInput(editor).bind(editor),
       render: editor.render.bind(editor),
       invalidate: editor.invalidate.bind(editor),
       renderTopBorder: internal.renderTopBorder.bind(editor),

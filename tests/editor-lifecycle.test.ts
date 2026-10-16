@@ -712,6 +712,21 @@ test('editor replacement transfers cursor ownership before construction and reti
   h.emit('session_shutdown');
 });
 
+test('Vi composes with a factory that reuses an already wired editor', () => {
+  const h = host('stock');
+  const cached = editor(CustomEditor);
+  h.ctx.ui.setEditorComponent(() => cached);
+  viMode(h.api);
+  h.emit('session_start');
+  h.emit('resources_discover');
+  assert.equal(h.app.editor, cached);
+  keys(cached, 'hello\x1b0x');
+  assert.equal(cached.getText(), 'ello');
+  keys(cached, 'u');
+  assert.equal(cached.getText(), 'hello');
+  h.emit('session_shutdown');
+});
+
 async function withInputEditors(extensions: Parameters<typeof withPi>[0]["extensions"], run: (app: any) => Promise<void>) {
   let app: any;
   await withPi({ extensions, bind(session) {

@@ -5,10 +5,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WaylandPointer } from './wayland.ts';
+import { ints, msg, string } from '../../tests/fixtures/wayland.ts';
 
-const ints = (...n: number[]) => { const b = Buffer.alloc(n.length * 4); n.forEach((v, i) => b.writeUInt32LE(v >>> 0, i * 4)); return b; };
-const string = (s: string) => { const b = Buffer.alloc(Math.ceil((Buffer.byteLength(s) + 1) / 4) * 4); b.write(s); return Buffer.concat([ints(Buffer.byteLength(s) + 1), b]); };
-const msg = (id: number, op: number, body: Buffer) => Buffer.concat([ints(id, ((body.length + 8) << 16) | op), body]);
 
 test('real Unix wire transport discovers output, binds pointer to it, clicks and scrolls', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-wayland-')); const socket = join(dir, 'wayland-test');

@@ -1,15 +1,8 @@
-import { deflateSync } from 'node:zlib';
+import { crc32, deflateSync } from 'node:zlib';
 
-const crcTable = Array.from({ length: 256 }, (_, n) => {
-  let c = n;
-  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-  return c >>> 0;
-});
 function chunk(kind: string, data: Buffer) {
   const b = Buffer.alloc(data.length + 12); b.writeUInt32BE(data.length); b.write(kind, 4); data.copy(b, 8);
-  let crc = 0xffffffff;
-  for (const byte of b.subarray(4, -4)) crc = crcTable[(crc ^ byte) & 255] ^ (crc >>> 8);
-  b.writeUInt32BE((crc ^ 0xffffffff) >>> 0, b.length - 4); return b;
+  b.writeUInt32BE(crc32(b.subarray(4, -4)), b.length - 4); return b;
 }
 
 /** PNG signature and IHDR only: a valid header whose pixels cannot be decoded. */

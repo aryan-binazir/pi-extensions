@@ -1,11 +1,13 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type, type TProperties } from 'typebox';
 import { StringEnum } from '@earendil-works/pi-ai';
+import type { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { MacSession, loadMacSdk } from './mac-client.ts';
+import { boundImages } from './images.ts';
 
-export function registerMacTools(pi: ExtensionAPI) {
-  let session = new MacSession();
-  pi.on('session_start', async () => { await session.close(); session = new MacSession(); });
+export function registerMacTools(pi: ExtensionAPI, launch?: () => StdioServerParameters) {
+  let session = new MacSession(launch);
+  pi.on('session_start', async () => { await session.close(); session = new MacSession(launch); });
   pi.on('session_shutdown', async () => { await session.close(); });
   const app = Type.String({ minLength: 1, maxLength: 1024, description: 'Application name, path, or bundle identifier; computer_apps can discover identifiers'  });
   const element = Type.String({ minLength: 1, maxLength: 128, description: 'Exact element_index from the current app accessibility tree' });
@@ -29,7 +31,8 @@ export function registerMacTools(pi: ExtensionAPI) {
           const p = params as Record<string, unknown>;
           if (p.element_index !== undefined ? p.x !== undefined || p.y !== undefined : p.x === undefined || p.y === undefined) throw new Error('Click requires element_index OR both screenshot pixel x/y, exclusively');
         }
-        return session.run(definition.remote, params, ctx, signal, definition.omit);
+        const result = await session.run(definition.remote, params, ctx, signal, definition.omit);
+        return { ...result, content: await boundImages(result.content, ctx.model?.inputLimits?.images?.resize, signal) };
       },
     });
   }

@@ -8,6 +8,7 @@ import { getImageDimensions } from '@earendil-works/pi-tui';
 import computerUse from './index.ts';
 import { pngResult } from './native.ts';
 import { png } from '../../tests/fixtures/png.ts';
+import { ints, msg, string } from '../../tests/fixtures/wayland.ts';
 
 const register = () => {
   const handlers = new Map<string, () => Promise<void>>(); const tools: any[] = [];
@@ -49,9 +50,6 @@ test('a new session restores desktop use after shutdown', { skip: process.platfo
   await handlers.get('session_shutdown')!();
 });
 
-const ints = (...n: number[]) => { const b = Buffer.alloc(n.length * 4); n.forEach((v, i) => b.writeUInt32LE(v >>> 0, i * 4)); return b; };
-const string = (s: string) => { const b = Buffer.alloc(Math.ceil((Buffer.byteLength(s) + 1) / 4) * 4); b.write(s); return Buffer.concat([ints(Buffer.byteLength(s) + 1), b]); };
-const msg = (id: number, op: number, body: Buffer) => Buffer.concat([ints(id, ((body.length + 8) << 16) | op), body]);
 
 test('Linux screenshots reach Pi bounded to the active model image limits', { skip: process.platform !== 'linux' }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-screenshot-')), socket = join(dir, 'wayland-test');
@@ -77,7 +75,7 @@ test('Linux screenshots reach Pi bounded to the active model image limits', { sk
   const { handlers, tools } = register();
   t.after(async () => {
     await handlers.get('session_shutdown')!();
-    Object.assign(process.env, saved); if (saved.WAYLAND_DISPLAY === undefined) delete process.env.WAYLAND_DISPLAY;
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     await new Promise(resolve => compositor.close(resolve)); await rm(dir, { recursive: true, force: true });
   });
   const model = { inputLimits: { images: { resize: { maxWidth: 1000, maxHeight: 1000 } } } };

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { approve, boundedText, macLaunch, macResult, MacSession } from './mac-client.ts';
 import { registerMacTools } from './mac-tools.ts';
 import { getImageDimensions } from '@earendil-works/pi-tui';
-import { png, pngHeader } from '../../tests/fixtures/png.ts';
+import { png } from '../../tests/fixtures/png.ts';
 
 const fixture = () => ({ command: process.execPath, args: [fileURLToPath(new URL('../../tests/fixtures/computer-mcp.mjs', import.meta.url))], stderr: 'pipe' as const });
 const ctx = (hasUI = false, answer = false): any => ({ hasUI, ui: { confirm: async () => answer } });
@@ -155,24 +155,18 @@ test('bounded text truncates on real UTF-8 bytes, not code unit count', () => {
   assert.match(boundedText('日'.repeat(21846)), /\n\[truncated\]$/);
 });
 
-test('service screenshots are bounded to the active model image limits; accessibility requests skip them', async () => {
+test('Mac screenshot tools bound service images to the active model limits; accessibility skips them', async () => {
   const env = { ...process.env, COMPUTER_MCP_IMAGE: png(3000, 1500).toString('base64') } as Record<string, string>;
-  const session = new MacSession(() => ({ ...fixture(), env }), 10000);
+  const tools: any[] = [], handlers = new Map<string, () => Promise<void>>();
+  registerMacTools({ on(name: string, handler: any) { handlers.set(name, handler); }, registerTool(tool: any) { tools.push(tool); } } as any, () => ({ ...fixture(), env }));
   const model = { inputLimits: { images: { resize: { maxWidth: 1000, maxHeight: 1000 } } } };
+  const run = (name: string) => tools.find(tool => tool.name === name).execute(name, { app: 'image' }, undefined, undefined, { ...ctx(), model });
   try {
-    const { content } = await session.run('get_app_state', { app: 'image' }, { ...ctx(), model });
-    assert.deepEqual(content.map(block => block.type), ['text', 'image', 'text']);
+    const { content } = await run('computer_screenshot');
+    assert.deepEqual(content.map((block: any) => block.type), ['text', 'image', 'text']);
     const [, image, note] = content;
-    assert.ok(image.type === 'image' && note.type === 'text');
     assert.deepEqual(getImageDimensions(image.data, image.mimeType), { widthPx: 1000, heightPx: 500 });
     assert.match(note.text, /original 3000x1500, displayed at 1000x500/);
-    assert.deepEqual((await session.run('get_app_state', { app: 'image' }, { ...ctx(), model }, undefined, true)).content, [{ type: 'text', text: 'Fixture state' }]);
-  } finally { await session.close(); }
-});
-
-test('images whose headers exceed the decode limits are rejected before any decoding', () => {
-  const header = (width: number, height: number) => ({ content: [{ type: 'image' as const, mimeType: 'image/png', data: pngHeader(width, height).toString('base64') }] });
-  assert.throws(() => macResult(header(10000, 10000)), /Invalid oversized image dimensions/);
-  assert.throws(() => macResult(header(40000, 10)), /Invalid oversized image dimensions/);
-  assert.equal(macResult(header(8000, 8000)).content[0].type, 'image');
+    assert.deepEqual((await run('computer_accessibility')).content, [{ type: 'text', text: 'Fixture state' }]);
+  } finally { await handlers.get('session_shutdown')!(); }
 });

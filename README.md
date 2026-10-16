@@ -43,7 +43,12 @@ load; helpers and tests are not extensions.
 7. **Configure the required scoped models.** Follow
    [scoped model setup](docs/agent-setup.md#required-scoped-models), preserving this
    machine's existing model connections.
-8. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
+8. **Install memory and autocomplete separately (required).** Follow
+   [OMMS setup](docs/agent-setup.md#omms-memory-external-package) and
+   [Ghost Autocomplete setup](docs/agent-setup.md#ghost-autocomplete-external-package).
+   Enable old-history import for OMMS and resolve any custom-editor conflict
+   before enabling Ghost.
+9. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
    servers through its built-in MCP support and `~/.pi/agent/mcp.json`.
 
 With Subagents enabled, the system prompt includes **both** the editable selection

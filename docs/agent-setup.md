@@ -17,13 +17,15 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
    skipped, not missing setup. Escape Continue, Bash approvals, Hooks, the footer
-   with PR links, and Claude bridge are required; a missing or disabled component
+   with PR links, Claude bridge, OMMS, and Ghost Autocomplete are required;
+   a missing or disabled component
    is setup drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
    this repository's tracked file in a stable checkout. With Subagents selected,
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
    Escape Continue, Bash approvals, Hooks, the footer with PR links, Claude bridge,
+   [OMMS](#omms-memory-external-package), [Ghost Autocomplete](#ghost-autocomplete-external-package),
    and each configured or requested optional feature. For Escape Continue, compare
    selected entrypoints with [its configuration requirements](#escape-continue),
    read-only. Check external package pins and their documented config;
@@ -53,6 +55,88 @@ steps, and drift or unverified items, naming the relevant file and README step.
 Ask Ar before repairs or changes to personal settings; continue unrelated work
 when a setup issue does not block it. Keep machine-specific audit results out of
 tracked instructions.
+
+## OMMS memory (external package)
+
+Install [om-memory-system](https://pi.dev/packages/om-memory-system) separately
+from this repository. The reviewed package version is pinned:
+
+```sh
+pi install npm:om-memory-system@4.18.0
+```
+
+Before starting a session with the extension enabled, merge its configuration
+into `~/.config/omms/omms.jsonc`, preserving existing settings. This path is
+independent of `PI_CODING_AGENT_DIR`. Use this machine's existing Pi connection
+for `gpt-6-luna` as `MODEL_CONNECTION`:
+
+```json
+{
+  "piProvider": "MODEL_CONNECTION",
+  "piModel": "gpt-6-luna",
+  "piBackfillModel": "MODEL_CONNECTION/gpt-6-luna",
+  "autoBackfill": true,
+  "autoCaptureEnabled": true,
+  "webServerAutoStart": false,
+  "webServerHost": "127.0.0.1"
+}
+```
+
+Ar has approved importing old session history as part of this setup. Keep
+`autoBackfill` enabled. Import, capture, and profile learning send conversation
+content to the selected model and make additional model calls. Keep credentials
+in Pi's existing connection.
+
+Memories default to `~/.omms/data`. Embeddings run locally and download their
+model on first use. The web app binds to localhost at port 4747; the configuration
+above leaves login autostart off. Preserve existing storage and embedding choices.
+If npm reports blocked dependency install scripts, verify the local embedding
+backend before approving only the scripts it needs.
+
+Completion: `pi list` includes the pin, its extension and memory skill are
+selected, the configured model resolves in the offline model list, and the saved
+`autoBackfill` is `true`. Restart Pi, verify the `memory` tool
+is available, and test capture and recall with a disposable note. Report model
+calls, embeddings, and recall as unverified until observed.
+
+## Ghost Autocomplete (external package)
+
+Install [pi-ghost-autocomplete](https://pi.dev/packages/pi-ghost-autocomplete)
+separately from this repository. The reviewed package version is pinned:
+
+```sh
+pi install npm:pi-ghost-autocomplete@0.17.0
+```
+
+Use an existing Pi model connection instead of the default Mercury provider,
+which requires a separate Inception API key. Persist these exports in the shell
+startup file or Pi launcher that this machine actually uses, replacing
+`MODEL_CONNECTION` with its existing connection for `gpt-6-luna`:
+
+```sh
+export PI_GHOST_PROVIDER=pi
+export PI_GHOST_MODEL=MODEL_CONNECTION/gpt-6-luna
+```
+
+Preserve existing Ghost settings and unrelated launcher behavior. Restart the Pi
+process after changing its environment; `/reload` cannot import new exports from
+the parent shell. Ghost makes additional model calls with draft text and recent
+conversation context. Keep raw-prompt evaluation capture and debug logging off
+unless requested.
+
+**Custom-editor conflict:** version 0.17.0 installs its own `GhostEditor` rather
+than wrapping the active editor. This repository's Vi mode also installs an
+editor. Loading Ghost after Vi replaces Vi editing; reversing the order replaces
+Ghost. Prompt stash's wrapper alone does not resolve this conflict. Ask Ar to
+choose compatibility work, Ghost without Vi, or Vi with Ghost disabled before
+changing the editor selection. Preserve Escape Continue and prompt stash.
+
+The package requires a native binary for the host platform and has no JavaScript
+fallback. Completion: the pinned package and matching platform dependency are
+installed, editor selection reflects Ar's choice, and `/ghost` reports the
+intended Pi provider/model after restart. In the TUI, type a draft, observe a
+suggestion, accept it with Right Arrow or Tab, and verify the retained editor
+shortcuts. Installation and model registration alone do not verify suggestions.
 
 ## Escape Continue
 

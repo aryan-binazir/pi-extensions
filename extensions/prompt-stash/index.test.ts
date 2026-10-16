@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { ViEditor } from "../vi-mode/editor.ts";
-import { readPastes } from "../vi-mode/adapter.ts";
+import { readPastes, viEditor } from "../vi-mode/adapter.ts";
 import { stashHost } from "./test-support.ts";
 
 for (const EditorClass of [CustomEditor, ViEditor]) {
@@ -165,7 +165,7 @@ test("restoring the only draft into an empty editor clears the stash status", ()
 test("stash wraps the loaded vi factory and restores raw drafts with typed text around a collapsed paste", () => {
   const h = stashHost(CustomEditor, true);
   try {
-    assert.ok(h.editor instanceof ViEditor);
+    assert.ok(viEditor in h.editor);
     const payload = "\tpasted line\r\n".repeat(20);
     h.editor.handleInput("\x1b[200~raw\tinline\r \x1b[201~");
     h.editor.handleInput("typed prefix ");

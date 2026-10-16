@@ -10,6 +10,7 @@ import { withPi } from './pi-session.ts';
 const root = resolve(import.meta.dirname, '..');
 const expected = new Map<string, { tools: string[]; commands: string[]; shortcuts: string[] }>([
   ['hooks', {tools: [], commands: [], shortcuts: []}],
+  ['background-models', {tools: [], commands: [], shortcuts: []}],
   ['questionnaire', {tools: ['questionnaire'], commands: [], shortcuts: []}],
   ['todo', {tools: ['todo_write'], commands: [], shortcuts: ['alt+t']}],
   ['effort', {tools: [], commands: ['effort'], shortcuts: []}],
@@ -49,6 +50,8 @@ test('Pi package discovers every declared entrypoint and independently loads eac
           const installed: unknown[] = [];
           const ctx = {...runner.createContext(), hasUI: true, ui: {...runner.createContext().ui, getEditorText: () => "", setEditorText: () => {}, setEditorComponent: (factory: unknown) => installed.push(factory)}};
           for (const hook of extension.handlers.get('session_start') ?? []) await hook({type: 'session_start', reason: 'startup'}, ctx);
+          assert.equal(installed.length, 0, 'vi waits for custom editors to finish session startup');
+          for (const hook of extension.handlers.get('resources_discover') ?? []) await hook({type: 'resources_discover'}, ctx);
           assert.equal(typeof installed[0], 'function', 'vi registers a real editor factory');
           for (const hook of extension.handlers.get('session_shutdown') ?? []) await hook({type: 'session_shutdown', reason: 'exit'}, ctx);
           assert.equal(installed.at(-1), undefined, 'vi removes its editor at shutdown');

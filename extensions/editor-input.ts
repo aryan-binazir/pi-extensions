@@ -132,7 +132,7 @@ function dispatch(input: Input, data: string): void {
   }
   finally { input.depth--; }
 }
-export function attachEditorInput(editor: Editor, backend?: Backend): void {
+export function attachEditorInput(editor: Editor, backend?: Backend): Editor["handleInput"] {
   const state = sharedState();
   let input = (editor as WiredEditor)[editorInput];
   if (!input) {
@@ -148,6 +148,7 @@ export function attachEditorInput(editor: Editor, backend?: Backend): void {
   input.backend ??= backend;
   if (input.retired) input.backend?.acquire();
   input.retired = false;
+  return input.original;
 }
 export function resetEditorInput(editor: Editor): void {
   const input = (editor as WiredEditor)[editorInput];

@@ -5,6 +5,7 @@ import {
   decodeKittyPrintable,
   CURSOR_MARKER,
   visibleWidth,
+  type TUI,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
 import {
@@ -74,7 +75,7 @@ type Snapshot = {
   pos: number;
   payloads: PasteState;
 };
-export class ViEditor extends CustomEditor {
+class ViMode {
   private mode: "insert" | "normal" | "visual" | "line" = "insert";
   private previousHardwareCursor: boolean;
   private disposed = false;
@@ -119,14 +120,45 @@ export class ViEditor extends CustomEditor {
     cols: number;
   } | undefined;
   private draft: string | undefined;
+  private handlingBaseInput = false;
 
-  constructor(...args: ConstructorParameters<typeof CustomEditor>) {
-    super(...args);
-    markViEditor(this);
+  private readonly tui: TUI;
+  private readonly base;
+  constructor(private readonly editor: CustomEditor) {
+    const internal = editor as unknown as {
+      tui: TUI;
+      renderTopBorder(width: number, hidden: number): string;
+      renderBottomBorder(width: number, hidden: number): string;
+    };
+    this.tui = internal.tui;
+    this.base = {
+      getText: editor.getText.bind(editor),
+      setText: editor.setText.bind(editor),
+      handleInput: attachEditorInput(editor).bind(editor),
+      render: editor.render.bind(editor),
+      invalidate: editor.invalidate.bind(editor),
+      renderTopBorder: internal.renderTopBorder.bind(editor),
+      renderBottomBorder: internal.renderBottomBorder.bind(editor),
+    };
+    editor.getExpandedText = this.getExpandedText.bind(this);
+    editor.setText = this.setText.bind(this);
+    editor.insertTextAtCursor = this.insertTextAtCursor.bind(this);
+    editor.render = this.render.bind(this);
+    editor.invalidate = () => {
+      this.base.invalidate();
+      // Ghost's async invalidation does not schedule a repaint in compiled Pi.
+      if (!this.disposed) this.tui.requestRender();
+    };
+    internal.renderBottomBorder = this.renderBottomBorder.bind(this);
+    Object.defineProperty(editor, invalidateTextCache, { value: this[invalidateTextCache].bind(this) });
+    markViEditor(editor);
     this.previousHardwareCursor = this.tui.getShowHardwareCursor();
     this.tui.setShowHardwareCursor(true);
     this.cursorShape();
-    attachEditorInput(this, { key: data => this.handleKey(data), paste: data => this.consumePaste(data), release: () => this.releaseCursor(), acquire: () => this.acquireCursor() });
+    attachEditorInput(editor, { key: data => this.handleKey(data), paste: data => this.consumePaste(data), release: () => this.releaseCursor(), acquire: () => this.acquireCursor() });
+  }
+  private clearGhost(): void {
+    (this.editor as CustomEditor & { forceClearGhost?: () => void }).forceClearGhost?.();
   }
   private resetPending(): void {
     this.op = "";
@@ -135,7 +167,7 @@ export class ViEditor extends CustomEditor {
     this.registerPending = false;
   }
   private text(): string {
-    return (this.draft ??= super.getText());
+    return (this.draft ??= this.base.getText());
   }
   [invalidateTextCache](): void {
     this.draft = undefined;
@@ -171,7 +203,7 @@ export class ViEditor extends CustomEditor {
     const text = this.text();
     if (this.markerText !== text) {
       this.markerText = text;
-      this.markerList = pasteMarkers(this, text);
+      this.markerList = pasteMarkers(this.editor, text);
     }
     return this.markerList;
   }
@@ -200,21 +232,23 @@ export class ViEditor extends CustomEditor {
     return p;
   }
   private baseInput(data: string): void {
-    const submit = this.onSubmit;
+    const submit = this.editor.onSubmit;
     const before = this.mode === "insert" ? undefined : this.snapshot();
     const history = this.undoHistory;
-    this.onSubmit = (expanded) => {
-      this.setText("");
+    this.editor.onSubmit = (expanded) => {
+      this.resetDraft("");
       submit?.(expanded.trim().replace(CONTROLS_EXCEPT_TAB_LF, ""));
     };
     try {
-      super.handleInput(data);
+      this.handlingBaseInput = true;
+      try { this.base.handleInput(data); }
+      finally { this.handlingBaseInput = false; }
+      if (this.mode !== "insert") this.clearGhost();
       this.draft = undefined;
       const historyReset = history !== this.undoHistory;
       if (before && !historyReset && before.text !== this.text()) {
         this.visualLayout = undefined;
         this.checkpoint(before);
-        // A native edit cancels pending commands and arguments, so a following u undoes it.
         this.discardArgument = false;
         this.resetPending();
         this.register = '"';
@@ -222,13 +256,13 @@ export class ViEditor extends CustomEditor {
     } finally {
       this.draft = undefined;
       if (this.mode === "insert") this.visualLayout = undefined;
-      this.onSubmit = submit;
+      this.editor.onSubmit = submit;
     }
   }
-  override getExpandedText(): string {
-    return expandPastes(this, super.getText());
+  getExpandedText(): string {
+    return expandPastes(this.editor, this.base.getText());
   }
-  override insertTextAtCursor(text: string): void {
+  insertTextAtCursor(text: string): void {
     text = safeDraft(text);
     if (!text) return;
     if (this.insertion && this.insertion.text !== this.text())
@@ -241,7 +275,21 @@ export class ViEditor extends CustomEditor {
     this.insertion = undefined;
   }
 
-  override setText(text: string): void {
+  setText(text: string): void {
+    if (this.handlingBaseInput) {
+      if (this.mode === "insert") {
+        if (this.insertion && this.insertion.text !== this.text()) this.checkpoint(this.insertion);
+        this.checkpoint();
+      }
+      this.insertion = undefined;
+      this.writeText(text);
+      this.move(this.text().length);
+      return;
+    }
+    this.resetDraft(text);
+  }
+  private resetDraft(text: string): void {
+    this.clearGhost();
     if (this.mode === "visual" || this.mode === "line") this.mode = "normal";
     this.anchor = 0;
     this.visualScroll = 0;
@@ -250,12 +298,12 @@ export class ViEditor extends CustomEditor {
     this.undoHistory = [];
     this.redoHistory = [];
     this.insertion = undefined;
-    resetEditorInput(this);
+    resetEditorInput(this.editor);
     this.resetPending();
-    writePastes(this, { pastes: new Map(), counter: 0 });
-    this.writeText(collapsePaste(this, safeDraft(text)));
+    writePastes(this.editor, { pastes: new Map(), counter: 0 });
+    this.writeText(collapsePaste(this.editor, safeDraft(text)));
     this.move(this.text().length);
-    clearBaseUndo(this);
+    clearBaseUndo(this.editor);
     this.cursorShape();
   }
   private writeText(text: string): void {
@@ -263,14 +311,14 @@ export class ViEditor extends CustomEditor {
     this.visualLayout = undefined;
     this.boundaryText = "";
     this.markerText = undefined;
-    const payloads = readPastes(this);
-    super.setText(text);
+    const payloads = readPastes(this.editor);
+    this.base.setText(text);
     this.draft = undefined;
-    writePastes(this, payloads);
-    clearBaseUndo(this);
+    writePastes(this.editor, payloads);
+    clearBaseUndo(this.editor);
     if (this.text() !== text) {
-      retainRawText(this, text);
-      this.onChange?.(text);
+      retainRawText(this.editor, text);
+      this.editor.onChange?.(text);
     }
   }
   private rebuildBoundaries(text: string): void {
@@ -316,12 +364,12 @@ export class ViEditor extends CustomEditor {
     return this.boundaries[Math.max(0, index - 1)];
   }
   private pos(): number {
-    const c = this.getCursor();
+    const c = this.editor.getCursor();
     const starts = this.starts();
     return (c.line < starts.length ? starts[c.line] : this.text().length + 1) + c.col;
   }
   private snapshot(): Snapshot {
-    return { text: this.text(), pos: this.pos(), payloads: readPastes(this) };
+    return { text: this.text(), pos: this.pos(), payloads: readPastes(this.editor) };
   }
   private checkpoint(s = this.snapshot()): void {
     this.undoHistory.push(s);
@@ -329,13 +377,12 @@ export class ViEditor extends CustomEditor {
     this.redoHistory = [];
   }
   private restore(s: Snapshot): void {
-    writePastes(this, s.payloads);
+    writePastes(this.editor, s.payloads);
     this.writeText(s.text);
     this.cursorTo(s.pos);
   }
   private cursorTo(offset: number): void {
-    // A popup's prefix belongs to the old cursor; Enter or Tab would apply it here.
-    cancelAutocomplete(this);
+    cancelAutocomplete(this.editor);
     const starts = this.starts();
     const end = clampOffset(offset, this.text().length);
     let low = 0,
@@ -345,7 +392,7 @@ export class ViEditor extends CustomEditor {
       if (starts[mid] <= end) low = mid;
       else high = mid - 1;
     }
-    setCursorPosition(this, low, end - starts[low]);
+    setCursorPosition(this.editor, low, end - starts[low]);
   }
   private onGrapheme(p: number): number {
     const end = this.lineEnd(p);
@@ -391,7 +438,7 @@ export class ViEditor extends CustomEditor {
     let p = this.pos();
     n = Math.min(10000, n);
     if (key === "j" || key === "k") {
-      const cursor = this.getCursor();
+      const cursor = this.editor.getCursor();
       this.preferredColumn ??= cursor.col;
       const starts = this.starts();
       const line = Math.max(
@@ -416,7 +463,7 @@ export class ViEditor extends CustomEditor {
       else if (key === "0") return this.lineStart(p);
       else if (key === "$")
         return Math.max(this.lineStart(p), this.previous(this.lineEnd(p)));
-      else if (key === "^") return this.lineTarget(this.getCursor().line + 1);
+      else if (key === "^") return this.lineTarget(this.editor.getCursor().line + 1);
       else if (key === "w") p = this.wordNext(p);
       else if (key === "e") p = this.wordEnd(this.next(p));
       else if (key === "b") {
@@ -461,7 +508,7 @@ export class ViEditor extends CustomEditor {
       this.register = '"';
       return;
     }
-    const value = { text: expandPastes(this, text.slice(a, b)), line };
+    const value = { text: expandPastes(this.editor, text.slice(a, b)), line };
     this.registers.set(this.register, value);
     this.registers.set('"', value);
     this.register = '"';
@@ -495,7 +542,7 @@ export class ViEditor extends CustomEditor {
     let a = key === "P" ? this.pos() : Math.min(this.lineEnd(), this.next(this.pos())),
       b = a;
     if (visual) [a, b] = this.range();
-    const selected = visual ? expandPastes(this, t.slice(a, b)) : "";
+    const selected = visual ? expandPastes(this.editor, t.slice(a, b)) : "";
     const separator = r.line && r.text && !r.text.endsWith("\n") ? "\n" : "";
     const repeatedLength = r.text.length * n + separator.length * (n - 1);
     const remainingLength = this.getExpandedText().length - selected.length;
@@ -521,7 +568,7 @@ export class ViEditor extends CustomEditor {
     if (remainingLength + before.length + value.length + after.length > MAX_DRAFT) return;
     this.checkpoint();
     if (visual) this.registers.set('"', { text: selected, line: this.mode === "line" });
-    this.writeText(t.slice(0, a) + before + collapsePaste(this, value) + after + t.slice(b));
+    this.writeText(t.slice(0, a) + before + collapsePaste(this.editor, value) + after + t.slice(b));
     this.move(a + before.length);
     if (visual) {
       this.mode = "normal";
@@ -590,7 +637,7 @@ export class ViEditor extends CustomEditor {
       ? [a + (around ? 0 : 1), b + (around ? 1 : 0)]
       : undefined;
   }
-  dispose(): void { retireEditorInput(this); }
+  dispose(): void { this.clearGhost(); retireEditorInput(this.editor); }
   private acquireCursor(): void {
     if (!this.disposed) return;
     this.disposed = false;
@@ -605,6 +652,7 @@ export class ViEditor extends CustomEditor {
     this.tui.terminal.write("\x1b[0 q");
   }
   private consumePaste(data: string): void {
+    this.clearGhost();
     const payload = safeDraft(data.replace(/\x1b\[(\d+);5u/g, (sequence, code: string) => {
       const cp = Number(code);
       return cp >= 97 && cp <= 122 ? String.fromCharCode(cp - 96)
@@ -618,7 +666,7 @@ export class ViEditor extends CustomEditor {
         ? this.range()
         : [this.pos(), this.pos()];
     const text = this.text();
-    const visible = collapsePaste(this, payload);
+    const visible = collapsePaste(this.editor, payload);
     this.writeText(text.slice(0, p) + visible + text.slice(selectionEnd));
     if (this.mode === "visual" || this.mode === "line") {
       this.mode = "normal";
@@ -628,6 +676,7 @@ export class ViEditor extends CustomEditor {
     this.move(p + visible.length);
   }
   private handleKey(data: string): void {
+    if (this.mode !== "insert" || matchesKey(data, "escape")) this.clearGhost();
     if (matchesKey(data, "escape")) {
       const discarded = this.discardArgument;
       this.discardArgument = false;
@@ -636,7 +685,7 @@ export class ViEditor extends CustomEditor {
         this.baseInput(data);
         return;
       }
-      cancelAutocomplete(this);
+      cancelAutocomplete(this.editor);
       if (
         this.mode === "insert" &&
         this.insertion &&
@@ -671,7 +720,6 @@ export class ViEditor extends CustomEditor {
       this.baseInput(data);
       return;
     }
-    // Arguments are consumed before undo/redo so they never run as commands.
     if (this.discardArgument) {
       this.discardArgument = false;
       return;
@@ -726,7 +774,6 @@ export class ViEditor extends CustomEditor {
       this.resetPending();
       return;
     }
-    // Unsupported commands that take a character cancel pending state and swallow it.
     if ("rmqfFtT".includes(data)) {
       this.resetPending();
       this.register = '"';
@@ -865,7 +912,7 @@ export class ViEditor extends CustomEditor {
     if ("iaIAoO".includes(data)) {
       if (data === "a")
         this.move(Math.min(this.lineEnd(), this.next(this.pos())));
-      if (data === "I") this.move(this.lineTarget(this.getCursor().line + 1));
+      if (data === "I") this.move(this.lineTarget(this.editor.getCursor().line + 1));
       if (data === "A") this.move(this.lineEnd());
       this.insertion = this.snapshot();
       if (data === "o" || data === "O") {
@@ -890,26 +937,27 @@ export class ViEditor extends CustomEditor {
     );
     this.tui.requestRender();
   }
-  protected override renderBottomBorder(width: number, hidden: number): string {
+  private renderBottomBorder(width: number, hidden: number): string {
     const pending = `${this.count}${this.op}${this.prefix}`;
     const label = truncateToWidth(
       ` ${this.mode.toUpperCase()}${pending ? ` ${pending}` : ""} `,
       width,
       "",
     );
-    return super.renderBottomBorder(Math.max(0, width - visibleWidth(label)), hidden) + label;
+    return this.base.renderBottomBorder(Math.max(0, width - visibleWidth(label)), hidden) + label;
   }
-  override render(width: number): string[] {
-    if (this.focused && !this.tui.getShowHardwareCursor()) {
+  render(width: number): string[] {
+    if (this.mode !== "insert") this.clearGhost();
+    if (this.editor.focused && !this.tui.getShowHardwareCursor()) {
       this.tui.setShowHardwareCursor(true);
       this.cursorShape();
     }
     if (this.mode !== "visual" && this.mode !== "line") {
       const projection = this.projected();
       const lines = projection
-        ? renderProjected(this, () => super.render(width), projection, this.pos())
-        : super.render(width);
-      if (this.mode !== "insert" || !this.focused) return lines;
+        ? renderProjected(this.editor, () => this.base.render(width), projection, this.pos())
+        : this.base.render(width);
+      if (this.mode !== "insert" || !this.editor.focused) return lines;
       return lines.map((line) => {
         const start = line.indexOf(CURSOR_MARKER + "\x1b[7m");
         if (start < 0) return line;
@@ -929,7 +977,7 @@ export class ViEditor extends CustomEditor {
     const text = projection ? projection.text : raw;
     const cursor = display(this.pos());
     const padding = Math.min(
-      this.getPaddingX(),
+      this.editor.getPaddingX(),
       Math.max(0, Math.floor((width - 1) / 2)),
     );
     const layoutWidth = Math.max(1, width - 2 * padding - (padding ? 0 : 1));
@@ -1004,7 +1052,7 @@ export class ViEditor extends CustomEditor {
       this.visualScroll = cursorRow - max + 1;
     const start = Math.max(0, Math.min(this.visualScroll, rowCount - max));
     const rows: string[] = [];
-    const mark = this.focused ? CURSOR_MARKER : "";
+    const mark = this.editor.focused ? CURSOR_MARKER : "";
     let character = 0;
     if (characters) {
       let low = 0, high = characters.length;
@@ -1029,9 +1077,29 @@ export class ViEditor extends CustomEditor {
       if (characters && text.charCodeAt(to) === 10) character++;
     }
     return [
-      this.renderTopBorder(width, start),
+      this.base.renderTopBorder(width, start),
       ...rows,
       this.renderBottomBorder(width, Math.max(0, rowCount - start - max)),
     ];
   }
+}
+
+const viDisposer = Symbol.for("pi-interactive:vi-disposer");
+
+export function attachViMode(editor: CustomEditor): () => void {
+  const shared = editor as CustomEditor & { [viDisposer]?: () => void };
+  if (shared[viDisposer]) return shared[viDisposer];
+  const mode = new ViMode(editor);
+  const dispose = () => mode.dispose();
+  Object.defineProperty(editor, viDisposer, { value: dispose });
+  return dispose;
+}
+
+export class ViEditor extends CustomEditor {
+  private readonly disposeVi: () => void;
+  constructor(...args: ConstructorParameters<typeof CustomEditor>) {
+    super(...args);
+    this.disposeVi = attachViMode(this);
+  }
+  dispose(): void { this.disposeVi(); }
 }

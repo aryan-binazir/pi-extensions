@@ -17,7 +17,7 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
    skipped, not missing setup. Escape Continue, Bash approvals, Hooks, the footer
-   with PR links, Claude bridge, OMMS, and Ghost Autocomplete are required;
+   with PR links, Claude bridge, background model defaults, OMMS, and Ghost Autocomplete are required;
    a missing or disabled component
    is setup drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
@@ -56,6 +56,31 @@ Ask Ar before repairs or changes to personal settings; continue unrelated work
 when a setup issue does not block it. Keep machine-specific audit results out of
 tracked instructions.
 
+## Background model defaults
+
+Enable this repository's Background models extension with `pi config`. For a
+local checkout, select the stable checkout's absolute
+`extensions/background-models/index.ts` path in user-scoped `settings.json`.
+Preserve unrelated extension selections.
+
+It defaults OMMS and Ghost registry `stream`/`complete` requests for `gpt-6-luna`
+to low reasoning, preserving explicit effort. It also omits `temperature` from
+those Codex requests,
+because that endpoint rejects the parameter sent by Ghost. The main session uses
+its own model runtime and thinking settings.
+
+Background models must load before Ghost's `session_start`: Ghost captures the
+registry's stream method during startup. User-local extension paths load before
+packages. If both are installed as packages, put this repository's package before
+Ghost in `settings.json.packages`. In `settings.json.extensions`, keep Background
+models after Hooks and before any Ghost entry. Recheck this order after installs
+and upgrades. The real-Ghost tests cover Codex/Luna options in both orders and
+demonstrate that Ghost-first startup bypasses these defaults.
+
+Completion: verify the selection and startup order, then restart Pi. Verify
+background request effort separately from the main-session footer. Calls through
+`streamSimple` or a provider's own runtime retain their existing settings.
+
 ## OMMS memory (external package)
 
 Install [om-memory-system](https://pi.dev/packages/om-memory-system) separately
@@ -68,11 +93,10 @@ pi install npm:om-memory-system@4.18.0
 Before starting a session with the extension enabled, merge its configuration
 into `~/.config/omms/omms.jsonc`, preserving existing settings. This path is
 independent of `PI_CODING_AGENT_DIR`. Use this machine's existing Pi connection
-for `gpt-6-luna` as `MODEL_CONNECTION`:
+for `gpt-6-luna` as `MODEL_CONNECTION`.
 
-The default background model is GPT-6 Luna at **low** reasoning. Verify the
-request effort separately; Pi's main-session thinking setting does not configure
-these extension calls.
+The default background model is GPT-6 Luna at **low** reasoning. Enable
+[background model defaults](#background-model-defaults) to apply that effort.
 
 ```json
 {
@@ -115,10 +139,11 @@ pi install npm:pi-ghost-autocomplete@0.17.0
 Use an existing Pi model connection instead of the default Mercury provider,
 which requires a separate Inception API key. Persist these exports in the shell
 startup file or Pi launcher that this machine actually uses, replacing
-`MODEL_CONNECTION` with its existing connection for `gpt-6-luna`:
+`MODEL_CONNECTION` with its existing connection for `gpt-6-luna`.
 
-Use GPT-6 Luna at **low** reasoning by default. Verify the request effort as well
-as the model ID; changing Pi's main-session thinking does not set Ghost's effort.
+Use GPT-6 Luna at **low** reasoning by default. Enable
+[background model defaults](#background-model-defaults) to apply that effort and
+omit the Codex-incompatible temperature parameter.
 
 ```sh
 export PI_GHOST_PROVIDER=pi
@@ -131,16 +156,31 @@ the parent shell. Ghost makes additional model calls with draft text and recent
 conversation context. Keep raw-prompt evaluation capture and debug logging off
 unless requested.
 
-**Custom-editor conflict:** version 0.17.0 installs its own `GhostEditor` rather
-than wrapping the active editor. This repository's Vi mode also installs an
-editor. Loading Ghost after Vi replaces Vi editing; reversing the order replaces
-Ghost. Prompt stash's wrapper alone does not resolve this conflict. Ask Ar to
-choose compatibility work, Ghost without Vi, or Vi with Ghost disabled before
-changing the editor selection. Preserve Escape Continue and prompt stash.
+Enable both Ghost and this repository's Vi mode. Vi attaches to the active
+editor after session startup, so Ghost keeps its provider, commands, and
+lifecycle in either load order. Suggestions are available in insert mode;
+Escape clears the suggestion and enters normal mode. Vi motions, visual
+selection, undo, paste payloads, prompt stash, and Escape Continue remain
+available. Keep this repository updated on machines using both extensions.
+
+`npm run check` tests the pinned Ghost development dependency. To also check a
+globally installed copy:
+
+```sh
+PI_GHOST_TEST_ENTRYPOINT="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/npm/node_modules/pi-ghost-autocomplete/dist/index.js" npm run check
+```
 
 The package requires a native binary for the host platform and has no JavaScript
-fallback. Completion: the pinned package and matching platform dependency are
-installed, editor selection reflects Ar's choice, and `/ghost` reports the
+fallback. Some compiled Pi runtimes cannot resolve the optional platform package
+by name even when its binary loads by absolute path. In that case, use Ghost's
+existing file fallback: symlink the matching platform package's `.node` file into
+`pi-ghost-autocomplete/dist/` with the same filename. Verify matching package
+versions. An existing target must be a symlink resolving to that installed
+platform package's matching addon; report any other file or destination as drift
+and ask Ar before replacing it. Recheck after package upgrades.
+
+Completion: the pinned package and matching platform dependency are
+installed, both extensions are selected, and `/ghost` reports the
 intended Pi provider/model after restart. In the TUI, type a draft, observe a
 suggestion, accept it with Right Arrow or Tab, and verify the retained editor
 shortcuts. Installation and model registration alone do not verify suggestions.

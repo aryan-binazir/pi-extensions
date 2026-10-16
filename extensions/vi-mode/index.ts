@@ -1,22 +1,29 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { installEditorInput } from "../editor-input.ts";
-import { ViEditor } from "./editor.ts";
+import { attachViMode } from "./editor.ts";
+type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 export default function viMode(pi: ExtensionAPI): void {
-  let active: ViEditor | undefined;
+  let dispose: (() => void) | undefined;
+  let composed = false;
   installEditorInput();
-  pi.on("session_start", (_event, ctx) => {
-    if (ctx.hasUI) {
-      ctx.ui.setEditorComponent(
-        (tui, theme, keybindings) => {
-          active?.dispose();
-          return (active = new ViEditor(tui, theme, keybindings));
-        },
-      );
-    }
+  pi.on("session_start", () => {
+    composed = false;
+  });
+  pi.on("resources_discover", (_event, ctx) => {
+    if (!ctx.hasUI || composed) return;
+    composed = true;
+    const base = ctx.ui.getEditorComponent();
+    const factory: EditorFactory = (tui, theme, keybindings) => {
+      dispose?.();
+      const editor = base?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+      dispose = editor instanceof CustomEditor ? attachViMode(editor) : undefined;
+      return editor;
+    };
+    ctx.ui.setEditorComponent(factory);
   });
   pi.on("session_shutdown", (_event, ctx) => {
-    active?.dispose();
-    active = undefined;
+    dispose?.();
+    dispose = undefined;
     if (ctx.hasUI) ctx.ui.setEditorComponent(undefined);
   });
 }

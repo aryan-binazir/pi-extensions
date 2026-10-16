@@ -238,7 +238,9 @@ async function loadViMode() {
 let reloaded: ReturnType<typeof loadViMode> | undefined;
 async function reloadedHost() {
   reloaded ??= loadViMode().then(loadViMode);
-  const start = (await reloaded).handlers.get("session_start")![0];
+  const extension = await reloaded;
+  const start = extension.handlers.get("session_start")![0];
+  const discover = extension.handlers.get("resources_discover")![0];
   initTheme("dark", false);
   const app = Object.assign(Object.create(InteractiveMode.prototype), {
     keybindings: new KeybindingsManager(),
@@ -254,8 +256,15 @@ async function reloadedHost() {
   });
   Object.defineProperty(app, "session", { value: { sessionManager: {} } });
   app.editor = app.defaultEditor = editor(CustomEditor);
-  const ui = { setEditorComponent: (factory: unknown) => app.setCustomEditorComponent(factory) };
-  return { app, start: () => start({ type: "session_start" }, { hasUI: true, ui } as any) };
+  const ui = {
+    getEditorComponent: () => app.editorComponentFactory,
+    setEditorComponent: (factory: unknown) => app.setCustomEditorComponent(factory),
+  };
+  return { app, start: () => {
+    const ctx = { hasUI: true, ui } as any;
+    start({ type: "session_start" }, ctx);
+    discover({ type: "resources_discover" }, ctx);
+  } };
 }
 
 test("a vi editor from a reloaded module edits the draft the handoff transferred", async () => {

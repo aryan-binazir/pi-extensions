@@ -11,7 +11,7 @@ import { initTheme } from '../node_modules/@earendil-works/pi-coding-agent/dist/
 
 initTheme('dark', false);
 const ghostPath = process.env.PI_GHOST_TEST_ENTRYPOINT;
-const localExtensions = ['vi-mode', 'prompt-stash', 'escape-continue'].map(name =>
+const localExtensions = ['background-models', 'vi-mode', 'prompt-stash', 'escape-continue'].map(name =>
   fileURLToPath(new URL(`../extensions/${name}/index.ts`, import.meta.url)));
 
 async function waitFor(condition: () => boolean): Promise<void> {

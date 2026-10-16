@@ -18,6 +18,7 @@
   "pi": {
     "extensions": [
       "./extensions/hooks/index.ts",
+      "./extensions/background-models/index.ts",
       "./extensions/questionnaire/index.ts",
       "./extensions/todo/index.ts",
       "./extensions/effort/index.ts",

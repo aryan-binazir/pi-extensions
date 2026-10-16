@@ -6,7 +6,7 @@ During setup, ensure the scoped models include `gpt-6.1-sol`, `gpt-6-luna`, and 
 
 Escape Continue is required. During setup, [install and enable it](docs/agent-setup.md#escape-continue), preserving other extension selections.
 
-OMMS and Ghost Autocomplete are required external packages. Follow [memory setup](docs/agent-setup.md#omms-memory-external-package) with old-history import enabled and [autocomplete setup](docs/agent-setup.md#ghost-autocomplete-external-package), preserving Vi mode.
+OMMS and Ghost Autocomplete are required external packages. Enable [background model defaults](docs/agent-setup.md#background-model-defaults), then follow [memory setup](docs/agent-setup.md#omms-memory-external-package) with old-history import enabled and [autocomplete setup](docs/agent-setup.md#ghost-autocomplete-external-package), preserving Vi mode.
 
 Repair Auto Permissions version drift using the required pin and upgrade procedure in [Automatic Bash permissions](docs/agent-setup.md#automatic-bash-permissions-external-package). Reporting a mismatch alone is not completion.
 

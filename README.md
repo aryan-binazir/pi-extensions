@@ -44,6 +44,7 @@ load; helpers and tests are not extensions.
    [scoped model setup](docs/agent-setup.md#required-scoped-models), preserving this
    machine's existing model connections.
 8. **Install memory and autocomplete separately (required).** Follow
+   [background model defaults](docs/agent-setup.md#background-model-defaults),
    [OMMS setup](docs/agent-setup.md#omms-memory-external-package) and
    [Ghost Autocomplete setup](docs/agent-setup.md#ghost-autocomplete-external-package).
    Enable old-history import for OMMS. Vi mode composes with Ghost's editor.
@@ -59,6 +60,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | Extension | What it does |
 | --- | --- |
 | [Hooks](#hooks) | Tested block, advise and gate hooks, switched on in `personal-settings/hooks.yaml`. Replaces Guard. |
+| [Background models](docs/agent-setup.md#background-model-defaults) | Defaults extension Luna calls to low reasoning and omits unsupported Codex temperature. |
 | Questionnaire | Interactive questions through the `questionnaire` tool. |
 | Todo | Compact task summary; `alt+t` toggles the full list. Session-backed progress and stale-progress reminders. |
 | Effort | `/effort` changes reasoning; `/effort new` starts a temporary model/effort session. |

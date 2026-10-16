@@ -10,6 +10,7 @@ import { withPi } from './pi-session.ts';
 const root = resolve(import.meta.dirname, '..');
 const expected = new Map<string, { tools: string[]; commands: string[]; shortcuts: string[] }>([
   ['hooks', {tools: [], commands: [], shortcuts: []}],
+  ['background-models', {tools: [], commands: [], shortcuts: []}],
   ['questionnaire', {tools: ['questionnaire'], commands: [], shortcuts: []}],
   ['todo', {tools: ['todo_write'], commands: [], shortcuts: ['alt+t']}],
   ['effort', {tools: [], commands: ['effort'], shortcuts: []}],

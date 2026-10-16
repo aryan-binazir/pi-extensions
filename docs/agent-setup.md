@@ -17,7 +17,7 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
    skipped, not missing setup. Escape Continue, Bash approvals, Hooks, the footer
-   with PR links, Claude bridge, OMMS, and Ghost Autocomplete are required;
+   with PR links, Claude bridge, background model defaults, OMMS, and Ghost Autocomplete are required;
    a missing or disabled component
    is setup drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
@@ -56,6 +56,22 @@ Ask Ar before repairs or changes to personal settings; continue unrelated work
 when a setup issue does not block it. Keep machine-specific audit results out of
 tracked instructions.
 
+## Background model defaults
+
+Enable this repository's Background models extension with `pi config`. For a
+local checkout, select the stable checkout's absolute
+`extensions/background-models/index.ts` path in user-scoped `settings.json`.
+Preserve unrelated extension selections.
+
+It defaults extension requests for `gpt-6-luna` to low reasoning, preserving any
+explicit effort. It also omits `temperature` from extension Codex requests,
+because that endpoint rejects the parameter sent by Ghost. The main session uses
+its own model runtime and thinking settings.
+
+Completion: the extension is selected and loads before an OMMS or Ghost request.
+Restart Pi after changing selection. Verify background request effort separately
+from the main-session footer.
+
 ## OMMS memory (external package)
 
 Install [om-memory-system](https://pi.dev/packages/om-memory-system) separately
@@ -70,9 +86,8 @@ into `~/.config/omms/omms.jsonc`, preserving existing settings. This path is
 independent of `PI_CODING_AGENT_DIR`. Use this machine's existing Pi connection
 for `gpt-6-luna` as `MODEL_CONNECTION`.
 
-The default background model is GPT-6 Luna at **low** reasoning. Verify the
-request effort separately; Pi's main-session thinking setting does not configure
-these extension calls.
+The default background model is GPT-6 Luna at **low** reasoning. Enable
+[background model defaults](#background-model-defaults) to apply that effort.
 
 ```json
 {
@@ -117,8 +132,9 @@ which requires a separate Inception API key. Persist these exports in the shell
 startup file or Pi launcher that this machine actually uses, replacing
 `MODEL_CONNECTION` with its existing connection for `gpt-6-luna`.
 
-Use GPT-6 Luna at **low** reasoning by default. Verify the request effort as well
-as the model ID; changing Pi's main-session thinking does not set Ghost's effort.
+Use GPT-6 Luna at **low** reasoning by default. Enable
+[background model defaults](#background-model-defaults) to apply that effort and
+omit the Codex-incompatible temperature parameter.
 
 ```sh
 export PI_GHOST_PROVIDER=pi

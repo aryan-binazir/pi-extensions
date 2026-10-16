@@ -7,9 +7,7 @@ import type { DesktopAction, DesktopBackend, DesktopResult } from './desktop.ts'
 const maxBytes = 16 * 1024 * 1024;
 export function pngResult(bytes: Buffer, output: string): DesktopResult {
   if (bytes.length < 24 || bytes.length > maxBytes || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || bytes.toString('ascii', 12, 16) !== 'IHDR') throw new Error('Desktop returned an invalid or oversized PNG');
-  const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
-  if (!width || !height || width > 32768 || height > 32768 || width * height > 64_000_000) throw new Error('Desktop screenshot dimensions exceed limits');
-  return { image: bytes.toString('base64'), mimeType: 'image/png', output, width, height, coordinates: 'Click x/y are fractions from 0 to 1 within this output.' };
+  return { image: bytes.toString('base64'), mimeType: 'image/png', output, width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20), coordinates: 'Click x/y are fractions from 0 to 1 within this output.' };
 }
 export class LinuxDesktop implements DesktopBackend {
   private pointer?: WaylandPointer;

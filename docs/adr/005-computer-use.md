@@ -12,7 +12,7 @@ On macOS, Pi connects to the existing Codex Computer Use service through its bun
 
 The Mac API is deliberately app/window-targeted, with screenshot pixel coordinates, element indices, page scrolling, and keyboard chords. Do not disguise it as the Linux normalized display-coordinate API. Preserve official MCP schema validation and route elicitation through Pi's confirmation UI; headless requests cannot silently approve. Pi owns only its client and relay, never the shared service. No nested model or direct Swift fallback runs behind the tools.
 
-Linux retains `DesktopSession.run` and its Wayland backend. macOS owns an independent serialized MCP session because its app-targeted semantics and approval lifecycle differ. Both transports bound output, close owned resources on cancellation, and never automatically replay mutations. The tradeoff is dependence on the installed Codex service/client/runtime contract; mocked tests do not prove compatibility with every desktop app version.
+Linux retains `DesktopSession.run` and its Wayland backend. macOS owns an independent serialized MCP session because its app-targeted semantics and approval lifecycle differ. Both transports bound output, close owned resources on cancellation, and never automatically replay mutations. Screenshots are downscaled to the active model's image limits before results reach Pi, and an image that cannot be processed is omitted with a note rather than forwarded: Pi's tool-result normalizer keeps the original when resizing fails, and one oversized image makes every later provider request in the session fail. The tradeoff is dependence on the installed Codex service/client/runtime contract; mocked tests do not prove compatibility with every desktop app version.
 
 Primary references:
 

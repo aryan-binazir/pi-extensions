@@ -2,6 +2,7 @@ import { accessSync, constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ImageContent, TextContent } from '@earendil-works/pi-ai';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -79,7 +80,7 @@ function canonicalBase64(image: Buffer, text: string): boolean {
 export function macResult(result: CallToolResult, omitImages = false) {
   const text = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
   if (result.isError) throw new Error(boundedText(text || 'Codex computer-use service error'));
-  const content: ({ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string })[] = [];
+  const content: (TextContent | ImageContent)[] = [];
   if (text) content.push({ type: 'text', text: boundedText(text) });
   let bytes = 0;
   for (const item of result.content) {

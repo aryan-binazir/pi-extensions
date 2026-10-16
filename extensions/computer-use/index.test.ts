@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:net';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { getImageDimensions } from '@earendil-works/pi-tui';
 import computerUse from './index.ts';
 import { pngResult } from './native.ts';
+import { png } from '../../tests/fixtures/png.ts';
+import { ints, msg, string } from '../../tests/fixtures/wayland.ts';
 
 const register = () => {
   const handlers = new Map<string, () => Promise<void>>(); const tools: any[] = [];
@@ -41,4 +48,40 @@ test('a new session restores desktop use after shutdown', { skip: process.platfo
   await handlers.get('session_start')!();
   assert.equal((await accessibility.execute('new', {})).details.available, false);
   await handlers.get('session_shutdown')!();
+});
+
+
+test('Linux screenshots reach Pi bounded to the active model image limits', { skip: process.platform !== 'linux' }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-screenshot-')), socket = join(dir, 'wayland-test');
+  const compositor = createServer(s => {
+    let buffer = Buffer.alloc(0);
+    s.on('data', data => {
+      buffer = Buffer.concat([buffer, data]);
+      while (buffer.length >= 8) {
+        const id = buffer.readUInt32LE(0), word = buffer.readUInt32LE(4), size = word >>> 16, op = word & 65535;
+        if (buffer.length < size) break;
+        const body = Buffer.from(buffer.subarray(8, size)); buffer = buffer.subarray(size);
+        if (id === 1 && op === 1) s.write(msg(body.readUInt32LE(0), 0, Buffer.concat([ints(11), string('wl_output'), ints(4)])));
+        else if (id === 1 && op === 0) s.write(msg(body.readUInt32LE(0), 0, ints(42)));
+        else if (id === 2 && op === 0) s.write(msg(body.readUInt32LE(body.length - 4), 4, string('HEADLESS-1')));
+      }
+    });
+  });
+  await new Promise<void>(resolve => compositor.listen(socket, resolve));
+  await writeFile(join(dir, 'screen.png'), png(3000, 1500));
+  await writeFile(join(dir, 'grim'), `#!/bin/sh\ncat '${join(dir, 'screen.png')}'\n`, { mode: 0o755 });
+  const saved = { WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY, PATH: process.env.PATH };
+  process.env.WAYLAND_DISPLAY = socket; process.env.PATH = `${dir}:${process.env.PATH}`;
+  const { handlers, tools } = register();
+  t.after(async () => {
+    await handlers.get('session_shutdown')!();
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    await new Promise(resolve => compositor.close(resolve)); await rm(dir, { recursive: true, force: true });
+  });
+  const model = { inputLimits: { images: { resize: { maxWidth: 1000, maxHeight: 1000 } } } };
+  const { content, details } = await tools.find(tool => tool.name === 'computer_screenshot').execute('shot', {}, undefined, undefined, { model });
+  const image = content.find((block: any) => block.type === 'image');
+  assert.deepEqual(getImageDimensions(image.data, image.mimeType), { widthPx: 1000, heightPx: 500 });
+  assert.equal(details.output, 'HEADLESS-1');
+  assert.ok(content.some((block: any) => block.type === 'text' && /original 3000x1500, displayed at 1000x500/.test(block.text)));
 });

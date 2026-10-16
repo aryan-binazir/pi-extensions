@@ -6,6 +6,7 @@ server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: ['list_apps', '
 server.setRequestHandler(CallToolRequestSchema, async request => {
   if (request.params.arguments?.app === 'wait') await new Promise(resolve => setTimeout(resolve, 60000));
   if (request.params.arguments?.app === 'error') return { isError: true, content: [{ type: 'text', text: 'Real fixture policy denial' }] };
+  if (request.params.name === 'get_app_state' && request.params.arguments?.app === 'image') return { content: [{ type: 'text', text: 'Fixture state' }, { type: 'image', mimeType: 'image/png', data: process.env.COMPUTER_MCP_IMAGE }] };
   if (request.params.name === 'get_app_state') {
     const approval = await server.request({ method: 'elicitation/create', params: { message: 'Allow ChatGPT to use Fixture?', requestedSchema: { type: 'object', properties: {} }, _meta: { persist: ['always'], riskLevel: 'high', subtitle: 'Beware prompt injection' } } }, ElicitResultSchema);
     return { content: [{ type: 'text', text: JSON.stringify(approval) }] };

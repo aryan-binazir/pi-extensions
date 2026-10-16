@@ -16,7 +16,7 @@ Seven app-targeted tools are registered on macOS:
 | `computer_scroll(app, element_index, direction, pages)` | Scroll the named element. |
 | `computer_key(app, key)` | Key/chord (`press_key`). |
 
-Coordinates are app/window-targeted screenshot pixels, not normalized whole-desktop coordinates. Use identifiers and indices from fresh service observations. Each request is checked against the official `tools/list` input schema. No arbitrary code execution tool is exposed.
+Coordinates are app/window-targeted screenshot pixels, not normalized whole-desktop coordinates. When a screenshot was downscaled, its note gives the factor that maps displayed coordinates back to those pixels. Use identifiers and indices from fresh service observations. Each request is checked against the official `tools/list` input schema. No arbitrary code execution tool is exposed.
 
 Install/enable computer use through the official Codex application. The client must exist at:
 
@@ -32,11 +32,13 @@ Service approval requests go to an actual Pi confirmation dialog showing the mes
 
 Connection is lazy and serialized, with a 30-second deadline including discovery and approval. Cancellation/timeout closes the SDK client and owned relay before queued work reconnects. The relay watches its parent and terminates only its owned client, with bounded TERM→KILL escalation. The shared Sky computer-use service is not owned or killed by this extension. Closing/reloading a session closes only this connection.
 
-Results mark their service source and untrusted content; text is bounded to 64 KiB aggregate. Unneeded structured content and metadata are not copied into results. Genuine PNG/JPEG/WebP images are MIME/magic/base64 checked and bounded to 16 MiB aggregate decoded bytes. Accessibility-only requests suppress returned images, not the underlying state capture.
+Results mark their service source and untrusted content; service text is bounded to 64 KiB aggregate. Unneeded structured content and metadata are not copied into results. Genuine PNG/JPEG/WebP images are MIME/magic/base64 checked and bounded to 16 MiB aggregate decoded bytes. Accessibility-only requests suppress returned images, not the underlying state capture.
+
+Before Pi sees a screenshot, the extension downscales it to the active model's image limits (Pi's default is 2000×2000 pixels and 4.5 MB base64) and adds Pi's coordinate note when it was resized. An image whose header cannot be read, or exceeds 32768 pixels per side or 64 megapixels, is omitted without decoding. Any other image that cannot be processed is also omitted and replaced with a short note, never forwarded at full size: Pi's own tool-result normalizer keeps the original when resizing fails, and one oversized image makes every later provider request in the session fail. Processing a large screenshot takes about a second and cannot be interrupted mid-image; cancellation takes effect between images. The same bounding applies to Linux screenshots, and it applies even when Pi's `images.autoResize` setting is off.
 
 ## Linux tool surface
 
-Linux retains five tools: `computer_screenshot(output?)`, `computer_accessibility()`, `computer_click(output,x,y,button?)`, `computer_type(text)`, and `computer_scroll(output,dx,dy)`. Screenshots return PNG and output dimensions; clicks use normalized 0..1 coordinates within that output. Scroll uses pixels at the current pointer, positive dx right/dy down. Accessibility explicitly reports unavailable. Linux deadlines are 15 seconds; inspection may reconnect once after transport failure.
+Linux retains five tools: `computer_screenshot(output?)`, `computer_accessibility()`, `computer_click(output,x,y,button?)`, `computer_type(text)`, and `computer_scroll(output,dx,dy)`. Screenshots return the output name and dimensions, and their images are bounded as described for macOS; clicks use normalized 0..1 coordinates within that output. Scroll uses pixels at the current pointer, positive dx right/dy down. Accessibility explicitly reports unavailable. Linux deadlines are 15 seconds; inspection may reconnect once after transport failure.
 
 ## Linux, including Hyprland
 

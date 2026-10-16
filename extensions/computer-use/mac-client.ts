@@ -3,9 +3,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { getImageDimensions } from '@earendil-works/pi-tui';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { ElicitRequest, ElicitResult, CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
+import { boundImages } from './images.ts';
 
 let sdk: Promise<{
   Client: typeof import('@modelcontextprotocol/sdk/client/index.js').Client;
@@ -94,6 +96,8 @@ export function macResult(result: CallToolResult, omitImages = false) {
       : item.mimeType === 'image/jpeg' ? image.length >= 4 && image[0] === 255 && image[1] === 216 && image[2] === 255 && image.at(-2) === 255 && image.at(-1) === 217
       : item.mimeType === 'image/webp' && image.length >= 16 && image.toString('ascii', 0, 4) === 'RIFF' && image.toString('ascii', 8, 12) === 'WEBP';
     if (!valid) throw new Error('Invalid image MIME or magic');
+    const size = getImageDimensions(item.data, item.mimeType);
+    if (size && (size.widthPx > 32768 || size.heightPx > 32768 || size.widthPx * size.heightPx > 64_000_000)) throw new Error('Invalid oversized image dimensions');
     if (!omitImages) content.push({ type: 'image', data: item.data, mimeType: item.mimeType });
   }
   return { content, details: { source: 'Codex computer-use service', untrusted: true } };
@@ -136,7 +140,8 @@ export class MacSession {
         const tool = this.tools.find(tool => tool.name === name);
         if (!tool || !validator(tool.inputSchema)(args).valid) throw new Error(`Arguments do not match official ${name} schema`);
         sent = true;
-        return macResult(await client.callTool({ name, arguments: args }, undefined, { signal: control.signal }) as CallToolResult, omitImages);
+        const result = macResult(await client.callTool({ name, arguments: args }, undefined, { signal: control.signal }) as CallToolResult, omitImages);
+        return { ...result, content: await boundImages(result.content, ctx.model?.inputLimits?.images?.resize, control.signal) };
       })();
       try { return await Promise.race([operation, cancelled]); }
       catch (error) {

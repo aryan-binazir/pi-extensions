@@ -68,7 +68,7 @@ pi install npm:om-memory-system@4.18.0
 Before starting a session with the extension enabled, merge its configuration
 into `~/.config/omms/omms.jsonc`, preserving existing settings. This path is
 independent of `PI_CODING_AGENT_DIR`. Use this machine's existing Pi connection
-for `gpt-6-luna` as `MODEL_CONNECTION`:
+for `gpt-6-luna` as `MODEL_CONNECTION`.
 
 The default background model is GPT-6 Luna at **low** reasoning. Verify the
 request effort separately; Pi's main-session thinking setting does not configure
@@ -115,7 +115,7 @@ pi install npm:pi-ghost-autocomplete@0.17.0
 Use an existing Pi model connection instead of the default Mercury provider,
 which requires a separate Inception API key. Persist these exports in the shell
 startup file or Pi launcher that this machine actually uses, replacing
-`MODEL_CONNECTION` with its existing connection for `gpt-6-luna`:
+`MODEL_CONNECTION` with its existing connection for `gpt-6-luna`.
 
 Use GPT-6 Luna at **low** reasoning by default. Verify the request effort as well
 as the model ID; changing Pi's main-session thinking does not set Ghost's effort.
@@ -131,16 +131,28 @@ the parent shell. Ghost makes additional model calls with draft text and recent
 conversation context. Keep raw-prompt evaluation capture and debug logging off
 unless requested.
 
-**Custom-editor conflict:** version 0.17.0 installs its own `GhostEditor` rather
-than wrapping the active editor. This repository's Vi mode also installs an
-editor. Loading Ghost after Vi replaces Vi editing; reversing the order replaces
-Ghost. Prompt stash's wrapper alone does not resolve this conflict. Ask Ar to
-choose compatibility work, Ghost without Vi, or Vi with Ghost disabled before
-changing the editor selection. Preserve Escape Continue and prompt stash.
+Enable both Ghost and this repository's Vi mode. Vi attaches to the active
+editor after session startup, so Ghost keeps its provider, commands, and
+lifecycle in either load order. Suggestions are available in insert mode;
+Escape clears the suggestion and enters normal mode. Vi motions, visual
+selection, undo, paste payloads, prompt stash, and Escape Continue remain
+available. Keep this repository updated on machines using both extensions.
+
+Run the real-package regression tests against the globally installed pin:
+
+```sh
+PI_GHOST_TEST_ENTRYPOINT="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/npm/node_modules/pi-ghost-autocomplete/dist/index.js" npm run check
+```
 
 The package requires a native binary for the host platform and has no JavaScript
-fallback. Completion: the pinned package and matching platform dependency are
-installed, editor selection reflects Ar's choice, and `/ghost` reports the
+fallback. Some compiled Pi runtimes cannot resolve the optional platform package
+by name even when its binary loads by absolute path. In that case, use Ghost's
+existing file fallback: symlink the matching platform package's `.node` file into
+`pi-ghost-autocomplete/dist/` with the same filename. Preserve any existing target,
+verify matching package versions, and recheck after package upgrades.
+
+Completion: the pinned package and matching platform dependency are
+installed, both extensions are selected, and `/ghost` reports the
 intended Pi provider/model after restart. In the TUI, type a draft, observe a
 suggestion, accept it with Right Arrow or Tab, and verify the retained editor
 shortcuts. Installation and model registration alone do not verify suggestions.

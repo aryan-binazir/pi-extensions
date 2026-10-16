@@ -46,8 +46,7 @@ load; helpers and tests are not extensions.
 8. **Install memory and autocomplete separately (required).** Follow
    [OMMS setup](docs/agent-setup.md#omms-memory-external-package) and
    [Ghost Autocomplete setup](docs/agent-setup.md#ghost-autocomplete-external-package).
-   Enable old-history import for OMMS and resolve any custom-editor conflict
-   before enabling Ghost.
+   Enable old-history import for OMMS. Vi mode composes with Ghost's editor.
 9. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
    servers through its built-in MCP support and `~/.pi/agent/mcp.json`.
 

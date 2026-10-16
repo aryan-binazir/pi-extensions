@@ -5,13 +5,11 @@ function chunk(kind: string, data: Buffer) {
   b.writeUInt32BE(crc32(b.subarray(4, -4)), b.length - 4); return b;
 }
 
-/** PNG signature and IHDR only: a valid header whose pixels cannot be decoded. */
 export function pngHeader(width: number, height: number) {
   const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 2;
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header)]);
 }
 
-/** Complete RGB PNG; `noise` fills it with deterministic incompressible pixels. */
 export function png(width: number, height: number, { noise = false } = {}) {
   const stride = width * 3 + 1, rows = Buffer.alloc(stride * height);
   if (noise) {

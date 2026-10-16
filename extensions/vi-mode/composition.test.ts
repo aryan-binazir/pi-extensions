@@ -15,6 +15,11 @@ class SuggestionEditor extends CustomEditor {
       this.forceClearGhost();
       return;
     }
+    if (data === '\x1b[C' && this.suggestion) {
+      this.setText(this.getText().replace(/\w+$/, this.suggestion));
+      this.forceClearGhost();
+      return;
+    }
     super.handleInput(data);
   }
   forceClearGhost(): void {
@@ -40,6 +45,38 @@ test('Vi composes with a custom editor without replacing its instance or insert 
   assert.equal(e.getText(), 'hello');
   keys(e, 'u');
   assert.equal(e.getText(), '');
+  dispose();
+});
+
+test('custom token replacements retain Vi undo, redo, and existing paste payloads', () => {
+  const e = editor(SuggestionEditor);
+  const dispose = attachViMode(e);
+  const payload = 'synthetic paste\n'.repeat(20);
+  e.handleInput('\x1b[200~' + payload + '\x1b[201~');
+  keys(e, ' abc');
+  const before = e.getText();
+  e.suggestion = 'abcdef';
+  e.handleInput('\x1b[C');
+  assert.equal(e.getExpandedText(), payload + ' abcdef');
+  e.handleInput('\x1b');
+  keys(e, 'u');
+  assert.equal(e.getText(), before);
+  assert.equal(e.getExpandedText(), payload + ' abc');
+  e.handleInput('\x12');
+  assert.equal(e.getExpandedText(), payload + ' abcdef');
+  dispose();
+});
+
+test('independent Vi module copies attach once to the same editor', async () => {
+  const secondModule = './editor.ts?second-copy';
+  const second = await import(secondModule);
+  const e = editor(CustomEditor);
+  const dispose = attachViMode(e);
+  assert.equal(second.attachViMode(e), dispose);
+  keys(e, 'hello\x1b0x');
+  assert.equal(e.getText(), 'ello');
+  keys(e, 'u');
+  assert.equal(e.getText(), 'hello');
   dispose();
 });
 

@@ -1,6 +1,6 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { installEditorInput } from "../editor-input.ts";
-import { attachViMode, ViEditor } from "./editor.ts";
+import { attachViMode } from "./editor.ts";
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 export default function viMode(pi: ExtensionAPI): void {
   let dispose: (() => void) | undefined;
@@ -15,9 +15,8 @@ export default function viMode(pi: ExtensionAPI): void {
     const base = ctx.ui.getEditorComponent();
     const factory: EditorFactory = (tui, theme, keybindings) => {
       dispose?.();
-      const editor = base?.(tui, theme, keybindings) ?? new ViEditor(tui, theme, keybindings);
-      if (!(editor instanceof CustomEditor)) throw new Error("Vi mode requires a Pi CustomEditor");
-      dispose = attachViMode(editor);
+      const editor = base?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+      dispose = editor instanceof CustomEditor ? attachViMode(editor) : undefined;
       return editor;
     };
     ctx.ui.setEditorComponent(factory);

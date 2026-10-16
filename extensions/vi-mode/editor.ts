@@ -120,6 +120,7 @@ class ViMode {
     cols: number;
   } | undefined;
   private draft: string | undefined;
+  private handlingBaseInput = false;
 
   private readonly tui: TUI;
   private readonly base;
@@ -145,6 +146,7 @@ class ViMode {
     editor.render = this.render.bind(this);
     editor.invalidate = () => {
       this.base.invalidate();
+      // Ghost's async invalidation does not schedule a repaint in compiled Pi.
       if (!this.disposed) this.tui.requestRender();
     };
     internal.renderBottomBorder = this.renderBottomBorder.bind(this);
@@ -234,11 +236,13 @@ class ViMode {
     const before = this.mode === "insert" ? undefined : this.snapshot();
     const history = this.undoHistory;
     this.editor.onSubmit = (expanded) => {
-      this.setText("");
+      this.resetDraft("");
       submit?.(expanded.trim().replace(CONTROLS_EXCEPT_TAB_LF, ""));
     };
     try {
-      this.base.handleInput(data);
+      this.handlingBaseInput = true;
+      try { this.base.handleInput(data); }
+      finally { this.handlingBaseInput = false; }
       if (this.mode !== "insert") this.clearGhost();
       this.draft = undefined;
       const historyReset = history !== this.undoHistory;
@@ -272,6 +276,19 @@ class ViMode {
   }
 
   setText(text: string): void {
+    if (this.handlingBaseInput) {
+      if (this.mode === "insert") {
+        if (this.insertion && this.insertion.text !== this.text()) this.checkpoint(this.insertion);
+        this.checkpoint();
+      }
+      this.insertion = undefined;
+      this.writeText(text);
+      this.move(this.text().length);
+      return;
+    }
+    this.resetDraft(text);
+  }
+  private resetDraft(text: string): void {
     this.clearGhost();
     if (this.mode === "visual" || this.mode === "line") this.mode = "normal";
     this.anchor = 0;
@@ -1067,15 +1084,15 @@ class ViMode {
   }
 }
 
-const modes = new WeakMap<CustomEditor, ViMode>();
+const viDisposer = Symbol.for("pi-interactive:vi-disposer");
 
 export function attachViMode(editor: CustomEditor): () => void {
-  let mode = modes.get(editor);
-  if (!mode) {
-    mode = new ViMode(editor);
-    modes.set(editor, mode);
-  }
-  return () => mode.dispose();
+  const shared = editor as CustomEditor & { [viDisposer]?: () => void };
+  if (shared[viDisposer]) return shared[viDisposer];
+  const mode = new ViMode(editor);
+  const dispose = () => mode.dispose();
+  Object.defineProperty(editor, viDisposer, { value: dispose });
+  return dispose;
 }
 
 export class ViEditor extends CustomEditor {

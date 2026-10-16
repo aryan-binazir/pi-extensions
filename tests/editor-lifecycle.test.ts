@@ -7,6 +7,7 @@ import { initTheme } from '../node_modules/@earendil-works/pi-coding-agent/dist/
 import { KeybindingsManager } from '../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js';
 import { editor, keys } from '../extensions/vi-mode/test-support.ts';
 import viMode from '../extensions/vi-mode/index.ts';
+import { attachViMode } from '../extensions/vi-mode/editor.ts';
 import stash from '../extensions/prompt-stash/index.ts';
 import escapeContinue from '../extensions/escape-continue/index.ts';
 import { withPi } from './pi-session.ts';
@@ -699,9 +700,10 @@ test('standalone stash can undo swaps between identical markers with different p
 test('editor replacement transfers cursor ownership before construction and retired disposal is harmless', () => {
   const h = host();
   const outgoing = h.app.editor;
+  const dispose = attachViMode(outgoing);
   const factory = h.app.editorComponentFactory;
-  h.app.setCustomEditorComponent((...args: ConstructorParameters<typeof CustomEditor>) => new (outgoing.constructor)(...args));
-  outgoing.dispose();
+  h.app.setCustomEditorComponent(factory);
+  dispose();
   assert.equal(h.app.ui.getShowHardwareCursor(), true, 'retired editor cannot disable incoming cursor before render');
   h.app.setCustomEditorComponent(undefined);
   assert.equal(h.app.ui.getShowHardwareCursor(), false, 'stock editor inherits original cursor setting');

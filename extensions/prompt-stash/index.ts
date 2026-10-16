@@ -32,10 +32,11 @@ export default function promptStash(pi: ExtensionAPI): void {
     const current = ctx.ui.getEditorText();
     if (slot === undefined && current === "") return;
     const captured: { text: string; restore?: () => boolean } = { text: current };
-    const draft = active && { text: active.getText(), payloads: readPastes(active) };
+    const capturedEditor = active;
+    const draft = capturedEditor && { text: capturedEditor.getText(), payloads: readPastes(capturedEditor) };
     const factory = installed;
     if (draft) captured.restore = () => {
-      if (!active || ctx.ui.getEditorComponent() !== factory) return false;
+      if (!active || (active !== capturedEditor && ctx.ui.getEditorComponent() !== factory)) return false;
       restoreRawDraft(active, draft.text, draft.payloads);
       return true;
     };

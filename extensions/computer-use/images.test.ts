@@ -39,11 +39,13 @@ test("the active model's tighter resize limits apply on the first pass", async (
   assert.match(note.type === 'text' ? note.text : '', /displayed at 1000x500\. Multiply coordinates by 3\.00/);
 });
 
-test('a request aborted while one image is processing stops before the next image', async () => {
-  const control = new AbortController();
-  const pending = boundImages([image(png(3000, 1500)), image(png(3000, 1500))], undefined, control.signal);
-  control.abort(new Error('request aborted'));
-  await assert.rejects(pending, /request aborted/);
+test('a request aborted while an image is processing is rejected, whether or not another image follows', async () => {
+  for (const count of [1, 2]) {
+    const control = new AbortController();
+    const pending = boundImages(Array.from({ length: count }, () => image(png(3000, 1500))), undefined, control.signal);
+    control.abort(new Error('request aborted'));
+    await assert.rejects(pending, /request aborted/);
+  }
 });
 
 test('small real JPEG and WebP screenshots pass through unchanged without a note', async () => {

@@ -20,5 +20,6 @@ export async function boundImages(content: (TextContent | ImageContent)[], resiz
     const note = formatDimensionNote(resized);
     if (note) bounded.push({ type: 'text', text: note });
   }
+  signal?.throwIfAborted();
   return bounded;
 }

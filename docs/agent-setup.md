@@ -70,6 +70,10 @@ into `~/.config/omms/omms.jsonc`, preserving existing settings. This path is
 independent of `PI_CODING_AGENT_DIR`. Use this machine's existing Pi connection
 for `gpt-6-luna` as `MODEL_CONNECTION`:
 
+The default background model is GPT-6 Luna at **low** reasoning. Verify the
+request effort separately; Pi's main-session thinking setting does not configure
+these extension calls.
+
 ```json
 {
   "piProvider": "MODEL_CONNECTION",
@@ -112,6 +116,9 @@ Use an existing Pi model connection instead of the default Mercury provider,
 which requires a separate Inception API key. Persist these exports in the shell
 startup file or Pi launcher that this machine actually uses, replacing
 `MODEL_CONNECTION` with its existing connection for `gpt-6-luna`:
+
+Use GPT-6 Luna at **low** reasoning by default. Verify the request effort as well
+as the model ID; changing Pi's main-session thinking does not set Ghost's effort.
 
 ```sh
 export PI_GHOST_PROVIDER=pi

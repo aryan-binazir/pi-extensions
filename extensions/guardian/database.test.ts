@@ -65,6 +65,29 @@ test('commands that are not destructive database operations are untouched', () =
   }
 });
 
+test('every host of a target counts, however it is written', () => {
+  const multiHost = { DATABASE_URL: 'postgresql://localhost:5432,roundhouse.proxy.rlwy.net:5432/railway' };
+  assert.equal(decide(`psql "$DATABASE_URL" -c 'DROP TABLE customers'`, multiHost), 'forbidden', 'libpq tries the next host when the first fails');
+  for (const script of [
+    'psql -hprod.example.com -c "DROP TABLE t"',
+    'psql -h localhost,db.example.com -c "DROP TABLE t"',
+    `psql "service=production" -c 'DROP TABLE t'`,
+    `psql "postgresql://localhost/app?host=db.example.com" -c 'DROP TABLE t'`,
+    `psql "host=localhost,10.0.0.5 dbname=app" -c 'DROP TABLE t'`,
+    'mongosh "mongodb://localhost:27017,mongo2.example.com:27017/app" --eval "db.dropDatabase()"',
+  ]) {
+    assert.equal(decide(script), 'forbidden', script);
+  }
+  assert.equal(decide(`psql "postgresql://%2Fvar%2Frun%2Fpostgresql/app" -c 'DROP TABLE t'`), undefined, 'a percent-encoded socket path is local');
+  assert.equal(decide('psql -h127.0.0.1 -c "DROP TABLE t"'), undefined);
+});
+
+test('variables are expanded only where the shell expands them', () => {
+  assert.equal(decide("psql -h localhost -c 'DELETE FROM cache WHERE key = $$obsolete$$'"), undefined, 'SQL dollar quoting in single quotes is text');
+  assert.equal(decide('psql -h localhost -c "DELETE FROM cache WHERE pid = $$"'), undefined, '$$ is the process ID');
+  assert.equal(decide('psql -h localhost -c "DELETE FROM cache WHERE key = $KEY"'), 'forbidden', 'an unset variable could hold anything');
+});
+
 test('local hosts are loopback names and addresses or socket paths', () => {
   for (const host of ['localhost', 'LOCALHOST', 'app.localhost', '127.0.0.1', '127.1.2.3', '::1', '[::1]', '/var/run/postgresql', '']) assert.ok(isLocalHost(host), host);
   for (const host of ['db.example.com', '10.0.0.5', '0.0.0.0', 'localhost.example.com', 'roundhouse.proxy.rlwy.net']) assert.ok(!isLocalHost(host), host);

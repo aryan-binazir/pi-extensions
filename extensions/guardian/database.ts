@@ -40,10 +40,11 @@ const DESTRUCTIVE_STATEMENT = /\b(?:drop\s+(?:table|database|schema|view|materia
 const CLIENT_TOKEN = new RegExp(`(^|[^A-Za-z0-9_-])(${Object.keys(CLIENT_DEFAULTS).join('|')})([^A-Za-z0-9_-]|$)`, 'g');
 /** Commands that run the client on another machine, where "localhost" is that machine. */
 const REMOTE_EXEC = /(^|[^A-Za-z0-9_-])(ssh|kubectl|oc|heroku|fly|flyctl|gcloud|az|aws|doctl|render|railway)([^A-Za-z0-9_-]|$)/;
-const VARIABLE = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|([A-Za-z_][A-Za-z0-9_]*))/g;
-const URI = /\b[a-z][a-z0-9+.-]*:\/\/(?:[^\s'"@/]*@)?(\[[^\]]*\]|[^\s'"/:?,]*)/gi;
-const HOST_OPTION = /(?:^|\s)(?:-h|--host|-S|--server|--socket)(?:\s+|=)(['"]?)([^\s'"]+)\1/g;
-const CONNINFO_HOST = /\bhost(?:addr)?\s*=\s*(['"]?)([^\s'"]+)\1/gi;
+const URI_AUTHORITY = /\b[a-z][a-z0-9+.-]*:\/\/([^\s'"/?#]*)/gi;
+const HOST_OPTION = /(?:^|\s)(?:--(?:host|server|socket)(?:\s+|=)|-[hS](?:\s+|=)?)(['"]?)([^\s'"]+)\1/g;
+const CONNINFO_HOST = /\bhost(?:addr)?\s*=\s*(['"]?)([^\s'"&]+)\1/gi;
+/** A libpq service file names its own host, which Guardian does not read. */
+const SERVICE = /\bservice\s*=/i;
 const ENV_ASSIGNMENT = /(?:^|[\s;&|(])(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(?:'([^']*)'|"([^"]*)"|([^\s;&|)]*))/g;
 
 /** Local hosts: loopback names and addresses, Unix socket directories, and libpq's empty host. */
@@ -52,12 +53,67 @@ export function isLocalHost(host: string): boolean {
   return bare === '' || bare === 'localhost' || bare.endsWith('.localhost') || bare === '::1' || /^127(\.\d{1,3}){3}$/.test(bare) || bare.startsWith('/');
 }
 
-/** A connection target from an environment value: a URI's host, a conninfo host, or the value as a host name. */
+const decode = (text: string) => { try { return decodeURIComponent(text); } catch { return text; } };
+const withoutPort = (host: string) => host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.replace(/:[^:]*$/, '');
+
+/** Every host the text names: each host of a multi-host URI, and each entry of a `host=` or `hostaddr=` list. */
+function hostsIn(text: string): string[] {
+  const hosts: string[] = [];
+  for (const match of text.matchAll(URI_AUTHORITY)) {
+    const authority = match[1].slice(match[1].lastIndexOf('@') + 1);
+    hosts.push(...authority.split(',').map(part => decode(withoutPort(part))));
+  }
+  for (const match of text.matchAll(CONNINFO_HOST)) hosts.push(...match[2].split(','));
+  return hosts;
+}
+
+/** The hosts in an environment value: those of a URI or connection string, or the value as a host list. */
 function hostsInValue(value: string): string[] {
-  const uris = [...value.matchAll(URI)].map(match => match[1]);
-  if (uris.length) return uris;
-  const conninfo = [...value.matchAll(CONNINFO_HOST)].map(match => match[2]);
-  return conninfo.length ? conninfo : [value];
+  const hosts = hostsIn(value);
+  return hosts.length ? hosts : value.split(',');
+}
+
+/**
+ * Expands variables where the shell would: not inside single quotes, so SQL dollar quoting stays text, and `$$`
+ * is the process ID. Returns the names expanded and the text with their values.
+ */
+function expandVariables(text: string, lookup: (name: string) => string | undefined): { names: string[]; expanded: string } {
+  const names: string[] = [];
+  let expanded = '', single = false, double = false;
+  for (let index = 0; index < text.length;) {
+    const char = text[index];
+    if (single) {
+      if (char === "'") single = false;
+      expanded += char;
+      index++;
+    } else if (char === '\\') {
+      expanded += text.slice(index, index + 2);
+      index += 2;
+    } else if (char === "'" && !double) {
+      single = true;
+      expanded += char;
+      index++;
+    } else if (char === '"') {
+      double = !double;
+      expanded += char;
+      index++;
+    } else if (char === '$' && text[index + 1] === '$') {
+      expanded += '$$';
+      index += 2;
+    } else {
+      const variable = char === '$' ? /^\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|^([A-Za-z_][A-Za-z0-9_]*)/.exec(text.slice(index + 1)) : null;
+      if (!variable) {
+        expanded += char;
+        index++;
+        continue;
+      }
+      const name = variable[1] ?? variable[2];
+      names.push(name);
+      expanded += lookup(name) ?? '';
+      index += 1 + variable[0].length;
+    }
+  }
+  return { names, expanded };
 }
 
 export type DatabaseDecision = 'forbidden' | undefined;
@@ -77,17 +133,11 @@ export function databaseDecision(shell: Shell, command: readonly string[], env: 
   const assigned = new Map<string, string>();
   for (const match of text.matchAll(ENV_ASSIGNMENT)) assigned.set(match[1], match[2] ?? match[3] ?? match[4] ?? '');
 
-  const hosts: string[] = [];
-  for (const match of text.matchAll(VARIABLE)) {
-    const name = match[1] ?? match[2];
-    const value = assigned.has(name) ? undefined : env[name];
-    if (value === undefined) return 'forbidden';
-    if (/:\/\/|host(addr)?\s*=/i.test(value)) hosts.push(...hostsInValue(value));
-  }
-  const resolved = text.replace(VARIABLE, (_, braced, plain) => env[braced ?? plain] ?? '');
-  hosts.push(...[...resolved.matchAll(URI)].map(match => match[1]));
-  hosts.push(...[...resolved.matchAll(HOST_OPTION)].map(match => match[2]));
-  hosts.push(...[...resolved.matchAll(CONNINFO_HOST)].map(match => match[2]));
+  const { names: referenced, expanded } = expandVariables(text, name => env[name]);
+  // A variable the script sets, or Pi's environment lacks, could name any server.
+  if (referenced.some(name => assigned.has(name) || env[name] === undefined)) return 'forbidden';
+  if (SERVICE.test(expanded)) return 'forbidden';
+  const hosts = [...hostsIn(expanded), ...[...expanded.matchAll(HOST_OPTION)].flatMap(match => match[2].split(','))];
 
   // Where each tool looks when the command names no server: an assignment in the script, then Pi's environment.
   const implicit = [...wipes, ...clientNames.map(name => CLIENT_DEFAULTS[name])];

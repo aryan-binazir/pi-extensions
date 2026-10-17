@@ -180,7 +180,9 @@ others), such as `psql "$DATABASE_URL" -c 'DROP TABLE users'`, and database wipe
 `localhost`, `127.0.0.1`, `::1`, a Unix socket or a SQLite file. It looks for URIs, `-h`/`--host`/
 `--socket` options, `host=` connection strings and assignments such as `PGHOST=…` in the command, and
 resolves referenced variables such as `$DATABASE_URL`, and those a tool reads (`PGHOST`,
-`DATABASE_URL`), from Pi's environment. A client that finds its server by default (`psql` without a
+`DATABASE_URL`), from Pi's environment, expanding them only where the shell would. Every host of a
+multi-host URI or host list must be local, since a client tries the next one when the first fails, and
+a libpq `service=` is refused because its host lives in a file Guardian does not read. A client that finds its server by default (`psql` without a
 host, `redis-cli`, `sqlite3`) counts as local. Anything else is refused outright, like the Railway
 boundary, because it may be a Railway database: a remote or unknown host, a variable the script sets
 or Pi's environment lacks, a command substitution, a remote shell such as `ssh` or `kubectl`, `mysql`

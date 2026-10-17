@@ -13,9 +13,10 @@ including approval and queue time.
   permissions; explicit tool requests outside those permissions are rejected.
 - **Hooks.** Every child loads this checkout's [hooks](../README.md#hooks) first,
   so the same switches and protection apply; a child does not start without them.
-- **Guardian.** Every child then loads [Guardian](guardian.md), so a child cannot run
-  what the parent would review: its commands run in the same sandbox, under the same
-  rules, with the same reviewer. A child does not start without it. Children have no
+- **Guardian.** When the parent runs [Guardian](guardian.md), every child loads it too,
+  so a child cannot run what the parent would review: its commands run in the same
+  sandbox, under the same rules, with the same reviewer. Such a child does not start
+  without it; a parent without Guardian starts children without it. Children have no
   interactive user, so an approval that would ask gets rejected instead; the child
   reports that and the parent can run the command itself.
 - **Model.** Children default to the `implement` profile:

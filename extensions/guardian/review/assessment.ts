@@ -69,6 +69,9 @@ export function parseGuardianAssessment(text: string): GuardianAssessment {
   }
   const outcome = field(payload, 'outcome', OUTCOMES);
   if (!outcome) throw new Error('missing field `outcome`');
+  if (payload.rationale !== undefined && payload.rationale !== null && typeof payload.rationale !== 'string') {
+    throw new Error(`invalid type for \`rationale\`: ${JSON.stringify(payload.rationale)}, expected a string`);
+  }
   const rationale = typeof payload.rationale === 'string' && payload.rationale.trim() ? payload.rationale : undefined;
   return {
     riskLevel: field(payload, 'risk_level', RISK_LEVELS) ?? (outcome === 'allow' ? 'low' : 'high'),

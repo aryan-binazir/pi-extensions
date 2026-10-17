@@ -33,7 +33,8 @@ function writeFakeBwrap(dir: string, contents = HELP): string {
 
 test('the probe reports user namespace failures', async t => {
   const dir = tempDir(t);
-  for (const failure of ['loopback: Failed RTM_NEWADDR', 'loopback: Failed RTM_NEWLINK', 'setting up uid map: Permission denied', 'No permissions to create a new namespace']) {
+  for (const failure of ['loopback: Failed RTM_NEWADDR', 'loopback: Failed RTM_NEWLINK', 'setting up uid map: Permission denied', 'No permissions to create a new namespace',
+    'bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.']) {
     const bwrap = writeFakeBwrap(join(dir, String(failure.length)), `#!/bin/sh\necho '${failure}' >&2\nexit 1\n`);
     assert.equal(await bwrapHasUserNamespaceAccess(bwrap), false, failure);
   }

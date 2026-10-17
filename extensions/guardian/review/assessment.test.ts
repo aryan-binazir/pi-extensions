@@ -25,6 +25,11 @@ test('parse guardian assessment rejects non-json and invalid enums', () => {
   assert.throws(() => parseGuardianAssessment('{"risk_level":"low"}'), /outcome/);
 });
 
+test('a rationale that is not a string is rejected, as serde rejects it in Codex', () => {
+  assert.throws(() => parseGuardianAssessment('{"outcome":"allow","rationale":42}'), /rationale/);
+  assert.equal(parseGuardianAssessment('{"outcome":"allow","rationale":null}').outcome, 'allow');
+});
+
 test('output contract and schema stay aligned', () => {
   assert.deepEqual(GUARDIAN_OUTPUT_SCHEMA.required, ['outcome']);
   assert.ok(GUARDIAN_OUTPUT_CONTRACT_PROMPT.includes('{"outcome":"allow"}'));

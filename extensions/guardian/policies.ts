@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { BANNED_PREFIX_SUGGESTIONS, loadExecPolicy } from './exec-policy.ts';
 import { invokesRailwayCli, railwayDecision, RAILWAY_EXTRA_POLICY } from './railway.ts';
-import type { Policy } from './rules.ts';
+import { Policy } from './rules.ts';
 import type { Shell } from './shell.ts';
 
 const BUNDLED_DIR = fileURLToPath(new URL('../../personal-settings/guardian/', import.meta.url));
@@ -28,11 +28,23 @@ export interface LoadedPolicies {
   warning?: string;
 }
 
-export async function loadPolicies(userRulesDirs: readonly string[]): Promise<LoadedPolicies> {
-  const bundled = await loadExecPolicy([BUNDLED_RULES_DIR]);
+export async function loadPolicies(userRulesDirs: readonly string[], bundledRulesDir = BUNDLED_RULES_DIR): Promise<LoadedPolicies> {
+  let bundled: Policy;
+  try {
+    bundled = await loadExecPolicy([bundledRulesDir]);
+  } catch (error) {
+    // Guardian must still start: the Railway boundary is in code, and your rules still load below.
+    const warning = `Guardian could not load its bundled rules; the Railway boundary in code still applies: ${(error as Error).message}`;
+    if (!userRulesDirs.length) return { policy: Policy.empty(), warning };
+    try {
+      return { policy: await loadExecPolicy([...userRulesDirs]), warning };
+    } catch (userError) {
+      return { policy: Policy.empty(), warning: `${warning}; your rules files did not load either: ${(userError as Error).message}` };
+    }
+  }
   if (!userRulesDirs.length) return { policy: bundled };
   try {
-    return { policy: await loadExecPolicy([BUNDLED_RULES_DIR, ...userRulesDirs]) };
+    return { policy: await loadExecPolicy([bundledRulesDir, ...userRulesDirs]) };
   } catch (error) {
     return { policy: bundled, warning: `Guardian could not load your rules files, so only its bundled rules apply: ${(error as Error).message}` };
   }
@@ -44,7 +56,8 @@ export async function loadPolicies(userRulesDirs: readonly string[]): Promise<Lo
  * rules apply alone.
  */
 export function retainPolicies(previous: LoadedPolicies | undefined, next: LoadedPolicies): LoadedPolicies {
-  if (!next.warning || !previous || previous.warning) return next;
+  if (!next.warning || !previous) return next;
+  // `previous` may itself be retained from an earlier failure; its policy is still the last one that loaded.
   return { ...previous, warning: `${next.warning}; keeping the rules that last loaded` };
 }
 

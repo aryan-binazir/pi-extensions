@@ -101,7 +101,15 @@ export class Approvals {
       return { type: 'rejected', message: `This action is too large to review completely (${Buffer.byteLength(actionJson)} bytes, limit ${MAX_REVIEWED_ACTION_BYTES}). Split it into smaller changes and retry.` };
     }
     const reason = request.reason === undefined ? undefined : truncateText(request.reason, MAX_APPROVAL_REASON_TOKENS);
-    const completion = completeReview(await this.deps.review({ actionJson, ...(reason === undefined ? {} : { reason }) }, ctx, signal));
+    let outcome: ReviewOutcome;
+    try {
+      outcome = await this.deps.review({ actionJson, ...(reason === undefined ? {} : { reason }) }, ctx, signal);
+    } catch (error) {
+      // A review that fails to start or clean up is a failed review, so it takes the same fallback.
+      outcome = signal?.aborted ? { type: 'error', error: { type: 'cancelled' } }
+        : { type: 'error', error: { type: 'session', message: error instanceof Error ? error.message : String(error), transient: false } };
+    }
+    const completion = completeReview(outcome);
     const turnId = this.deps.turnId();
     if (completion.assessmentOutcome === 'deny') {
       this.denied = { summary: request.summary, actionJson };

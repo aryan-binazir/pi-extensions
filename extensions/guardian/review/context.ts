@@ -1,8 +1,9 @@
 // Ported from openai/codex codex-rs/guardian-context/src/{truncation,transcript,transcript_record,profile,composition,
 // action,permissions,authorization,verified_answers}.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md.
 // Pi keeps the full session branch, so pre-compaction user messages appear directly in the transcript instead of
-// Codex's retained-instructions section, and compaction summaries are not duplicated. Whole-request budget
-// admission is not ported; the synchronous profile's per-entry and aggregate limits bound the request.
+// Codex's retained-instructions section, and compaction summaries are not duplicated. Codex's whole-request
+// admission (guardian-context/src/enforcement.rs) is reduced to a transcript budget: Pi does not know every
+// reviewer's input limit, so a fixed budget stands in for it, and older user entries yield first.
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { TranscriptFormat } from './prompts.ts';
 
@@ -54,7 +55,13 @@ export interface TranscriptRetention {
   maxMessageTranscriptTokens: number;
   maxToolTranscriptTokens: number;
   maxRecentNonUserEntries: number;
+  /** The whole retained transcript, user entries included. */
+  maxTranscriptTokens?: number;
 }
+
+const MAX_TRANSCRIPT_TOKENS = 64_000;
+/** Codex's lower bound when it shortens a historical entry: enough to keep its label and both ends. */
+const MIN_TRUNCATED_ENTRY_TOKENS = 32;
 
 export const SYNC_ENTRY_LIMITS: TranscriptEntryLimits = { messageTokens: 5_000, toolTokens: 1_000 };
 export const SYNC_RETENTION: TranscriptRetention = { maxMessageTranscriptTokens: 20_000, maxToolTranscriptTokens: 10_000, maxRecentNonUserEntries: 40 };
@@ -203,6 +210,24 @@ export function prepareTranscript(entries: readonly TranscriptEntry[], offset: n
     included[index] = true;
     retained++;
     if (tool) toolTokens += tokens[index]; else messageTokens += tokens[index];
+  }
+  // Every user entry is kept above, so a long session needs the whole-request bound: the oldest user entries are
+  // shortened first, keeping both ends and a marker, and omitted only when shortening is not enough.
+  const budget = retention.maxTranscriptTokens ?? MAX_TRANSCRIPT_TOKENS;
+  let total = tokens.reduce((sum, count, index) => sum + (included[index] ? count : 0), 0);
+  for (let index = 0; index < entries.length && total > budget; index++) {
+    if (!included[index] || !isAuthorization(entries[index])) continue;
+    const target = Math.max(MIN_TRUNCATED_ENTRY_TOKENS, tokens[index] - (total - budget));
+    if (target >= tokens[index]) continue;
+    rendered[index] = truncateText(rendered[index], target);
+    const after = approxTokensFromBytes(byteLength(rendered[index]));
+    total -= tokens[index] - after;
+    tokens[index] = after;
+  }
+  for (let index = 0; index < entries.length && total > budget; index++) {
+    if (!included[index]) continue;
+    included[index] = false;
+    total -= tokens[index];
   }
   return {
     items: rendered.filter((_, index) => included[index]),

@@ -71,6 +71,17 @@ test('review timeouts and failures fall back to you by default and never auto-al
   assert.deepEqual(timedOut.prompts, []);
 });
 
+test('a review that throws takes the failure fallback instead of failing the tool call', async () => {
+  const notices: string[] = [];
+  const approvals = new Approvals({
+    config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => 'turn-1',
+    review: async () => { throw new Error("ENOENT: no such file or directory, mkdtemp '/missing/guardian-claude-'"); },
+  });
+  const ctx: ApprovalContext = { hasUI: true, abort: () => {}, ui: { notify: message => { notices.push(message); }, select: async (_title, options) => options[0] } };
+  assert.deepEqual(await approvals.request(request, ctx), { type: 'approved' });
+  assert.match(notices.join('\n'), /ENOENT[\s\S]*asking you instead/);
+});
+
 test('a cancelled review aborts', async () => {
   const h = harness([{ type: 'error', error: { type: 'cancelled' } }]);
   assert.equal((await h.approvals.request(request, h.ctx)).type, 'aborted');

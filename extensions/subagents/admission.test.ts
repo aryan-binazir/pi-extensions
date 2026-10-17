@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { DelegationAdmission } from './scope.ts';
 import { loadProfiles } from './profiles.ts';
 import { fixtureModelRegistry, admissionFixture } from './test-support.ts';
@@ -131,8 +132,21 @@ test('workflow task signatures retain the production shape and property order', 
   try {
     const admission = admissionFixture({cwd: () => cwd, tools: () => ['read']}).admission;
     const task = await admission.workflow().admit({task: 'compatibility', cwd, model: 'test/fixture', thinking: 'low', tools: ['read'], preset: 'reader'}, cwd);
-    const json = JSON.stringify(task).replace(task.cwd, '<cwd>').replace(task.hooks, '<hooks>').replace(task.guardian, '<guardian>');
+    const json = JSON.stringify(task).replace(task.cwd, '<cwd>').replace(task.hooks, '<hooks>').replace(task.guardian!, '<guardian>');
     assert.equal(json, '{"task":"compatibility","cwd":"<cwd>","model":"test/fixture","thinking":"low","tools":["read"],"preset":"reader","profile":"fixture","configProvenance":{"config":"fixture-config","profile":"fixture","model":"explicit","thinking":"explicit"},"extensions":[],"hooks":"<hooks>","guardian":"<guardian>","timeout":3600000}');
+  } finally { await rm(cwd, {recursive: true, force: true}); }
+});
+
+test('children load Guardian exactly when the parent runs it', async () => {
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), 'admission-guardian-')));
+  try {
+    const guardianPath = fileURLToPath(new URL('../guardian/index.ts', import.meta.url));
+    const tool = (name: string, path: string) => ({name, sourceInfo: {path, source: 'local', scope: 'user', origin: 'top-level'}}) as any;
+    const admit = (definitions?: () => any[]) => admissionFixture({cwd: () => cwd, tools: () => ['read', 'bash'], ...(definitions ? {definitions} : {})})
+      .admission.workflow().admit({task: 'check', cwd, model: 'test/fixture', thinking: 'low', tools: ['read']}, cwd);
+    assert.equal((await admit(() => [tool('read', 'builtin:read'), tool('bash', 'builtin:bash')])).guardian, undefined, 'a parent without Guardian keeps children without it');
+    assert.equal((await admit(() => [tool('read', 'builtin:read'), tool('bash', guardianPath)])).guardian, await realpath(guardianPath));
+    assert.equal((await admit()).guardian, await realpath(guardianPath), 'when Pi cannot say, children load Guardian');
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 

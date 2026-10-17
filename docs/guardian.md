@@ -18,7 +18,8 @@ Guardian replaces Pi's `bash` tool and gates `write` and `edit`.
    strictest decision wins: `forbidden`, then `prompt`, then `allow`.
 2. A `forbidden` match is rejected before anything runs. A `prompt` match needs approval.
 3. Unmatched commands run inside the sandbox without review, unless they force-remove files
-   (`rm -f`, including inside `sudo`, `env`, `trap` and nested shells) or ask to leave the sandbox.
+   (`rm -f`, including inside `sudo`, `env`, `trap` and nested shells), run a destructive database
+   statement (see [Shared rules: Railway](#shared-rules-railway)), or ask to leave the sandbox.
 4. The sandbox lets commands read anywhere and write only in the working directory, `/tmp`,
    `$TMPDIR` and configured roots. `.git`, `.agents`, `.codex`, `.pi` and `.aws` stay read-only, and
    network access is off. `sandbox-exec` on macOS, or `bwrap` on Linux, is the first process, so no
@@ -66,8 +67,13 @@ Install bubblewrap with your package manager: `sudo apt install bubblewrap` on U
 later, `sudo pacman -S bubblewrap` on Arch. Ubuntu 22.04 ships bubblewrap 0.6, which is too old, so
 Guardian uses Codex's bundled copy there. `/guardian status` names the bubblewrap in use.
 
-Subagent children load Guardian the way they load hooks, so a child cannot run what the parent would
-review. A child refuses to start if Guardian is missing.
+When the parent runs Guardian, subagent children load it the way they load hooks, so a child cannot run
+what the parent would review, and a child refuses to start if Guardian is missing. A parent without
+Guardian starts children without it.
+
+If Guardian itself cannot start, for example because a bundled file is unreadable, it still replaces
+`bash`, `write` and `edit` with tools that refuse every call and says why at session start, so Pi never
+falls back to its unguarded tools.
 
 ## Preferences
 
@@ -166,6 +172,12 @@ and Railway's data hosts (`backboard.railway.com`, `*.rlwy.net`, `*.railway.inte
 Railway. Other Railway commands that can reach data (`connect`, `run`, `variables`, `ssh`, the volume,
 database, environment, service and project subcommands, and any command calling a Railway data host) are
 always reviewed. `railway status`, `logs` and `whoami` are untouched.
+
+A destructive statement run through a database client (`psql`, `mysql`, `mongosh`, `redis-cli` and
+others), such as `psql "$DATABASE_URL" -c 'DROP TABLE users'`, and database wipe tools (`dropdb`,
+`prisma migrate reset`, `rails db:drop`) are reviewed even inside the sandbox. Their target usually
+comes from credentials such as `$DATABASE_URL` that Guardian cannot see, so it may be a Railway
+database, and the reviewer's Railway deny decides. Reading and creating data are not affected.
 
 `personal-settings/guardian/rules/railway.rules` keeps the same denials as `.rules` data for defence in
 depth, and the reviewer additionally gets an absolute deny on destructive Railway database and storage

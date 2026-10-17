@@ -228,6 +228,13 @@ test('bundled Railway rules apply everywhere a literal command can hide, even wi
   }
 });
 
+test('a destructive database statement is reviewed even when it would run in the sandbox', async t => {
+  const { run, requests } = setup(t, { decisions: [{ type: 'rejected', message: 'denied' }] });
+  await assert.rejects(run({ command: `psql "$DATABASE_URL" -c 'DROP TABLE customers'` }), /denied/);
+  assert.match(requests[0].reason ?? '', /destructive database statements are reviewed/);
+  assert.equal(requests[0].action.sandbox_permissions, 'use_default');
+});
+
 test('Railway commands that reach databases need review', async t => {
   const { run, requests } = setup(t, { decisions: [{ type: 'rejected', message: 'denied' }] });
   await assert.rejects(run({ command: 'railway connect postgres' }), /denied/);

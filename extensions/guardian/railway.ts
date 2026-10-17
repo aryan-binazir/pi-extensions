@@ -6,6 +6,7 @@ import type { Shell } from './shell.ts';
 
 export const RAILWAY_FORBIDDEN_REASON = 'destructive Railway operations are permanently blocked; this boundary cannot be approved or configured away. Report the blocker to the user or use a read-only alternative.';
 export const RAILWAY_REVIEW_REASON = 'Railway commands that can reach databases or storage are reviewed before they run';
+export const DATABASE_REVIEW_REASON = 'destructive database statements are reviewed before they run, because their target may be a Railway database that the command does not name';
 
 /** The reviewer's Railway deny. Guardian adds it whenever the bundled policy file does not carry it verbatim. */
 export const RAILWAY_EXTRA_POLICY = `### Railway Databases (absolute deny)
@@ -71,6 +72,26 @@ const DESTRUCTIVE_TOKEN = new RegExp(`(^|[^A-Za-z0-9_-])(${[...DESTRUCTIVE].join
 const DESTRUCTIVE_MUTATION = new RegExp(`[a-z](${[...DESTRUCTIVE].map(verb => verb[0].toUpperCase() + verb.slice(1)).join('|')})(?![a-z])`);
 /** Railway's API, its database proxy and its private network, which reach data without naming the CLI. */
 const RAILWAY_DATA_HOST = /(^|[^A-Za-z0-9-])(backboard\.railway\.(app|com)|([A-Za-z0-9-]+\.)+rlwy\.net|([A-Za-z0-9-]+\.)*railway\.internal)([^A-Za-z0-9-]|$)/i;
+
+/** Database clients, whose target usually comes from credentials such as `$DATABASE_URL` that Guardian cannot see. */
+const DATABASE_CLIENTS = new Set(['psql', 'pgcli', 'mysql', 'mariadb', 'mycli', 'mongosh', 'mongo', 'redis-cli', 'sqlcmd', 'clickhouse-client',
+  'cockroach', 'usql', 'sqlite3', 'litecli']);
+const DATABASE_CLIENT_TOKEN = new RegExp(`(^|[^A-Za-z0-9_-])(${[...DATABASE_CLIENTS].join('|')})([^A-Za-z0-9_-]|$)`);
+const DESTRUCTIVE_STATEMENT = /\b(?:drop\s+(?:table|database|schema|view|materialized\s+view|index|sequence|function|type|extension|collection|user|role|owned)\b|truncate\b|delete\s+from\b|alter\s+table\b[^;]*\bdrop\b|flushall\b|flushdb\b|dropdatabase\b)|\.drop(?:Database)?\s*\(/i;
+/** Tools that wipe a database by themselves, wherever it is hosted. */
+const DATABASE_WIPE = /(^|[^A-Za-z0-9_-])(dropdb|prisma\s+migrate\s+reset|prisma\s+db\s+push\b[^;&|]*--(?:force-reset|accept-data-loss)|(?:rails|rake)\s+db:(?:drop|reset|purge))([^A-Za-z0-9_-]|$)/i;
+
+/**
+ * Whether a command runs a destructive database statement. Its target is usually unresolved, so it may be a
+ * Railway database: such commands are reviewed even inside the sandbox, where network access may reach it.
+ */
+export function destructiveDatabaseCommand(shell: Shell, command: readonly string[]): boolean {
+  const text = shell.extractBashCommand(command)?.[1] ?? command.join(' ');
+  if (DATABASE_WIPE.test(text)) return true;
+  if (!DESTRUCTIVE_STATEMENT.test(text)) return false;
+  return shell.expandLiteralCommands(command).some(candidate => DATABASE_CLIENTS.has(basename(unwrap(candidate)[0] ?? '')))
+    || DATABASE_CLIENT_TOKEN.test(text);
+}
 
 /**
  * Whether a command must be blocked or reviewed for Railway. Two layers, because static parsing cannot

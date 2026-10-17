@@ -56,7 +56,9 @@ registry rather than a catalog entry.
 - Network is all or nothing; there is no managed proxy or per-host approval.
 - The reviewer is one model loop with a single read-only `exec_command` tool in the read-only
   sandbox, not a forked Codex session. It gets the full transcript on every review, with
-  no session reuse, deltas, or whole-request budget admission.
+  no session reuse or deltas. Codex's whole-request budget admission is reduced to a fixed transcript
+  budget, because Pi does not know every reviewer's input limit: the oldest user entries are shortened
+  first, keeping both ends, and omitted only when that is not enough.
 - Pi has no developer role. Reviewer policy and permissions go in the system prompt; AGENTS.md files
   and environment context lead the user message.
 - Pi keeps the whole session branch, so earlier user messages appear in the transcript directly
@@ -100,8 +102,14 @@ registry rather than a catalog entry.
 - Sandboxed commands finish the way Pi's own bash does: after the command exits, output is read until
   the pipes close or fall idle for 100 ms, so a backgrounded process does not hold the tool call open
   and output still in the pipe is kept.
-- Subagent children load Guardian alongside hooks and refuse to start without it, so a child inherits the
-  parent's sandbox, rules and review.
+- Subagent children of a parent running Guardian load it alongside hooks and refuse to start without it, so
+  a child inherits the parent's sandbox, rules and review; children of a parent without it match the parent.
+- A Guardian that cannot start (unreadable bundled files, a parser that fails to load) still replaces `bash`,
+  `write` and `edit` with tools that refuse, so Pi never falls back to its unguarded tools. A broken bundled
+  rules file only drops those rules; the Railway boundary in code still applies.
+- A destructive statement through a database client (`psql`, `mysql`, `mongosh`, `redis-cli` and others) or a
+  database wipe tool (`dropdb`, `prisma migrate reset`, `rails db:drop`) is reviewed even inside the sandbox:
+  its target usually comes from credentials Guardian cannot see, so it may be a Railway database.
 
 ## Verification
 

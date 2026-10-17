@@ -2,10 +2,10 @@
 // docs/licenses/README.md. Bubblewrap creates a missing mount target on the host before it masks it, for example an
 // empty `.codex` directory inside a writable workspace, and these are removed once no sandbox still masks them.
 // Guardian shares Codex's registry directory, marker format and lock file, so Guardian and Codex sandboxes running
-// at the same time see each other's placeholders. Codex takes the lock with flock(2); Node cannot, so Guardian runs
-// util-linux's flock(1) for the cross-process part and serializes its own registrations in-process.
+// at the same time see each other's placeholders. Codex takes the lock with flock(2); Node cannot, so Guardian has
+// util-linux's flock(1) lock a descriptor it opened, and serializes its own registrations in-process.
 import { spawn } from 'node:child_process';
-import { type BigIntStats, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { type BigIntStats, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const SYNTHETIC_MOUNT_MARKER_SYNTHETIC = 'synthetic\n';
@@ -141,19 +141,31 @@ function withRegistryLock<T>(registryRoot: string, critical: () => T): Promise<T
   return result;
 }
 
-/** Holds flock(2) on `lockPath` through util-linux's flock(1) until the returned release function runs. */
+/**
+ * Holds flock(2) on `lockPath` until the returned release function runs. flock(1) locks the descriptor it inherits
+ * and exits; the lock belongs to the open file, which this process keeps until release closes it. Only that absolute
+ * binary runs, with no shell and no PATH lookup, because this happens before any sandbox exists.
+ */
 function acquireFileLock(lockPath: string): Promise<() => void> {
   const flock = FLOCK_CANDIDATES.find(path => existsSync(path));
   if (!flock) return Promise.resolve(() => {});
+  const fd = openSync(lockPath, 'a');
   return new Promise((resolve, reject) => {
-    const child = spawn(flock, ['--exclusive', lockPath, '/bin/sh', '-c', 'echo locked; exec cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stderr = '';
-    const release = () => { child.stdin.end(); };
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.stdout.once('data', () => resolve(release));
-    child.stdin.on('error', () => {});
-    child.on('error', reject);
-    child.on('exit', code => reject(new Error(`could not lock the synthetic mount registry ${lockPath}: ${stderr.trim() || `flock exited ${code}`}`)));
+    const child = spawn(flock, ['--exclusive', '3'], { env: {}, stdio: ['ignore', 'ignore', 'pipe', fd] });
+    let stderr = '', settled = false;
+    child.stderr?.on('data', chunk => { stderr += chunk; });
+    const fail = (message: string) => {
+      if (settled) return;
+      settled = true;
+      closeSync(fd);
+      reject(new Error(`could not lock the synthetic mount registry ${lockPath}: ${message}`));
+    };
+    child.on('error', error => fail(error.message));
+    child.on('close', code => {
+      if (code !== 0) return fail(stderr.trim() || `flock exited ${code}`);
+      settled = true;
+      resolve(() => closeSync(fd));
+    });
   });
 }
 

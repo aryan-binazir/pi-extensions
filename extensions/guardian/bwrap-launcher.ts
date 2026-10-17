@@ -25,6 +25,8 @@ const USER_NAMESPACE_FAILURES = [
   'loopback: Failed RTM_NEWLINK',
   'setting up uid map: Permission denied',
   'No permissions to create a new namespace',
+  // Older bubblewrap releases word it without the article.
+  'No permissions to create new namespace',
 ];
 const SYSTEM_BWRAP_PROBE_TIMEOUT_MS = 500;
 const SYSTEM_BWRAP_PROBE_STDERR_LIMIT_BYTES = 64 * 1024;

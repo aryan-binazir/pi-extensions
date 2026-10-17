@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
 import { withPi } from '../../tests/pi-session.ts';
-import guardian from './index.ts';
+import { DEFAULT_GUARDIAN_CONFIG } from './config.ts';
+import guardian, { instructedPermissions, registerFailClosed } from './index.ts';
 import { MANUAL_APPROVAL_DEVELOPER_PREFIX } from './review/context.ts';
 import { detectPlatformSandbox } from './sandbox.ts';
 
@@ -207,4 +208,28 @@ process.stdin.on('data', chunk => { stdin += chunk; }).on('end', () => {
   assert.ok(recorded.argv.includes('--safe-mode') && recorded.argv.includes('claude-opus-5-5'));
   assert.ok(recorded.argv[recorded.argv.indexOf('--system-prompt') + 1].startsWith('You are judging one planned coding-agent action.'));
   assert.ok(recorded.stdin.includes('[1] user: Write it with Claude reviewing.') && recorded.stdin.includes('>>> APPROVAL REQUEST START'));
+});
+
+test('the permission instructions describe how commands actually run', () => {
+  const with_ = (overrides: Partial<typeof DEFAULT_GUARDIAN_CONFIG>, mode = DEFAULT_GUARDIAN_CONFIG.sandbox.mode) =>
+    ({ ...DEFAULT_GUARDIAN_CONFIG, ...overrides, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode } });
+  assert.deepEqual(instructedPermissions(with_({}), true), { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' });
+  assert.deepEqual(instructedPermissions(with_({}), false), { sandboxMode: 'danger-full-access', approvalPolicy: 'unless-trusted' });
+  assert.deepEqual(instructedPermissions(with_({ approvalPolicy: 'never' }), false), { sandboxMode: 'read-only', approvalPolicy: 'never' });
+  for (const approvalPolicy of ['never', 'on-request'] as const) {
+    assert.deepEqual(instructedPermissions(with_({ approvalPolicy }, 'danger-full-access'), false), { sandboxMode: 'danger-full-access', approvalPolicy },
+      'explicit full access keeps the configured policy');
+  }
+});
+
+test('a Guardian that cannot start still replaces bash, write and edit with tools that refuse', async () => {
+  const tools: { name: string; execute: (...args: unknown[]) => Promise<unknown> }[] = [];
+  const handlers: ((event: unknown, ctx: { hasUI: boolean; ui: { notify(message: string, type?: string): void } }) => void)[] = [];
+  registerFailClosed({ registerTool: tool => { tools.push(tool as never); }, on: ((_event: string, handler: never) => { handlers.push(handler); }) as never },
+    new Error('bundled rules are unreadable'), '/repo');
+  assert.deepEqual(tools.map(tool => tool.name), ['bash', 'write', 'edit']);
+  for (const tool of tools) await assert.rejects(tool.execute('call', { command: 'ls', path: 'x', content: '' }), /Guardian could not start[\s\S]*bundled rules are unreadable/);
+  const notices: string[] = [];
+  for (const handler of handlers) handler({}, { hasUI: true, ui: { notify: message => { notices.push(message); } } });
+  assert.match(notices.join('\n'), /Guardian could not start/);
 });

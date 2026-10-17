@@ -344,6 +344,8 @@ test('every child loads the hooks and Guardian extensions before any other and r
       await assert.rejects(validateTask({task: 'Check', cwd, tools: []}, [], undefined, missing), /Subagents do not start without the hooks extension/);
       await assert.rejects(validateTask({task: 'Check', cwd, tools: []}, [], undefined, undefined, missing), /Subagents do not start without the guardian extension/);
     }
+    const withoutGuardian = piInvocation(await validateTask({task: 'Check', cwd, tools: []}, [], undefined, undefined, null)).args;
+    assert.deepEqual(withoutGuardian.flatMap((arg, i) => arg === '-e' ? [withoutGuardian[i + 1]] : []), [await realpath(hooks)], 'a parent without Guardian adds none');
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 

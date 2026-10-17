@@ -2,13 +2,13 @@
 // any Railway command.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createExecApprovalRequirement, type ExecApprovalRequest } from './exec-policy.ts';
 import { BUNDLED_EXTRA_POLICY_PATH, BUNDLED_RULES_DIR, extraPolicy, loadPolicies } from './policies.ts';
-import { RAILWAY_EXTRA_POLICY, RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
+import { destructiveDatabaseCommand, RAILWAY_EXTRA_POLICY, RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
 import { loadShell } from './shell.ts';
 
 const shell = await loadShell();
@@ -128,6 +128,26 @@ test('package runners persist as in Codex, and only Codex\'s banned forms are re
   for (const prefix of [['npm', 'run'], ['pnpm', 'run'], ['yarn', 'run'], ['bun']]) assert.equal(persistableAmendment(shell, prefix), undefined, prefix.join(' '));
 });
 
+test('destructive statements through database clients are reviewed, whatever database they reach', () => {
+  for (const script of [
+    `psql "$DATABASE_URL" -c 'DROP TABLE customers'`,
+    "echo 'TRUNCATE orders;' | psql $DATABASE_URL",
+    'mysql -e "DELETE FROM users" app',
+    `mongosh "$MONGO_URL" --eval 'db.dropDatabase()'`,
+    'redis-cli -u $REDIS_URL FLUSHALL',
+    'docker compose exec db psql -c "ALTER TABLE users DROP COLUMN email"',
+    'dropdb app_production',
+    'npx prisma migrate reset --force',
+    'bin/rails db:drop',
+  ]) {
+    assert.equal(destructiveDatabaseCommand(shell, ['bash', '-lc', script]), true, script);
+  }
+  for (const script of [`psql "$DATABASE_URL" -c 'select count(*) from users'`, 'git commit -m "drop table support"', 'grep -r "DROP TABLE" migrations/',
+    'psql -c "CREATE TABLE t (id int)"', 'npx prisma migrate deploy']) {
+    assert.equal(destructiveDatabaseCommand(shell, ['bash', '-lc', script]), false, script);
+  }
+});
+
 test('the text layer is blunt: any script naming Railway beside a destructive word is refused', () => {
   for (const script of ['rm -f railway.json', 'git commit -m "remove railway config"', 'cd /srv/railway && rm -rf build']) {
     assert.equal(decide(script), 'forbidden', script);
@@ -179,4 +199,20 @@ test('a rules file that stops loading keeps the last rules that did load', async
   assert.match(kept.warning ?? '', /other\.rules[\s\S]*keeping the rules that last loaded/);
   assert.equal(retainPolicies(undefined, broken), broken, 'with nothing loaded before, the bundled rules apply');
   assert.equal(retainPolicies(good, good), good);
+  const twice = retainPolicies(kept, await loadPolicies([dir]));
+  assert.equal(twice.policy, good.policy, 'a second failed reload still keeps them');
+  assert.doesNotMatch(twice.warning ?? '', /keeping the rules that last loaded; keeping/);
+});
+
+test('a broken bundled rules file leaves Guardian running with your rules and the code boundary', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'guardian-bundled-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, 'user'));
+  writeFileSync(join(dir, 'user', 'mine.rules'), 'prefix_rule(pattern=["touch"], decision="forbidden")');
+  const { loadPolicies: load } = await import('./policies.ts');
+  mkdirSync(join(dir, 'bundled'));
+  writeFileSync(join(dir, 'bundled', 'broken.rules'), 'prefix_rule(');
+  const loaded = await load([join(dir, 'user')], join(dir, 'bundled'));
+  assert.match(loaded.warning ?? '', /could not load its bundled rules/);
+  assert.equal(createExecApprovalRequirement(shell, loaded.policy, { command: ['touch', 'x'], approvalPolicy: 'on-request', fileSystem: 'restricted', sandboxPermissions: 'use_default' }).type, 'forbidden');
 });

@@ -1,7 +1,7 @@
 // Guardian: Codex's approval stack for Pi. Our inspiration from this code comes from there. The source is openai/codex
 // (https://github.com/openai/codex, Apache-2.0) at ce0323f2f2d3b25e82806cd555237da3db4e1897. See docs/licenses/README.md.
 import { statSync } from 'node:fs';
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { createBashToolDefinition, createEditToolDefinition, createWriteToolDefinition, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { appendAllowPrefixRule } from './amend.ts';
 import { type ApprovalContext, Approvals, manualApprovalMessage } from './approvals.ts';
 import { createGuardianBashTool, sandboxPolicyFor } from './bash.ts';
@@ -20,11 +20,40 @@ import { loadShell } from './shell.ts';
 
 const REVIEW_STATUS_KEY = 'guardian-review';
 
+/**
+ * Tools that refuse every call. A Guardian that cannot start must still replace Pi's `bash`, `write` and `edit`;
+ * otherwise Pi would run them unguarded.
+ */
+export function registerFailClosed(pi: Pick<ExtensionAPI, 'registerTool' | 'on'>, error: unknown, cwd = process.cwd()): void {
+  const message = `Guardian could not start, so commands and file changes are blocked: ${error instanceof Error ? error.message : String(error)}. Fix it and run /reload.`;
+  const refuse = async (): Promise<never> => { throw new Error(message); };
+  for (const tool of [createBashToolDefinition(cwd), createWriteToolDefinition(cwd), createEditToolDefinition(cwd)]) {
+    pi.registerTool({ ...tool, execute: refuse } as unknown as ToolDefinition);
+  }
+  pi.on('session_start', (_event, ctx) => { if (ctx.hasUI) ctx.ui.notify(message, 'error'); });
+}
+
+/**
+ * The sandbox and approval policy the agent is told about, as they actually behave. Without a platform sandbox,
+ * on-request asks about every command, like unless-trusted, and never runs only what your rules allow.
+ */
+export function instructedPermissions(settings: GuardianConfig, sandboxAvailable: boolean): { sandboxMode: GuardianConfig['sandbox']['mode']; approvalPolicy: GuardianConfig['approvalPolicy'] } {
+  if (settings.sandbox.mode === 'danger-full-access') return { sandboxMode: 'danger-full-access', approvalPolicy: settings.approvalPolicy };
+  if (sandboxAvailable) return { sandboxMode: settings.sandbox.mode, approvalPolicy: settings.approvalPolicy };
+  if (settings.approvalPolicy === 'never') return { sandboxMode: 'read-only', approvalPolicy: 'never' };
+  return { sandboxMode: 'danger-full-access', approvalPolicy: 'unless-trusted' };
+}
+
 export default async function guardian(pi: ExtensionAPI): Promise<void> {
-  const shell = await loadShell();
-  const { sandbox, warning: sandboxWarning } = await detectPlatformSandbox();
+  let shell: Awaited<ReturnType<typeof loadShell>>, detection: Awaited<ReturnType<typeof detectPlatformSandbox>>, loaded: LoadedPolicies;
+  try {
+    [shell, detection, loaded] = await Promise.all([loadShell(), detectPlatformSandbox(), loadPolicies([userRulesDir()])]);
+  } catch (error) {
+    return registerFailClosed(pi, error);
+  }
+  const { sandbox, warning: sandboxWarning } = detection;
   const sandboxAvailable = sandbox !== undefined;
-  let policies: LoadedPolicies = await loadPolicies([userRulesDir()]);
+  let policies = loaded;
   let contextFiles: { path: string; content: string }[] = [];
   let turn = 0;
   let cached: { stamp: string; config: GuardianConfig; error?: string } | undefined;
@@ -128,9 +157,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     if (!settings.enabled) return;
     const sandboxed = settings.sandbox.mode !== 'danger-full-access' && sandboxAvailable;
     event.systemPromptOptions.sections.permissions_instructions = permissionsInstructions({
-      // Without a platform sandbox nothing is confined, and every command needs approval instead.
-      sandboxMode: sandboxed ? settings.sandbox.mode : 'danger-full-access',
-      approvalPolicy: sandboxed ? settings.approvalPolicy : 'unless-trusted',
+      ...instructedPermissions(settings, sandboxAvailable),
       networkAccess: settings.sandbox.networkAccess ? 'enabled' : 'restricted',
       reviewer: settings.approvalsReviewer,
       approvedCommandPrefixes: policies.policy.allowedPrefixes(),

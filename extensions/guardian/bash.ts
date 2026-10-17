@@ -10,7 +10,7 @@ import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './appro
 import type { GuardianConfig } from './config.ts';
 import { createExecApprovalRequirement, type SandboxPermissions } from './exec-policy.ts';
 import { persistableAmendment } from './policies.ts';
-import { RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
+import { DATABASE_REVIEW_REASON, destructiveDatabaseCommand, RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
 import type { Policy } from './rules.ts';
 import { killProcessGroup, waitForChildProcess } from './review/process.ts';
 import { isLikelySandboxDenied, type PlatformSandbox } from './sandbox.ts';
@@ -143,9 +143,11 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
         ...(params.prefix_rule ? { prefixRule: params.prefix_rule } : {}),
       });
       if (requirement.type === 'forbidden') throw new Error(requirement.reason);
-      // A Railway command that can reach data is reviewed even when rules or settings would skip it.
-      const effective = requirement.type === 'skip' && railway === 'prompt'
-        ? { type: 'needs_approval' as const, reason: RAILWAY_REVIEW_REASON, proposedExecpolicyAmendment: undefined }
+      // A Railway command that can reach data, or a destructive statement whose database may be Railway's, is
+      // reviewed even when rules or settings would skip it.
+      const reviewReason = railway === 'prompt' ? RAILWAY_REVIEW_REASON : destructiveDatabaseCommand(runtime.shell, command) ? DATABASE_REVIEW_REASON : undefined;
+      const effective = requirement.type === 'skip' && reviewReason
+        ? { type: 'needs_approval' as const, reason: reviewReason, proposedExecpolicyAmendment: undefined }
         : requirement;
 
       const approvalContext = ctx as unknown as ApprovalContext;

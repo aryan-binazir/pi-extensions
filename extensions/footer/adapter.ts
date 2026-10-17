@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 export interface PermissionConfig {
@@ -8,9 +10,25 @@ export interface PermissionConfig {
   rules: unknown[];
   reviewer?: { provider: string; model: string; reasoningEffort: string; prefilter?: boolean };
 }
-export interface ConfigLoader { load(): PermissionConfig; path: string }
+export interface ConfigLoader {
+  load(): unknown;
+  path: string;
+  status(config: unknown, model: ExtensionContext['model']): string;
+}
 
+const GUARDIAN_INDEX = fileURLToPath(new URL('../guardian/index.ts', import.meta.url));
+const realpath = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+
+/** Guardian, when this package loaded it; otherwise the reviewed Auto Permissions package. */
 export async function findConfigLoader(commands: ReturnType<ExtensionAPI['getCommands']>): Promise<ConfigLoader | undefined> {
+  const guardian = commands.find(command => command.source === 'extension' && command.name.split(':')[0] === 'guardian'
+    && realpath(command.sourceInfo.path) === realpath(GUARDIAN_INDEX));
+  if (guardian) {
+    const [{ guardianStatusText, loadGuardianConfig }, { guardianConfigPath }] = await Promise.all([import('../guardian/config.ts'), import('../guardian/policies.ts')]);
+    const sandboxAvailable = process.platform === 'darwin';
+    const path = guardianConfigPath();
+    return { path, load: () => loadGuardianConfig(path), status: config => guardianStatusText(config as ReturnType<typeof loadGuardianConfig>, sandboxAvailable) };
+  }
   for (const command of commands) {
     if (command.source !== 'extension' || command.name.split(':')[0] !== 'auto-permissions') continue;
     const root = dirname(command.sourceInfo.path);
@@ -21,7 +39,7 @@ export async function findConfigLoader(commands: ReturnType<ExtensionAPI['getCom
     if (manifest.version !== '0.16.2' && manifest.version !== '0.21.0') throw new Error('Unsupported Auto Permissions version');
     const helper = await import(join(root, 'config.ts'));
     if (typeof helper.loadAutoPermissionsConfig !== 'function' || typeof helper.autoPermissionsConfigPath !== 'function') throw new Error('Config loader unavailable');
-    return { load: helper.loadAutoPermissionsConfig, path: helper.autoPermissionsConfigPath() };
+    return { load: helper.loadAutoPermissionsConfig, path: helper.autoPermissionsConfigPath(), status: (config, model) => statusText(config as PermissionConfig, model) };
   }
 }
 

@@ -109,13 +109,13 @@ function dedup(paths: string[]): string[] {
   return [...new Set(paths)];
 }
 
-interface WritableRoot {
+export interface WritableRoot {
   root: string;
   readOnlySubpaths: string[];
 }
 
 /** Codex's legacy workspace-write roots with their read-only carveouts, as resolved on macOS. */
-function workspaceWriteRoots(policy: SandboxPolicy, cwd: string, env: NodeJS.ProcessEnv): WritableRoot[] {
+export function workspaceWriteRoots(policy: SandboxPolicy, cwd: string, env: NodeJS.ProcessEnv): WritableRoot[] {
   const cwdRoot = normalizeSystemAliases(cwd);
   const extraRoots = (policy.writableRoots ?? []).map(root => normalizeSystemAliases(root));
   const tmpdir = env.TMPDIR;

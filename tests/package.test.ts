@@ -22,6 +22,7 @@ const expected = new Map<string, { tools: string[]; commands: string[]; shortcut
   ['computer-use', {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []}],
   ['fast-mode', {tools: [], commands: ['fast'], shortcuts: []}],
   ['auto-caffeinate', {tools: [], commands: [], shortcuts: []}],
+  ['guardian', {tools: ['bash'], commands: ['guardian'], shortcuts: []}],
   ['auto-permissions-status', {tools: [], commands: [], shortcuts: []}],
   ['nvim-ide', {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['vim'], shortcuts: []}],
 ]);

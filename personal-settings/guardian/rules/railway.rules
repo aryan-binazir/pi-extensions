@@ -1,0 +1,27 @@
+# Destructive Railway operations are always blocked. Guardian loads this file on every machine,
+# and a forbidden rule outranks every allow rule, approval, and sandbox setting.
+# Never test these rules by running Railway commands.
+
+prefix_rule(
+    pattern = ["railway", ["delete", "down"]],
+    decision = "forbidden",
+    justification = "destructive Railway operations are permanently blocked; report the blocker to the user or use a read-only alternative",
+    match = ["railway delete", "railway down --yes"],
+    not_match = ["railway status", "railway logs"],
+)
+
+prefix_rule(
+    pattern = ["railway", ["volume", "volumes"], ["delete", "rm", "remove", "detach"]],
+    decision = "forbidden",
+    justification = "destructive Railway operations are permanently blocked; report the blocker to the user or use a read-only alternative",
+    match = ["railway volume delete", "railway volume detach"],
+    not_match = ["railway volume list"],
+)
+
+prefix_rule(
+    pattern = ["railway", ["environment", "env", "service"], ["delete", "rm", "remove"]],
+    decision = "forbidden",
+    justification = "destructive Railway operations are permanently blocked; report the blocker to the user or use a read-only alternative",
+    match = ["railway environment delete staging", "railway service delete"],
+    not_match = ["railway environment", "railway service"],
+)

@@ -211,6 +211,47 @@ export class Shell {
     });
   }
 
+  /**
+   * Every command this one may run, as far as static parsing can tell: itself, the commands behind `sudo`,
+   * `env` and `trap`, and the literal commands of any shell script it carries, recursively. Guardian uses this
+   * so a mandatory forbidden prefix is found wherever a literal command hides. Codex walks the same tree in
+   * `dangerous_command_match_with_depth`; here the walk collects commands instead of matching `rm`.
+   */
+  expandLiteralCommands(command: readonly string[], wrapperDepth = 0): string[][] {
+    if (wrapperDepth > MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH) return [];
+    const expanded = [[...command]];
+    const unwrapped = this.unwrapCommand(command);
+    const nested = [...(unwrapped ? [unwrapped] : []), ...this.parseShellLcLiteralCommands(command) ?? []];
+    for (const inner of nested) {
+      if (!inner.length || inner.join('\0') === command.join('\0')) continue;
+      expanded.push(...this.expandLiteralCommands(inner, wrapperDepth + 1));
+    }
+    return expanded;
+  }
+
+  /** The command behind a `sudo`, `env` or `trap` wrapper, if any. */
+  private unwrapCommand(command: readonly string[]): string[] | undefined {
+    switch (command[0]?.split('/').pop() || undefined) {
+      case 'sudo': return command.slice(1);
+      case 'env': {
+        let index = 1;
+        for (; index < command.length; index++) {
+          const argument = command[index];
+          if (argument === '--') { index++; break; }
+          const name = argument.split('=', 1)[0];
+          const assignment = argument.includes('=') && name !== '' && !name.startsWith('-');
+          if (argument !== '-i' && argument !== '--ignore-environment' && !assignment) break;
+        }
+        return command.slice(index);
+      }
+      case 'trap': {
+        const action = command[command[1] === '--' ? 2 : 1];
+        return action === undefined || action.startsWith('-') ? undefined : ['sh', '-c', action];
+      }
+      default: return undefined;
+    }
+  }
+
   dangerousCommandMatch(command: readonly string[], wrapperDepth = 0): DangerousCommandMatch | undefined {
     if (wrapperDepth > MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH) return 'other';
     const direct = this.dangerousCommandMatchForExec(command, wrapperDepth);
@@ -224,29 +265,9 @@ export class Shell {
   }
 
   private dangerousCommandMatchForExec(command: readonly string[], wrapperDepth: number): DangerousCommandMatch | undefined {
-    const program = command[0]?.split('/').pop() || undefined;
-    switch (program) {
-      case 'rm': return rmArgsIncludeForceOption(command.slice(1)) ? 'forced_rm' : undefined;
-      case 'sudo': return this.dangerousCommandMatch(command.slice(1), wrapperDepth + 1);
-      case 'env': {
-        let index = 1;
-        for (; index < command.length; index++) {
-          const argument = command[index];
-          if (argument === '--') { index++; break; }
-          const name = argument.split('=', 1)[0];
-          const assignment = argument.includes('=') && name !== '' && !name.startsWith('-');
-          if (argument !== '-i' && argument !== '--ignore-environment' && !assignment) break;
-        }
-        return this.dangerousCommandMatch(command.slice(index), wrapperDepth + 1);
-      }
-      case 'trap': {
-        const actionIndex = command[1] === '--' ? 2 : 1;
-        const action = command[actionIndex];
-        if (action === undefined || action.startsWith('-')) return undefined;
-        return this.dangerousCommandMatch(['sh', '-c', action], wrapperDepth + 1);
-      }
-      default: return undefined;
-    }
+    if (command[0]?.split('/').pop() === 'rm') return rmArgsIncludeForceOption(command.slice(1)) ? 'forced_rm' : undefined;
+    const unwrapped = this.unwrapCommand(command);
+    return unwrapped && this.dangerousCommandMatch(unwrapped, wrapperDepth + 1);
   }
 }
 

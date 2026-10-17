@@ -1,25 +1,34 @@
 // Pi's bash tool with Codex's shell approval flow, ported from openai/codex codex-rs/core/src/tools/{orchestrator,
 // sandboxing}.rs, codex-rs/core/src/tools/handlers/shell_spec.rs and codex-rs/sandboxing/src/denial.rs @ ce0323f
-// (Apache-2.0); see docs/licenses/README.md. Commands run in Pi's own shell, wrapped in Seatbelt unless approved
-// to escape it. Scripts are evaluated as `bash -lc <command>`, the form Codex parses into command segments.
-import { type BashToolDetails, createBashToolDefinition, getShellConfig, type ToolDefinition } from '@earendil-works/pi-coding-agent';
+// (Apache-2.0); see docs/licenses/README.md. Sandboxed commands are spawned directly as
+// `sandbox-exec -- <shell> -c <command>` so no unsandboxed shell runs first. Scripts are evaluated as
+// `bash -lc <command>`, the form Codex parses into command segments.
+import { spawn } from 'node:child_process';
+import { type BashOperations, type BashToolDetails, createBashToolDefinition, getShellConfig, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import type { GuardianConfig } from './config.ts';
-import { createExecApprovalRequirement, type SandboxPermissions } from './exec-policy.ts';
+import { commandsForExecPolicy, createExecApprovalRequirement, type SandboxPermissions } from './exec-policy.ts';
 import type { Policy } from './rules.ts';
 import { createSeatbeltCommandArgs, MACOS_PATH_TO_SEATBELT_EXECUTABLE, sandboxEnv, type SandboxPolicy } from './seatbelt.ts';
 import type { Shell } from './shell.ts';
-import { shlexTryJoin } from './shlex.ts';
 
 const SANDBOX_DENIED_KEYWORDS = ['operation not permitted', 'permission denied', 'read-only file system', 'seccomp', 'sandbox', 'landlock', 'failed to write file'];
 const RETRY_REASON = 'command failed; retry without sandbox?';
 const NEVER_ESCALATE = 'approval policy is Never; reject command — you cannot request escalated permissions unless the approval policy is OnRequest';
 const MAX_SUMMARY_CHARS = 300;
 
+export interface ShellSettings {
+  shellPath?: string;
+  commandPrefix?: string;
+}
+
 export interface BashRuntime {
   config(): GuardianConfig;
   policy(): Policy;
+  /** Bundled rules that apply even when Guardian is disabled or unrestricted. */
+  mandatoryPolicy(): Policy;
+  shellSettings(): ShellSettings;
   shell: Shell;
   sandboxAvailable: boolean;
   approvals: { request(request: ApprovalRequest, ctx: ApprovalContext, signal?: AbortSignal): Promise<ApprovalDecision> };
@@ -36,6 +45,55 @@ export function isLikelySandboxDenied(exitCode: number, output: string): boolean
 export function sandboxPolicyFor(config: GuardianConfig): SandboxPolicy {
   const { mode, networkAccess, writableRoots, excludeTmpdirEnvVar, excludeSlashTmp } = config.sandbox;
   return { mode: mode === 'read-only' ? 'read-only' : 'workspace-write', networkAccess, writableRoots, excludeTmpdirEnvVar, excludeSlashTmp };
+}
+
+/**
+ * Spawns `sandbox-exec -- <shell> -c <command>` directly, so the sandbox owns the first process and no
+ * unsandboxed shell reads its startup files first. Errors use Pi's own contract so its bash tool renders them.
+ */
+function sandboxedOperations(policy: SandboxPolicy, shellPath: string | undefined): BashOperations {
+  return {
+    exec(command, cwd, { onData, signal, timeout, env }) {
+      if (signal?.aborted) throw new Error('aborted');
+      const shell = (() => { try { return getShellConfig(shellPath); } catch { return { shell: '/bin/bash', args: ['-c'] }; } })();
+      const environment = { ...(env ?? process.env), ...sandboxEnv(policy) };
+      const args = createSeatbeltCommandArgs([shell.shell, ...shell.args, command], policy, cwd, environment);
+      if (args.some(argument => argument.includes('\0'))) throw new Error('This command cannot be run in the sandbox: it contains a NUL byte.');
+      return new Promise((settled, reject) => {
+        const child = spawn(MACOS_PATH_TO_SEATBELT_EXECUTABLE, args, { cwd, detached: true, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
+        let timedOut = false;
+        const killGroup = () => {
+          try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+        };
+        const onAbort = () => killGroup();
+        const timer = timeout !== undefined && timeout > 0 ? setTimeout(() => { timedOut = true; killGroup(); }, timeout * 1000) : undefined;
+        signal?.addEventListener('abort', onAbort, { once: true });
+        child.stdout.on('data', onData);
+        child.stderr.on('data', onData);
+        const finish = (complete: () => void) => {
+          if (timer) clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          complete();
+        };
+        child.on('error', error => finish(() => reject(error)));
+        child.on('close', (code, killSignal) => finish(() => {
+          if (signal?.aborted) return reject(new Error('aborted'));
+          if (timedOut) return reject(new Error(`timeout:${timeout}`));
+          settled({ exitCode: code ?? (killSignal ? 1 : null) });
+        }));
+      });
+    },
+  };
+}
+
+/**
+ * Every command a script can run, as far as static parsing can tell: its plain segments when the script is
+ * word-only, plus the literal commands Codex extracts from control flow, substitutions and nested shells.
+ */
+function mandatoryCommands(shell: Shell, command: string[]): string[][] {
+  const seen = new Set<string>();
+  return [...commandsForExecPolicy(shell, command), ...shell.expandLiteralCommands(command)]
+    .filter(candidate => candidate.length && !seen.has(JSON.stringify(candidate)) && seen.add(JSON.stringify(candidate)));
 }
 
 const parameters = Type.Object({
@@ -55,37 +113,51 @@ type Result = Awaited<ReturnType<ToolDefinition<typeof parameters, BashToolDetai
 
 export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string): ToolDefinition<typeof parameters, BashToolDetails | undefined> {
   const base = createBashToolDefinition(defaultCwd);
-  const shellPath = () => { try { return getShellConfig().shell; } catch { return 'bash'; } };
   return {
     ...base,
     parameters,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const config = runtime.config();
       const cwd = ctx?.cwd ?? defaultCwd;
+      const settings = runtime.shellSettings();
+      const shellOptions = {
+        ...(settings.shellPath === undefined ? {} : { shellPath: settings.shellPath }),
+        ...(settings.commandPrefix === undefined ? {} : { commandPrefix: settings.commandPrefix }),
+      };
       // Strict tool schemas make optional fields nullable, so null means unset.
       const plain = { command: params.command, ...(params.timeout == null ? {} : { timeout: params.timeout }) };
       const sandbox = sandboxPolicyFor(config);
-      const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed ? {
-        spawnHook: spawn => {
-          const wrapped = shlexTryJoin([MACOS_PATH_TO_SEATBELT_EXECUTABLE, ...createSeatbeltCommandArgs([shellPath(), '-c', spawn.command], sandbox, spawn.cwd, spawn.env)]);
-          if (wrapped === undefined) throw new Error('This command cannot be run in the sandbox: it contains a NUL byte.');
-          return { ...spawn, command: `exec ${wrapped}`, env: { ...spawn.env, ...sandboxEnv(sandbox) } };
-        },
-      } : {}).execute(toolCallId, plain, signal, onUpdate, ctx);
-      if (!config.enabled) return run(false);
+      const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed
+        ? { ...shellOptions, operations: sandboxedOperations(sandbox, settings.shellPath) }
+        : shellOptions).execute(toolCallId, plain, signal, onUpdate, ctx);
+
+      const command = ['bash', '-lc', params.command];
+      const unrestricted = config.sandbox.mode === 'danger-full-access';
+      // Bundled rules bind even when Guardian is off or unrestricted, so a hard deny cannot be configured away.
+      const mandatory = createExecApprovalRequirement(runtime.shell, runtime.mandatoryPolicy(), {
+        command, commands: mandatoryCommands(runtime.shell, command), approvalPolicy: config.approvalPolicy,
+        fileSystem: 'restricted', sandboxPermissions: 'use_default',
+      });
+      if (mandatory.type === 'forbidden') throw new Error(mandatory.reason);
+      if (!config.enabled) {
+        if (mandatory.type === 'needs_approval') throw new Error(mandatory.reason ?? 'this command requires review, which is disabled');
+        return run(false);
+      }
 
       const requested = (params.sandbox_permissions ?? 'use_default') as SandboxPermissions;
       if (requested !== 'use_default' && requested !== 'require_escalated') throw new Error(`unsupported sandbox_permissions: ${requested}`);
       if (requested === 'require_escalated' && config.approvalPolicy === 'never') throw new Error(NEVER_ESCALATE);
-      const unrestricted = config.sandbox.mode === 'danger-full-access';
       // Without a platform sandbox every command would run unrestricted, so each one is reviewed as an escalation.
       const sandboxPermissions: SandboxPermissions = !unrestricted && !runtime.sandboxAvailable ? 'require_escalated' : requested;
-      const command = ['bash', '-lc', params.command];
       const requirement = createExecApprovalRequirement(runtime.shell, runtime.policy(), {
         command, approvalPolicy: config.approvalPolicy, fileSystem: unrestricted ? 'unrestricted' : 'restricted', sandboxPermissions,
         ...(params.prefix_rule ? { prefixRule: params.prefix_rule } : {}),
       });
       if (requirement.type === 'forbidden') throw new Error(requirement.reason);
+      // A mandatory prompt rule still requires approval when ordinary rules or settings would skip it.
+      const effective = requirement.type === 'skip' && mandatory.type === 'needs_approval'
+        ? { ...mandatory, proposedExecpolicyAmendment: undefined }
+        : requirement;
 
       const approvalContext = ctx as unknown as ApprovalContext;
       const approve = async (permissions: SandboxPermissions, reason: string | undefined, amendment: string[] | undefined) => {
@@ -101,17 +173,17 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       };
 
       let approved = false;
-      if (requirement.type === 'needs_approval') {
-        await approve(sandboxPermissions, requirement.reason, requirement.proposedExecpolicyAmendment);
+      if (effective.type === 'needs_approval') {
+        await approve(sandboxPermissions, effective.reason, effective.proposedExecpolicyAmendment);
         approved = true;
       }
-      const bypass = unrestricted || (requirement.type === 'skip' && requirement.bypassSandbox) || (sandboxPermissions === 'require_escalated' && approved);
+      const bypass = unrestricted || (effective.type === 'skip' && effective.bypassSandbox) || (sandboxPermissions === 'require_escalated' && approved);
       const result = await run(!bypass);
       // On-request returns sandbox denials to the agent; unless-trusted asks to retry outside the sandbox.
       const exitCode = (result as { structuredContent?: { exit_code?: number } }).structuredContent?.exit_code ?? 0;
       const output = result.content.map(part => part.type === 'text' ? part.text : '').join('');
       if (bypass || config.approvalPolicy !== 'unless-trusted' || !isLikelySandboxDenied(exitCode, output)) return result;
-      await approve('require_escalated', RETRY_REASON, requirement.proposedExecpolicyAmendment);
+      await approve('require_escalated', RETRY_REASON, effective.type === 'needs_approval' ? effective.proposedExecpolicyAmendment : undefined);
       return run(false);
     },
   };

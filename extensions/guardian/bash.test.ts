@@ -1,7 +1,7 @@
 // Orchestration ported from openai/codex codex-rs/core/src/tools/{orchestrator,sandboxing}.rs and
 // codex-rs/sandboxing/src/denial.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md.
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,12 +9,14 @@ import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import { type BashRuntime, createGuardianBashTool, isLikelySandboxDenied } from './bash.ts';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import { Policy, PolicyParser } from './rules.ts';
+import { loadPolicies } from './policies.ts';
 import { loadShell } from './shell.ts';
 
 const darwin = { skip: process.platform !== 'darwin' && 'Seatbelt is macOS-only' };
 const shell = await loadShell();
+const { policy: mandatory } = await loadPolicies([]);
 
-function setup(t: test.TestContext, options: { rules?: string; config?: Partial<GuardianConfig>; decisions?: ApprovalDecision[]; sandboxAvailable?: boolean } = {}) {
+function setup(t: test.TestContext, options: { rules?: string; config?: Partial<GuardianConfig>; decisions?: ApprovalDecision[]; sandboxAvailable?: boolean; shellSettings?: { shellPath?: string; commandPrefix?: string } } = {}) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bash-cwd-')));
   const outside = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bash-outside-')));
   t.after(() => { rmSync(cwd, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
@@ -36,6 +38,8 @@ function setup(t: test.TestContext, options: { rules?: string; config?: Partial<
     policy: () => policy,
     shell,
     sandboxAvailable: options.sandboxAvailable ?? true,
+    mandatoryPolicy: () => mandatory,
+    shellSettings: () => options.shellSettings ?? {},
     approvals: { request: async request => { requests.push(request); return decisions.shift() ?? { type: 'rejected', message: 'no scripted decision' }; } },
     persistAmendment: async prefix => { persisted.push(prefix); },
   };
@@ -49,7 +53,7 @@ function setup(t: test.TestContext, options: { rules?: string; config?: Partial<
 const text = (result: { content: { type: string; text?: string }[] }) => result.content.map(part => part.text ?? '').join('');
 
 test('the tool exposes Codex approval parameters', () => {
-  const tool = createGuardianBashTool({ config: () => DEFAULT_GUARDIAN_CONFIG, policy: () => Policy.empty(), shell, sandboxAvailable: true,
+  const tool = createGuardianBashTool({ config: () => DEFAULT_GUARDIAN_CONFIG, policy: () => Policy.empty(), mandatoryPolicy: () => Policy.empty(), shellSettings: () => ({}), shell, sandboxAvailable: true,
     approvals: { request: async () => ({ type: 'approved' }) }, persistAmendment: async () => {} }, '/');
   const properties = (tool.parameters as { properties: Record<string, { enum?: string[]; anyOf?: { const: string }[] }> }).properties;
   assert.deepEqual(Object.keys(properties), ['command', 'timeout', 'sandbox_permissions', 'justification', 'prefix_rule']);
@@ -151,6 +155,44 @@ test('null optional arguments from strict tool schemas mean unset', darwin, asyn
 test('commands that cannot be quoted for the sandbox fail instead of running', darwin, async t => {
   const { run } = setup(t);
   await assert.rejects(run({ command: 'echo a\u0000b' }), /cannot be run in the sandbox: it contains a NUL byte/);
+});
+
+test('the sandbox starts directly, so no unsandboxed shell sources BASH_ENV first', darwin, async t => {
+  const { cwd, outside, run } = setup(t);
+  const marker = join(outside, 'pwned');
+  writeFileSync(join(cwd, 'startup.sh'), `echo pwned > ${marker} 2>/dev/null\n`);
+  const previous = process.env.BASH_ENV;
+  process.env.BASH_ENV = join(cwd, 'startup.sh');
+  t.after(() => { if (previous === undefined) delete process.env.BASH_ENV; else process.env.BASH_ENV = previous; });
+  const output = text(await run({ command: 'echo harmless' }));
+  assert.ok(output.includes('harmless'), output);
+  assert.ok(!existsSync(marker), 'the startup file ran only inside the sandbox, where its write was denied');
+  assert.match(output, /startup\.sh[\s\S]*Operation not permitted/);
+});
+
+test('sandboxed commands honor timeouts and Pi shell settings', darwin, async t => {
+  const { run } = setup(t, { shellSettings: { commandPrefix: 'export GREETING=prefixed' } });
+  assert.equal(text(await run({ command: 'echo $GREETING' })), 'prefixed\n');
+  await assert.rejects(run({ command: 'sleep 5', timeout: 1 }), /timed out after 1 seconds/);
+  const disabled = setup(t, { config: { enabled: false }, shellSettings: { commandPrefix: 'export GREETING=plain' } });
+  assert.equal(text(await disabled.run({ command: 'echo $GREETING' })), 'plain\n');
+});
+
+test('bundled Railway rules apply everywhere a literal command can hide, even with Guardian off', async t => {
+  for (const config of [{}, { enabled: false }, { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'danger-full-access' as const } }]) {
+    const { run, requests } = setup(t, { config, rules: 'prefix_rule(pattern=["/opt/homebrew/bin/railway"], decision="allow")\nprefix_rule(pattern=["railway"], decision="allow")' });
+    for (const command of ['railway delete', '/opt/homebrew/bin/railway volume delete pg', 'if true; then railway down; fi', 'echo "$(railway env rm prod)"',
+      "bash -c 'railway delete'", 'sudo railway volume rm pg', 'env RAILWAY_TOKEN=x railway delete', 'cd app > /dev/null && railway delete 2>&1']) {
+      await assert.rejects(run({ command }), /destructive Railway operations are permanently blocked/, `${JSON.stringify(config)} ${command}`);
+    }
+    assert.deepEqual(requests, []);
+  }
+});
+
+test('Railway commands that reach databases need review', async t => {
+  const { run, requests } = setup(t, { decisions: [{ type: 'rejected', message: 'denied' }] });
+  await assert.rejects(run({ command: 'railway connect postgres' }), /denied/);
+  assert.match(requests[0].reason ?? '', /`bash -lc 'railway connect postgres'` requires approval: Railway commands that can reach databases are reviewed/);
 });
 
 test('sandbox denial heuristic matches Codex keywords', () => {

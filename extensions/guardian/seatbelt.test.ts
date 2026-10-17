@@ -100,7 +100,9 @@ test('create seatbelt args with read-only git and codex subpaths', darwin, t => 
     `-DWRITABLE_ROOT_0_EXCLUDED_0=${join(cwdCanonical, '.codex')}`,
     `-DWRITABLE_ROOT_0_EXCLUDED_1=${join(cwdCanonical, '.git')}`,
     `-DWRITABLE_ROOT_0_EXCLUDED_2=${join(cwdCanonical, '.agents')}`,
-    `-DWRITABLE_ROOT_0_EXCLUDED_3=${join(cwdCanonical, '.aws')}`,
+    // `.pi` is Guardian's addition to Codex's protected metadata names.
+    `-DWRITABLE_ROOT_0_EXCLUDED_3=${join(cwdCanonical, '.pi')}`,
+    `-DWRITABLE_ROOT_0_EXCLUDED_4=${join(cwdCanonical, '.aws')}`,
     `-DWRITABLE_ROOT_1=${vulnerableRootCanonical}`,
     `-DWRITABLE_ROOT_1_EXCLUDED_0=${dotGitCanonical}`,
     `-DWRITABLE_ROOT_1_EXCLUDED_1=${dotCodexCanonical}`,

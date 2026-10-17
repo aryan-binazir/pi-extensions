@@ -5,8 +5,8 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { appendAllowPrefixRule } from './amend.ts';
 import { type ApprovalContext, Approvals, manualApprovalMessage } from './approvals.ts';
 import { createGuardianBashTool, sandboxPolicyFor } from './bash.ts';
-import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
-import { assessFileChange, fileChangeAction, resolveToolPath } from './files.ts';
+import { FAIL_CLOSED_CONFIG, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
+import { createGuardianFileTools } from './files.ts';
 import { permissionsInstructions } from './permissions.ts';
 import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, userRulesDir } from './policies.ts';
 import { collectReviewEvidence, composeReviewRequest, MANUAL_APPROVAL_MESSAGE_TYPE, prepareTranscript } from './review/context.ts';
@@ -29,14 +29,22 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   let cached: { stamp: string; config: GuardianConfig; error?: string } | undefined;
   let reportedError: string | undefined;
 
-  /** Reads config.json when it changes; an invalid file keeps Guardian on with the defaults. */
+  /**
+   * Reads config.json when it changes. An invalid file keeps the last valid settings, so a typo never relaxes
+   * permissions; with no valid settings yet, every reviewable action is sent to review or to you.
+   */
   const config = (): GuardianConfig => {
     const path = guardianConfigPath();
     let stamp = 'missing';
     try { const info = statSync(path); stamp = `${info.ino}:${info.mtimeMs}:${info.size}`; } catch { /* missing means defaults */ }
     if (cached?.stamp !== stamp) {
       try { cached = { stamp, config: loadGuardianConfig(path) }; }
-      catch (error) { cached = { stamp, config: DEFAULT_GUARDIAN_CONFIG, error: `Guardian config error, using defaults: ${(error as Error).message}` }; }
+      catch (error) {
+        const message = `Guardian config error: ${(error as Error).message}`;
+        cached = cached?.error === undefined && cached
+          ? { stamp, config: cached.config, error: `${message}; keeping the last valid settings` }
+          : { stamp, config: FAIL_CLOSED_CONFIG, error: `${message}; every reviewable action needs approval until it is fixed` };
+      }
     }
     return cached.config;
   };
@@ -78,10 +86,18 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   };
   const approvals = new Approvals({ config, review, turnId: () => String(turn) });
 
+  const shellSettings = () => {
+    const settings = pi.getSettings() as { shellPath?: string; shellCommandPrefix?: string };
+    return {
+      ...(settings.shellPath === undefined ? {} : { shellPath: settings.shellPath }),
+      ...(settings.shellCommandPrefix === undefined ? {} : { commandPrefix: settings.shellCommandPrefix }),
+    };
+  };
   pi.registerTool(createGuardianBashTool({
-    config, policy: () => policies.policy, shell, sandboxAvailable, approvals,
+    config, policy: () => policies.policy, mandatoryPolicy: () => policies.mandatory, shellSettings, shell, sandboxAvailable, approvals,
     persistAmendment: async prefix => { await appendAllowPrefixRule(defaultRulesPath(), prefix); await reloadPolicies(); },
   }, process.cwd()));
+  for (const tool of createGuardianFileTools({ config, sandboxAvailable, approvals }, process.cwd())) pi.registerTool(tool);
 
   pi.on('session_start', async (_event, ctx) => {
     await reloadPolicies();
@@ -108,20 +124,6 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
       approvedCommandPrefixes: policies.policy.allowedPrefixes(),
       writableRoots: sandboxed && settings.sandbox.mode === 'workspace-write' ? workspaceWriteRoots(sandboxPolicyFor(settings), ctx.cwd, process.env).map(root => root.root) : [],
     });
-  });
-
-  pi.on('tool_call', async (event, ctx) => {
-    if (event.toolName !== 'write' && event.toolName !== 'edit') return;
-    const input = event.input as { path?: unknown; content?: unknown; edits?: unknown };
-    if (typeof input.path !== 'string') return;
-    const path = resolveToolPath(input.path, ctx.cwd);
-    const safety = assessFileChange(path, { config: config(), cwd: ctx.cwd, sandboxAvailable });
-    if (safety === 'auto_approve') return;
-    if (typeof safety === 'object') return { block: true, reason: safety.reason };
-    const decision = await approvals.request({
-      action: fileChangeAction(event.toolName, { ...input, path: input.path }, path, ctx.cwd), summary: `${event.toolName} ${path}`,
-    }, ctx, ctx.signal);
-    return decision.type === 'approved' ? undefined : { block: true, reason: decision.message };
   });
 
   pi.registerCommand('guardian', {

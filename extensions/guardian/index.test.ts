@@ -1,11 +1,9 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import test from 'node:test';
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { Type } from 'typebox';
 import { withPi } from '../../tests/pi-session.ts';
 import guardian from './index.ts';
 import { MANUAL_APPROVAL_DEVELOPER_PREFIX } from './review/context.ts';
@@ -119,19 +117,10 @@ test('an unavailable reviewer fails closed without a UI', async () => {
   });
 });
 
-const fakeWrite = (pi: ExtensionAPI) => pi.registerTool({
-  name: 'write', label: 'write', description: 'write a file',
-  parameters: Type.Object({ path: Type.String(), content: Type.String() }),
-  async execute(_id, { path, content }, _signal, _update, ctx) {
-    writeFileSync(resolve(ctx.cwd, path), content);
-    return { content: [{ type: 'text', text: 'written' }], details: undefined };
-  },
-});
-
-test('writes outside writable roots are reviewed; inside writes are not', async t => {
+test('writes outside writable roots are reviewed; inside writes are not, through Pi\'s own write tool', async t => {
   const outside = outsideDir(t);
   let reviewer = '';
-  await withPi({ extensions: [guardian, fakeWrite], responses: [
+  await withPi({ extensions: [guardian], responses: [
     fauxAssistantMessage([fauxToolCall('write', { path: 'inside.txt', content: 'in' }), fauxToolCall('write', { path: join(outside, 'out.txt'), content: 'out' })]),
     context => { reviewer = contextText(context); return fauxAssistantMessage('{"outcome":"allow"}'); },
     fauxAssistantMessage('Done.'),
@@ -143,7 +132,26 @@ test('writes outside writable roots are reviewed; inside writes are not', async 
     assert.equal(readFileSync(join(cwd, 'inside.txt'), 'utf8'), 'in');
     assert.equal(readFileSync(join(outside, 'out.txt'), 'utf8'), 'out');
   });
-  assert.ok(reviewer.includes('\\"tool\\": \\"write\\"') && reviewer.includes('out.txt') && !reviewer.includes('inside.txt\\"\\n  ]'));
+  const plannedAction = reviewer.slice(reviewer.indexOf('Planned action JSON'));
+  assert.ok(plannedAction.includes('\\"tool\\": \\"write\\"') && plannedAction.includes('out.txt'), plannedAction.slice(0, 400));
+  assert.ok(!plannedAction.includes('inside.txt'), 'only the write outside the writable roots was reviewed');
+});
+
+test('a write into protected project metadata is reviewed even inside the workspace', async t => {
+  const outside = outsideDir(t);
+  void outside;
+  await withPi({ extensions: [guardian], responses: [
+    fauxAssistantMessage(fauxToolCall('write', { path: '@.pi/extensions/evil.ts', content: 'export default () => {};' })),
+    fauxAssistantMessage('{"outcome":"deny","rationale":"Project extensions run as host code."}'),
+    fauxAssistantMessage('Stopped.'),
+  ], configure: ({ agentDir }, provider) => {
+    writeConfig(agentDir, { reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
+    return { model: provider.getModel() };
+  } }, async ({ session, cwd }) => {
+    await session.prompt('Add a project extension.');
+    assert.match(toolResults(session.messages)[0].content[0].text ?? '', /unacceptable risk/);
+    assert.ok(!existsSync(join(cwd, '.pi')));
+  });
 });
 
 test('/guardian approve records a trusted manual approval of the last denied action', async () => {

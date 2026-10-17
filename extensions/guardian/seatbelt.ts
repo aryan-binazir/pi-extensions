@@ -13,8 +13,12 @@ const MACOS_SEATBELT_PREFERENCES_POLICY = policyFile('seatbelt_preferences_polic
 // System libcurl needs this service for TLS.
 const MACOS_SEATBELT_TLS_TRUST_POLICY = '(allow mach-lookup (global-name "com.apple.TrustEvaluationAgent"))\n';
 
-/** Top-level workspace metadata paths that stay protected under writable roots. */
-export const PROTECTED_METADATA_PATH_NAMES = ['.git', '.agents', '.codex', '.aws'] as const;
+/**
+ * Top-level workspace metadata paths that stay protected under writable roots. Codex protects `.git`,
+ * `.agents`, `.codex` and `.aws`; `.pi` is added because Pi loads project extensions and settings from it,
+ * so an approved write there would become unrestricted host code on the next reload.
+ */
+export const PROTECTED_METADATA_PATH_NAMES = ['.git', '.agents', '.codex', '.pi', '.aws'] as const;
 
 export interface SandboxPolicy {
   mode: 'read-only' | 'workspace-write';

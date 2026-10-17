@@ -46,6 +46,16 @@ export const DEFAULT_GUARDIAN_CONFIG: GuardianConfig = {
   sandbox: { mode: 'workspace-write', networkAccess: false, writableRoots: [], excludeTmpdirEnvVar: false, excludeSlashTmp: false },
 };
 
+/**
+ * Used while config.json is invalid and no valid settings have been read yet: Guardian stays on with its
+ * strictest sandbox, and nothing is approved automatically.
+ */
+export const FAIL_CLOSED_CONFIG: GuardianConfig = {
+  ...DEFAULT_GUARDIAN_CONFIG,
+  approvalPolicy: 'unless-trusted',
+  sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'read-only' },
+};
+
 const THINKING_LEVELS: readonly ThinkingLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const KNOWN_KEYS: Record<string, readonly string[]> = {
   config: ['enabled', 'approvalPolicy', 'approvalsReviewer', 'reviewer', 'autoReview', 'sandbox'],

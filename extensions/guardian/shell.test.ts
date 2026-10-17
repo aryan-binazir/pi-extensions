@@ -187,3 +187,25 @@ test('non forced or non literal rm is not dangerous', () => {
     assert.equal(shell.dangerousCommandMatch(command), undefined, JSON.stringify(command));
   }
 });
+
+test('expanded literal commands unwrap wrappers and nested shells like the dangerous-command walk', () => {
+  const expand = (script: string) => shell.expandLiteralCommands(['bash', '-lc', script]).map(command => command.join(' '));
+  assert.deepEqual(expand('railway delete'), ['bash -lc railway delete', 'railway delete']);
+  for (const [script, expected] of [
+    ['sudo railway down', 'railway down'],
+    ['env TOKEN=x railway down', 'railway down'],
+    ['env -i -- railway down', 'railway down'],
+    ["bash -c 'railway down'", 'railway down'],
+    ["sh -lc 'sudo railway down'", 'railway down'],
+    ["trap 'railway down' EXIT", 'railway down'],
+    ['if true; then railway down; fi', 'railway down'],
+    ['echo "$(railway down)"', 'railway down'],
+    ['printf x | railway down', 'railway down'],
+  ] as const) {
+    assert.ok(expand(script).includes(expected), `${script} -> ${JSON.stringify(expand(script))}`);
+  }
+  assert.ok(!expand("echo 'railway down'").includes('railway down'), 'quoted text is an argument, not a command');
+  const nested = Array.from({ length: MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH + 4 }, () => 'env').join(' ');
+  assert.ok(shell.expandLiteralCommands(['bash', '-lc', `${nested} railway down`]).length <= MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH + 3, 'bounded depth');
+  assert.deepEqual(shell.expandLiteralCommands(['railway', 'delete']), [['railway', 'delete']]);
+});

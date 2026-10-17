@@ -221,7 +221,9 @@ to `low`.
 ```
 
 Install the [shared reviewer policy](#shared-auto-permissions-policy) before
-using this configuration; a missing prompt file fails closed.
+using this configuration; a missing prompt file fails closed. This example is a
+scaffold: installation must also populate the required Railway `hardDeny` entry
+from the shared policy as described below.
 
 Review is then on by default across sessions: every Bash command goes through the
 rules and, absent a hard deny, trusted-group bypass or session approval, Luna review
@@ -287,17 +289,26 @@ Install it once on each machine after user approval:
    infrastructure policy and other unrelated entries. Leave old prompt files intact
    for rollback. The relative config value is identical across machines; only each
    symlink's target is machine-specific. Keep credentials and trust exceptions local.
+   Append the exact first paragraph under **Railway database hard deny** in the
+   shared prompt to `guardianPolicy.hardDeny` if absent, preserving existing entries.
+   This is the required unconditional prohibition on destructive Railway database
+   and persistent-storage operations, not a trust exception. The shared paragraph
+   is the source of truth; obtain approval before migrating a conflicting policy.
 5. Show the diff and validate using the installed package's
    `config.ts` / `loadAutoPermissionsConfig` through Pi's SDK-aware loader.
    Verify its `systemPromptSource.path` is the local `guardian-prompt.md` link,
    that the link resolves to the chosen checkout's policy, and that the loaded
-   prompt matches that file. If loading fails, restore the prior config. Report an
-   unavailable validator as unverified rather than claiming success.
+   prompt matches that file. Verify `guardianPolicy.hardDeny` contains the canonical
+   Railway paragraph without changing other rules or timeout behavior. If loading
+   fails, restore the prior config. Report an unavailable validator as unverified
+   rather than claiming success. Validate configuration only: do not run Railway
+   commands, destructive operations, probes, dry runs or destructive-operation tests.
 
 Completion: the live config uses `systemPromptFile: "./guardian-prompt.md"`, and
 that readable symlink resolves to the shared policy, with Bash review enabled,
-`reviewAllShell: true`, the required reviewer model/effort, and existing deny rules
-preserved. Missing, stale or unreadable links and direct-reference or copied-policy
+`reviewAllShell: true`, the required reviewer model/effort, the canonical Railway
+`hardDeny` entry and existing deny rules preserved. Missing, stale or unreadable
+links and direct-reference or copied-policy
 installations are setup drift; report those in the read-only audit and ask before
 repair. Keep subsequent shared policy
 changes in this repository rather than editing a local copy. Pulling the checkout
@@ -326,6 +337,22 @@ resubmit normally, not a human approval prompt. Explicit user instructions to
 verify override prior skip permission and the screenshot exception. Sensitive
 effects retain review. Feedback should fit the command: `git -C` for Git, absolute paths or
 read/search tools for file inspection.
+
+#### Railway database boundary
+
+Destructive Railway database or persistent-storage operations are forbidden in
+all environments, including through SQL clients, migrations, scripts and delegated
+agents. The shared prompt contains the canonical wording; setup mirrors that
+paragraph into the user-scoped `guardianPolicy.hardDeny` array. Approval is not an
+exception. Keep read-only inspection available; do not validate this policy by
+running Railway commands or destructive tests.
+
+This is a **reviewer-enforced** hard policy, not a new deterministic CLI guard or
+OS sandbox. Hidden/delegated effects and non-Bash tools retain the coverage limits
+above. Timeout/cancellation handling is unchanged: a failed review can still show
+the fallback approval prompt. That prompt must not be used to override the Railway
+prohibition. Restrictive database credentials provide a stronger boundary than
+prompt policy alone.
 
 ### Upgrading from 0.16.2
 

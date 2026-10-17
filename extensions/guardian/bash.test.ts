@@ -142,6 +142,11 @@ test('disabled Guardian runs commands as plain Pi bash', async t => {
   assert.deepEqual(requests, []);
 });
 
+test('commands that cannot be quoted for the sandbox fail instead of running', darwin, async t => {
+  const { run } = setup(t);
+  await assert.rejects(run({ command: 'echo a\u0000b' }), /cannot be run in the sandbox: it contains a NUL byte/);
+});
+
 test('sandbox denial heuristic matches Codex keywords', () => {
   assert.ok(isLikelySandboxDenied(1, 'bash: /x: Operation not permitted'));
   assert.ok(isLikelySandboxDenied(2, 'touch: /x: Read-only file system'));

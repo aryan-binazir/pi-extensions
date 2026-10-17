@@ -65,11 +65,11 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       const plain = { command: params.command, ...(params.timeout === undefined ? {} : { timeout: params.timeout }) };
       const sandbox = sandboxPolicyFor(config);
       const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed ? {
-        spawnHook: spawn => ({
-          ...spawn,
-          command: `exec ${shlexTryJoin([MACOS_PATH_TO_SEATBELT_EXECUTABLE, ...createSeatbeltCommandArgs([shellPath(), '-c', spawn.command], sandbox, spawn.cwd, spawn.env)])}`,
-          env: { ...spawn.env, ...sandboxEnv(sandbox) },
-        }),
+        spawnHook: spawn => {
+          const wrapped = shlexTryJoin([MACOS_PATH_TO_SEATBELT_EXECUTABLE, ...createSeatbeltCommandArgs([shellPath(), '-c', spawn.command], sandbox, spawn.cwd, spawn.env)]);
+          if (wrapped === undefined) throw new Error('This command cannot be run in the sandbox: it contains a NUL byte.');
+          return { ...spawn, command: `exec ${wrapped}`, env: { ...spawn.env, ...sandboxEnv(sandbox) } };
+        },
       } : {}).execute(toolCallId, plain, signal, onUpdate, ctx);
       if (!config.enabled) return run(false);
 

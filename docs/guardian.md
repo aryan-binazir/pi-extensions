@@ -30,8 +30,10 @@ Guardian also replaces `write` and `edit`, and checks each mutation at the absol
 so `@`-prefixed and `file://` paths are judged as what they actually write. Writes inside the writable
 roots are approved automatically; other paths need approval. A leaf symlink is followed even when its
 target is missing, a file with more than one hard link is never written automatically, and parent
-directories are created only after the change is allowed. Without Seatbelt (any platform other than
-macOS), every command and file change needs approval.
+directories are created only after the change is allowed. Writes that are approved automatically run
+inside Seatbelt, so a link swapped in after the check cannot redirect them. Without Seatbelt (any platform
+other than macOS), every command and file change needs approval, except commands an `allow` rule of
+yours covers: as in Codex, an allow rule runs its command outside the sandbox on every platform.
 
 Subagent children load Guardian the way they load hooks, so a child cannot run what the parent would
 review. A child refuses to start if Guardian is missing.

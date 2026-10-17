@@ -124,6 +124,13 @@ database client reading credentials from the environment: those depend on the re
 of this by running Railway commands; `extensions/guardian/railway.test.ts` evaluates the rules
 directly.
 
+## Load order
+
+Guardian loads after Fast mode in `package.json`, because the default reviewer `gpt-6-luna~fast` is a
+virtual model Fast mode registers. Loaded alone, that reviewer does not resolve: Guardian then fails the
+review closed and the message names the setting to change. Set a plain model id, such as
+`gpt-6-luna`, to run without Fast mode.
+
 ## Commands and status
 
 - `/guardian` shows the effective settings and file locations.

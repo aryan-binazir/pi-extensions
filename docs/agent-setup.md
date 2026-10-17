@@ -324,8 +324,13 @@ boundary). An explicitly chosen push repository/remote/branch carries forward fo
 follow-up delivery of the same work, including a selected `main` target; "push those"
 does not require repeating it. Later target changes take precedence. This is not
 permission for another repository/task, force pushes, production effects or skipping
-verification. Routine task-related local work, including scripted source/test edits,
-is preauthorized. Non-overwriting sibling backups of the config being worked on
+verification. Routine task-related local work, including scripted source/test edits
+and diagnostic helpers, is preauthorized. If missing local helper source, arguments
+or relevant imports prevent assessment, the reviewer must return **revise** for
+read-only inspection and resubmission, not ask the human merely to inspect a script.
+Reasons must describe known effects or the actual uncertainty, not invented agent
+launches or other side effects. Independent safety boundaries still apply.
+Non-overwriting sibling backups of the config being worked on
 are part of authorized setup, even outside the repository; potentially overwriting
 copies receive revision guidance rather than a prompt. Screenshot/media-only
 pushes to dedicated `pr-assets/...` branches on the existing repository remote are

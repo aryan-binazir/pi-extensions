@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { BANNED_PREFIX_SUGGESTIONS, loadExecPolicy } from './exec-policy.ts';
-import { isRailwayProgram, railwayDecision, RAILWAY_EXTRA_POLICY } from './railway.ts';
+import { invokesRailwayCli, railwayDecision, RAILWAY_EXTRA_POLICY } from './railway.ts';
 import type { Policy } from './rules.ts';
 import type { Shell } from './shell.ts';
 
@@ -59,17 +59,18 @@ export async function extraPolicy(userExtraPolicy: string | undefined, bundledPa
   } catch {
     bundled = RAILWAY_EXTRA_POLICY;
   }
-  if (!bundled.includes('Railway')) bundled = `${RAILWAY_EXTRA_POLICY}\n\n${bundled}`;
+  if (!bundled.includes(RAILWAY_EXTRA_POLICY)) bundled = `${RAILWAY_EXTRA_POLICY}\n\n${bundled}`;
   return userExtraPolicy?.trim() ? `${bundled.trim()}\n\n${userExtraPolicy.trim()}` : bundled.trim();
 }
 
 /**
- * A prefix rule is only persisted when it cannot widen a boundary: Railway stays out of reach, and Codex's
- * banned suggestions (bare interpreters, `env`, `sudo`, `git`, `rm`) never become standing allow rules.
+ * A prefix rule is only persisted when it cannot widen a boundary: a prefix that invokes the Railway CLI, Codex's
+ * banned suggestions (bare interpreters, `env`, `sudo`, `git`, `rm`) and wrapper commands never become standing
+ * allow rules. Package runners such as `npm test` persist as in Codex; the Railway boundary is checked before rules.
  */
 export function persistableAmendment(shell: Shell, prefix: readonly string[]): string[] | undefined {
   if (!prefix.length) return undefined;
-  if (isRailwayProgram(prefix[0]) || railwayDecision(shell, [...prefix]) !== undefined) return undefined;
+  if (invokesRailwayCli(prefix) || railwayDecision(shell, [...prefix]) !== undefined) return undefined;
   const sameTokens = (banned: readonly string[]) => banned.length === prefix.length && banned.every((token, index) => token === prefix[index]);
   if (BANNED_PREFIX_SUGGESTIONS.some(sameTokens)) return undefined;
   // A wrapper prefix allows every command it can carry, so it is never a reusable rule.

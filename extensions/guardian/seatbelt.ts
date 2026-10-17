@@ -49,7 +49,8 @@ const lstatOrUndefined = (path: string) => {
 };
 const canonicalOrUndefined = (path: string) => { try { return realpathSync(path); } catch { return undefined; } };
 
-const pathStartsWith = (path: string, root: string) => path === root || path.startsWith(root === '/' ? '/' : `${root}/`);
+/** Whether `path` is `root` or inside it, compared by path components. */
+export const pathStartsWith = (path: string, root: string) => path === root || path.startsWith(root === '/' ? '/' : `${root}/`);
 
 /** Ancestors of `path`, nearest first, excluding the path itself. */
 function ancestors(path: string): string[] {

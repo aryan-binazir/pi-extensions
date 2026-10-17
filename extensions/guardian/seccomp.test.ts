@@ -1,6 +1,6 @@
-// Ported from the tests in openai/codex codex-rs/linux-sandbox/src/seccomp.rs @ ce0323f (Apache-2.0); see
-// docs/licenses/README.md. Codex trusts seccompiler for the filter itself; Guardian builds the BPF by hand, so these
-// tests also run the program through a small classic-BPF interpreter for both architectures.
+// The mode-selection test is ported from the tests in openai/codex codex-rs/linux-sandbox/src/seccomp.rs @ ce0323f
+// (Apache-2.0); see docs/licenses/README.md. Codex trusts seccompiler for the filter itself; Guardian builds the BPF
+// by hand, so the remaining tests are Guardian's own and run the program through a small classic-BPF interpreter.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {

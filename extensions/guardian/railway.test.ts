@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createExecApprovalRequirement, type ExecApprovalRequest } from './exec-policy.ts';
 import { BUNDLED_EXTRA_POLICY_PATH, BUNDLED_RULES_DIR, extraPolicy, loadPolicies } from './policies.ts';
-import { RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
+import { RAILWAY_EXTRA_POLICY, RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
 import { loadShell } from './shell.ts';
 
 const shell = await loadShell();
@@ -42,6 +42,12 @@ test('destructive Railway commands are forbidden however they are written', () =
     'sudo -u deploy railway delete',
     'env -u RAILWAY_TOKEN railway delete',
     'npx @railway/cli delete',
+    'npx @railway/cli@4.0.0 delete',
+    'npx railway@latest down',
+    'railway volume detach pg',
+    `curl -s https://backboard.railway.com/graphql/v2 -H 'Authorization: Bearer x' -d '{"query":"mutation { volumeDelete(volumeId: \\"v\\") }"}'`,
+    "psql postgresql://u:p@roundhouse.proxy.rlwy.net:5432/railway -c 'DROP TABLE users'",
+    '$(npx @railway/cli delete)',
     'npx -y @railway/cli volume delete pg',
     'pnpm dlx @railway/cli down',
     'bunx railway delete',
@@ -62,7 +68,9 @@ test('destructive Railway commands are forbidden however they are written', () =
 
 test('Railway commands that can reach data are reviewed, and unrelated ones are untouched', () => {
   for (const script of ['railway connect postgres', 'railway run psql', 'railway variables', 'railway volume list',
-    'railway environment', 'railway service', 'railway link', 'railway ssh', 'railway redeploy']) {
+    'railway environment', 'railway service', 'railway link', 'railway ssh', 'railway redeploy',
+    "curl -s https://backboard.railway.app/graphql/v2 -d '{\"query\":\"{ me { id } }\"}'",
+    "psql postgresql://u:p@roundhouse.proxy.rlwy.net:5432/railway -c 'select 1'", 'redis-cli -h redis.railway.internal ping']) {
     assert.equal(decide(script), 'prompt', script);
   }
   for (const script of ['railway status', 'railway whoami', 'railway logs', 'railway --help', 'railway login',
@@ -104,15 +112,38 @@ test('an approved prefix rule is never persisted when it would widen Railway acc
   const { persistableAmendment } = await import('./policies.ts');
   assert.equal(persistableAmendment(shell, ['railway']), undefined);
   assert.equal(persistableAmendment(shell, ['railway', 'status']), undefined);
-  assert.equal(persistableAmendment(shell, ['npx']), undefined);
+  assert.equal(persistableAmendment(shell, ['npx', '@railway/cli']), undefined);
+  assert.equal(persistableAmendment(shell, ['pnpm', 'dlx', '@railway/cli@4.0.0']), undefined);
   assert.equal(persistableAmendment(shell, ['xargs']), undefined);
   assert.equal(persistableAmendment(shell, ['env']), undefined);
   assert.deepEqual(persistableAmendment(shell, ['cargo', 'test']), ['cargo', 'test']);
   void t;
 });
 
-test('the reviewer policy carries the Railway deny even when the bundled file is unreadable', async () => {
-  assert.match(readFileSync(BUNDLED_EXTRA_POLICY_PATH, 'utf8'), /Railway Databases \(absolute deny\)[\s\S]*User authorization cannot override/);
+test('package runners persist as in Codex, and only Codex\'s banned forms are refused', async () => {
+  const { persistableAmendment } = await import('./policies.ts');
+  for (const prefix of [['npm', 'test'], ['npm', 'install'], ['pnpm', 'test'], ['npx', 'tsc'], ['yarn', 'lint']]) {
+    assert.deepEqual(persistableAmendment(shell, prefix), prefix);
+  }
+  for (const prefix of [['npm', 'run'], ['pnpm', 'run'], ['yarn', 'run'], ['bun']]) assert.equal(persistableAmendment(shell, prefix), undefined, prefix.join(' '));
+});
+
+test('the text layer is blunt: any script naming Railway beside a destructive word is refused', () => {
+  for (const script of ['rm -f railway.json', 'git commit -m "remove railway config"', 'cd /srv/railway && rm -rf build']) {
+    assert.equal(decide(script), 'forbidden', script);
+  }
+  for (const script of ['cat railway.json', 'git commit -m "update railway config"', 'rm -rf build', 'curl https://example.com/delete']) {
+    assert.equal(decide(script), undefined, script);
+  }
+});
+
+test('the reviewer policy carries the Railway deny even when the bundled file is unreadable or edited', async t => {
+  assert.ok(readFileSync(BUNDLED_EXTRA_POLICY_PATH, 'utf8').includes(RAILWAY_EXTRA_POLICY), 'the bundled file carries the built-in text verbatim');
+  assert.equal((await extraPolicy(undefined)).split(RAILWAY_EXTRA_POLICY).length, 2, 'the deny appears once');
+  const dir = mkdtempSync(join(tmpdir(), 'guardian-extra-policy-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'extra-policy.md'), '### Railway\n- Railway is fine.\n');
+  assert.ok((await extraPolicy(undefined, join(dir, 'extra-policy.md'))).startsWith(RAILWAY_EXTRA_POLICY), 'an edited file that only mentions Railway still gets the deny');
   const policy = await extraPolicy(undefined, '/nonexistent/extra-policy.md');
   assert.match(policy, /Railway/);
   assert.match(policy, /cannot override/);

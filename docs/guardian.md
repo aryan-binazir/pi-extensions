@@ -4,8 +4,8 @@
 
 Guardian ports Codex's approval stack to Pi: exec-policy rules, the Seatbelt sandbox on macOS and
 the bubblewrap and seccomp sandbox on Linux, permission instructions for the agent, and the Guardian
-auto-reviewer. Our inspiration from this
-code comes from there: [openai/codex](https://github.com/openai/codex/tree/ce0323f2f2d3b25e82806cd555237da3db4e1897)
+auto-reviewer. Our inspiration from this code comes from there. The source is
+[openai/codex](https://github.com/openai/codex/tree/ce0323f2f2d3b25e82806cd555237da3db4e1897)
 (Apache-2.0; see [third-party notices](licenses/README.md)). [ADR 025](adr/025-guardian.md)
 records where it departs from Codex.
 
@@ -51,8 +51,8 @@ limits the network.
 - Without network access, the network namespace is unshared and the filter denies every socket
   except Unix sockets, along with `ptrace`, cross-process memory access and io_uring. With network
   access, the filter still denies VM sockets and io_uring.
-- Guardian uses the first `bwrap` on `PATH` that lists `--as-pid-1` and `--perms` in its help
-  (bubblewrap 0.8 or newer) and that the sandbox could not replace. Otherwise it uses the bubblewrap
+- Guardian takes the first `bwrap` on `PATH` that the sandbox could not replace, and uses it when its
+  help lists `--as-pid-1` and `--perms` (bubblewrap 0.8 or newer). Otherwise it uses the bubblewrap
   bundled with the Codex install on `PATH` (npm, pnpm, bun or the standalone installer) and warns at
   session start. With neither, or when bubblewrap cannot create user namespaces, Guardian warns and
   every command needs approval. WSL1 is not supported; WSL2 is.
@@ -97,7 +97,7 @@ so a typo never widens permissions. Unknown settings are errors.
 
 | Setting | Codex equivalent | Values |
 | --- | --- | --- |
-| `approvalPolicy` | `approval_policy` | `on-request` (default): the agent asks when it needs to leave the sandbox. `unless-trusted`: everything not allowed by a rule needs approval, and sandbox failures offer a retry outside it. `never`: nothing is approved; escalations are rejected. |
+| `approvalPolicy` | `approval_policy` | `on-request` (default): the agent asks when it needs to leave the sandbox. `untrusted` (Codex's value; `unless-trusted` also works): everything not allowed by a rule needs your approval, and a sandbox failure is retried outside the sandbox. `never`: nothing is approved; escalations are rejected. |
 | `approvalsReviewer` | `approvals_reviewer` | `auto_review` (default): the reviewer model decides on-request approvals. `user`: you decide every approval. |
 | `reviewer` | (model catalog) | Any model in Pi's registry, for example `{"provider": "openai-codex", "model": "gpt-6.1-sol", "reasoning": "medium"}`. For Claude, use `{"provider": "claude-cli", "model": "claude-opus-5-5", "reasoning": "high"}`, which reviews through `claude -p` with `--safe-mode` and read-only tools. `reasoning` is a Pi thinking level. |
 | `autoReview.policy` / `policyFile` | `[auto_review] policy` | Replaces the built-in tenant policy (Codex's `policy.md`). |
@@ -106,7 +106,7 @@ so a typo never widens permissions. Unknown settings are errors.
 | `sandbox.mode` | `sandbox_mode` | `workspace-write` (default), `read-only`, or `danger-full-access` (no sandbox). |
 | `sandbox.networkAccess` | `[sandbox_workspace_write] network_access` | Network inside the sandbox. |
 | `sandbox.writableRoots` | `[sandbox_workspace_write] writable_roots` | Extra absolute paths the sandbox may write. |
-| `sandbox.excludeTmpdirEnvVar` / `excludeSlashTmp` | same names | Drop `$TMPDIR` or `/tmp` from the writable roots. |
+| `sandbox.excludeTmpdirEnvVar` / `excludeSlashTmp` | `[sandbox_workspace_write] exclude_tmpdir_env_var` / `exclude_slash_tmp` | Drop `$TMPDIR` or `/tmp` from the writable roots. |
 
 The block above shows the defaults; `policy` and `extraPolicy` are unset by default. Policy text may be
 inline (`policy`, `extraPolicy`) or a file (`policyFile`, `extraPolicyFile`), not both. File paths are
@@ -131,11 +131,13 @@ host_executable(name = "git", paths = ["/usr/bin/git", "/opt/homebrew/bin/git"])
 ```
 
 When you approve a command with "Yes, and don't ask again for commands that start with …",
-Guardian appends that prefix to `rules/default.rules`, unless the prefix would widen a boundary: Railway
-programs, package runners such as `npx`, wrapper commands such as `env`, `xargs` and `find`, and Codex's
-banned suggestions are never persisted. If a rules file cannot be read or parsed, all of your rules are
-skipped with a warning — including any `forbidden` rules of your own — and Guardian's own rules still
-apply. Fix the file to get your rules back.
+Guardian appends that prefix to `rules/default.rules`. The option is only offered for a prefix that
+cannot widen a boundary: prefixes that invoke the Railway CLI, wrapper commands such as `env`, `xargs`
+and `find`, and Codex's banned suggestions (bare interpreters, `npm run`, `git`, `sudo` and the like)
+are never saved. Package runners such as `npm test` are saved as in Codex; the Railway boundary is
+checked before rules, so a rule cannot reach it. If a rules file cannot be read or parsed, Guardian
+warns and keeps the rules that last loaded; when none have loaded yet, only Guardian's own rules apply
+until the file is fixed.
 
 Guardian parses the `prefix_rule`, `host_executable` and `network_rule` calls that Codex's own rules
 files use, with string and list literals. Codex evaluates these files as Starlark, so rules built from
@@ -143,8 +145,7 @@ variables or expressions are rejected here.
 
 ## Shared rules: Railway
 
-`personal-settings/guardian/rules/railway.rules` and `personal-settings/guardian/extra-policy.md`
-The boundary itself lives in code, in `extensions/guardian/railway.ts`, because a rules file inside a
+The boundary lives in code, in `extensions/guardian/railway.ts`, because a rules file inside a
 writable checkout could be edited, deleted, or left unparsed. It is checked before rules, settings and
 review, and it still applies when Guardian is disabled or the sandbox is off.
 
@@ -156,16 +157,20 @@ commands hidden in control flow, substitutions or nested shells. Destructive ver
 `down`, `destroy`, `remove`, `rm`, `reset`, `wipe`, `prune`, `restore` and `drop`, against any target
 including volumes, buckets, databases, environments, services and projects.
 
-A script that cannot be parsed statically but names Railway next to a destructive verb is also refused,
-even if the mention is only text: for a boundary this absolute, a false refusal beats a miss. Other
-Railway commands that can reach data (`connect`, `run`, `variables`, `ssh`, and the volume, database,
-environment, service and project subcommands) are always reviewed. `railway status`, `logs` and
-`whoami` are untouched.
+Any script that names Railway next to a destructive word is also refused, even when the mention is only
+text, such as `rm -f railway.json` or a commit message that says "remove railway config". That catches
+forms static parsing cannot follow (`eval`, `find -exec`, `python -c`) and Railway's API mutations such
+as `volumeDelete`; for a boundary this absolute, a false refusal beats a miss. Reword the command, or
+use the write tool, when it trips on harmless text. Package specs with versions (`@railway/cli@4.0.0`)
+and Railway's data hosts (`backboard.railway.com`, `*.rlwy.net`, `*.railway.internal`) count as naming
+Railway. Other Railway commands that can reach data (`connect`, `run`, `variables`, `ssh`, the volume,
+database, environment, service and project subcommands, and any command calling a Railway data host) are
+always reviewed. `railway status`, `logs` and `whoami` are untouched.
 
 `personal-settings/guardian/rules/railway.rules` keeps the same denials as `.rules` data for defence in
 depth, and the reviewer additionally gets an absolute deny on destructive Railway database and storage
-operations through any other route — falling back to built-in text if the bundled policy file is
-unreadable. A review is not a hard boundary for routes that never name Railway, such as a database
+operations through any other route, from `personal-settings/guardian/extra-policy.md`. Guardian adds its
+built-in copy of that text whenever the file does not carry it verbatim. A review is not a hard boundary for routes that never name Railway, such as a database
 client reading credentials from the environment; those depend on the reviewer's judgement.
 
 Never test any of this by running Railway commands. `extensions/guardian/railway.test.ts` evaluates the

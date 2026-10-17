@@ -18,7 +18,8 @@ const sandboxed = { skip: !detected && 'this platform has no usable sandbox' };
 const WRITE_DENIED = /Operation not permitted|Read-only file system/;
 const shell = await loadShell();
 
-function setup(t: test.TestContext, options: { rules?: string; config?: Partial<GuardianConfig>; decisions?: ApprovalDecision[]; sandbox?: PlatformSandbox | null; shellSettings?: { shellPath?: string; commandPrefix?: string } } = {}) {
+function setup(t: test.TestContext, options: { rules?: string; config?: Partial<GuardianConfig>; decisions?: ApprovalDecision[]; sandbox?: PlatformSandbox | null;
+  shellSettings?: { shellPath?: string; commandPrefix?: string }; persistAmendment?: (prefix: string[]) => Promise<void> } = {}) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bash-cwd-')));
   const outside = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bash-outside-')));
   t.after(() => { rmSync(cwd, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
@@ -42,13 +43,14 @@ function setup(t: test.TestContext, options: { rules?: string; config?: Partial<
     sandbox: options.sandbox === null ? undefined : options.sandbox ?? detected,
     shellSettings: () => options.shellSettings ?? {},
     approvals: { request: async request => { requests.push(request); return decisions.shift() ?? { type: 'rejected', message: 'no scripted decision' }; } },
-    persistAmendment: async prefix => { persisted.push(prefix); },
+    persistAmendment: options.persistAmendment ?? (async prefix => { persisted.push(prefix); }),
   };
   const tool = createGuardianBashTool(runtime, cwd);
-  const ctx = { cwd, hasUI: true, abort: () => {}, ui: { notify: () => {}, select: async () => undefined },
+  const notices: string[] = [];
+  const ctx = { cwd, hasUI: true, abort: () => {}, ui: { notify: (message: string) => { notices.push(message); }, select: async () => undefined },
     sessionManager: { getSessionId: () => 's', getSessionFile: () => undefined } };
   const run = (params: Record<string, unknown>) => tool.execute('call-1', params as never, undefined, undefined, ctx as never);
-  return { cwd, outside, run, requests, persisted };
+  return { cwd, outside, run, requests, persisted, notices };
 }
 
 const text = (result: { content: { type: string; text?: string }[] }) => result.content.map(part => part.text ?? '').join('');
@@ -123,9 +125,7 @@ test('unless-trusted retries a sandbox denial outside the sandbox after approval
   const target = join(outside, 'retried.txt');
   await run({ command: `echo retried > ${target}` });
   assert.equal(readFileSync(target, 'utf8'), 'retried\n');
-  assert.equal(requests.length, 2);
-  assert.equal(requests[1].reason, 'command failed; retry without sandbox?');
-  assert.equal(requests[1].action.sandbox_permissions, 'require_escalated');
+  assert.equal(requests.length, 1, 'as in Codex, a command you approved is retried without asking again');
 });
 
 test('on-request returns sandbox denials to the agent without retrying', sandboxed, async t => {
@@ -133,6 +133,38 @@ test('on-request returns sandbox denials to the agent without retrying', sandbox
   const result = await run({ command: `echo x > ${outside}/no.txt` });
   assert.equal(result.isError, true);
   assert.deepEqual(requests, []);
+});
+
+test('under never with no platform sandbox, commands are rejected instead of running unreviewed', async t => {
+  const { cwd, run, requests } = setup(t, { sandbox: null, config: { approvalPolicy: 'never' } });
+  await assert.rejects(run({ command: 'touch never-ran' }), /approval policy is Never and no platform sandbox is available/);
+  assert.equal(existsSync(join(cwd, 'never-ran')), false);
+  assert.deepEqual(requests, []);
+  const allowed = setup(t, { sandbox: null, config: { approvalPolicy: 'never' }, rules: 'prefix_rule(pattern=["touch"], decision="allow")' });
+  await allowed.run({ command: 'touch allowed' });
+  assert.ok(existsSync(join(allowed.cwd, 'allowed')), 'your allow rules still run, as in Codex');
+});
+
+test('"don\'t ask again" is offered only for prefixes that can be saved', async t => {
+  const { run, requests } = setup(t, { sandbox: null, decisions: [{ type: 'approved' }, { type: 'approved' }] });
+  await run({ command: 'echo saved', sandbox_permissions: 'require_escalated', prefix_rule: ['echo', 'saved'] });
+  await run({ command: 'timeout 5 echo wrapped', sandbox_permissions: 'require_escalated', prefix_rule: ['timeout', '5'] });
+  assert.deepEqual(requests[0].amendment, ['echo', 'saved']);
+  assert.equal(requests[1].amendment, undefined, 'a wrapper prefix could carry any command, so it is not offered');
+});
+
+test('a rule that cannot be saved does not fail the command you approved', async t => {
+  const { run, notices } = setup(t, { sandbox: null, decisions: [{ type: 'approved', persist: ['echo', 'kept'] }],
+    persistAmendment: async () => { throw new Error('disk full'); } });
+  assert.equal(text(await run({ command: 'echo kept', sandbox_permissions: 'require_escalated', prefix_rule: ['echo', 'kept'] })), 'kept\n');
+  assert.match(notices.join('\n'), /Could not save the approved rule: disk full/);
+});
+
+test('the approval request shows the whole command', async t => {
+  const { run, requests } = setup(t, { sandbox: null, decisions: [{ type: 'rejected', message: 'no' }] });
+  const command = `echo ${'x'.repeat(400)} && rm -rf ~/important`;
+  await assert.rejects(run({ command }), /no/);
+  assert.equal(requests[0].summary, command);
 });
 
 test('without a platform sandbox every command needs approval', async t => {

@@ -7,8 +7,8 @@ Status: accepted.
 Auto Permissions reviews every Bash command with a model and no sandbox, so every command waits
 on a review and the reviewer carries the whole safety burden. Codex instead runs commands in an OS
 sandbox, lets exec-policy rules decide what they can, and asks its Guardian reviewer only for
-actions that leave the sandbox. Our inspiration from this code comes from there: openai/codex at
-`ce0323f2f2d3b25e82806cd555237da3db4e1897` (Apache-2.0).
+actions that leave the sandbox. Our inspiration from this code comes from there. The source is
+openai/codex at `ce0323f2f2d3b25e82806cd555237da3db4e1897` (Apache-2.0).
 
 ## Decision
 
@@ -54,8 +54,8 @@ registry rather than a catalog entry.
 - Not ported on Linux: WSL interop masks, deny-read globs, Codex's app-server socket masks, the
   proxy-routed network mode, and the legacy Landlock pipeline.
 - Network is all or nothing; there is no managed proxy or per-host approval.
-- The reviewer is one model loop with a single read-only `exec_command` tool under the read-only
-  Seatbelt profile, not a forked Codex session. It gets the full transcript on every review, with
+- The reviewer is one model loop with a single read-only `exec_command` tool in the read-only
+  sandbox, not a forked Codex session. It gets the full transcript on every review, with
   no session reuse, deltas, or whole-request budget admission.
 - Pi has no developer role. Reviewer policy and permissions go in the system prompt; AGENTS.md files
   and environment context lead the user message.
@@ -74,7 +74,8 @@ registry rather than a catalog entry.
 - `.rules` files are parsed as the call-and-literal subset Codex's own rules files use. Codex evaluates
   them as Starlark, so rules built from variables or expressions are rejected rather than mis-evaluated.
 - Codex's granular approval policy is ported in `exec-policy.ts`, because its tests cover it, but is not
-  exposed in `config.json`; `approvalPolicy` offers `on-request`, `unless-trusted` and `never`.
+  exposed in `config.json`; `approvalPolicy` offers `on-request`, `untrusted` (also spelled
+  `unless-trusted`) and `never`.
 - Claude reviews through `claude -p` (`review/claude-cli.ts`) with `--safe-mode` and read-only tools.
   Pi's `claude-bridge` provider only serves prompts captured through Pi's own agent lifecycle, so it
   cannot answer a review; configuring it is an error that names `claude-cli`.
@@ -82,10 +83,15 @@ registry rather than a catalog entry.
 - The Railway boundary lives in code (`railway.ts`), not in a `.rules` file, and is checked before rules,
   settings and review, including when Guardian is disabled. A data file under a writable checkout could be
   edited, deleted or left unparsed, and the boundary must not depend on that. It normalizes wrappers,
-  package runners, paths and flags, and refuses unparsable scripts that name Railway beside a destructive
-  verb, accepting false refusals at that edge. The bundled `.rules` file remains as defence in depth.
-- Approved prefix rules are only persisted when they cannot widen a boundary: Railway programs, package
-  runners, wrapper commands and Codex's banned suggestions never become standing allow rules.
+  package runners, package versions, paths and flags, refuses any script that names Railway beside a
+  destructive word, accepting false refusals on harmless text, and reviews calls to Railway's data hosts.
+  The bundled `.rules` file remains as defence in depth, and the reviewer's absolute deny is built in.
+- "Don't ask again" is only offered, and a prefix only persisted, when it cannot widen a boundary:
+  prefixes that invoke the Railway CLI, wrapper commands and Codex's banned suggestions never become
+  standing allow rules. Package runners persist as in Codex.
+- Under `approvalPolicy: never` without a sandbox, commands no rule allows are rejected rather than run.
+- Approval requests for writes name the file a link resolves to, and the approved write goes to that
+  file.
 - Claude runs with `--restricted --setting-sources ''` from a temporary directory outside the reviewed
   workspace, with `--add-dir <cwd>` for reads. Otherwise a `.claude/settings.json` written in the
   workspace could make the reviewer run a helper command on the host.
@@ -96,15 +102,13 @@ registry rather than a catalog entry.
   and output still in the pipe is kept.
 - Subagent children load Guardian alongside hooks and refuse to start without it, so a child inherits the
   parent's sandbox, rules and review.
-- Destructive Railway operations are forbidden by bundled rules and an absolute reviewer deny that
-  config cannot remove.
 
 ## Verification
 
 Each module's `*.test.ts` ports the corresponding Codex tests. Seatbelt tests run the real
 `sandbox-exec` on macOS, and `sandbox.test.ts` ports Codex's Linux sandbox suite against the real
 `bwrap`. Shell, file and session tests run against whichever sandbox the platform has. The seccomp
-program is checked by a BPF interpreter for both architectures, and its syscall numbers against
-libseccomp's tables. `index.test.ts` drives full Pi sessions in which a scripted model plays
+program is checked by a BPF interpreter for both architectures; its syscall numbers were compared once
+by hand against libseccomp's `scmp_sys_resolver`, not in the tests. `index.test.ts` drives full Pi sessions in which a scripted model plays
 both the agent and the reviewer. `railway.test.ts` evaluates the Railway rules without running
 any Railway command.

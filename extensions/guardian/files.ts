@@ -100,9 +100,17 @@ type Input = { path: string; content?: unknown; edits?: unknown };
  * The planned change exactly as it will be applied. Codex keeps action arguments complete, so the reviewer
  * never approves a body it could not see; changes too large to review are rejected by the approval layer.
  */
-export function fileChangeAction(tool: 'write' | 'edit', input: Input, path: string, cwd: string): Record<string, unknown> {
+export function fileChangeAction(tool: 'write' | 'edit', input: Input, path: string, cwd: string, resolved = path): Record<string, unknown> {
   const change = tool === 'write' ? { content: input.content } : { edits: input.edits };
-  return { tool, cwd, files: [path], ...change, environment_id: 'local' };
+  // A link would otherwise show one path while the change lands on another.
+  return { tool, cwd, files: [path], ...(resolved === path ? {} : { resolved_files: [resolved] }), ...change, environment_id: 'local' };
+}
+
+/** What makes this path need approval beyond its location, said where you and the reviewer read the request. */
+function linkReason(path: string, resolved: string): string | undefined {
+  if (resolved !== path) return `\`${path}\` is a link; the change is written to \`${resolved}\``;
+  if (hasOtherLinks(path)) return `\`${path}\` has other hard links, which share the change`;
+  return undefined;
 }
 
 /**
@@ -135,10 +143,14 @@ function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, 
     const config = runtime.config();
     const safety = assessFileChange(path, { config, cwd, sandboxAvailable: runtime.sandbox !== undefined });
     if (typeof safety === 'object') throw new Error(safety.reason);
+    // Resolved once, so the file that was approved is the file that is written, even if a link changes meanwhile.
+    const resolved = canonicalTarget(path);
     if (safety === 'ask_user') {
       await (approval ??= (async () => {
+        const reason = linkReason(path, resolved);
         const decision = await runtime.approvals.request({
-          action: fileChangeAction(tool, input, path, cwd), summary: `${tool} ${path}`,
+          action: fileChangeAction(tool, input, path, cwd, resolved), summary: `${tool} ${resolved === path ? path : `${path} → ${resolved}`}`,
+          ...(reason ? { reason } : {}),
         }, ctx, signal);
         if (decision.type !== 'approved') throw new Error(decision.message);
       })());
@@ -148,7 +160,7 @@ function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, 
     const sandbox = safety === 'auto_approve' && config.enabled && config.sandbox.mode !== 'danger-full-access' ? runtime.sandbox : undefined;
     return sandbox
       ? { write: (target, content) => sandboxedWrite(target, content, config, cwd, sandbox) }
-      : { write: async (target, content) => { await mkdir(dirname(target), { recursive: true }); await writeFile(target, content, 'utf8'); } };
+      : { write: async (_target, content) => { await mkdir(dirname(resolved), { recursive: true }); await writeFile(resolved, content, 'utf8'); } };
   };
 }
 

@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import type { ThinkingLevel } from '@earendil-works/pi-ai';
 
+/** Codex's `AskForApproval`; its config value for `unless-trusted` is `untrusted`, which is accepted too. */
 export type ApprovalPolicy = 'on-request' | 'never' | 'unless-trusted';
 export type ApprovalsReviewer = 'auto_review' | 'user';
 export type SandboxMode = 'workspace-write' | 'read-only' | 'danger-full-access';
@@ -126,9 +127,10 @@ export function loadGuardianConfig(path: string): GuardianConfig {
   const configDir = dirname(path);
   // The bridge only serves prompts from Pi's own agent lifecycle, so it cannot answer a review.
   if (reviewer.provider === 'claude-bridge') throw new Error('reviewer.provider claude-bridge cannot run reviews; use "claude-cli" to review with Claude');
+  const approvalPolicy = oneOf(config.approvalPolicy, ['on-request', 'never', 'untrusted', 'unless-trusted'], 'approvalPolicy', defaults.approvalPolicy);
   return {
     enabled: boolean(config.enabled, 'enabled', defaults.enabled),
-    approvalPolicy: oneOf(config.approvalPolicy, ['on-request', 'never', 'unless-trusted'], 'approvalPolicy', defaults.approvalPolicy),
+    approvalPolicy: approvalPolicy === 'untrusted' ? 'unless-trusted' : approvalPolicy,
     approvalsReviewer: oneOf(config.approvalsReviewer, ['auto_review', 'user'], 'approvalsReviewer', defaults.approvalsReviewer),
     reviewer: {
       provider: text(reviewer.provider, 'reviewer.provider', defaults.reviewer.provider),
@@ -163,7 +165,10 @@ export function reviewerLabel(reviewer: Pick<ReviewerModel, 'provider' | 'model'
 /** The footer's top-right indicator, in the format Auto Permissions used. */
 export function guardianStatusText(config: GuardianConfig, sandboxAvailable: boolean): string {
   if (!config.enabled) return 'Auto: off';
-  const reviewer = config.approvalsReviewer === 'user' ? 'you review' : `${reviewerLabel(config.reviewer)} ${sanitizeTerminalLabel(config.reviewer.reasoning)}`;
+  // Codex sends only on-request approvals to the reviewer model; `untrusted` asks you, and `never` asks no one.
+  const reviewer = config.approvalPolicy === 'never' ? 'no approvals'
+    : config.approvalsReviewer === 'user' || config.approvalPolicy !== 'on-request' ? 'you review'
+      : `${reviewerLabel(config.reviewer)} ${sanitizeTerminalLabel(config.reviewer.reasoning)}`;
   const sandbox = config.sandbox.mode === 'danger-full-access' || !sandboxAvailable ? ' · no sandbox' : config.sandbox.networkAccess ? ' · network' : '';
   return `Auto: on · ${reviewer}${sandbox}`;
 }

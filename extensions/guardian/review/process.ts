@@ -1,6 +1,42 @@
 // Runs reviewer subprocesses with bounded output and whole-process-group cleanup.
-import { spawn } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
+import { constants as osConstants } from 'node:os';
 import type { SandboxedProcess } from '../sandbox.ts';
+
+const EXIT_STDIO_GRACE_MS = 100;
+
+/** Kills a child started with `detached: true` together with everything in its process group. */
+export function killProcessGroup(child: ChildProcess): void {
+  try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+}
+
+/**
+ * Pi's `waitForChildProcess`, which it does not export: after `exit`, keep reading until both pipes end or fall idle,
+ * so a tail still in the pipe is not lost, and a descendant that left the group holding them open cannot hang the call.
+ */
+export function waitForChildProcess(child: ChildProcess): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false, exited = false, stdoutEnded = !child.stdout, stderrEnded = !child.stderr;
+    let idle: NodeJS.Timeout | undefined;
+    const finalize = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(idle);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve();
+    };
+    const armIdleTimer = () => { clearTimeout(idle); idle = setTimeout(finalize, EXIT_STDIO_GRACE_MS); };
+    const maybeFinalize = () => { if (exited && stdoutEnded && stderrEnded) finalize(); };
+    child.stdout?.once('end', () => { stdoutEnded = true; maybeFinalize(); });
+    child.stderr?.once('end', () => { stderrEnded = true; maybeFinalize(); });
+    child.stdout?.on('data', () => { if (exited) armIdleTimer(); });
+    child.stderr?.on('data', () => { if (exited) armIdleTimer(); });
+    child.once('error', error => { if (settled) return; settled = true; clearTimeout(idle); reject(error); });
+    child.once('exit', () => { exited = true; maybeFinalize(); if (!settled) armIdleTimer(); });
+    child.once('close', finalize);
+  });
+}
 
 export interface BoundedRun {
   exitCode: number | null;
@@ -84,17 +120,14 @@ export async function runStarted(start: () => Promise<SandboxedProcess>, options
       options.signal?.removeEventListener('abort', onAbort);
       void finished.then(() => resolve({ exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut, aborted, ...(spawnError ? { spawnError } : {}) }));
     };
-    const killGroup = () => {
-      try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
-    };
-    const onAbort = () => { aborted = true; killGroup(); };
-    const timer = setTimeout(() => { timedOut = true; killGroup(); }, Math.max(0, options.timeoutMs));
+    const onAbort = () => { aborted = true; killProcessGroup(child); };
+    const timer = setTimeout(() => { timedOut = true; killProcessGroup(child); }, Math.max(0, options.timeoutMs));
     if (options.signal?.aborted) onAbort(); else options.signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
     child.stdin?.on('error', () => {});
     child.stdin?.end(options.stdin ?? '');
-    child.on('error', error => finish(null, error.message));
-    child.on('close', code => finish(code));
+    waitForChildProcess(child).then(() => finish(child.exitCode ?? (child.signalCode ? 128 + (osConstants.signals[child.signalCode] ?? 0) : null)),
+      error => finish(null, (error as Error).message));
   });
 }

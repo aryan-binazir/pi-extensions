@@ -140,6 +140,32 @@ test('file change actions carry the planned change for review', () => {
   assert.equal(big.content, 'x'.repeat(200_000), 'the reviewer sees the complete change');
 });
 
+test('a write through a link is reviewed as the file it lands on, and lands there even if the link moves', async t => {
+  const { cwd, outside } = workspace(t);
+  const victim = join(outside, 'config.json'), decoy = join(outside, 'decoy.json');
+  writeFileSync(victim, '{}');
+  writeFileSync(decoy, '{}');
+  symlinkSync(victim, join(cwd, 'cfg.json'));
+  const requests: ApprovalRequest[] = [];
+  const [write] = createGuardianFileTools({
+    config: () => isolated(), sandbox: detected,
+    approvals: { request: async request => {
+      requests.push(request);
+      // The link is swapped while you are deciding; the approved file is still the one written.
+      rmSync(join(cwd, 'cfg.json'));
+      symlinkSync(decoy, join(cwd, 'cfg.json'));
+      return { type: 'approved' };
+    } },
+  }, cwd);
+  const ctx = { cwd, hasUI: true, abort: () => {}, ui: { notify: () => {}, select: async () => undefined } };
+  await (write.execute as (...args: unknown[]) => Promise<unknown>)('c', { path: 'cfg.json', content: '{"enabled":false}' }, undefined, undefined, ctx);
+  assert.deepEqual(requests[0].action.resolved_files, [victim]);
+  assert.equal(requests[0].summary, `write ${join(cwd, 'cfg.json')} → ${victim}`);
+  assert.match(requests[0].reason ?? '', /is a link; the change is written to/);
+  assert.equal(readFileSync(victim, 'utf8'), '{"enabled":false}');
+  assert.equal(readFileSync(decoy, 'utf8'), '{}');
+});
+
 test('a call aborted while approval is pending writes nothing', async t => {
   const { cwd, outside } = workspace(t);
   const controller = new AbortController();

@@ -4,8 +4,8 @@
 
 The [Guardian extension](../guardian.md) ports Codex's approval stack: exec
 policy rules, shell command parsing, the macOS Seatbelt and Linux bubblewrap and seccomp sandboxes,
-permission instructions, and the Guardian auto-reviewer. Our inspiration from this code comes from there:
-[openai/codex](https://github.com/openai/codex) at revision
+permission instructions, and the Guardian auto-reviewer. Our inspiration from this code comes from there.
+The source is [openai/codex](https://github.com/openai/codex) at revision
 [`ce0323f2f2d3b25e82806cd555237da3db4e1897`](https://github.com/openai/codex/tree/ce0323f2f2d3b25e82806cd555237da3db4e1897),
 Copyright 2025 OpenAI, licensed under the [Apache License 2.0](openai-codex-APACHE-2.0.txt) with this
 [NOTICE](openai-codex-NOTICE.txt). The license and NOTICE at that revision match the copies here.

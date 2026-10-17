@@ -5,7 +5,7 @@
 // and Codex's app-server socket masks are omitted.
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
-import { PROTECTED_METADATA_PATH_NAMES, SandboxPreparationError, type WritableRoot } from './seatbelt.ts';
+import { pathStartsWith, PROTECTED_METADATA_PATH_NAMES, SandboxPreparationError, type WritableRoot } from './seatbelt.ts';
 import { existingTarget, missingTarget, type SyntheticMountTarget } from './synthetic-mounts.ts';
 
 /** Linux system paths readable by the `/proc` mount preflight's minimal filesystem view. */
@@ -32,7 +32,6 @@ export interface BwrapArgs {
 }
 
 const isProtectedMetadataName = (name: string) => (PROTECTED_METADATA_PATH_NAMES as readonly string[]).includes(name);
-const pathStartsWith = (path: string, root: string) => path === root || path.startsWith(root === '/' ? '/' : `${root}/`);
 const pathDepth = (path: string) => path.split('/').filter(Boolean).length;
 const byDepth = (left: string, right: string) => pathDepth(left) - pathDepth(right);
 const isWithinAllowedWritePaths = (path: string, allowed: readonly string[]) => allowed.some(root => pathStartsWith(path, root));

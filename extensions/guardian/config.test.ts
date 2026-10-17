@@ -58,6 +58,11 @@ test('policy text can come from files relative to the config directory', t => {
   assert.throws(() => loadGuardianConfig(join(dir, 'config.json')), /autoReview\.policy and autoReview\.policyFile/);
 });
 
+test('Codex\'s `untrusted` value selects the unless-trusted policy', t => {
+  assert.equal(loadGuardianConfig(join(configDir(t, { approvalPolicy: 'untrusted' }), 'config.json')).approvalPolicy, 'unless-trusted');
+  assert.equal(loadGuardianConfig(join(configDir(t, { approvalPolicy: 'unless-trusted' }), 'config.json')).approvalPolicy, 'unless-trusted');
+});
+
 test('invalid configs are rejected with the offending field', t => {
   const cases: [unknown, RegExp][] = [
     ['{', /config\.json/],
@@ -89,5 +94,7 @@ test('status text keeps the Auto Permissions indicator format', () => {
   assert.equal(guardianStatusText(DEFAULT_GUARDIAN_CONFIG, false), 'Auto: on · Luna low · no sandbox');
   assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, networkAccess: true } }, true), 'Auto: on · Luna low · network');
   assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: 'user' }, true), 'Auto: on · you review');
+  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: 'unless-trusted' }, true), 'Auto: on · you review', 'untrusted approvals go to you');
+  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: 'never' }, true), 'Auto: on · no approvals');
   assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } }, true), 'Auto: on · Opus high');
 });

@@ -8,7 +8,8 @@ import { accessSync, constants, readFileSync, realpathSync, statSync } from 'nod
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
-import type { WritableRoot } from './seatbelt.ts';
+import { killProcessGroup } from './review/process.ts';
+import { pathStartsWith, type WritableRoot } from './seatbelt.ts';
 
 export const MISSING_BWRAP_WARNING = 'Guardian could not find bubblewrap 0.8 or newer on PATH. Install bubblewrap with your OS package manager. '
   + 'Guardian uses the bubblewrap bundled with Codex in the meantime.';
@@ -33,7 +34,6 @@ export interface BwrapLauncher {
   source: 'system' | 'codex';
 }
 
-const pathStartsWith = (path: string, root: string) => path === root || path.startsWith(root === '/' ? '/' : `${root}/`);
 const canonicalOr = (path: string) => { try { return realpathSync(path); } catch { return path; } };
 
 export function procVersionIndicatesWsl1(procVersion: string): boolean {
@@ -222,7 +222,7 @@ export function bwrapHasUserNamespaceAccess(program: string, timeoutMs = SYSTEM_
     };
     // A probe that hangs is not a namespace failure; descendants holding stderr open must not delay the answer.
     const timer = setTimeout(() => {
-      try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+      killProcessGroup(child);
       settle(true);
     }, timeoutMs);
     child.stderr.on('data', (chunk: Buffer) => { if (stderr.length < SYSTEM_BWRAP_PROBE_STDERR_LIMIT_BYTES) stderr += chunk.toString(); });

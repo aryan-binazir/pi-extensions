@@ -9,16 +9,17 @@ import { Type } from 'typebox';
 import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import type { GuardianConfig } from './config.ts';
 import { createExecApprovalRequirement, type SandboxPermissions } from './exec-policy.ts';
+import { persistableAmendment } from './policies.ts';
 import { RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
 import type { Policy } from './rules.ts';
-import { isLikelySandboxDenied, type PlatformSandbox, type SandboxedChild } from './sandbox.ts';
+import { killProcessGroup, waitForChildProcess } from './review/process.ts';
+import { isLikelySandboxDenied, type PlatformSandbox } from './sandbox.ts';
 import type { SandboxPolicy } from './seatbelt.ts';
 import type { Shell } from './shell.ts';
 
 const RETRY_REASON = 'command failed; retry without sandbox?';
 const NEVER_ESCALATE = 'approval policy is Never; reject command — you cannot request escalated permissions unless the approval policy is OnRequest';
-const MAX_SUMMARY_CHARS = 300;
-const EXIT_STDIO_GRACE_MS = 100;
+const NEVER_WITHOUT_SANDBOX = 'approval policy is Never and no platform sandbox is available, so commands cannot run without approval; reject command';
 
 export interface ShellSettings {
   shellPath?: string;
@@ -42,34 +43,6 @@ export function sandboxPolicyFor(config: GuardianConfig): SandboxPolicy {
 }
 
 /**
- * Pi's `waitForChildProcess`, which it does not export: after `exit`, keep reading until both pipes end or fall idle,
- * so a tail still in the pipe is not lost, and a backgrounded descendant holding them open cannot hang the call.
- */
-function waitForChildProcess(child: SandboxedChild): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let settled = false, exited = false, stdoutEnded = false, stderrEnded = false;
-    let idle: NodeJS.Timeout | undefined;
-    const finalize = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(idle);
-      child.stdout.destroy();
-      child.stderr.destroy();
-      resolve();
-    };
-    const armIdleTimer = () => { clearTimeout(idle); idle = setTimeout(finalize, EXIT_STDIO_GRACE_MS); };
-    const maybeFinalize = () => { if (exited && stdoutEnded && stderrEnded) finalize(); };
-    child.stdout.once('end', () => { stdoutEnded = true; maybeFinalize(); });
-    child.stderr.once('end', () => { stderrEnded = true; maybeFinalize(); });
-    child.stdout.on('data', () => { if (exited) armIdleTimer(); });
-    child.stderr.on('data', () => { if (exited) armIdleTimer(); });
-    child.once('error', error => { if (settled) return; settled = true; clearTimeout(idle); reject(error); });
-    child.once('exit', () => { exited = true; maybeFinalize(); if (!settled) armIdleTimer(); });
-    child.once('close', finalize);
-  });
-}
-
-/**
  * Spawns the shell directly inside the sandbox, so the sandbox owns the first process and no unsandboxed shell
  * reads its startup files first. Errors use Pi's own contract so its bash tool renders them.
  */
@@ -77,17 +50,14 @@ function sandboxedOperations(sandbox: PlatformSandbox, policy: SandboxPolicy, sh
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
       if (signal?.aborted) throw new Error('aborted');
-      const shell = (() => { try { return getShellConfig(shellPath); } catch { return { shell: '/bin/bash', args: ['-c'] }; } })();
+      const shell = getShellConfig(shellPath);
       const argv = [shell.shell, ...shell.args, command];
       if (argv.some(argument => argument.includes('\0'))) throw new Error('This command cannot be run in the sandbox: it contains a NUL byte.');
       const { child, finished } = await sandbox.spawn(argv, policy, { cwd, env: env ?? process.env, stdin: 'ignore' });
       return new Promise((settled, reject) => {
         let timedOut = false;
-        const killGroup = () => {
-          try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
-        };
-        const onAbort = () => killGroup();
-        const timer = timeout !== undefined && timeout > 0 ? setTimeout(() => { timedOut = true; killGroup(); }, timeout * 1000) : undefined;
+        const onAbort = () => killProcessGroup(child);
+        const timer = timeout !== undefined && timeout > 0 ? setTimeout(() => { timedOut = true; killProcessGroup(child); }, timeout * 1000) : undefined;
         signal?.addEventListener('abort', onAbort, { once: true });
         child.stdout.on('data', onData);
         child.stderr.on('data', onData);
@@ -179,16 +149,25 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
         : requirement;
 
       const approvalContext = ctx as unknown as ApprovalContext;
-      const approve = async (permissions: SandboxPermissions, reason: string | undefined, amendment: string[] | undefined) => {
+      const approve = async (permissions: SandboxPermissions, reason: string | undefined, proposed: string[] | undefined) => {
+        // Only offer "don't ask again" for a prefix that can actually be saved.
+        const amendment = proposed && persistableAmendment(runtime.shell, proposed);
         const decision = await runtime.approvals.request({
           action: { tool: 'bash', command, cwd, sandbox_permissions: permissions, ...(params.justification ? { justification: params.justification } : {}), environment_id: 'local' },
-          summary: params.command.length > MAX_SUMMARY_CHARS ? `${params.command.slice(0, MAX_SUMMARY_CHARS)}…` : params.command,
+          // The whole command, so nothing you approve is hidden past a cut-off.
+          summary: params.command,
           ...(params.justification ? { justification: params.justification } : {}),
           ...(reason === undefined ? {} : { reason }),
           ...(amendment ? { amendment } : {}),
         }, approvalContext, signal);
         if (decision.type !== 'approved') throw new Error(decision.message);
-        if (decision.persist) await runtime.persistAmendment(decision.persist);
+        if (!decision.persist) return;
+        // The command is approved either way; a rule that could not be saved only means you are asked again.
+        try {
+          await runtime.persistAmendment(decision.persist);
+        } catch (error) {
+          if (approvalContext.hasUI) approvalContext.ui.notify(`Could not save the approved rule: ${(error as Error).message}`, 'warning');
+        }
       };
 
       let approved = false;
@@ -197,12 +176,15 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
         approved = true;
       }
       const bypass = unrestricted || (effective.type === 'skip' && effective.bypassSandbox) || (sandboxPermissions === 'require_escalated' && approved);
+      // Under `never`, an unmatched command is allowed to run in the sandbox; with no sandbox it cannot run at all.
+      if (!bypass && !runtime.sandbox) throw new Error(NEVER_WITHOUT_SANDBOX);
       const result = await run(!bypass);
       // On-request returns sandbox denials to the agent; unless-trusted asks to retry outside the sandbox.
       const exitCode = (result as { structuredContent?: { exit_code?: number } }).structuredContent?.exit_code ?? 0;
       const output = result.content.map(part => part.type === 'text' ? part.text : '').join('');
       if (bypass || config.approvalPolicy !== 'unless-trusted' || !isLikelySandboxDenied(exitCode, output, runtime.sandbox?.kind)) return result;
-      await approve('require_escalated', RETRY_REASON, effective.type === 'needs_approval' ? effective.proposedExecpolicyAmendment : undefined);
+      // As in Codex, a command you already approved is retried without asking again.
+      if (!approved) await approve('require_escalated', RETRY_REASON, effective.type === 'needs_approval' ? effective.proposedExecpolicyAmendment : undefined);
       return run(false);
     },
   };

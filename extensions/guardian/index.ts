@@ -1,16 +1,15 @@
-// Guardian: Codex's approval stack for Pi. Our inspiration from this code comes from there: openai/codex
+// Guardian: Codex's approval stack for Pi. Our inspiration from this code comes from there. The source is openai/codex
 // (https://github.com/openai/codex, Apache-2.0) at ce0323f2f2d3b25e82806cd555237da3db4e1897. See docs/licenses/README.md.
 import { statSync } from 'node:fs';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { appendAllowPrefixRule } from './amend.ts';
 import { type ApprovalContext, Approvals, manualApprovalMessage } from './approvals.ts';
 import { createGuardianBashTool, sandboxPolicyFor } from './bash.ts';
-import { FAIL_CLOSED_CONFIG, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
+import { CLAUDE_CLI_PROVIDER, FAIL_CLOSED_CONFIG, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
 import { createGuardianFileTools } from './files.ts';
 import { permissionsInstructions } from './permissions.ts';
 import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, persistableAmendment, retainPolicies, userRulesDir } from './policies.ts';
 import { collectReviewEvidence, composeReviewRequest, MANUAL_APPROVAL_MESSAGE_TYPE, prepareTranscript } from './review/context.ts';
-import { CLAUDE_CLI_PROVIDER } from './config.ts';
 import { runClaudeCliReview } from './review/claude-cli.ts';
 import { resolveReviewer } from './review/model.ts';
 import { MAX_REVIEW_ATTEMPTS, REVIEW_TIMEOUT_MS, type ReviewOutcome, runWithRetry } from './review/outcome.ts';

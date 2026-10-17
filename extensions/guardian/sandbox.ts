@@ -9,6 +9,7 @@ import {
   USER_NAMESPACE_WARNING, WSL1_BWRAP_WARNING,
 } from './bwrap-launcher.ts';
 import { createBwrapCommandArgs, createProcPreflightArgs, FIRST_BIND_DATA_FD, isProcMountFailure, withAsPid1, withOptionsBeforeCommand } from './bwrap.ts';
+import { killProcessGroup } from './review/process.ts';
 import { networkSeccompMode, seccompProgram, seccompSupported } from './seccomp.ts';
 import {
   createSeatbeltCommandArgs, MACOS_PATH_TO_SEATBELT_EXECUTABLE, SandboxPreparationError, type SandboxPolicy, sandboxEnv as seatbeltEnv,
@@ -100,7 +101,7 @@ function procMountSupported(program: string, networkMode: 'full-access' | 'isola
     supported = new Promise(resolve => {
       const child = spawn(program, withAsPid1(createProcPreflightArgs(networkMode)), { cwd: '/', detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
       let stderr = '';
-      const timer = setTimeout(() => { try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ } }, PREFLIGHT_TIMEOUT_MS);
+      const timer = setTimeout(() => killProcessGroup(child), PREFLIGHT_TIMEOUT_MS);
       child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
       child.on('error', () => { clearTimeout(timer); resolve(true); });
       child.on('close', () => { clearTimeout(timer); resolve(!isProcMountFailure(stderr)); });

@@ -199,6 +199,26 @@ test('a backgrounded command does not hold the sandboxed call open', darwin, asy
   assert.ok(Date.now() - started < 2_000, `returned in ${Date.now() - started}ms`);
 });
 
+test('the configured command prefix is judged as part of the script that runs', async t => {
+  const { cwd, run, requests } = setup(t, {
+    rules: 'prefix_rule(pattern=["touch"], decision="forbidden", justification="no markers")',
+    shellSettings: { commandPrefix: 'touch prefix-marker' },
+  });
+  await assert.rejects(run({ command: 'echo hi' }), /no markers/);
+  assert.ok(!existsSync(join(cwd, 'prefix-marker')));
+  assert.deepEqual(requests, []);
+  const reviewed = setup(t, { shellSettings: { commandPrefix: 'export A=1' }, decisions: [{ type: 'rejected', message: 'no' }] });
+  await assert.rejects(reviewed.run({ command: 'echo hi', sandbox_permissions: 'require_escalated' }), /no/);
+  assert.deepEqual(reviewed.requests[0].action.command, ['bash', '-lc', 'export A=1\necho hi']);
+});
+
+test('invalid timeouts are rejected before anything runs', async t => {
+  const { run } = setup(t);
+  for (const timeout of [-1, 0, Number.POSITIVE_INFINITY, 3_000_000]) {
+    await assert.rejects(run({ command: 'echo hi', timeout }), /Invalid timeout/, String(timeout));
+  }
+});
+
 test('sandbox denial heuristic matches Codex keywords', () => {
   assert.ok(isLikelySandboxDenied(1, 'bash: /x: Operation not permitted'));
   assert.ok(isLikelySandboxDenied(2, 'touch: /x: Read-only file system'));

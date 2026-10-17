@@ -100,7 +100,15 @@ export interface ReviewEvidence {
  * Bounded transcript entries plus verified answers from the session branch. User messages and
  * manual approvals stay complete; other entries are capped as they are collected.
  */
-export function collectReviewEvidence(entries: readonly SessionEntry[], limits: TranscriptEntryLimits = SYNC_ENTRY_LIMITS): ReviewEvidence {
+export interface CollectOptions {
+  /**
+   * The session is a subagent child. Its first "user" message is the parent agent's task brief, which Codex
+   * attributes to the agent: a delegated claim of approval must not become trusted user authorization.
+   */
+  delegated?: boolean;
+}
+
+export function collectReviewEvidence(entries: readonly SessionEntry[], limits: TranscriptEntryLimits = SYNC_ENTRY_LIMITS, options: CollectOptions = {}): ReviewEvidence {
   const transcript: TranscriptEntry[] = [];
   const answers: string[] = [];
   let answersComplete = true;
@@ -127,7 +135,8 @@ export function collectReviewEvidence(entries: readonly SessionEntry[], limits: 
     const message = entry.message as unknown as Record<string, unknown> & { role: string };
     switch (message.role) {
       case 'user':
-        push('user', textOf(message.content as Content));
+        if (options.delegated) push('assistant', textOf(message.content as Content), 'delegated task from the parent agent');
+        else push('user', textOf(message.content as Content));
         break;
       case 'assistant':
         for (const part of message.content as { type: string; text?: string; id?: string; name?: string; arguments?: unknown }[]) {

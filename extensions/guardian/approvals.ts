@@ -8,6 +8,7 @@ import { MANUAL_APPROVAL_DEVELOPER_PREFIX, truncateText } from './review/context
 import { completeReview, type ReviewOutcome } from './review/outcome.ts';
 
 const MAX_APPROVAL_REASON_TOKENS = 512;
+const MAX_REVIEWED_ACTION_BYTES = 256 * 1024;
 const NO_INTERACTIVE_USER = 'approval required, but no interactive user is available to approve it';
 const USER_REJECTED = 'rejected by user';
 const YES = 'Yes, proceed';
@@ -95,6 +96,10 @@ export class Approvals {
     // Codex routes only on-request approvals to the auto reviewer.
     if (config.approvalsReviewer !== 'auto_review' || config.approvalPolicy !== 'on-request') return this.askUser(request, ctx);
     const actionJson = formatActionPretty(request.action);
+    // The reviewer must see the whole action it approves; one this large is split by the agent instead.
+    if (Buffer.byteLength(actionJson) > MAX_REVIEWED_ACTION_BYTES) {
+      return { type: 'rejected', message: `This action is too large to review completely (${Buffer.byteLength(actionJson)} bytes, limit ${MAX_REVIEWED_ACTION_BYTES}). Split it into smaller changes and retry.` };
+    }
     const reason = request.reason === undefined ? undefined : truncateText(request.reason, MAX_APPROVAL_REASON_TOKENS);
     const completion = completeReview(await this.deps.review({ actionJson, ...(reason === undefined ? {} : { reason }) }, ctx, signal));
     const turnId = this.deps.turnId();

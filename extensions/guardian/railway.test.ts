@@ -134,3 +134,18 @@ test('bundled rules load as defence in depth, and a missing or broken file never
   assert.match(BUNDLED_RULES_DIR, /guardian\/rules$/);
   assert.equal(RAILWAY_REVIEW_REASON.length > 0, true);
 });
+
+test('a rules file that stops loading keeps the last rules that did load', async t => {
+  const { retainPolicies } = await import('./policies.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'guardian-retain-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'mine.rules'), 'prefix_rule(pattern=["touch"], decision="forbidden")');
+  const good = await loadPolicies([dir]);
+  writeFileSync(join(dir, 'other.rules'), 'prefix_rule(');
+  const broken = await loadPolicies([dir]);
+  const kept = retainPolicies(good, broken);
+  assert.equal(kept.policy, good.policy, 'your forbidden rules survive a later load failure');
+  assert.match(kept.warning ?? '', /other\.rules[\s\S]*keeping the rules that last loaded/);
+  assert.equal(retainPolicies(undefined, broken), broken, 'with nothing loaded before, the bundled rules apply');
+  assert.equal(retainPolicies(good, good), good);
+});

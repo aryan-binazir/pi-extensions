@@ -8,7 +8,7 @@ import { createGuardianBashTool, sandboxPolicyFor } from './bash.ts';
 import { FAIL_CLOSED_CONFIG, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
 import { createGuardianFileTools } from './files.ts';
 import { permissionsInstructions } from './permissions.ts';
-import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, persistableAmendment, userRulesDir } from './policies.ts';
+import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, persistableAmendment, retainPolicies, userRulesDir } from './policies.ts';
 import { collectReviewEvidence, composeReviewRequest, MANUAL_APPROVAL_MESSAGE_TYPE, prepareTranscript } from './review/context.ts';
 import { CLAUDE_CLI_PROVIDER } from './config.ts';
 import { runClaudeCliReview } from './review/claude-cli.ts';
@@ -57,7 +57,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     if (problem && problem !== reportedError && ctx.hasUI) ctx.ui.notify(problem, 'warning');
     reportedError = problem;
   };
-  const reloadPolicies = async () => { policies = await loadPolicies([userRulesDir()]); };
+  const reloadPolicies = async () => { policies = retainPolicies(policies, await loadPolicies([userRulesDir()])); };
 
   const review = async (input: { actionJson: string; reason?: string }, approvalContext: ApprovalContext, signal?: AbortSignal): Promise<ReviewOutcome> => {
     const ctx = approvalContext as unknown as ExtensionContext;
@@ -66,7 +66,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     const claudeCli = settings.reviewer.provider === CLAUDE_CLI_PROVIDER;
     const reviewer = claudeCli ? undefined : resolveReviewer(ctx.modelRegistry, settings.reviewer, `guardian-${sessionId}`);
     if (reviewer && !reviewer.ok) return { type: 'error', error: { type: 'prompt_build', message: reviewer.message } };
-    const evidence = collectReviewEvidence(ctx.sessionManager.getBranch());
+    const evidence = collectReviewEvidence(ctx.sessionManager.getBranch(), undefined, { delegated: process.env.PI_SUBAGENT_TIMEOUT_MS !== undefined });
     const request = composeReviewRequest({
       transcript: prepareTranscript(evidence.transcript, 0, 'line'), sessionId, trustedUserAnswers: evidence.trustedUserAnswers, environmentId: 'local',
       plannedAction: { json: input.actionJson, ...(input.reason === undefined ? {} : { reason: input.reason }) },

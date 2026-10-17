@@ -42,6 +42,16 @@ export async function loadPolicies(userRulesDirs: readonly string[]): Promise<Lo
 }
 
 /**
+ * Keeps the rules that last loaded when a reload fails, whether a file stopped parsing or became unreadable:
+ * dropping them would silently remove your own `forbidden` rules. With nothing loaded before, the bundled
+ * rules apply alone.
+ */
+export function retainPolicies(previous: LoadedPolicies | undefined, next: LoadedPolicies): LoadedPolicies {
+  if (!next.warning || !previous || previous.warning) return next;
+  return { ...previous, warning: `${next.warning}; keeping the rules that last loaded` };
+}
+
+/**
  * The bundled policy followed by the user's extra policy. The Railway deny falls back to its built-in
  * text, so an unreadable or edited bundled file cannot drop it from the reviewer's instructions.
  */

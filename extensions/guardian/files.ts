@@ -10,12 +10,13 @@ import {
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import type { GuardianConfig } from './config.ts';
-import { truncateText } from './review/context.ts';
-import { PROTECTED_METADATA_PATH_NAMES, workspaceWriteRoots } from './seatbelt.ts';
+import { runBounded } from './review/process.ts';
+import { sandboxPolicyFor } from './bash.ts';
+import { createSeatbeltCommandArgs, MACOS_PATH_TO_SEATBELT_EXECUTABLE, PROTECTED_METADATA_PATH_NAMES, workspaceWriteRoots } from './seatbelt.ts';
 
 const PATCH_REJECTED_OUTSIDE_PROJECT_REASON = 'writing outside of the project; rejected by user approval settings';
 const PATCH_REJECTED_READ_ONLY_REASON = 'writing is blocked by read-only sandbox; rejected by user approval settings';
-const MAX_CHANGE_TOKENS = 8_000;
+const SANDBOXED_WRITE_TIMEOUT_MS = 30_000;
 
 export type FileSafety = 'auto_approve' | 'ask_user' | { type: 'reject'; reason: string };
 
@@ -94,13 +95,28 @@ export function assessFileChange(path: string, context: FileSafetyContext): File
 
 type Input = { path: string; content?: unknown; edits?: unknown };
 
-/** The planned change as the reviewer sees it; large bodies keep both ends around an omission marker. */
+/**
+ * The planned change exactly as it will be applied. Codex keeps action arguments complete, so the reviewer
+ * never approves a body it could not see; changes too large to review are rejected by the approval layer.
+ */
 export function fileChangeAction(tool: 'write' | 'edit', input: Input, path: string, cwd: string): Record<string, unknown> {
-  const cap = (text: unknown) => typeof text === 'string' ? truncateText(text, MAX_CHANGE_TOKENS) : text;
-  const change = tool === 'write'
-    ? { content: cap(input.content) }
-    : { edits: Array.isArray(input.edits) ? input.edits.map(edit => ({ ...edit, oldText: cap(edit?.oldText), newText: cap(edit?.newText) })) : input.edits };
+  const change = tool === 'write' ? { content: input.content } : { edits: input.edits };
   return { tool, cwd, files: [path], ...change, environment_id: 'local' };
+}
+
+/**
+ * Writes a file from inside the workspace-write sandbox, as Codex applies patches. Seatbelt checks the path
+ * at write time, so a symlink or hard link swapped in after the writable-root check cannot redirect the write.
+ */
+export async function sandboxedWrite(path: string, content: string, config: GuardianConfig, cwd: string): Promise<void> {
+  const script = 'mkdir -p "$1" && cat > "$2"';
+  const run = await runBounded(MACOS_PATH_TO_SEATBELT_EXECUTABLE,
+    createSeatbeltCommandArgs(['/bin/sh', '-c', script, 'sh', dirname(path), path], sandboxPolicyFor(config), cwd), {
+      cwd, stdin: content, timeoutMs: SANDBOXED_WRITE_TIMEOUT_MS, maxBytes: 16 * 1024,
+    });
+  if (run.spawnError) throw new Error(`Could not write ${path} in the sandbox: ${run.spawnError}`);
+  if (run.timedOut) throw new Error(`Writing ${path} in the sandbox timed out`);
+  if (run.exitCode !== 0) throw new Error(`Writing ${path} was blocked by the sandbox: ${run.stderr.trim() || `exit ${run.exitCode}`}`);
 }
 
 export interface FileRuntime {
@@ -113,40 +129,48 @@ export interface FileRuntime {
  * Assesses every mutation of one tool call, and asks you at most once: a tool call is one logical change, so
  * creating the parent directory and writing the file share a decision, as one Codex patch does.
  */
-function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, cwd: string, ctx: ApprovalContext, signal: AbortSignal | undefined) {
+function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, cwd: string, ctx: ApprovalContext, signal: AbortSignal | undefined): Gate {
   let approval: Promise<void> | undefined;
-  return async (path: string): Promise<void> => {
-    const safety = assessFileChange(path, { config: runtime.config(), cwd, sandboxAvailable: runtime.sandboxAvailable });
-    if (safety === 'auto_approve') return;
+  return async (path: string): Promise<Mutation> => {
+    const config = runtime.config();
+    const safety = assessFileChange(path, { config, cwd, sandboxAvailable: runtime.sandboxAvailable });
     if (typeof safety === 'object') throw new Error(safety.reason);
-    return approval ??= (async () => {
-      const decision = await runtime.approvals.request({
-        action: fileChangeAction(tool, input, path, cwd), summary: `${tool} ${path}`,
-      }, ctx, signal);
-      if (decision.type !== 'approved') throw new Error(decision.message);
-    })();
+    if (safety === 'ask_user') {
+      await (approval ??= (async () => {
+        const decision = await runtime.approvals.request({
+          action: fileChangeAction(tool, input, path, cwd), summary: `${tool} ${path}`,
+        }, ctx, signal);
+        if (decision.type !== 'approved') throw new Error(decision.message);
+      })());
+    }
+    // Approval can take a while; a call cancelled meanwhile must not mutate anything.
+    if (signal?.aborted) throw new Error('Operation aborted');
+    const sandboxed = safety === 'auto_approve' && config.enabled && config.sandbox.mode !== 'danger-full-access' && runtime.sandboxAvailable;
+    return sandboxed
+      ? { write: (target, content) => sandboxedWrite(target, content, config, cwd) }
+      : { write: async (target, content) => { await mkdir(dirname(target), { recursive: true }); await writeFile(target, content, 'utf8'); } };
   };
 }
 
-type Gate = (path: string) => Promise<void>;
+/** How an allowed mutation is applied: inside the sandbox, or directly once you or the reviewer approved it. */
+interface Mutation {
+  write(path: string, content: string): Promise<void>;
+}
 
-/** Parent directories are created only after the write itself is allowed, so a denial leaves nothing behind. */
+type Gate = (path: string) => Promise<Mutation>;
+
+/** Parent directories are created only with the write itself, so a denial leaves nothing behind. */
 function gatedWriteOperations(gate: Gate): WriteOperations {
-  let parent: string | undefined;
   return {
-    async mkdir(dir) { parent = dir; },
-    async writeFile(path, content) {
-      await gate(path);
-      if (parent !== undefined) await mkdir(parent, { recursive: true });
-      await writeFile(path, content, 'utf8');
-    },
+    async mkdir() {},
+    async writeFile(path, content) { await (await gate(path)).write(path, content); },
   };
 }
 
 const gatedEditOperations = (gate: Gate): EditOperations => ({
   readFile: path => readFile(path),
   access: async () => {},
-  async writeFile(path, content) { await gate(path); await writeFile(path, content, 'utf8'); },
+  async writeFile(path, content) { await (await gate(path)).write(path, content); },
 });
 
 type AnyFileTool = ToolDefinition<never, never, never>;
@@ -154,7 +178,7 @@ type AnyFileTool = ToolDefinition<never, never, never>;
 /** Pi's `write` and `edit`, with every mutation gated at the path Pi resolved. */
 export function createGuardianFileTools(runtime: FileRuntime, defaultCwd: string): AnyFileTool[] {
   const wrap = (name: 'write' | 'edit', build: (cwd: string, gate: Gate) => unknown): AnyFileTool => ({
-    ...(build(defaultCwd, async () => {}) as AnyFileTool),
+    ...(build(defaultCwd, async () => ({ write: async () => {} })) as AnyFileTool),
     async execute(toolCallId: string, params: Input, signal: AbortSignal | undefined, onUpdate: unknown, ctx: ApprovalContext & { cwd?: string }) {
       const cwd = ctx?.cwd ?? defaultCwd;
       const gated = build(cwd, createGate(runtime, name, params, cwd, ctx, signal)) as AnyFileTool;

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
-import { assessFileChange, createGuardianFileTools, fileChangeAction } from './files.ts';
+import { assessFileChange, createGuardianFileTools, fileChangeAction, sandboxedWrite } from './files.ts';
 
 function workspace(t: test.TestContext) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-files-')));
@@ -38,7 +38,9 @@ test('protected metadata stays read-only, including case variants and gitdir poi
   mkdirSync(linked);
   writeFileSync(join(linked, '.git'), `gitdir: ${gitdir}\n`);
   const config = isolated({ sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, writableRoots: [linked, outside] } });
-  for (const path of ['.git/hooks/pre-commit', '.codex/config.toml', '.agents/x', '.aws/credentials', '.GIT/config', join(gitdir, 'HEAD'), join(linked, '.git')]) {
+  // `.GIT` aliases `.git` only on a case-insensitive volume, the macOS default.
+  const caseVariants = process.platform === 'darwin' ? ['.GIT/config'] : [];
+  for (const path of ['.git/hooks/pre-commit', '.codex/config.toml', '.agents/x', '.aws/credentials', '.pi/settings.json', ...caseVariants, join(gitdir, 'HEAD'), join(linked, '.git')]) {
     assert.equal(assessFileChange(resolve(cwd, path), { config, cwd, sandboxAvailable: true }), 'ask_user', path);
   }
   assert.equal(assessFileChange(resolve(cwd, '.gitignore'), { config, cwd, sandboxAvailable: true }), 'auto_approve');
@@ -131,5 +133,29 @@ test('file change actions carry the planned change for review', () => {
   assert.deepEqual(fileChangeAction('edit', { path: 'a.txt', edits: [{ oldText: 'a', newText: 'b' }] }, '/repo/a.txt', '/repo'),
     { tool: 'edit', cwd: '/repo', files: ['/repo/a.txt'], edits: [{ oldText: 'a', newText: 'b' }], environment_id: 'local' });
   const big = fileChangeAction('write', { path: 'a', content: 'x'.repeat(200_000) }, '/repo/a', '/repo');
-  assert.match(String(big.content), /<truncated omitted_approx_tokens=/);
+  assert.equal(big.content, 'x'.repeat(200_000), 'the reviewer sees the complete change');
+});
+
+test('a call aborted while approval is pending writes nothing', async t => {
+  const { cwd, outside } = workspace(t);
+  const controller = new AbortController();
+  const [write] = createGuardianFileTools({
+    config: () => isolated(), sandboxAvailable: true,
+    approvals: { request: async () => { controller.abort(); return { type: 'approved' }; } },
+  }, cwd);
+  const ctx = { cwd, hasUI: true, abort: () => {}, ui: { notify: () => {}, select: async () => undefined } };
+  const target = join(outside, 'aborted.txt');
+  await assert.rejects((write.execute as (...args: unknown[]) => Promise<unknown>)('c', { path: target, content: 'x' }, controller.signal, undefined, ctx), /aborted/i);
+  assert.ok(!existsSync(target));
+});
+
+test('auto-approved writes run inside the sandbox, so a link swapped in after the check cannot escape', { skip: process.platform !== 'darwin' && 'Seatbelt is macOS-only' }, async t => {
+  const { cwd, outside } = workspace(t);
+  const victim = join(outside, 'victim.txt');
+  writeFileSync(victim, 'original');
+  symlinkSync(victim, join(cwd, 'swapped'));
+  await assert.rejects(sandboxedWrite(join(cwd, 'swapped'), 'changed', isolated(), cwd), /Operation not permitted|not permitted/);
+  assert.equal(readFileSync(victim, 'utf8'), 'original');
+  await sandboxedWrite(join(cwd, 'deep/ok.txt'), 'ok', isolated(), cwd);
+  assert.equal(readFileSync(join(cwd, 'deep/ok.txt'), 'utf8'), 'ok');
 });

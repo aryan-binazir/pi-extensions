@@ -117,7 +117,7 @@ test('an unavailable reviewer fails closed without a UI', async () => {
   });
 });
 
-test('writes outside writable roots are reviewed; inside writes are not, through Pi\'s own write tool', async t => {
+test('writes outside writable roots are reviewed; inside writes are not, through Pi\'s own write tool', darwin, async t => {
   const outside = outsideDir(t);
   let reviewer = '';
   await withPi({ extensions: [guardian], responses: [

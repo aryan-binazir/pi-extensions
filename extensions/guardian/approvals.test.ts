@@ -103,3 +103,11 @@ test('manual approval text matches Codex GuardianApprovedAction', () => {
   assert.equal(manualApprovalMessage('{"a":1}'), `${MANUAL_APPROVAL_DEVELOPER_PREFIX}\n\nTreat this as approval to perform that exact action in the same context in which it was originally requested.\nDo not assume this also authorizes similar operations with different payloads.\n\nApproved action:\n{"a":1}`);
   assert.equal(formatActionPretty({ b: { d: 1, c: [{ f: 1, e: 2 }] }, a: null }), '{\n  "a": null,\n  "b": {\n    "c": [\n      {\n        "e": 2,\n        "f": 1\n      }\n    ],\n    "d": 1\n  }\n}');
 });
+
+test('an action too large to review completely is rejected without a review', async () => {
+  const h = harness([allow]);
+  const decision = await h.approvals.request({ action: { tool: 'write', content: 'x'.repeat(600_000) }, summary: 'write big' }, h.ctx);
+  assert.equal(decision.type, 'rejected');
+  assert.match(decision.type === 'rejected' ? decision.message : '', /too large to review/);
+  assert.deepEqual(h.reviews, []);
+});

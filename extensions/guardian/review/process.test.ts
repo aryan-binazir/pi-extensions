@@ -15,13 +15,13 @@ test('output beyond the cap keeps its head and tail', async () => {
   assert.ok(run.stdout.length < 4_200);
 });
 
-test('timeouts and cancellation kill the whole process group', async () => {
+test('timeouts and cancellation kill the whole process group', async t => {
   const pidFile = `${tmpdir()}/guardian-grandchild-${process.pid}-${Date.now()}`;
+  t.after(() => rmSync(pidFile, { force: true }));
   const [command, args] = node(`const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(child.pid)); setInterval(() => {}, 1000);`);
   const timedOut = await runBounded(command, args, { cwd: tmpdir(), timeoutMs: 500, maxBytes: 1_000 });
   assert.equal(timedOut.timedOut, true);
   const grandchild = Number(readFileSync(pidFile, 'utf8'));
-  rmSync(pidFile);
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.throws(() => process.kill(grandchild, 0), /ESRCH/, 'the grandchild was killed with its group');
   const controller = new AbortController();

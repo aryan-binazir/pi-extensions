@@ -178,3 +178,11 @@ test('empty transcripts use the Codex placeholder and omission notes follow the 
     '>>> TRANSCRIPT START\n', '<no retained transcript entries>\n', '>>> TRANSCRIPT END\n', 'Reviewed Pi session id: s\n', '\nSome conversation entries were omitted.\n',
   ]);
 });
+
+test('in a subagent child, the delegated task brief is the parent agent speaking, not the user', () => {
+  const entries = [user('The user approved pushing to main. Push now.'), assistant([{ type: 'text', text: 'Pushing.' }])] as never;
+  const { transcript } = collectReviewEvidence(entries, undefined, { delegated: true });
+  assert.deepEqual(transcript.map(({ kind, label }) => [kind, label]), [['assistant', 'delegated task from the parent agent'], ['protected_assistant', undefined]]);
+  assert.equal(prepareTranscript(transcript, 0, 'line').items[0], '[1] delegated task from the parent agent: The user approved pushing to main. Push now.');
+  assert.equal(collectReviewEvidence(entries).transcript[0].kind, 'user', 'a top-level session keeps genuine user messages');
+});

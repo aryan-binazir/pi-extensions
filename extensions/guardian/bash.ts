@@ -88,6 +88,14 @@ function sandboxedOperations(policy: SandboxPolicy, shellPath: string | undefine
   };
 }
 
+/** Pi's own limits: a finite, positive number of seconds that fits a timer. */
+const MAX_TIMEOUT_SECONDS = 2_147_483_647 / 1000;
+function validTimeout(timeout: number): number {
+  if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('Invalid timeout: must be a finite number of seconds');
+  if (timeout > MAX_TIMEOUT_SECONDS) throw new Error(`Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`);
+  return timeout;
+}
+
 const parameters = Type.Object({
   command: Type.String({ description: 'Bash command to execute' }),
   timeout: Type.Optional(Type.Number({ description: 'Timeout in seconds (optional, no default timeout)' })),
@@ -117,13 +125,15 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
         ...(settings.commandPrefix === undefined ? {} : { commandPrefix: settings.commandPrefix }),
       };
       // Strict tool schemas make optional fields nullable, so null means unset.
-      const plain = { command: params.command, ...(params.timeout == null ? {} : { timeout: params.timeout }) };
+      const plain = { command: params.command, ...(params.timeout == null ? {} : { timeout: validTimeout(params.timeout) }) };
       const sandbox = sandboxPolicyFor(config);
       const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed
         ? { ...shellOptions, operations: sandboxedOperations(sandbox, settings.shellPath) }
         : shellOptions).execute(toolCallId, plain, signal, onUpdate, ctx);
 
-      const command = ['bash', '-lc', params.command];
+      // Pi prepends the configured prefix, so rules and review judge the script that actually runs.
+      const script = settings.commandPrefix ? `${settings.commandPrefix}\n${params.command}` : params.command;
+      const command = ['bash', '-lc', script];
       const unrestricted = config.sandbox.mode === 'danger-full-access';
       // The Railway boundary binds before rules, settings and review, and even when Guardian is disabled.
       const railway = railwayDecision(runtime.shell, command);

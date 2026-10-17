@@ -33,11 +33,6 @@ export type SandboxPermissions = 'use_default' | 'require_escalated';
 
 export interface ExecApprovalRequest {
   command: string[];
-  /**
-   * Command segments to evaluate instead of parsing `command`. Guardian uses this for mandatory rules so a
-   * forbidden prefix is still found inside control flow and substitutions, as Codex finds hidden `rm -f`.
-   */
-  commands?: string[][];
   approvalPolicy: ApprovalPolicy;
   fileSystem: FileSystemSandboxKind;
   sandboxPermissions: SandboxPermissions;
@@ -105,7 +100,7 @@ export function renderDecisionForUnmatchedCommand(shell: Shell, command: string[
 
 export function createExecApprovalRequirement(shell: Shell, policy: Policy, request: ExecApprovalRequest): ExecApprovalRequirement {
   const { command, approvalPolicy, prefixRule } = request;
-  const commands = request.commands?.length ? request.commands : commandsForExecPolicy(shell, command);
+  const commands = commandsForExecPolicy(shell, command);
   const fallback: HeuristicsFallback = cmd => renderDecisionForUnmatchedCommand(shell, cmd, request);
   const matchOptions = { resolveHostExecutables: true };
   const evaluation = policy.checkMultiple(commands, fallback, matchOptions);

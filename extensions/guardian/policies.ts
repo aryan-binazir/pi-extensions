@@ -24,20 +24,17 @@ export const defaultRulesPath = () => join(userRulesDir(), 'default.rules');
 export interface LoadedPolicies {
   /** Bundled rules plus your rules, when yours load. */
   policy: Policy;
-  /** Bundled rules alone; these bind even when Guardian is disabled. */
-  mandatory: Policy;
   /** Set when your rules could not be loaded; the bundled rules still apply. */
   warning?: string;
 }
 
 export async function loadPolicies(userRulesDirs: readonly string[]): Promise<LoadedPolicies> {
-  const mandatory = await loadExecPolicy([BUNDLED_RULES_DIR]);
-  if (!userRulesDirs.length) return { policy: mandatory, mandatory };
+  const bundled = await loadExecPolicy([BUNDLED_RULES_DIR]);
+  if (!userRulesDirs.length) return { policy: bundled };
   try {
-    return { policy: await loadExecPolicy([BUNDLED_RULES_DIR, ...userRulesDirs]), mandatory };
+    return { policy: await loadExecPolicy([BUNDLED_RULES_DIR, ...userRulesDirs]) };
   } catch (error) {
-    // A rules file that cannot be read may hold restrictions, so treat its absence as a warning, not as permission.
-    return { policy: mandatory, mandatory, warning: `Guardian could not load your rules files, so only its bundled rules apply: ${(error as Error).message}` };
+    return { policy: bundled, warning: `Guardian could not load your rules files, so only its bundled rules apply: ${(error as Error).message}` };
   }
 }
 

@@ -213,8 +213,8 @@ export class Shell {
 
   /**
    * Every command this one may run, as far as static parsing can tell: itself, the commands behind `sudo`,
-   * `env` and `trap`, and the literal commands of any shell script it carries, recursively. Guardian uses this
-   * so a mandatory forbidden prefix is found wherever a literal command hides. Codex walks the same tree in
+   * `env` and `trap`, and the literal commands of any shell script it carries, recursively. The Railway
+   * boundary uses this to find a Railway invocation wherever a literal command hides. Codex walks the same tree in
    * `dangerous_command_match_with_depth`; here the walk collects commands instead of matching `rm`.
    */
   expandLiteralCommands(command: readonly string[], wrapperDepth = 0): string[][] {

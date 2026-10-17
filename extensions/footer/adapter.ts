@@ -24,8 +24,10 @@ export async function findConfigLoader(commands: ReturnType<ExtensionAPI['getCom
   const guardian = commands.find(command => command.source === 'extension' && command.name.split(':')[0] === 'guardian'
     && realpath(command.sourceInfo.path) === realpath(GUARDIAN_INDEX));
   if (guardian) {
-    const [{ guardianStatusText, loadGuardianConfig }, { guardianConfigPath }] = await Promise.all([import('../guardian/config.ts'), import('../guardian/policies.ts')]);
-    const sandboxAvailable = process.platform === 'darwin';
+    const [{ guardianStatusText, loadGuardianConfig }, { guardianConfigPath }, { detectPlatformSandbox }] = await Promise.all([
+      import('../guardian/config.ts'), import('../guardian/policies.ts'), import('../guardian/sandbox.ts'),
+    ]);
+    const sandboxAvailable = (await detectPlatformSandbox()).sandbox !== undefined;
     const path = guardianConfigPath();
     return { path, load: () => loadGuardianConfig(path), status: config => guardianStatusText(config as ReturnType<typeof loadGuardianConfig>, sandboxAvailable) };
   }

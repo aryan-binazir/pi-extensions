@@ -1,5 +1,6 @@
 // Runs reviewer subprocesses with bounded output and whole-process-group cleanup.
 import { spawn } from 'node:child_process';
+import type { SandboxedProcess } from '../sandbox.ts';
 
 export interface BoundedRun {
   exitCode: number | null;
@@ -58,6 +59,21 @@ class HeadTail {
 }
 
 export function runBounded(command: string, args: readonly string[], options: BoundedRunOptions): Promise<BoundedRun> {
+  return runStarted(async () => {
+    const child = spawn(command, args, { cwd: options.cwd, env: options.env ?? process.env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    return { child, finished: Promise.resolve() };
+  }, options);
+}
+
+/** Like runBounded, for a process started in its own group with piped stdio, such as a sandboxed one. */
+export async function runStarted(start: () => Promise<SandboxedProcess>, options: Omit<BoundedRunOptions, 'env'>): Promise<BoundedRun> {
+  let started: SandboxedProcess;
+  try {
+    started = await start();
+  } catch (error) {
+    return { exitCode: null, stdout: '', stderr: '', timedOut: false, aborted: false, spawnError: (error as Error).message };
+  }
+  const { child, finished } = started;
   return new Promise(resolve => {
     const stdout = new HeadTail(options.maxBytes / 2), stderr = new HeadTail(options.maxBytes / 2);
     let timedOut = false, aborted = false, settled = false;
@@ -66,9 +82,8 @@ export function runBounded(command: string, args: readonly string[], options: Bo
       settled = true;
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', onAbort);
-      resolve({ exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut, aborted, ...(spawnError ? { spawnError } : {}) });
+      void finished.then(() => resolve({ exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut, aborted, ...(spawnError ? { spawnError } : {}) }));
     };
-    const child = spawn(command, args, { cwd: options.cwd, env: options.env ?? process.env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
     const killGroup = () => {
       try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
     };
@@ -77,8 +92,8 @@ export function runBounded(command: string, args: readonly string[], options: Bo
     if (options.signal?.aborted) onAbort(); else options.signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
-    child.stdin.on('error', () => {});
-    child.stdin.end(options.stdin ?? '');
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(options.stdin ?? '');
     child.on('error', error => finish(null, error.message));
     child.on('close', code => finish(code));
   });

@@ -7,6 +7,10 @@ import test from 'node:test';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import { assessFileChange, createGuardianFileTools, fileChangeAction, sandboxedWrite } from './files.ts';
+import { detectPlatformSandbox } from './sandbox.ts';
+
+const detected = (await detectPlatformSandbox()).sandbox;
+const sandboxed = { skip: !detected && 'this platform has no usable sandbox' };
 
 function workspace(t: test.TestContext) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-files-')));
@@ -71,7 +75,7 @@ function fileTools(t: test.TestContext, config: GuardianConfig, decisions: Appro
   const requests: ApprovalRequest[] = [];
   const queue = [...decisions];
   const [write, edit] = createGuardianFileTools({
-    config: () => config, sandboxAvailable: true,
+    config: () => config, sandbox: detected,
     approvals: { request: async request => { requests.push(request); return queue.shift() ?? { type: 'rejected', message: 'not approved' }; } },
   }, cwd);
   const ctx = { cwd, hasUI: true, abort: () => {}, ui: { notify: () => {}, select: async () => undefined } };
@@ -91,7 +95,7 @@ test('Pi path forms are gated at the path Pi resolved, including @ and file: pre
   assert.ok(!existsSync(join(cwd, '.git', 'config')));
 });
 
-test('an approved write runs once and an ordinary workspace write is never asked about', async t => {
+test('an approved write runs once and an ordinary workspace write is never asked about', sandboxed, async t => {
   const { cwd, outside, write, edit, run, requests } = fileTools(t, isolated(), [{ type: 'approved' }]);
   await run(write, { path: 'notes/inside.md', content: 'in' });
   assert.equal(readFileSync(join(cwd, 'notes/inside.md'), 'utf8'), 'in');
@@ -140,7 +144,7 @@ test('a call aborted while approval is pending writes nothing', async t => {
   const { cwd, outside } = workspace(t);
   const controller = new AbortController();
   const [write] = createGuardianFileTools({
-    config: () => isolated(), sandboxAvailable: true,
+    config: () => isolated(), sandbox: detected,
     approvals: { request: async () => { controller.abort(); return { type: 'approved' }; } },
   }, cwd);
   const ctx = { cwd, hasUI: true, abort: () => {}, ui: { notify: () => {}, select: async () => undefined } };
@@ -149,13 +153,13 @@ test('a call aborted while approval is pending writes nothing', async t => {
   assert.ok(!existsSync(target));
 });
 
-test('auto-approved writes run inside the sandbox, so a link swapped in after the check cannot escape', { skip: process.platform !== 'darwin' && 'Seatbelt is macOS-only' }, async t => {
+test('auto-approved writes run inside the sandbox, so a link swapped in after the check cannot escape', sandboxed, async t => {
   const { cwd, outside } = workspace(t);
   const victim = join(outside, 'victim.txt');
   writeFileSync(victim, 'original');
   symlinkSync(victim, join(cwd, 'swapped'));
-  await assert.rejects(sandboxedWrite(join(cwd, 'swapped'), 'changed', isolated(), cwd), /Operation not permitted|not permitted/);
+  await assert.rejects(sandboxedWrite(join(cwd, 'swapped'), 'changed', isolated(), cwd, detected!), /Operation not permitted|Read-only file system/);
   assert.equal(readFileSync(victim, 'utf8'), 'original');
-  await sandboxedWrite(join(cwd, 'deep/ok.txt'), 'ok', isolated(), cwd);
+  await sandboxedWrite(join(cwd, 'deep/ok.txt'), 'ok', isolated(), cwd, detected!);
   assert.equal(readFileSync(join(cwd, 'deep/ok.txt'), 'utf8'), 'ok');
 });

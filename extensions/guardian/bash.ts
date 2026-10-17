@@ -1,9 +1,8 @@
 // Pi's bash tool with Codex's shell approval flow, ported from openai/codex codex-rs/core/src/tools/{orchestrator,
 // sandboxing}.rs, codex-rs/core/src/tools/handlers/shell_spec.rs and codex-rs/sandboxing/src/denial.rs @ ce0323f
 // (Apache-2.0); see docs/licenses/README.md. Sandboxed commands are spawned directly as
-// `sandbox-exec -- <shell> -c <command>` so no unsandboxed shell runs first. Scripts are evaluated as
-// `bash -lc <command>`, the form Codex parses into command segments.
-import { spawn } from 'node:child_process';
+// `sandbox-exec -- <shell> -c <command>` or `bwrap ... -- <shell> -c <command>`, so no unsandboxed shell runs first.
+// Scripts are evaluated as `bash -lc <command>`, the form Codex parses into command segments.
 import { constants as osConstants } from 'node:os';
 import { type BashOperations, type BashToolDetails, createBashToolDefinition, getShellConfig, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
@@ -12,13 +11,14 @@ import type { GuardianConfig } from './config.ts';
 import { createExecApprovalRequirement, type SandboxPermissions } from './exec-policy.ts';
 import { RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
 import type { Policy } from './rules.ts';
-import { createSeatbeltCommandArgs, MACOS_PATH_TO_SEATBELT_EXECUTABLE, sandboxEnv, type SandboxPolicy } from './seatbelt.ts';
+import { isLikelySandboxDenied, type PlatformSandbox, type SandboxedChild } from './sandbox.ts';
+import type { SandboxPolicy } from './seatbelt.ts';
 import type { Shell } from './shell.ts';
 
-const SANDBOX_DENIED_KEYWORDS = ['operation not permitted', 'permission denied', 'read-only file system', 'seccomp', 'sandbox', 'landlock', 'failed to write file'];
 const RETRY_REASON = 'command failed; retry without sandbox?';
 const NEVER_ESCALATE = 'approval policy is Never; reject command — you cannot request escalated permissions unless the approval policy is OnRequest';
 const MAX_SUMMARY_CHARS = 300;
+const EXIT_STDIO_GRACE_MS = 100;
 
 export interface ShellSettings {
   shellPath?: string;
@@ -30,16 +30,10 @@ export interface BashRuntime {
   policy(): Policy;
   shellSettings(): ShellSettings;
   shell: Shell;
-  sandboxAvailable: boolean;
+  /** Undefined when this platform has no usable sandbox, and every command is reviewed instead. */
+  sandbox: PlatformSandbox | undefined;
   approvals: { request(request: ApprovalRequest, ctx: ApprovalContext, signal?: AbortSignal): Promise<ApprovalDecision> };
   persistAmendment(prefix: string[]): Promise<void>;
-}
-
-/** Codex's executor-managed sandbox denial heuristic: a failure whose output names a sandbox restriction. */
-export function isLikelySandboxDenied(exitCode: number, output: string): boolean {
-  if (exitCode === 0) return false;
-  const lower = output.toLowerCase();
-  return SANDBOX_DENIED_KEYWORDS.some(keyword => lower.includes(keyword));
 }
 
 export function sandboxPolicyFor(config: GuardianConfig): SandboxPolicy {
@@ -48,19 +42,46 @@ export function sandboxPolicyFor(config: GuardianConfig): SandboxPolicy {
 }
 
 /**
- * Spawns `sandbox-exec -- <shell> -c <command>` directly, so the sandbox owns the first process and no
- * unsandboxed shell reads its startup files first. Errors use Pi's own contract so its bash tool renders them.
+ * Pi's `waitForChildProcess`, which it does not export: after `exit`, keep reading until both pipes end or fall idle,
+ * so a tail still in the pipe is not lost, and a backgrounded descendant holding them open cannot hang the call.
  */
-function sandboxedOperations(policy: SandboxPolicy, shellPath: string | undefined): BashOperations {
+function waitForChildProcess(child: SandboxedChild): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false, exited = false, stdoutEnded = false, stderrEnded = false;
+    let idle: NodeJS.Timeout | undefined;
+    const finalize = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(idle);
+      child.stdout.destroy();
+      child.stderr.destroy();
+      resolve();
+    };
+    const armIdleTimer = () => { clearTimeout(idle); idle = setTimeout(finalize, EXIT_STDIO_GRACE_MS); };
+    const maybeFinalize = () => { if (exited && stdoutEnded && stderrEnded) finalize(); };
+    child.stdout.once('end', () => { stdoutEnded = true; maybeFinalize(); });
+    child.stderr.once('end', () => { stderrEnded = true; maybeFinalize(); });
+    child.stdout.on('data', () => { if (exited) armIdleTimer(); });
+    child.stderr.on('data', () => { if (exited) armIdleTimer(); });
+    child.once('error', error => { if (settled) return; settled = true; clearTimeout(idle); reject(error); });
+    child.once('exit', () => { exited = true; maybeFinalize(); if (!settled) armIdleTimer(); });
+    child.once('close', finalize);
+  });
+}
+
+/**
+ * Spawns the shell directly inside the sandbox, so the sandbox owns the first process and no unsandboxed shell
+ * reads its startup files first. Errors use Pi's own contract so its bash tool renders them.
+ */
+function sandboxedOperations(sandbox: PlatformSandbox, policy: SandboxPolicy, shellPath: string | undefined): BashOperations {
   return {
-    exec(command, cwd, { onData, signal, timeout, env }) {
+    async exec(command, cwd, { onData, signal, timeout, env }) {
       if (signal?.aborted) throw new Error('aborted');
       const shell = (() => { try { return getShellConfig(shellPath); } catch { return { shell: '/bin/bash', args: ['-c'] }; } })();
-      const environment = { ...(env ?? process.env), ...sandboxEnv(policy) };
-      const args = createSeatbeltCommandArgs([shell.shell, ...shell.args, command], policy, cwd, environment);
-      if (args.some(argument => argument.includes('\0'))) throw new Error('This command cannot be run in the sandbox: it contains a NUL byte.');
+      const argv = [shell.shell, ...shell.args, command];
+      if (argv.some(argument => argument.includes('\0'))) throw new Error('This command cannot be run in the sandbox: it contains a NUL byte.');
+      const { child, finished } = await sandbox.spawn(argv, policy, { cwd, env: env ?? process.env, stdin: 'ignore' });
       return new Promise((settled, reject) => {
-        const child = spawn(MACOS_PATH_TO_SEATBELT_EXECUTABLE, args, { cwd, detached: true, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
         let timedOut = false;
         const killGroup = () => {
           try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
@@ -73,16 +94,15 @@ function sandboxedOperations(policy: SandboxPolicy, shellPath: string | undefine
         const finish = (complete: () => void) => {
           if (timer) clearTimeout(timer);
           signal?.removeEventListener('abort', onAbort);
-          complete();
+          void finished.then(complete);
         };
-        child.on('error', error => finish(() => reject(error)));
-        // Resolve when the command itself exits. Waiting for the streams to close hangs on a backgrounded
-        // process that inherited them.
-        child.on('exit', (code, killSignal) => finish(() => {
+        if (signal?.aborted) onAbort();
+        waitForChildProcess(child).then(() => finish(() => {
           if (signal?.aborted) return reject(new Error('aborted'));
           if (timedOut) return reject(new Error(`timeout:${timeout}`));
-          settled({ exitCode: code ?? (killSignal ? 128 + (osConstants.signals[killSignal] ?? 0) : null) });
-        }));
+          const { exitCode: code, signalCode } = child;
+          settled({ exitCode: code ?? (signalCode ? 128 + (osConstants.signals[signalCode] ?? 0) : null) });
+        }), error => finish(() => reject(error)));
       });
     },
   };
@@ -127,8 +147,8 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       // Strict tool schemas make optional fields nullable, so null means unset.
       const plain = { command: params.command, ...(params.timeout == null ? {} : { timeout: validTimeout(params.timeout) }) };
       const sandbox = sandboxPolicyFor(config);
-      const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed
-        ? { ...shellOptions, operations: sandboxedOperations(sandbox, settings.shellPath) }
+      const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed && runtime.sandbox
+        ? { ...shellOptions, operations: sandboxedOperations(runtime.sandbox, sandbox, settings.shellPath) }
         : shellOptions).execute(toolCallId, plain, signal, onUpdate, ctx);
 
       // Pi prepends the configured prefix, so rules and review judge the script that actually runs.
@@ -147,7 +167,7 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       if (requested !== 'use_default' && requested !== 'require_escalated') throw new Error(`unsupported sandbox_permissions: ${requested}`);
       if (requested === 'require_escalated' && config.approvalPolicy === 'never') throw new Error(NEVER_ESCALATE);
       // Without a platform sandbox every command would run unrestricted, so each one is reviewed as an escalation.
-      const sandboxPermissions: SandboxPermissions = !unrestricted && !runtime.sandboxAvailable ? 'require_escalated' : requested;
+      const sandboxPermissions: SandboxPermissions = !unrestricted && !runtime.sandbox ? 'require_escalated' : requested;
       const requirement = createExecApprovalRequirement(runtime.shell, runtime.policy(), {
         command, approvalPolicy: config.approvalPolicy, fileSystem: unrestricted ? 'unrestricted' : 'restricted', sandboxPermissions,
         ...(params.prefix_rule ? { prefixRule: params.prefix_rule } : {}),
@@ -181,7 +201,7 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       // On-request returns sandbox denials to the agent; unless-trusted asks to retry outside the sandbox.
       const exitCode = (result as { structuredContent?: { exit_code?: number } }).structuredContent?.exit_code ?? 0;
       const output = result.content.map(part => part.type === 'text' ? part.text : '').join('');
-      if (bypass || config.approvalPolicy !== 'unless-trusted' || !isLikelySandboxDenied(exitCode, output)) return result;
+      if (bypass || config.approvalPolicy !== 'unless-trusted' || !isLikelySandboxDenied(exitCode, output, runtime.sandbox?.kind)) return result;
       await approve('require_escalated', RETRY_REASON, effective.type === 'needs_approval' ? effective.proposedExecpolicyAmendment : undefined);
       return run(false);
     },

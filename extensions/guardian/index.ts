@@ -1,6 +1,6 @@
 // Guardian: Codex's approval stack for Pi. Our inspiration from this code comes from there: openai/codex
 // (https://github.com/openai/codex, Apache-2.0) at ce0323f2f2d3b25e82806cd555237da3db4e1897. See docs/licenses/README.md.
-import { existsSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { appendAllowPrefixRule } from './amend.ts';
 import { type ApprovalContext, Approvals, manualApprovalMessage } from './approvals.ts';
@@ -15,14 +15,16 @@ import { runClaudeCliReview } from './review/claude-cli.ts';
 import { resolveReviewer } from './review/model.ts';
 import { MAX_REVIEW_ATTEMPTS, REVIEW_TIMEOUT_MS, type ReviewOutcome, runWithRetry } from './review/outcome.ts';
 import { buildReviewerPrompt, runReadOnlyCommand, runReviewerTurn } from './review/reviewer.ts';
-import { MACOS_PATH_TO_SEATBELT_EXECUTABLE, workspaceWriteRoots } from './seatbelt.ts';
+import { detectPlatformSandbox } from './sandbox.ts';
+import { workspaceWriteRoots } from './seatbelt.ts';
 import { loadShell } from './shell.ts';
 
 const REVIEW_STATUS_KEY = 'guardian-review';
 
 export default async function guardian(pi: ExtensionAPI): Promise<void> {
   const shell = await loadShell();
-  const sandboxAvailable = process.platform === 'darwin' && existsSync(MACOS_PATH_TO_SEATBELT_EXECUTABLE);
+  const { sandbox, warning: sandboxWarning } = await detectPlatformSandbox();
+  const sandboxAvailable = sandbox !== undefined;
   let policies: LoadedPolicies = await loadPolicies([userRulesDir()]);
   let contextFiles: { path: string; content: string }[] = [];
   let turn = 0;
@@ -81,7 +83,8 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, 'Reviewing approval request…');
     try {
       return await runWithRetry({ maxAttempts: MAX_REVIEW_ATTEMPTS, deadline: Date.now() + REVIEW_TIMEOUT_MS }, signal, deadline => reviewer
-        ? runReviewerTurn({ ...prompt, cwd: ctx.cwd, deadline, ...(signal ? { signal } : {}), complete: reviewer.complete, runCommand: runReadOnlyCommand })
+        ? runReviewerTurn({ ...prompt, cwd: ctx.cwd, deadline, ...(signal ? { signal } : {}), complete: reviewer.complete,
+          runCommand: (command, workdir, commandSignal) => runReadOnlyCommand(command, workdir, commandSignal, sandbox) })
         : runClaudeCliReview({ ...prompt, cwd: ctx.cwd, model: settings.reviewer.model, reasoning: settings.reviewer.reasoning, deadline, ...(signal ? { signal } : {}) }));
     } finally {
       if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
@@ -97,7 +100,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     };
   };
   pi.registerTool(createGuardianBashTool({
-    config, policy: () => policies.policy, shellSettings, shell, sandboxAvailable, approvals,
+    config, policy: () => policies.policy, shellSettings, shell, sandbox, approvals,
     persistAmendment: async prefix => {
       const persistable = persistableAmendment(shell, prefix);
       if (!persistable) return;
@@ -105,12 +108,13 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
       await reloadPolicies();
     },
   }, process.cwd()));
-  for (const tool of createGuardianFileTools({ config, sandboxAvailable, approvals }, process.cwd())) pi.registerTool(tool);
+  for (const tool of createGuardianFileTools({ config, sandbox, approvals }, process.cwd())) pi.registerTool(tool);
 
   pi.on('session_start', async (_event, ctx) => {
     await reloadPolicies();
     reportedError = undefined;
     reportProblems(ctx);
+    if (sandboxWarning && ctx.hasUI && config().enabled) ctx.ui.notify(sandboxWarning, 'warning');
     if (ctx.hasUI && pi.getCommands().some(command => command.name.split(':')[0] === 'auto-permissions')) {
       ctx.ui.notify('Auto Permissions is also loaded, so commands are reviewed twice. Uninstall it to use Guardian alone.', 'warning');
     }
@@ -160,7 +164,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
         guardianStatusText(settings, sandboxAvailable),
         `Config: ${guardianConfigPath()}${cached?.error ? ` (${cached.error})` : ''}`,
         `Approvals: ${settings.approvalPolicy}, reviewed by ${settings.approvalsReviewer === 'user' ? 'you' : `${settings.reviewer.provider}/${settings.reviewer.model} (${settings.reviewer.reasoning})`}`,
-        `Sandbox: ${sandboxAvailable ? settings.sandbox.mode : 'unavailable on this platform'}, network ${settings.sandbox.networkAccess ? 'on' : 'off'}`,
+        `Sandbox: ${sandbox ? `${settings.sandbox.mode} via ${sandbox.summary}` : `unavailable${sandboxWarning ? ` (${sandboxWarning})` : ' on this platform'}`}, network ${settings.sandbox.networkAccess ? 'on' : 'off'}`,
         `Rules: ${userRulesDir()}${policies.warning ? ` (${policies.warning})` : ''}`,
       ].join('\n'), 'info');
     },

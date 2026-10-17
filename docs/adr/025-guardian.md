@@ -20,6 +20,10 @@ actions that leave the sandbox. Our inspiration from this code comes from there:
 | `shell.ts`, `shlex.ts` | `shell-command/src/{bash,shell_detect}.rs`, `command_safety/is_dangerous_command.rs`; the `shlex` crate |
 | `exec-policy.ts` | `core/src/exec_policy.rs` and its tests |
 | `seatbelt.ts`, `seatbelt/*.sbpl` | `sandboxing/src/seatbelt.rs` and its policies; workspace-write lowering in `protocol/src/permissions.rs` |
+| `bwrap.ts`, `synthetic-mounts.ts` | `linux-sandbox/src/{bwrap,linux_run_main}.rs` |
+| `bwrap-launcher.ts` | `sandboxing/src/bwrap.rs`, `linux-sandbox/src/{launcher,bundled_bwrap}.rs`, `install-context/src/lib.rs` |
+| `seccomp.ts` | `linux-sandbox/src/seccomp.rs` |
+| `sandbox.ts` | platform selection in `sandboxing/src/manager.rs`; `sandboxing/src/denial.rs` |
 | `permissions.ts` | `prompts/src/permissions_instructions.rs` and templates |
 | `bash.ts` | `core/src/tools/{orchestrator,sandboxing}.rs`, `handlers/shell_spec.rs`, `sandboxing/src/denial.rs` |
 | `files.ts` | `core/src/safety.rs` |
@@ -34,7 +38,21 @@ registry rather than a catalog entry.
 
 ## Departures from Codex
 
-- macOS Seatbelt only. Without it, every command and file change is reviewed as an escalation.
+- Seatbelt on macOS and bubblewrap on Linux; other platforms have no sandbox, and every command and
+  file change is reviewed as an escalation.
+- On Linux, Codex re-executes its own helper inside bubblewrap to install seccomp. Guardian emits the
+  same rules as a classic BPF program and passes it to `bwrap --seccomp`, so it never needs `--argv0`.
+  The x86-64 filter also rejects x32-ABI syscall numbers, which seccompiler leaves open.
+- Without a system bubblewrap, Guardian uses the one bundled with the Codex install on `PATH`. Codex
+  checks its bundled copy against a SHA-256 digest compiled into its build; Guardian cannot know that
+  digest and relies on Codex's other check, that the sandbox cannot replace the binary.
+- When bubblewrap cannot create user namespaces, Codex warns and still runs commands through it, so
+  each fails. Guardian treats that as having no sandbox and reviews every command.
+- Codex probes `/proc` mounting before every command; Guardian probes once per bubblewrap and network
+  mode. Codex locks its placeholder registry with flock(2); Guardian shares that registry and lock
+  through util-linux's flock(1), serializing its own registrations in-process.
+- Not ported on Linux: WSL interop masks, deny-read globs, Codex's app-server socket masks, the
+  proxy-routed network mode, and the legacy Landlock pipeline.
 - Network is all or nothing; there is no managed proxy or per-host approval.
 - The reviewer is one model loop with a single read-only `exec_command` tool under the read-only
   Seatbelt profile, not a forked Codex session. It gets the full transcript on every review, with
@@ -73,8 +91,9 @@ registry rather than a catalog entry.
   workspace could make the reviewer run a helper command on the host.
 - The reviewer model is resolved per review, and a `~fast` alias falls back to its plain model, so a
   session without Fast mode (a subagent child) still reviews instead of rejecting every approval.
-- Sandboxed commands resolve when the command exits, not when its streams close, so a backgrounded
-  process does not hold the tool call open.
+- Sandboxed commands finish the way Pi's own bash does: after the command exits, output is read until
+  the pipes close or fall idle for 100 ms, so a backgrounded process does not hold the tool call open
+  and output still in the pipe is kept.
 - Subagent children load Guardian alongside hooks and refuse to start without it, so a child inherits the
   parent's sandbox, rules and review.
 - Destructive Railway operations are forbidden by bundled rules and an absolute reviewer deny that
@@ -83,6 +102,9 @@ registry rather than a catalog entry.
 ## Verification
 
 Each module's `*.test.ts` ports the corresponding Codex tests. Seatbelt tests run the real
-`sandbox-exec` on macOS. `index.test.ts` drives full Pi sessions in which a scripted model plays
+`sandbox-exec` on macOS, and `sandbox.test.ts` ports Codex's Linux sandbox suite against the real
+`bwrap`. Shell, file and session tests run against whichever sandbox the platform has. The seccomp
+program is checked by a BPF interpreter for both architectures, and its syscall numbers against
+libseccomp's tables. `index.test.ts` drives full Pi sessions in which a scripted model plays
 both the agent and the reviewer. `railway.test.ts` evaluates the Railway rules without running
 any Railway command.

@@ -86,7 +86,7 @@ test('the boundary holds through the bash tool in every mode, before any review'
     { approvalPolicy: 'never' as const }, { approvalPolicy: 'unless-trusted' as const }]) {
     const tool = createGuardianBashTool({
       config: () => ({ ...DEFAULT_GUARDIAN_CONFIG, ...config }), policy: () => policy, shell,
-      shellSettings: () => ({}), sandboxAvailable: true,
+      shellSettings: () => ({}), sandbox: { kind: 'seatbelt', summary: 'unused', spawn: async () => { throw new Error('nothing reaches the sandbox'); } },
       approvals: { request: async request => { requests.push(request); return { type: 'approved' }; } },
       persistAmendment: async () => {},
     }, cwd);

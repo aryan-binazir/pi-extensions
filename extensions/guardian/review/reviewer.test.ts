@@ -7,6 +7,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai';
 import { buildReviewerPrompt, EXEC_COMMAND_TOOL, type ReviewerTurn, runReadOnlyCommand, runReviewerTurn } from './reviewer.ts';
+import { detectPlatformSandbox } from '../sandbox.ts';
+
+const { sandbox } = await detectPlatformSandbox();
 
 const reply = (content: AssistantMessage['content'], extra: Partial<AssistantMessage> = {}): AssistantMessage => ({
   role: 'assistant', content, api: 'openai-responses', provider: 'test', model: 'luna', usage: {} as AssistantMessage['usage'],
@@ -116,12 +119,17 @@ test('the reviewer prompt carries Codex policy, reviewer permissions and inherit
   assert.equal(EXEC_COMMAND_TOOL.name, 'exec_command');
 });
 
-test('read-only commands run under Seatbelt without write access', { skip: process.platform !== 'darwin' && 'Seatbelt is macOS-only' }, async t => {
+test('read-only commands run in the sandbox without write access', { skip: !sandbox && 'this platform has no usable sandbox' }, async t => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-reviewer-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  assert.equal(await runReadOnlyCommand('echo visible', dir, AbortSignal.timeout(10_000)), 'visible\n\nexit code: 0');
-  const denied = await runReadOnlyCommand('echo nope > out.txt', dir, AbortSignal.timeout(10_000));
-  assert.match(denied, /Operation not permitted[\s\S]*exit code: 1$/);
-  const huge = await runReadOnlyCommand('yes guardian | head -c 50000000', dir, AbortSignal.timeout(20_000));
+  assert.equal(await runReadOnlyCommand('echo visible', dir, AbortSignal.timeout(10_000), sandbox), 'visible\n\nexit code: 0');
+  const denied = await runReadOnlyCommand('echo nope > out.txt', dir, AbortSignal.timeout(10_000), sandbox);
+  assert.match(denied, /(Operation not permitted|Read-only file system)[\s\S]*exit code: 1$/);
+  const huge = await runReadOnlyCommand('yes guardian | head -c 50000000', dir, AbortSignal.timeout(20_000), sandbox);
   assert.ok(huge.length < 12_000 && huge.endsWith('exit code: 0'), 'huge output is bounded');
+});
+
+test('read-only commands report a missing sandbox instead of running', async () => {
+  assert.equal(await runReadOnlyCommand('echo visible', tmpdir(), AbortSignal.timeout(1_000), undefined),
+    'Read-only command checks are unavailable: this platform has no usable sandbox.\nexit code: 1');
 });

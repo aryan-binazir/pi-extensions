@@ -29,7 +29,8 @@ export interface SandboxPolicy {
   excludeSlashTmp?: boolean;
 }
 
-export class SeatbeltPreparationError extends Error {}
+/** The sandbox cannot enforce the policy as configured, so the command must not run. */
+export class SandboxPreparationError extends Error {}
 
 /** Environment Codex sets for sandboxed shell commands. */
 export function sandboxEnv(policy: SandboxPolicy): Record<string, string> {
@@ -169,7 +170,7 @@ function protectedMetadataNameRegex(root: string, name: string): string {
 function normalizeWritableRoot(root: string): { path: string; literal: boolean } {
   const symlink = nestedSymlinkComponent(root);
   if (symlink) {
-    throw new SeatbeltPreparationError(`writable root ${root} contains symlink component ${symlink}; symlinked writable roots are not supported.`);
+    throw new SandboxPreparationError(`writable root ${root} contains symlink component ${symlink}; symlinked writable roots are not supported.`);
   }
   const normalized = normalizeSystemAliases(root);
   const metadata = lstatOrUndefined(normalized);

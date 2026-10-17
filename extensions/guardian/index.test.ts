@@ -7,8 +7,9 @@ import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@ear
 import { withPi } from '../../tests/pi-session.ts';
 import guardian from './index.ts';
 import { MANUAL_APPROVAL_DEVELOPER_PREFIX } from './review/context.ts';
+import { detectPlatformSandbox } from './sandbox.ts';
 
-const darwin = { skip: process.platform !== 'darwin' && 'Seatbelt is macOS-only' };
+const sandboxed = { skip: !(await detectPlatformSandbox()).sandbox && 'this platform has no usable sandbox' };
 
 function writeConfig(agentDir: string, config: Record<string, unknown>) {
   mkdirSync(join(agentDir, 'guardian'), { recursive: true });
@@ -59,7 +60,7 @@ test('escalations go to the configured reviewer model with Codex policy, Railway
   assert.ok(requests.main[0].includes('`approvals_reviewer` is `auto_review`'));
 });
 
-test('an approved escalation runs outside the sandbox', darwin, async t => {
+test('an approved escalation runs outside the sandbox', sandboxed, async t => {
   const outside = outsideDir(t);
   const target = join(outside, 'approved.txt');
   await withPi({ extensions: [guardian], responses: [
@@ -75,7 +76,7 @@ test('an approved escalation runs outside the sandbox', darwin, async t => {
   });
 });
 
-test('ordinary commands run in the sandbox without a review call', darwin, async t => {
+test('ordinary commands run in the sandbox without a review call', sandboxed, async t => {
   const outside = outsideDir(t);
   await withPi({ extensions: [guardian], responses: [
     fauxAssistantMessage(fauxToolCall('bash', { command: `echo ok > inside.txt; echo no > ${outside}/x.txt` })),
@@ -88,7 +89,7 @@ test('ordinary commands run in the sandbox without a review call', darwin, async
     await session.prompt('Go.');
     assert.equal(readFileSync(join(cwd, 'inside.txt'), 'utf8'), 'ok\n');
     assert.ok(!existsSync(join(outside, 'x.txt')));
-    assert.match(toolResults(session.messages)[0].content[0].text ?? '', /Operation not permitted/);
+    assert.match(toolResults(session.messages)[0].content[0].text ?? '', /Operation not permitted|Read-only file system/);
   });
 });
 
@@ -117,7 +118,7 @@ test('an unavailable reviewer fails closed without a UI', async () => {
   });
 });
 
-test('writes outside writable roots are reviewed; inside writes are not, through Pi\'s own write tool', darwin, async t => {
+test('writes outside writable roots are reviewed; inside writes are not, through Pi\'s own write tool', sandboxed, async t => {
   const outside = outsideDir(t);
   let reviewer = '';
   await withPi({ extensions: [guardian], responses: [
@@ -175,7 +176,7 @@ test('/guardian approve records a trusted manual approval of the last denied act
   assert.ok(secondReview.includes('git push origin main'));
 });
 
-test('a claude-cli reviewer runs claude -p and its verdict decides the escalation', darwin, async t => {
+test('a claude-cli reviewer runs claude -p and its verdict decides the escalation', sandboxed, async t => {
   const outside = outsideDir(t);
   const bin = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-fake-claude-')));
   t.after(() => rmSync(bin, { recursive: true, force: true }));

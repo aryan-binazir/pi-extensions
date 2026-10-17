@@ -2,8 +2,9 @@
 
 [Back to README](../README.md)
 
-Guardian ports Codex's approval stack to Pi: exec-policy rules, the macOS Seatbelt sandbox,
-permission instructions for the agent, and the Guardian auto-reviewer. Our inspiration from this
+Guardian ports Codex's approval stack to Pi: exec-policy rules, the Seatbelt sandbox on macOS and
+the bubblewrap and seccomp sandbox on Linux, permission instructions for the agent, and the Guardian
+auto-reviewer. Our inspiration from this
 code comes from there: [openai/codex](https://github.com/openai/codex/tree/ce0323f2f2d3b25e82806cd555237da3db4e1897)
 (Apache-2.0; see [third-party notices](licenses/README.md)). [ADR 025](adr/025-guardian.md)
 records where it departs from Codex.
@@ -20,7 +21,8 @@ Guardian replaces Pi's `bash` tool and gates `write` and `edit`.
    (`rm -f`, including inside `sudo`, `env`, `trap` and nested shells) or ask to leave the sandbox.
 4. The sandbox lets commands read anywhere and write only in the working directory, `/tmp`,
    `$TMPDIR` and configured roots. `.git`, `.agents`, `.codex`, `.pi` and `.aws` stay read-only, and
-   network access is off. `sandbox-exec` is the first process, so no shell runs unsandboxed before it.
+   network access is off. `sandbox-exec` on macOS, or `bwrap` on Linux, is the first process, so no
+   shell runs unsandboxed before it.
    A failure is returned to the agent, which can retry with
    `sandbox_permissions: "require_escalated"` and a `justification`.
 5. Approval requests go to the reviewer model, or to you. An approved escalation runs outside the
@@ -31,9 +33,38 @@ so `@`-prefixed and `file://` paths are judged as what they actually write. Writ
 roots are approved automatically; other paths need approval. A leaf symlink is followed even when its
 target is missing, a file with more than one hard link is never written automatically, and parent
 directories are created only after the change is allowed. Writes that are approved automatically run
-inside Seatbelt, so a link swapped in after the check cannot redirect them. Without Seatbelt (any platform
-other than macOS), every command and file change needs approval, except commands an `allow` rule of
-yours covers: as in Codex, an allow rule runs its command outside the sandbox on every platform.
+inside the sandbox, so a link swapped in after the check cannot redirect them. Without a usable sandbox,
+every command and file change needs approval, except commands an `allow` rule of yours covers: as in
+Codex, an allow rule runs its command outside the sandbox on every platform.
+
+## Linux
+
+On Linux, Guardian runs Codex's sandbox: bubblewrap builds the filesystem view and a seccomp filter
+limits the network.
+
+- The filesystem is mounted read-only, the writable roots are bound back writable, and `.git`,
+  `.agents`, `.codex`, `.pi` and `.aws` under each of them are bound read-only. A missing one is
+  masked with an empty read-only placeholder, so it cannot be created either. Bubblewrap has to create
+  that placeholder on the host while the command runs, and Guardian removes it afterwards. Guardian
+  shares Codex's placeholder registry under `$TMPDIR`, so Guardian and Codex running in the same
+  workspace keep each other's placeholders.
+- Without network access, the network namespace is unshared and the filter denies every socket
+  except Unix sockets, along with `ptrace`, cross-process memory access and io_uring. With network
+  access, the filter still denies VM sockets and io_uring.
+- Guardian uses the first `bwrap` on `PATH` that lists `--as-pid-1` and `--perms` in its help
+  (bubblewrap 0.8 or newer) and that the sandbox could not replace. Otherwise it uses the bubblewrap
+  bundled with the Codex install on `PATH` (npm, pnpm, bun or the standalone installer) and warns at
+  session start. With neither, or when bubblewrap cannot create user namespaces, Guardian warns and
+  every command needs approval. WSL1 is not supported; WSL2 is.
+- Where the host forbids mounting a fresh `/proc`, as some containers do, commands run without one.
+- When Pi starts without `SHLVL` in its environment (from a desktop launcher rather than a terminal),
+  bash inside the network-isolated sandbox sources `~/.bashrc` instead of `BASH_ENV`. Codex's filter
+  makes `getpeername` fail, which bash reads as having been started by `rshd`. Either file runs only
+  inside the sandbox.
+
+Install bubblewrap with your package manager: `sudo apt install bubblewrap` on Ubuntu 24.04 and
+later, `sudo pacman -S bubblewrap` on Arch. Ubuntu 22.04 ships bubblewrap 0.6, which is too old, so
+Guardian uses Codex's bundled copy there. `/guardian status` names the bubblewrap in use.
 
 Subagent children load Guardian the way they load hooks, so a child cannot run what the parent would
 review. A child refuses to start if Guardian is missing.

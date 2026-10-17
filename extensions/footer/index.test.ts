@@ -12,6 +12,7 @@ import { type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-cod
 import { withPi } from '../../tests/pi-session.ts';
 import statusExtension from './index.ts';
 import { findConfigLoader, statusText, type PermissionConfig } from './adapter.ts';
+import { detectPlatformSandbox } from '../guardian/sandbox.ts';
 
 const config: PermissionConfig = {
   enabled: true, reviewAllShell: true, rules: [{}],
@@ -112,7 +113,7 @@ test('Guardian takes precedence over Auto Permissions and renders its own config
   });
   const guardianCommand = { name: 'guardian', source: 'extension',
     sourceInfo: { path: fileURLToPath(new URL('../guardian/index.ts', import.meta.url)), source: 'local', scope: 'user', origin: 'top-level' } } as ReturnType<ExtensionAPI['getCommands']>[number];
-  const sandbox = process.platform === 'darwin' ? '' : ' · no sandbox';
+  const sandbox = (await detectPlatformSandbox()).sandbox ? '' : ' · no sandbox';
   const loader = (await findConfigLoader([...commands(f.root), guardianCommand]))!;
   assert.equal(loader.path, join(agentDir, 'guardian', 'config.json'));
   assert.equal(loader.status(loader.load(), undefined), `Auto: on · Luna low${sandbox}`);

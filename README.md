@@ -69,7 +69,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
-| [Guardian](docs/guardian.md) | Codex's approval stack ported to Pi: Seatbelt-sandboxed `bash`, `.rules` command rules, and a configurable Claude or GPT reviewer for actions that leave the sandbox. Replaces Auto Permissions. |
+| [Guardian](docs/guardian.md) | Codex's approval stack ported to Pi: sandboxed `bash` (Seatbelt on macOS, bubblewrap and seccomp on Linux), `.rules` command rules, and a configurable Claude or GPT reviewer for actions that leave the sandbox. Replaces Auto Permissions. |
 | [Footer](docs/agent-setup.md#footer) | Replaces Pi's footer: directory, branch and clickable GitHub PR link, session, token/cost/context usage, model, Guardian or Auto Permissions status, and other extensions' statuses. |
 | [Neovim IDE](docs/nvim-ide.md) | Connects to claudecode.nvim: bounded request snapshots, reliable editor sends, editor tools, and coalesced live follow with reconnect replay. |
 

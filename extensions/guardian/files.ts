@@ -1,7 +1,7 @@
 // Write and edit approval, ported from openai/codex codex-rs/core/src/safety.rs @ ce0323f (Apache-2.0); see
 // docs/licenses/README.md. Codex applies patches inside the sandbox; Pi's write and edit tools mutate in-process,
 // so Guardian overrides them and gates each mutation where Pi hands over the absolute path it resolved. Paths are
-// canonicalized there, following leaf symlinks, and checked against the same writable roots Seatbelt enforces.
+// canonicalized there, following leaf symlinks, and checked against the same writable roots the sandbox enforces.
 import { lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
@@ -10,9 +10,10 @@ import {
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import type { GuardianConfig } from './config.ts';
-import { runBounded } from './review/process.ts';
+import { runStarted } from './review/process.ts';
 import { sandboxPolicyFor } from './bash.ts';
-import { createSeatbeltCommandArgs, MACOS_PATH_TO_SEATBELT_EXECUTABLE, PROTECTED_METADATA_PATH_NAMES, workspaceWriteRoots } from './seatbelt.ts';
+import type { PlatformSandbox } from './sandbox.ts';
+import { PROTECTED_METADATA_PATH_NAMES, workspaceWriteRoots } from './seatbelt.ts';
 
 const PATCH_REJECTED_OUTSIDE_PROJECT_REASON = 'writing outside of the project; rejected by user approval settings';
 const PATCH_REJECTED_READ_ONLY_REASON = 'writing is blocked by read-only sandbox; rejected by user approval settings';
@@ -105,15 +106,14 @@ export function fileChangeAction(tool: 'write' | 'edit', input: Input, path: str
 }
 
 /**
- * Writes a file from inside the workspace-write sandbox, as Codex applies patches. Seatbelt checks the path
+ * Writes a file from inside the workspace-write sandbox, as Codex applies patches. The sandbox checks the path
  * at write time, so a symlink or hard link swapped in after the writable-root check cannot redirect the write.
  */
-export async function sandboxedWrite(path: string, content: string, config: GuardianConfig, cwd: string): Promise<void> {
+export async function sandboxedWrite(path: string, content: string, config: GuardianConfig, cwd: string, sandbox: PlatformSandbox): Promise<void> {
   const script = 'mkdir -p "$1" && cat > "$2"';
-  const run = await runBounded(MACOS_PATH_TO_SEATBELT_EXECUTABLE,
-    createSeatbeltCommandArgs(['/bin/sh', '-c', script, 'sh', dirname(path), path], sandboxPolicyFor(config), cwd), {
-      cwd, stdin: content, timeoutMs: SANDBOXED_WRITE_TIMEOUT_MS, maxBytes: 16 * 1024,
-    });
+  const run = await runStarted(() => sandbox.spawn(['/bin/sh', '-c', script, 'sh', dirname(path), path], sandboxPolicyFor(config), { cwd, env: process.env, stdin: 'pipe' }), {
+    cwd, stdin: content, timeoutMs: SANDBOXED_WRITE_TIMEOUT_MS, maxBytes: 16 * 1024,
+  });
   if (run.spawnError) throw new Error(`Could not write ${path} in the sandbox: ${run.spawnError}`);
   if (run.timedOut) throw new Error(`Writing ${path} in the sandbox timed out`);
   if (run.exitCode !== 0) throw new Error(`Writing ${path} was blocked by the sandbox: ${run.stderr.trim() || `exit ${run.exitCode}`}`);
@@ -121,7 +121,7 @@ export async function sandboxedWrite(path: string, content: string, config: Guar
 
 export interface FileRuntime {
   config(): GuardianConfig;
-  sandboxAvailable: boolean;
+  sandbox: PlatformSandbox | undefined;
   approvals: { request(request: ApprovalRequest, ctx: ApprovalContext, signal?: AbortSignal): Promise<ApprovalDecision> };
 }
 
@@ -133,7 +133,7 @@ function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, 
   let approval: Promise<void> | undefined;
   return async (path: string): Promise<Mutation> => {
     const config = runtime.config();
-    const safety = assessFileChange(path, { config, cwd, sandboxAvailable: runtime.sandboxAvailable });
+    const safety = assessFileChange(path, { config, cwd, sandboxAvailable: runtime.sandbox !== undefined });
     if (typeof safety === 'object') throw new Error(safety.reason);
     if (safety === 'ask_user') {
       await (approval ??= (async () => {
@@ -145,9 +145,9 @@ function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, 
     }
     // Approval can take a while; a call cancelled meanwhile must not mutate anything.
     if (signal?.aborted) throw new Error('Operation aborted');
-    const sandboxed = safety === 'auto_approve' && config.enabled && config.sandbox.mode !== 'danger-full-access' && runtime.sandboxAvailable;
-    return sandboxed
-      ? { write: (target, content) => sandboxedWrite(target, content, config, cwd) }
+    const sandbox = safety === 'auto_approve' && config.enabled && config.sandbox.mode !== 'danger-full-access' ? runtime.sandbox : undefined;
+    return sandbox
+      ? { write: (target, content) => sandboxedWrite(target, content, config, cwd, sandbox) }
       : { write: async (target, content) => { await mkdir(dirname(target), { recursive: true }); await writeFile(target, content, 'utf8'); } };
   };
 }

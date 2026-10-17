@@ -117,7 +117,7 @@ test('Guardian takes precedence over Auto Permissions and renders its own config
   assert.equal(loader.path, join(agentDir, 'guardian', 'config.json'));
   assert.equal(loader.status(loader.load(), undefined), `Auto: on · Luna low${sandbox}`);
   await mkdir(join(agentDir, 'guardian'));
-  await writeFile(loader.path, JSON.stringify({ reviewer: { provider: 'claude-bridge', model: 'claude-opus-5-5', reasoning: 'high' } }));
+  await writeFile(loader.path, JSON.stringify({ reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } }));
   assert.equal(loader.status(loader.load(), undefined), `Auto: on · Opus high${sandbox}`);
   const impostor = { ...guardianCommand, sourceInfo: { ...guardianCommand.sourceInfo, path: '/elsewhere/guardian/index.ts' } };
   assert.equal(await findConfigLoader([impostor]), undefined);

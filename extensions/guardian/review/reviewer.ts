@@ -2,7 +2,6 @@
 // {review_session,reviewer_config}.rs and codex-rs/ext/guardian-reviewer/src/{execution,settings}.rs @ ce0323f,
 // Apache-2.0); see docs/licenses/README.md. Codex runs a full sub-agent with read-only tools and `approval_policy =
 // never`; Pi runs one model loop with a single read-only `exec_command` tool under the read-only Seatbelt profile.
-import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
@@ -11,11 +10,13 @@ import { createSeatbeltCommandArgs, MACOS_PATH_TO_SEATBELT_EXECUTABLE, sandboxEn
 import { GUARDIAN_OUTPUT_CONTRACT_PROMPT, parseGuardianAssessment } from './assessment.ts';
 import { truncateText } from './context.ts';
 import { isTransientProviderError, type ReviewOutcome } from './outcome.ts';
+import { runBounded } from './process.ts';
 import { GUARDIAN_POLICY, GUARDIAN_POLICY_TEMPLATE, guardianPolicyInstructions } from './prompts.ts';
 
 const MAX_REVIEWER_TOOL_ROUNDS = 12;
 const MAX_COMMAND_OUTPUT_TOKENS = 2_500;
 const MAX_COMMAND_MS = 30_000;
+const MAX_CAPTURED_BYTES = 64 * 1024;
 const READ_ONLY: SandboxPolicy = { mode: 'read-only', networkAccess: false };
 
 export const EXEC_COMMAND_TOOL: Tool = {
@@ -105,19 +106,15 @@ function raceAbort<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 /** Runs `bash -c` under the read-only Seatbelt profile with no network; output is capped like a transcript tool entry. */
-export function runReadOnlyCommand(command: string, workdir: string, signal: AbortSignal): Promise<string> {
-  if (process.platform !== 'darwin') return Promise.resolve('Read-only command checks are unavailable: the Seatbelt sandbox requires macOS.\nexit code: 1');
-  const args = createSeatbeltCommandArgs(['/bin/bash', '-c', command], READ_ONLY, workdir);
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(MACOS_PATH_TO_SEATBELT_EXECUTABLE, args, {
-      cwd: workdir, env: { ...process.env, ...sandboxEnv(READ_ONLY) }, stdio: ['ignore', 'pipe', 'pipe'], signal: AbortSignal.any([signal, AbortSignal.timeout(MAX_COMMAND_MS)]),
-    });
-    let output = '';
-    child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk; });
-    child.stderr.setEncoding('utf8').on('data', chunk => { output += chunk; });
-    child.on('error', error => signal.aborted ? reject(error) : resolvePromise(`${truncateText(output, MAX_COMMAND_OUTPUT_TOKENS)}\n${error.message}\nexit code: 1`));
-    child.on('close', (code, killSignal) => resolvePromise(`${truncateText(output, MAX_COMMAND_OUTPUT_TOKENS)}\nexit code: ${code ?? killSignal}`));
+export async function runReadOnlyCommand(command: string, workdir: string, signal: AbortSignal): Promise<string> {
+  if (process.platform !== 'darwin') return 'Read-only command checks are unavailable: the Seatbelt sandbox requires macOS.\nexit code: 1';
+  const run = await runBounded(MACOS_PATH_TO_SEATBELT_EXECUTABLE, createSeatbeltCommandArgs(['/bin/bash', '-c', command], READ_ONLY, workdir), {
+    cwd: workdir, env: { ...process.env, ...sandboxEnv(READ_ONLY) }, signal, timeoutMs: MAX_COMMAND_MS, maxBytes: MAX_CAPTURED_BYTES,
   });
+  if (run.aborted) throw new Error('aborted');
+  const output = truncateText(`${run.stdout}${run.stderr}`, MAX_COMMAND_OUTPUT_TOKENS);
+  if (run.spawnError) return `${output}\n${run.spawnError}\nexit code: 1`;
+  return `${output}\n${run.timedOut ? `timed out after ${MAX_COMMAND_MS / 1000} seconds` : `exit code: ${run.exitCode}`}`;
 }
 
 export interface ReviewerPromptInput {

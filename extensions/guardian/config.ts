@@ -1,6 +1,6 @@
 // Guardian's user preferences, named after the Codex settings they mirror (`approval_policy`, `approvals_reviewer`,
 // `[auto_review]`, `sandbox_mode`, `[sandbox_workspace_write]`; openai/codex @ ce0323f, Apache-2.0). Codex picks its
-// reviewer from a model catalog; here any model in Pi's registry, Claude or GPT, can review.
+// reviewer from a model catalog; here a GPT or other model in Pi's registry reviews, or Claude through `claude -p`.
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import type { ThinkingLevel } from '@earendil-works/pi-ai';
@@ -9,7 +9,11 @@ export type ApprovalPolicy = 'on-request' | 'never' | 'unless-trusted';
 export type ApprovalsReviewer = 'auto_review' | 'user';
 export type SandboxMode = 'workspace-write' | 'read-only' | 'danger-full-access';
 
+/** Reviews with Claude Code's `claude -p` instead of a model in Pi's registry. */
+export const CLAUDE_CLI_PROVIDER = 'claude-cli';
+
 export interface ReviewerModel {
+  /** A provider in Pi's model registry, or `claude-cli` for Claude Code's print mode. */
   provider: string;
   model: string;
   reasoning: ThinkingLevel;
@@ -110,6 +114,8 @@ export function loadGuardianConfig(path: string): GuardianConfig {
     throw new Error('sandbox.writableRoots must be a list of absolute paths');
   }
   const configDir = dirname(path);
+  // The bridge only serves prompts from Pi's own agent lifecycle, so it cannot answer a review.
+  if (reviewer.provider === 'claude-bridge') throw new Error('reviewer.provider claude-bridge cannot run reviews; use "claude-cli" to review with Claude');
   return {
     enabled: boolean(config.enabled, 'enabled', defaults.enabled),
     approvalPolicy: oneOf(config.approvalPolicy, ['on-request', 'never', 'unless-trusted'], 'approvalPolicy', defaults.approvalPolicy),

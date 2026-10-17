@@ -24,9 +24,11 @@ test('defaults match Codex on-request auto review with the Luna reviewer', t => 
   });
 });
 
-test('any registry model can review, including Claude', t => {
-  const dir = configDir(t, { reviewer: { provider: 'claude-bridge', model: 'claude-opus-5-5', reasoning: 'high' } });
-  assert.deepEqual(loadGuardianConfig(join(dir, 'config.json')).reviewer, { provider: 'claude-bridge', model: 'claude-opus-5-5', reasoning: 'high' });
+test('Claude reviews through claude-cli and GPT through the registry', t => {
+  const claude = configDir(t, { reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } });
+  assert.deepEqual(loadGuardianConfig(join(claude, 'config.json')).reviewer, { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' });
+  const gpt = configDir(t, { reviewer: { provider: 'openai-codex', model: 'gpt-6.1-sol', reasoning: 'medium' } });
+  assert.deepEqual(loadGuardianConfig(join(gpt, 'config.json')).reviewer, { provider: 'openai-codex', model: 'gpt-6.1-sol', reasoning: 'medium' });
 });
 
 test('Codex permission preferences merge over defaults', t => {
@@ -65,6 +67,7 @@ test('invalid configs are rejected with the offending field', t => {
     [{ sandbox: { writableRoots: ['relative'] } }, /writableRoots/],
     [{ reviewer: { reasoning: 'extreme' } }, /reviewer\.reasoning/],
     [{ reviewer: { model: '' } }, /reviewer\.model/],
+    [{ reviewer: { provider: 'claude-bridge', model: 'claude-opus-5-5' } }, /use "claude-cli"/],
     [{ enabled: 'yes' }, /enabled/],
     [{ autoReview: { failureFallback: 'allow' } }, /autoReview\.failureFallback/],
     [{ unknownKey: true }, /unknown setting `unknownKey`/],
@@ -75,7 +78,7 @@ test('invalid configs are rejected with the offending field', t => {
 test('reviewer labels name Claude and GPT families', () => {
   assert.equal(reviewerLabel({ provider: 'openai-codex', model: 'gpt-6-luna~fast' }), 'Luna');
   assert.equal(reviewerLabel({ provider: 'openai-codex', model: 'gpt-6.1-sol' }), 'Sol');
-  assert.equal(reviewerLabel({ provider: 'claude-bridge', model: 'claude-opus-5-5' }), 'Opus');
+  assert.equal(reviewerLabel({ provider: 'claude-cli', model: 'claude-opus-5-5' }), 'Opus');
   assert.equal(reviewerLabel({ provider: 'anthropic', model: 'claude-sonnet-5-5' }), 'Sonnet');
   assert.equal(reviewerLabel({ provider: 'x', model: 'odd model!' }), 'odd?model?');
 });
@@ -86,5 +89,5 @@ test('status text keeps the Auto Permissions indicator format', () => {
   assert.equal(guardianStatusText(DEFAULT_GUARDIAN_CONFIG, false), 'Auto: on · Luna low · no sandbox');
   assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, networkAccess: true } }, true), 'Auto: on · Luna low · network');
   assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: 'user' }, true), 'Auto: on · you review');
-  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, reviewer: { provider: 'claude-bridge', model: 'claude-opus-5-5', reasoning: 'high' } }, true), 'Auto: on · Opus high');
+  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } }, true), 'Auto: on · Opus high');
 });

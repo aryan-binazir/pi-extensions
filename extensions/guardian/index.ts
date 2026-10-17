@@ -10,6 +10,8 @@ import { assessFileChange, fileChangeAction, resolveToolPath } from './files.ts'
 import { permissionsInstructions } from './permissions.ts';
 import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, userRulesDir } from './policies.ts';
 import { collectReviewEvidence, composeReviewRequest, MANUAL_APPROVAL_MESSAGE_TYPE, prepareTranscript } from './review/context.ts';
+import { CLAUDE_CLI_PROVIDER } from './config.ts';
+import { runClaudeCliReview } from './review/claude-cli.ts';
 import { resolveReviewer } from './review/model.ts';
 import { MAX_REVIEW_ATTEMPTS, REVIEW_TIMEOUT_MS, type ReviewOutcome, runWithRetry } from './review/outcome.ts';
 import { buildReviewerPrompt, runReadOnlyCommand, runReviewerTurn } from './review/reviewer.ts';
@@ -50,8 +52,9 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     const ctx = approvalContext as unknown as ExtensionContext;
     const settings = config();
     const sessionId = ctx.sessionManager.getSessionId();
-    const reviewer = resolveReviewer(ctx.modelRegistry, settings.reviewer, `guardian-${sessionId}`);
-    if (!reviewer.ok) return { type: 'error', error: { type: 'prompt_build', message: reviewer.message } };
+    const claudeCli = settings.reviewer.provider === CLAUDE_CLI_PROVIDER;
+    const reviewer = claudeCli ? undefined : resolveReviewer(ctx.modelRegistry, settings.reviewer, `guardian-${sessionId}`);
+    if (reviewer && !reviewer.ok) return { type: 'error', error: { type: 'prompt_build', message: reviewer.message } };
     const evidence = collectReviewEvidence(ctx.sessionManager.getBranch());
     const request = composeReviewRequest({
       transcript: prepareTranscript(evidence.transcript, 0, 'line'), sessionId, trustedUserAnswers: evidence.trustedUserAnswers, environmentId: 'local',
@@ -66,9 +69,9 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     });
     if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, 'Reviewing approval request…');
     try {
-      return await runWithRetry({ maxAttempts: MAX_REVIEW_ATTEMPTS, deadline: Date.now() + REVIEW_TIMEOUT_MS }, signal, deadline => runReviewerTurn({
-        ...prompt, cwd: ctx.cwd, deadline, ...(signal ? { signal } : {}), complete: reviewer.complete, runCommand: runReadOnlyCommand,
-      }));
+      return await runWithRetry({ maxAttempts: MAX_REVIEW_ATTEMPTS, deadline: Date.now() + REVIEW_TIMEOUT_MS }, signal, deadline => reviewer
+        ? runReviewerTurn({ ...prompt, cwd: ctx.cwd, deadline, ...(signal ? { signal } : {}), complete: reviewer.complete, runCommand: runReadOnlyCommand })
+        : runClaudeCliReview({ ...prompt, cwd: ctx.cwd, model: settings.reviewer.model, reasoning: settings.reviewer.reasoning, deadline, ...(signal ? { signal } : {}) }));
     } finally {
       if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
     }

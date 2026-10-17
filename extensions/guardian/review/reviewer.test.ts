@@ -122,4 +122,6 @@ test('read-only commands run under Seatbelt without write access', { skip: proce
   assert.equal(await runReadOnlyCommand('echo visible', dir, AbortSignal.timeout(10_000)), 'visible\n\nexit code: 0');
   const denied = await runReadOnlyCommand('echo nope > out.txt', dir, AbortSignal.timeout(10_000));
   assert.match(denied, /Operation not permitted[\s\S]*exit code: 1$/);
+  const huge = await runReadOnlyCommand('yes guardian | head -c 50000000', dir, AbortSignal.timeout(20_000));
+  assert.ok(huge.length < 12_000 && huge.endsWith('exit code: 0'), 'huge output is bounded');
 });

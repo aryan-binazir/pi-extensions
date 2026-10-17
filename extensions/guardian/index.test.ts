@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -165,4 +165,37 @@ test('/guardian approve records a trusted manual approval of the last denied act
   });
   assert.ok(secondReview.includes(`developer: ${MANUAL_APPROVAL_DEVELOPER_PREFIX}`), 'the reviewer sees the approval as a trusted developer entry');
   assert.ok(secondReview.includes('git push origin main'));
+});
+
+test('a claude-cli reviewer runs claude -p and its verdict decides the escalation', darwin, async t => {
+  const outside = outsideDir(t);
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-fake-claude-')));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  const record = join(bin, 'record.json');
+  writeFileSync(join(bin, 'claude'), `#!${process.execPath}
+let stdin = '';
+process.stdin.on('data', chunk => { stdin += chunk; }).on('end', () => {
+  require('node:fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), stdin }));
+  process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: '{"outcome":"allow"}' }));
+});
+`);
+  chmodSync(join(bin, 'claude'), 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath}`;
+  t.after(() => { process.env.PATH = previousPath; });
+  const target = join(outside, 'claude.txt');
+  await withPi({ extensions: [guardian], responses: [
+    fauxAssistantMessage(fauxToolCall('bash', { command: `echo claude > ${target}`, sandbox_permissions: 'require_escalated' })),
+    fauxAssistantMessage('Done.'),
+  ], configure: ({ agentDir }, provider) => {
+    writeConfig(agentDir, { reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } });
+    return { model: provider.getModel() };
+  } }, async ({ session }) => {
+    await session.prompt('Write it with Claude reviewing.');
+    assert.equal(readFileSync(target, 'utf8'), 'claude\n');
+  });
+  const recorded = JSON.parse(readFileSync(record, 'utf8'));
+  assert.ok(recorded.argv.includes('--safe-mode') && recorded.argv.includes('claude-opus-5-5'));
+  assert.ok(recorded.argv[recorded.argv.indexOf('--system-prompt') + 1].startsWith('You are judging one planned coding-agent action.'));
+  assert.ok(recorded.stdin.includes('[1] user: Write it with Claude reviewing.') && recorded.stdin.includes('>>> APPROVAL REQUEST START'));
 });

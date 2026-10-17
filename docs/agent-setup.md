@@ -29,8 +29,9 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    selected entrypoints with [its configuration requirements](#escape-continue),
    read-only. Check external package pins and their documented config;
    for Bash approvals, check the reviewer settings and the required
-   [shared reviewer policy](#shared-auto-permissions-policy): the configured prompt
-   must resolve to this repository's policy in a stable checkout;
+   [shared reviewer policy](#shared-auto-permissions-policy): `guardian-prompt.md`
+   beside the active config must be a readable symlink to this repository's policy
+   in a stable checkout, selected by `systemPromptFile: "./guardian-prompt.md"`;
    for Hooks, check its selected entrypoint is in a stable checkout and loads before
    Auto Permissions, and that no Guard entry or `guard.json` link remains;
    for the footer, check the footer extension selection and `gh` on `PATH`,
@@ -201,7 +202,7 @@ to `low`.
 {
   "enabled": true,
   "reviewAllShell": true,
-  "systemPromptFile": "/absolute/path/to/pi-extensions/personal-settings/auto-permissions.md",
+  "systemPromptFile": "./guardian-prompt.md",
   "rules": ["$defaults"],
   "reviewConcurrency": 1,
   "reviewer": {
@@ -264,42 +265,47 @@ Install it once on each machine after user approval:
 2. Resolve the active config from `PI_AUTO_PERMISSIONS_CONFIG` when set, otherwise
    `$PI_CODING_AGENT_DIR/pi-auto-permissions/config.json` (agent directory defaults
    to `~/.pi/agent`). Inspect its existing `systemPromptFile` or inline
-   `systemPrompt`. A file reference already resolving to the shared source is
-   installed. Preserve existing custom prompts and ask before migrating them.
+   `systemPrompt`, and `guardian-prompt.md` beside the config. A readable symlink
+   to the chosen shared source is already linked. Preserve existing files and
+   links (including broken links), and ask before replacing or migrating them.
 3. Back up an existing config beside its original with a dated `.bak` suffix,
    preserving permissions and using no-clobber or exclusive creation (for example,
    `cp -pn` with a fresh filename). Skip backup when creating a new config.
-   Create the config directory if needed. Make the smallest textual change to set
-   `systemPromptFile` to the shared source's **absolute path on this machine**;
-   replace the placeholder in the example above. Keep the policy in the checkout,
-   rather than copying it into the agent directory. A direct reference needs no
-   symlink. Alternatively, create `guardian-prompt.md` beside the active config as
-   a symlink to the same absolute source and set
-   `"systemPromptFile": "./guardian-prompt.md"`. Inspect the destination first;
-   preserve existing files and links (including broken links), and ask before
-   replacement. Never force-link over personal customizations. If a protection
-   hook refuses link creation, use the direct reference or ask the user to create
-   the link; do not bypass the hook. If an inline `systemPrompt` exists, remove it
-   only as part of the approved migration: the package rejects setting both. Preserve `enabled`,
-   `reviewAllShell`, reviewer settings, `rules`, infrastructure policy and other
-   unrelated entries. Leave old prompt files intact for rollback. Do not copy
-   another machine's absolute paths, credentials or trust exceptions.
-4. Show the diff and validate using the installed package's
+   Create the config directory if needed. Create `guardian-prompt.md` beside the
+   active config as a symlink to the shared source's absolute path on this machine.
+   Use `ln -s <absolute-shared-source> <absolute-config-directory>/guardian-prompt.md`
+   only after verifying the destination is absent; never force-link over existing
+   files or links. Keep the policy in the checkout rather than copying its contents
+   into the agent directory. If a protection hook refuses link creation, ask the
+   user to run that exact command and verify the result; do not bypass the hook or
+   silently substitute a direct file reference.
+4. Verify the link exists, is readable and resolves to the selected shared source
+   **before** switching config. Make the smallest textual change to set
+   `"systemPromptFile": "./guardian-prompt.md"`. If an inline `systemPrompt` exists,
+   remove it only as part of the approved migration: the package rejects setting
+   both. Preserve `enabled`, `reviewAllShell`, reviewer settings, `rules`,
+   infrastructure policy and other unrelated entries. Leave old prompt files intact
+   for rollback. The relative config value is identical across machines; only each
+   symlink's target is machine-specific. Keep credentials and trust exceptions local.
+5. Show the diff and validate using the installed package's
    `config.ts` / `loadAutoPermissionsConfig` through Pi's SDK-aware loader.
-   Verify its `systemPromptSource.path` resolves to the chosen checkout's policy
-   (follow symlinks if used) and the loaded prompt matches that file. If loading fails, restore the prior
-   config. Report an unavailable validator as unverified rather than claiming
-   success.
+   Verify its `systemPromptSource.path` is the local `guardian-prompt.md` link,
+   that the link resolves to the chosen checkout's policy, and that the loaded
+   prompt matches that file. If loading fails, restore the prior config. Report an
+   unavailable validator as unverified rather than claiming success.
 
-Completion: the live config resolves the shared policy with Bash review enabled,
+Completion: the live config uses `systemPromptFile: "./guardian-prompt.md"`, and
+that readable symlink resolves to the shared policy, with Bash review enabled,
 `reviewAllShell: true`, the required reviewer model/effort, and existing deny rules
-preserved. Missing, stale or unreadable policy references are setup drift; report
-those in the read-only audit and ask before repair. Keep subsequent shared policy
+preserved. Missing, stale or unreadable links and direct-reference or copied-policy
+installations are setup drift; report those in the read-only audit and ask before
+repair. Keep subsequent shared policy
 changes in this repository rather than editing a local copy. Pulling the checkout
 updates configured machines on their next guardian review; moving/removing it
-requires updating the local file reference. Config/prompt-only changes need no
-`/reload`; extension installation or selection changes still do. Validate actual reviewer behavior separately: the
-policy is model guidance, not a deterministic shell parser or OS sandbox.
+requires updating the symlink target. Config/prompt-only changes need no
+`/reload`; extension installation or selection changes still do. Validate actual
+reviewer behavior separately: the policy is model guidance, not a deterministic
+shell parser or OS sandbox.
 
 The policy distinguishes **revise** (tell the agent to split chained operations,
 without interrupting the human) from **ask_user** (a material authorization or safety

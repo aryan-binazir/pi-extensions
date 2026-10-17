@@ -6,7 +6,7 @@ During setup, ensure the scoped models include `gpt-6.1-sol`, `gpt-6-luna`, and 
 
 Escape Continue is required. During setup, [install and enable it](docs/agent-setup.md#escape-continue), preserving other extension selections.
 
-Fast mode must load before Auto Permissions so its required `gpt-6-luna~fast` reviewer resolves. Install and verify the required [shared reviewer policy](docs/agent-setup.md#shared-auto-permissions-policy) on each machine; keep the policy in `personal-settings/auto-permissions.md`, not a machine-local fork. Preserve existing custom prompts and obtain approval before replacing them.
+Fast mode must load before Auto Permissions so its required `gpt-6-luna~fast` reviewer resolves. Install and verify the required [shared reviewer policy](docs/agent-setup.md#shared-auto-permissions-policy) on each machine: symlink `guardian-prompt.md` beside the active Auto Permissions config to a stable checkout's `personal-settings/auto-permissions.md`, then set `systemPromptFile` to `./guardian-prompt.md`. Keep the policy in the repository, not a machine-local fork. Preserve existing custom prompts and obtain approval before replacing them.
 
 Repair Auto Permissions version drift using the required pin and upgrade procedure in [Automatic Bash permissions](docs/agent-setup.md#automatic-bash-permissions-external-package). Reporting a mismatch alone is not completion.
 

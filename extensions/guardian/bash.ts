@@ -62,7 +62,8 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const config = runtime.config();
       const cwd = ctx?.cwd ?? defaultCwd;
-      const plain = { command: params.command, ...(params.timeout === undefined ? {} : { timeout: params.timeout }) };
+      // Strict tool schemas make optional fields nullable, so null means unset.
+      const plain = { command: params.command, ...(params.timeout == null ? {} : { timeout: params.timeout }) };
       const sandbox = sandboxPolicyFor(config);
       const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed ? {
         spawnHook: spawn => {

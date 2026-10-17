@@ -142,6 +142,12 @@ test('disabled Guardian runs commands as plain Pi bash', async t => {
   assert.deepEqual(requests, []);
 });
 
+test('null optional arguments from strict tool schemas mean unset', darwin, async t => {
+  const { run, requests } = setup(t);
+  assert.equal(text(await run({ command: 'echo ok', timeout: null, sandbox_permissions: null, justification: null, prefix_rule: null })), 'ok\n');
+  assert.deepEqual(requests, []);
+});
+
 test('commands that cannot be quoted for the sandbox fail instead of running', darwin, async t => {
   const { run } = setup(t);
   await assert.rejects(run({ command: 'echo a\u0000b' }), /cannot be run in the sandbox: it contains a NUL byte/);

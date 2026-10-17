@@ -43,11 +43,7 @@ load; helpers and tests are not extensions.
 7. **Configure the required scoped models.** Follow
    [scoped model setup](docs/agent-setup.md#required-scoped-models), preserving this
    machine's existing model connections.
-8. **Install memory separately (required).** Follow
-   [background model defaults](docs/agent-setup.md#background-model-defaults) and
-   [OMMS setup](docs/agent-setup.md#omms-memory-external-package).
-   Enable old-history import for OMMS (base GPT-6 Luna, medium reasoning).
-9. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
+8. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
    servers through its built-in MCP support and `~/.pi/agent/mcp.json`.
 
 With Subagents enabled, the system prompt includes **both** the editable selection
@@ -59,7 +55,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | Extension | What it does |
 | --- | --- |
 | [Hooks](#hooks) | Tested block, advise and gate hooks, switched on in `personal-settings/hooks.yaml`. Replaces Guard. |
-| [Background models](docs/agent-setup.md#background-model-defaults) | Defaults OMMS registry Luna calls to medium reasoning and omits unsupported Codex temperature. |
+| [Background models](docs/agent-setup.md#background-model-defaults) | Optionally defaults registry Luna calls to medium reasoning and omits unsupported Codex temperature. |
 | Questionnaire | Interactive questions through the `questionnaire` tool. |
 | Todo | Compact task summary; `alt+t` toggles the full list. Session-backed progress and stale-progress reminders. |
 | Effort | `/effort` changes reasoning; `/effort new` starts a temporary model/effort session. |

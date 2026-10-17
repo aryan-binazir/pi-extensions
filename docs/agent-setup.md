@@ -17,7 +17,7 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
    skipped, not missing setup. Escape Continue, Bash approvals, Hooks, the footer
-   with PR links, Claude bridge, background model defaults, and OMMS are required;
+   with PR links, and Claude bridge are required;
    a missing or disabled component
    is setup drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
@@ -25,7 +25,6 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
    Escape Continue, Bash approvals, Hooks, the footer with PR links, Claude bridge,
-   [OMMS](#omms-memory-external-package),
    and each configured or requested optional feature. For Escape Continue, compare
    selected entrypoints with [its configuration requirements](#escape-continue),
    read-only. Check external package pins and their documented config;
@@ -58,69 +57,24 @@ tracked instructions.
 
 ## Background model defaults
 
-Enable this repository's Background models extension with `pi config`. For a
+Optionally enable this repository's Background models extension with `pi config`. For a
 local checkout, select the stable checkout's absolute
 `extensions/background-models/index.ts` path in user-scoped `settings.json`.
 Preserve unrelated extension selections.
 
-It defaults OMMS registry `stream`/`complete` requests for `gpt-6-luna`
+It defaults extension registry `stream`/`complete` requests for `gpt-6-luna`
 to medium reasoning, preserving explicit effort. It also omits `temperature`
 from Codex requests because that endpoint rejects the parameter. The main session
 uses its own model runtime and thinking settings.
 
 Keep Background models after Hooks in `settings.json.extensions`. User-local
 extension paths load before packages. When using packages, put this repository
-before OMMS in `settings.json.packages` so defaults apply from startup.
+before packages that make background requests in `settings.json.packages` so
+defaults apply from startup.
 
 Completion: verify the selection and startup order, then restart Pi. Verify
 background request effort separately from the main-session footer. Calls through
 `streamSimple` or a provider's own runtime retain their existing settings.
-
-## OMMS memory (external package)
-
-Install [om-memory-system](https://pi.dev/packages/om-memory-system) separately
-from this repository. The reviewed package version is pinned:
-
-```sh
-pi install npm:om-memory-system@4.18.0
-```
-
-Before starting a session with the extension enabled, merge its configuration
-into `~/.config/omms/omms.jsonc`, preserving existing settings. This path is
-independent of `PI_CODING_AGENT_DIR`. Use this machine's existing Pi connection
-for `gpt-6-luna` as `MODEL_CONNECTION`.
-
-The default background model is GPT-6 Luna at **medium** reasoning. Enable
-[background model defaults](#background-model-defaults) to apply that effort.
-
-```json
-{
-  "piProvider": "MODEL_CONNECTION",
-  "piModel": "gpt-6-luna",
-  "piBackfillModel": "MODEL_CONNECTION/gpt-6-luna",
-  "autoBackfill": true,
-  "autoCaptureEnabled": true,
-  "webServerAutoStart": false,
-  "webServerHost": "127.0.0.1"
-}
-```
-
-Ar has approved importing old session history as part of this setup. Keep
-`autoBackfill` enabled. Import, capture, and profile learning send conversation
-content to the selected model and make additional model calls. Keep credentials
-in Pi's existing connection.
-
-Memories default to `~/.omms/data`. Embeddings run locally and download their
-model on first use. The web app binds to localhost at port 4747; the configuration
-above leaves login autostart off. Preserve existing storage and embedding choices.
-If npm reports blocked dependency install scripts, verify the local embedding
-backend before approving only the scripts it needs.
-
-Completion: `pi list` includes the pin, its extension and memory skill are
-selected, the configured model resolves in the offline model list, and the saved
-`autoBackfill` is `true`. Restart Pi, verify the `memory` tool
-is available, and test capture and recall with a disposable note. Report model
-calls, embeddings, and recall as unverified until observed.
 
 ## Escape Continue
 
@@ -274,7 +228,7 @@ guarantee a speedup, and provider tier pricing applies.
 Complete any required sign-in for the existing model connection and verify the
 alias resolves after `/reload`. Test a harmless Bash command and confirm the
 reviewer uses low reasoning and priority processing. Keep the main model,
-startup thinking, and OMMS model unchanged.
+startup thinking, and unrelated model settings unchanged.
 `reviewConcurrency: 1` preserves serial reviews; the package default is four.
 The prefilter was removed in 0.17.0, so every reviewed command gets full review.
 `guardianPolicy` takes natural-language preferences: trusted

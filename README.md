@@ -27,8 +27,8 @@ load; helpers and tests are not extensions.
    Package installation does **not** create the link.
 3. **Install Bash approvals separately (required).** Follow
    [Automatic Bash permissions](docs/agent-setup.md#automatic-bash-permissions-external-package)
-   to configure Hank Warren's Auto Permissions with `gpt-6-luna`
-   at low reasoning. This repo's footer only displays its status; it is not the
+   to configure Hank Warren's Auto Permissions with `openai-codex/gpt-6-luna~fast`
+   at explicit low reasoning. This repo's footer only displays its status; it is not the
    approval engine.
 4. **Enable Hooks (required).** Follow [Hooks setup](#hooks) to select the
    extension, load it before Auto Permissions, and remove Guard where it is still
@@ -43,11 +43,10 @@ load; helpers and tests are not extensions.
 7. **Configure the required scoped models.** Follow
    [scoped model setup](docs/agent-setup.md#required-scoped-models), preserving this
    machine's existing model connections.
-8. **Install memory and autocomplete separately (required).** Follow
-   [background model defaults](docs/agent-setup.md#background-model-defaults),
-   [OMMS setup](docs/agent-setup.md#omms-memory-external-package) and
-   [Ghost Autocomplete setup](docs/agent-setup.md#ghost-autocomplete-external-package).
-   Enable old-history import for OMMS. Vi mode composes with Ghost's editor.
+8. **Install memory separately (required).** Follow
+   [background model defaults](docs/agent-setup.md#background-model-defaults) and
+   [OMMS setup](docs/agent-setup.md#omms-memory-external-package).
+   Enable old-history import for OMMS (base GPT-6 Luna, medium reasoning).
 9. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
    servers through its built-in MCP support and `~/.pi/agent/mcp.json`.
 
@@ -60,7 +59,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | Extension | What it does |
 | --- | --- |
 | [Hooks](#hooks) | Tested block, advise and gate hooks, switched on in `personal-settings/hooks.yaml`. Replaces Guard. |
-| [Background models](docs/agent-setup.md#background-model-defaults) | Defaults OMMS/Ghost registry Luna calls to low reasoning and omits unsupported Codex temperature. |
+| [Background models](docs/agent-setup.md#background-model-defaults) | Defaults OMMS registry Luna calls to medium reasoning and omits unsupported Codex temperature. |
 | Questionnaire | Interactive questions through the `questionnaire` tool. |
 | Todo | Compact task summary; `alt+t` toggles the full list. Session-backed progress and stale-progress reminders. |
 | Effort | `/effort` changes reasoning; `/effort new` starts a temporary model/effort session. |

@@ -9,7 +9,7 @@ function requestOptions<T extends Api>(model: Model<T>, options?: ModelsApiStrea
   if (model.api !== 'openai-codex-responses' && model.id !== 'gpt-6-luna') return options;
   const result: Record<string, unknown> = { ...options };
   if (model.api === 'openai-codex-responses') delete result.temperature;
-  if (model.id === 'gpt-6-luna' && result.reasoningEffort === undefined) result.reasoningEffort = 'low';
+  if (model.id === 'gpt-6-luna' && result.reasoningEffort === undefined) result.reasoningEffort = 'medium';
   return result as ModelsApiStreamOptions<T>;
 }
 

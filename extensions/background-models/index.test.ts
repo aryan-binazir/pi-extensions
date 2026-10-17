@@ -4,7 +4,7 @@ import { fauxAssistantMessage, fauxProvider } from '@earendil-works/pi-ai';
 import backgroundModels from './index.ts';
 import { withPi } from '../../tests/pi-session.ts';
 
-test('background Codex calls omit temperature, default Luna low, and preserve explicit effort and request options', async () => {
+test('background Codex calls omit temperature, default Luna medium, and preserve explicit effort and request options', async () => {
   const requests: any[] = [];
   const provider = fauxProvider({ provider: 'background-test', api: 'openai-codex-responses', tokensPerSecond: Infinity,
     models: [{ id: 'gpt-6-luna', reasoning: true }, { id: 'gpt-6.1-sol', reasoning: true }] });
@@ -21,7 +21,7 @@ test('background Codex calls omit temperature, default Luna low, and preserve ex
     const context = { messages: [{ role: 'user' as const, content: 'synthetic request', timestamp: Date.now() }] };
     const controller = new AbortController();
     await registry.complete(luna, context, { temperature: 0, maxTokens: 77, signal: controller.signal });
-    assert.equal(requests[0].reasoningEffort, 'low');
+    assert.equal(requests[0].reasoningEffort, 'medium');
     assert.equal(requests[0].temperature, undefined);
     assert.equal(requests[0].maxTokens, 77);
     assert.ok(requests[0].signal instanceof AbortSignal);
@@ -36,7 +36,7 @@ test('background Codex calls omit temperature, default Luna low, and preserve ex
     assert.equal(requests[3].temperature, 0.5);
     await runner!.emit({ type: 'session_start', reason: 'reload' });
     await registry.complete(luna, context);
-    assert.equal(requests[4].reasoningEffort, 'low');
+    assert.equal(requests[4].reasoningEffort, 'medium');
     assert.equal(requests.length, 5, 'rebinding does not duplicate requests');
     await runner!.emit({ type: 'session_shutdown', reason: 'reload' });
     await registry.complete(luna, context, { temperature: 0.5 });

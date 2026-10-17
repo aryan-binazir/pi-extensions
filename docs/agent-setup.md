@@ -17,7 +17,7 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
    skipped, not missing setup. Escape Continue, Bash approvals, Hooks, the footer
-   with PR links, Claude bridge, background model defaults, OMMS, and Ghost Autocomplete are required;
+   with PR links, Claude bridge, background model defaults, and OMMS are required;
    a missing or disabled component
    is setup drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
@@ -25,7 +25,7 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
    Escape Continue, Bash approvals, Hooks, the footer with PR links, Claude bridge,
-   [OMMS](#omms-memory-external-package), [Ghost Autocomplete](#ghost-autocomplete-external-package),
+   [OMMS](#omms-memory-external-package),
    and each configured or requested optional feature. For Escape Continue, compare
    selected entrypoints with [its configuration requirements](#escape-continue),
    read-only. Check external package pins and their documented config;
@@ -63,19 +63,14 @@ local checkout, select the stable checkout's absolute
 `extensions/background-models/index.ts` path in user-scoped `settings.json`.
 Preserve unrelated extension selections.
 
-It defaults OMMS and Ghost registry `stream`/`complete` requests for `gpt-6-luna`
-to low reasoning, preserving explicit effort. It also omits `temperature` from
-those Codex requests,
-because that endpoint rejects the parameter sent by Ghost. The main session uses
-its own model runtime and thinking settings.
+It defaults OMMS registry `stream`/`complete` requests for `gpt-6-luna`
+to medium reasoning, preserving explicit effort. It also omits `temperature`
+from Codex requests because that endpoint rejects the parameter. The main session
+uses its own model runtime and thinking settings.
 
-Background models must load before Ghost's `session_start`: Ghost captures the
-registry's stream method during startup. User-local extension paths load before
-packages. If both are installed as packages, put this repository's package before
-Ghost in `settings.json.packages`. In `settings.json.extensions`, keep Background
-models after Hooks and before any Ghost entry. Recheck this order after installs
-and upgrades. The real-Ghost tests cover Codex/Luna options in both orders and
-demonstrate that Ghost-first startup bypasses these defaults.
+Keep Background models after Hooks in `settings.json.extensions`. User-local
+extension paths load before packages. When using packages, put this repository
+before OMMS in `settings.json.packages` so defaults apply from startup.
 
 Completion: verify the selection and startup order, then restart Pi. Verify
 background request effort separately from the main-session footer. Calls through
@@ -95,7 +90,7 @@ into `~/.config/omms/omms.jsonc`, preserving existing settings. This path is
 independent of `PI_CODING_AGENT_DIR`. Use this machine's existing Pi connection
 for `gpt-6-luna` as `MODEL_CONNECTION`.
 
-The default background model is GPT-6 Luna at **low** reasoning. Enable
+The default background model is GPT-6 Luna at **medium** reasoning. Enable
 [background model defaults](#background-model-defaults) to apply that effort.
 
 ```json
@@ -126,64 +121,6 @@ selected, the configured model resolves in the offline model list, and the saved
 `autoBackfill` is `true`. Restart Pi, verify the `memory` tool
 is available, and test capture and recall with a disposable note. Report model
 calls, embeddings, and recall as unverified until observed.
-
-## Ghost Autocomplete (external package)
-
-Install [pi-ghost-autocomplete](https://pi.dev/packages/pi-ghost-autocomplete)
-separately from this repository. The reviewed package version is pinned:
-
-```sh
-pi install npm:pi-ghost-autocomplete@0.17.0
-```
-
-Use an existing Pi model connection instead of the default Mercury provider,
-which requires a separate Inception API key. Persist these exports in the shell
-startup file or Pi launcher that this machine actually uses, replacing
-`MODEL_CONNECTION` with its existing connection for `gpt-6-luna`.
-
-Use GPT-6 Luna at **low** reasoning by default. Enable
-[background model defaults](#background-model-defaults) to apply that effort and
-omit the Codex-incompatible temperature parameter.
-
-```sh
-export PI_GHOST_PROVIDER=pi
-export PI_GHOST_MODEL=MODEL_CONNECTION/gpt-6-luna
-```
-
-Preserve existing Ghost settings and unrelated launcher behavior. Restart the Pi
-process after changing its environment; `/reload` cannot import new exports from
-the parent shell. Ghost makes additional model calls with draft text and recent
-conversation context. Keep raw-prompt evaluation capture and debug logging off
-unless requested.
-
-Enable both Ghost and this repository's Vi mode. Vi attaches to the active
-editor after session startup, so Ghost keeps its provider, commands, and
-lifecycle in either load order. Suggestions are available in insert mode;
-Escape clears the suggestion and enters normal mode. Vi motions, visual
-selection, undo, paste payloads, prompt stash, and Escape Continue remain
-available. Keep this repository updated on machines using both extensions.
-
-`npm run check` tests the pinned Ghost development dependency. To also check a
-globally installed copy:
-
-```sh
-PI_GHOST_TEST_ENTRYPOINT="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/npm/node_modules/pi-ghost-autocomplete/dist/index.js" npm run check
-```
-
-The package requires a native binary for the host platform and has no JavaScript
-fallback. Some compiled Pi runtimes cannot resolve the optional platform package
-by name even when its binary loads by absolute path. In that case, use Ghost's
-existing file fallback: symlink the matching platform package's `.node` file into
-`pi-ghost-autocomplete/dist/` with the same filename. Verify matching package
-versions. An existing target must be a symlink resolving to that installed
-platform package's matching addon; report any other file or destination as drift
-and ask Ar before replacing it. Recheck after package upgrades.
-
-Completion: the pinned package and matching platform dependency are
-installed, both extensions are selected, and `/ghost` reports the
-intended Pi provider/model after restart. In the TUI, type a draft, observe a
-suggestion, accept it with Right Arrow or Tab, and verify the retained editor
-shortcuts. Installation and model registration alone do not verify suggestions.
 
 ## Escape Continue
 
@@ -296,10 +233,13 @@ Pi adds `"npm:@hank-warren/pi-auto-permissions@0.21.0"` to the `packages` array 
 update itself; review new versions before upgrading. Do not also load the
 upstream `@ogulcancelik/pi-auto-permissions`: overlapping guards cause duplicate
 reviews. Create `~/.pi/agent/pi-auto-permissions/config.json` (or under your
-`PI_CODING_AGENT_DIR`). In the template below, replace `MODEL_CONNECTION` with
-this machine's existing connection identifier for `gpt-6-luna`; preserve the
-current `reviewer.provider` when it resolves that model. If the connection is
-missing or ambiguous, ask Ar before writing the config.
+`PI_CODING_AGENT_DIR`). Use the existing `openai-codex` connection and enable
+Fast mode (`extensions/fast-mode/index.ts`) before Auto Permissions so
+`gpt-6-luna~fast` resolves. With package installation, keep this repository's
+package before Auto Permissions in `settings.json.packages`; local extension
+paths load before packages. If that connection
+is unavailable, ask Ar before writing the config. Set `reasoningEffort` explicitly
+to `low`.
 
 ```json
 {
@@ -308,8 +248,8 @@ missing or ambiguous, ask Ar before writing the config.
   "rules": ["$defaults"],
   "reviewConcurrency": 1,
   "reviewer": {
-    "provider": "MODEL_CONNECTION",
-    "model": "gpt-6-luna",
+    "provider": "openai-codex",
+    "model": "gpt-6-luna~fast",
     "reasoningEffort": "low",
     "timeoutMs": 60000
   },
@@ -324,8 +264,17 @@ missing or ambiguous, ask Ar before writing the config.
 
 Review is then on by default across sessions: every Bash command goes through the
 rules and, absent a hard deny, trusted-group bypass or session approval, Luna review
-at low reasoning. Complete any required sign-in for the existing model connection
-and make sure `gpt-6-luna` is available; the main agent can use a different model.
+at low reasoning with priority processing requested. The `~fast` alias sends
+`service_tier: "priority"` while retaining the real model ID `gpt-6-luna`.
+It reuses Pi's existing Codex authentication; no separate classifier API key is
+needed. This is the Bash approval reviewer, not Pi's separate Decisions API.
+Priority availability and latency depend on the provider; fast mode does not
+guarantee a speedup, and provider tier pricing applies.
+
+Complete any required sign-in for the existing model connection and verify the
+alias resolves after `/reload`. Test a harmless Bash command and confirm the
+reviewer uses low reasoning and priority processing. Keep the main model,
+startup thinking, and OMMS model unchanged.
 `reviewConcurrency: 1` preserves serial reviews; the package default is four.
 The prefilter was removed in 0.17.0, so every reviewed command gets full review.
 `guardianPolicy` takes natural-language preferences: trusted
@@ -359,7 +308,7 @@ unattended behavior is opt-in via `PI_AUTO_PERMISSIONS_UNATTENDED=1`; ordinary
 interactive sessions still ask for approval.
 
 The required [footer](#footer) shows the plugin's status after `/reload`:
-`Auto: on · Luna low`, `Auto: off`, `Auto: unavailable` (Hank's settings command
+`Auto: on · gpt-6-luna~fast low`, `Auto: off`, `Auto: unavailable` (Hank's settings command
 is not loaded), `Auto: config error` (the package's own validator rejected the
 config), or `Auto: unavailable (adapter)` — the footer's adapter is tested
 against **0.21.0** and retains **0.16.2** compatibility. Other versions are

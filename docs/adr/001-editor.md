@@ -2,7 +2,7 @@
 
 Status: accepted; editor input and replacement ownership superseded by [ADR 021](021-editor-input.md). Editor adapter SDK baselines are Pi 0.85.1 and 0.99.1; Escape Continue also has TUI verification on Pi 0.87.1, 1.0.2 and 1.2.0.
 
-Pi's CustomEditor preserves application shortcuts, completion and submission. Vi attaches modal editing, logical-line motions, operator ranges, text objects, registers and bounded undo history to the active CustomEditor. The standalone ViEditor constructor creates a CustomEditor with the same attachment. [ADR 025](025-ghost-composition.md) covers composition with Ghost. Tests send real editor inputs and inspect submitted/expanded text and selection rendering. It starts in insert mode.
+Pi's CustomEditor preserves application shortcuts, completion and submission. Vi attaches modal editing, logical-line motions, operator ranges, text objects, registers and bounded undo history to the active CustomEditor. The standalone ViEditor constructor creates a CustomEditor with the same attachment. Tests send real editor inputs and inspect submitted/expanded text and selection rendering. It starts in insert mode.
 
 Supported keys are Escape, i/a/I/A/o/O, h/j/k/l, w/b/e, 0/^/$, gg/G, decimal counts, d/c/y with motions, dd/cc/yy, x/D/C, v/V, iw/aw/iW/aW and paired bracket/quote objects, named a-z and unnamed registers, p/P, u and Ctrl+R. This is a defined vi subset, not a complete Vim implementation. Search, macros, repeat-dot, marks, f/F/t/T character motions and clipboard registers are not implemented.
 

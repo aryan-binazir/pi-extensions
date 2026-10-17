@@ -28,8 +28,9 @@ load; helpers and tests are not extensions.
 3. **Install Bash approvals separately (required).** Follow
    [Automatic Bash permissions](docs/agent-setup.md#automatic-bash-permissions-external-package)
    to configure Hank Warren's Auto Permissions with `openai-codex/gpt-6-luna~fast`
-   at explicit low reasoning. This repo's footer only displays its status; it is not the
-   approval engine.
+   at explicit low reasoning, and install the required
+   [shared reviewer policy](docs/agent-setup.md#shared-auto-permissions-policy).
+   This repo's footer only displays its status; it is not the approval engine.
 4. **Enable Hooks (required).** Follow [Hooks setup](#hooks) to select the
    extension, load it before Auto Permissions, and remove Guard where it is still
    installed.

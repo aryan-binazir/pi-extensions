@@ -28,7 +28,9 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    and each configured or requested optional feature. For Escape Continue, compare
    selected entrypoints with [its configuration requirements](#escape-continue),
    read-only. Check external package pins and their documented config;
-   for Bash approvals, check the reviewer settings;
+   for Bash approvals, check the reviewer settings and the required
+   [shared reviewer policy](#shared-auto-permissions-policy): the configured prompt
+   must resolve to this repository's policy in a stable checkout;
    for Hooks, check its selected entrypoint is in a stable checkout and loads before
    Auto Permissions, and that no Guard entry or `guard.json` link remains;
    for the footer, check the footer extension selection and `gh` on `PATH`,
@@ -199,6 +201,7 @@ to `low`.
 {
   "enabled": true,
   "reviewAllShell": true,
+  "systemPromptFile": "/absolute/path/to/pi-extensions/personal-settings/auto-permissions.md",
   "rules": ["$defaults"],
   "reviewConcurrency": 1,
   "reviewer": {
@@ -215,6 +218,9 @@ to `low`.
   }
 }
 ```
+
+Install the [shared reviewer policy](#shared-auto-permissions-policy) before
+using this configuration; a missing prompt file fails closed.
 
 Review is then on by default across sessions: every Bash command goes through the
 rules and, absent a hard deny, trusted-group bypass or session approval, Luna review
@@ -234,10 +240,77 @@ The prefilter was removed in 0.17.0, so every reviewed command gets full review.
 `guardianPolicy` takes natural-language preferences: trusted
 infrastructure in `environment`, scoped exceptions in `allow`, restrictions
 needing explicit authorization in `softDeny`, unconditional ones in `hardDeny`.
-They supplement the built-in policy and never override deterministic hard denies.
+They supplement the active reviewer prompt and never override deterministic hard denies.
 **Coverage is Bash only, not an OS sandbox:** edits, writes, MCP and desktop tools
 are not gated, this repository's isolated subagents do not inherit the plugin, and
 explicit trusted-group bypasses and session approvals can still bypass review.
+
+### Shared Auto Permissions policy
+
+[`personal-settings/auto-permissions.md`](../personal-settings/auto-permissions.md)
+is the required, version-controlled reviewer prompt. It carries the shared
+local-autonomy and single-operation Bash policy across machines. It is a complete
+replacement for the package's built-in reviewer prompt, not an addition to the
+main agent's `APPEND_SYSTEM.md`. It is adapted from the pinned package's prompt;
+see its [license](../personal-settings/auto-permissions.LICENSE). Review this file
+alongside future Auto Permissions upgrades.
+
+Install it once on each machine after user approval:
+
+1. Choose a **stable checkout** of this repository (the source path shown by
+   `pi list` is also suitable if it will remain installed). Resolve the absolute
+   path to `personal-settings/auto-permissions.md`. Package installation ships
+   this file but does not configure Auto Permissions to use it.
+2. Resolve the active config from `PI_AUTO_PERMISSIONS_CONFIG` when set, otherwise
+   `$PI_CODING_AGENT_DIR/pi-auto-permissions/config.json` (agent directory defaults
+   to `~/.pi/agent`). Inspect its existing `systemPromptFile` or inline
+   `systemPrompt`. A file reference already resolving to the shared source is
+   installed. Preserve existing custom prompts and ask before migrating them.
+3. Back up an existing config beside its original with a dated `.bak` suffix,
+   preserving permissions and using no-clobber or exclusive creation (for example,
+   `cp -pn` with a fresh filename). Skip backup when creating a new config.
+   Create the config directory if needed. Make the smallest textual change to set
+   `systemPromptFile` to the shared source's **absolute path on this machine**;
+   replace the placeholder in the example above. Keep the policy in the checkout,
+   rather than copying it into the agent directory. A direct reference needs no
+   symlink. Alternatively, create `guardian-prompt.md` beside the active config as
+   a symlink to the same absolute source and set
+   `"systemPromptFile": "./guardian-prompt.md"`. Inspect the destination first;
+   preserve existing files and links (including broken links), and ask before
+   replacement. Never force-link over personal customizations. If a protection
+   hook refuses link creation, use the direct reference or ask the user to create
+   the link; do not bypass the hook. If an inline `systemPrompt` exists, remove it
+   only as part of the approved migration: the package rejects setting both. Preserve `enabled`,
+   `reviewAllShell`, reviewer settings, `rules`, infrastructure policy and other
+   unrelated entries. Leave old prompt files intact for rollback. Do not copy
+   another machine's absolute paths, credentials or trust exceptions.
+4. Show the diff and validate using the installed package's
+   `config.ts` / `loadAutoPermissionsConfig` through Pi's SDK-aware loader.
+   Verify its `systemPromptSource.path` resolves to the chosen checkout's policy
+   (follow symlinks if used) and the loaded prompt matches that file. If loading fails, restore the prior
+   config. Report an unavailable validator as unverified rather than claiming
+   success.
+
+Completion: the live config resolves the shared policy with Bash review enabled,
+`reviewAllShell: true`, the required reviewer model/effort, and existing deny rules
+preserved. Missing, stale or unreadable policy references are setup drift; report
+those in the read-only audit and ask before repair. Keep subsequent shared policy
+changes in this repository rather than editing a local copy. Pulling the checkout
+updates configured machines on their next guardian review; moving/removing it
+requires updating the local file reference. Config/prompt-only changes need no
+`/reload`; extension installation or selection changes still do. Validate actual reviewer behavior separately: the
+policy is model guidance, not a deterministic shell parser or OS sandbox.
+
+The policy distinguishes **revise** (tell the agent to split chained operations,
+without interrupting the human) from **ask_user** (a material authorization or safety
+boundary). Routine task-related local work, including scripted source/test edits,
+is preauthorized. Non-overwriting sibling backups of the config being worked on
+are part of authorized setup, even outside the repository; potentially overwriting
+copies receive revision guidance rather than a prompt. Screenshot/media-only
+pushes to dedicated `pr-assets/...` branches on the existing repository remote are
+also covered, including `--no-verify` only for those asset pushes. Sensitive effects
+retain review. Feedback should fit the command: `git -C` for Git, absolute paths or
+read/search tools for file inspection.
 
 ### Upgrading from 0.16.2
 

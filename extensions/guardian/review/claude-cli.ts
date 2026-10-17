@@ -1,5 +1,8 @@
 // Claude reviews through Claude Code's print mode (`claude -p`), isolated from your Claude customizations
 // (`--safe-mode`) and limited to read-only file tools. The verdict is parsed with Codex's assessment parser.
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ThinkingLevel } from '@earendil-works/pi-ai';
 import { parseGuardianAssessment } from './assessment.ts';
 import { isTransientProviderError, type ReviewOutcome } from './outcome.ts';
@@ -23,18 +26,32 @@ export interface ClaudeCliReview {
 /** Claude Code has no `minimal` effort; it maps to `low`. */
 const effort = (reasoning: ThinkingLevel) => reasoning === 'minimal' ? 'low' : reasoning;
 
-export function claudeCliArgs(review: Pick<ClaudeCliReview, 'systemPrompt' | 'model' | 'reasoning'>): string[] {
+export function claudeCliArgs(review: Pick<ClaudeCliReview, 'systemPrompt' | 'model' | 'reasoning' | 'cwd'>): string[] {
   return [
-    '-p', '--safe-mode', '--model', review.model, '--effort', effort(review.reasoning), '--system-prompt', review.systemPrompt,
+    // `--restricted` drops the command-running tools and ignores user, project and local settings, and
+    // `--setting-sources ''` leaves none of them. Without both, a `.claude/settings.json` the agent wrote
+    // in its workspace could make the reviewer run a helper command on the host.
+    '-p', '--safe-mode', '--restricted', '--setting-sources', '', '--strict-mcp-config', '--no-session-persistence',
+    '--add-dir', review.cwd, '--model', review.model, '--effort', effort(review.reasoning), '--system-prompt', review.systemPrompt,
     '--tools', ...READ_ONLY_TOOLS, '--allowedTools', ...READ_ONLY_TOOLS, '--permission-mode', 'dontAsk',
-    '--strict-mcp-config', '--no-session-persistence', '--output-format', 'json',
+    '--output-format', 'json',
   ];
 }
 
 export async function runClaudeCliReview(review: ClaudeCliReview): Promise<ReviewOutcome> {
   const stdin = review.userContent.map(part => part.endsWith('\n') ? part : `${part}\n\n`).join('');
+  // Run outside the reviewed workspace: Claude discovers CLAUDE.md, settings and hooks from its own cwd.
+  const neutralCwd = mkdtempSync(join(tmpdir(), 'guardian-review-'));
+  try {
+    return await claudeReview(review, stdin, neutralCwd);
+  } finally {
+    rmSync(neutralCwd, { recursive: true, force: true });
+  }
+}
+
+async function claudeReview(review: ClaudeCliReview, stdin: string, neutralCwd: string): Promise<ReviewOutcome> {
   const run = await runBounded(review.command ?? 'claude', claudeCliArgs(review), {
-    cwd: review.cwd, stdin, timeoutMs: review.deadline - Date.now(), maxBytes: MAX_OUTPUT_BYTES, ...(review.signal ? { signal: review.signal } : {}),
+    cwd: neutralCwd, stdin, timeoutMs: review.deadline - Date.now(), maxBytes: MAX_OUTPUT_BYTES, ...(review.signal ? { signal: review.signal } : {}),
   });
   if (run.aborted) return { type: 'error', error: { type: 'cancelled' } };
   if (run.timedOut) return { type: 'error', error: { type: 'timeout' } };

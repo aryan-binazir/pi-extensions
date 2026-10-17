@@ -79,6 +79,13 @@ export class Approvals {
     return this.denied;
   }
 
+  /** Consumes the denial, so one approval cannot be replayed for a later action. */
+  takeDenied(): DeniedAction | undefined {
+    const denied = this.denied;
+    this.denied = undefined;
+    return denied;
+  }
+
   clearTurn(turnId: string): void {
     this.denials.clearTurn(turnId);
   }

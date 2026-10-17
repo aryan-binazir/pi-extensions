@@ -10,7 +10,11 @@ export type ResolvedReviewer =
   | { ok: false; message: string };
 
 export function resolveReviewer(registry: ReviewerRegistry, reviewer: ReviewerModel, sessionId: string): ResolvedReviewer {
-  const model = registry.find(reviewer.provider, reviewer.model) as Model<Api> | undefined;
+  // `~fast` is a virtual model Fast mode registers. A session without it, such as a subagent child, still
+  // reviews with the plain model rather than failing every approval.
+  const plain = reviewer.model.replace(/~fast$/, '');
+  const model = (registry.find(reviewer.provider, reviewer.model)
+    ?? (plain === reviewer.model ? undefined : registry.find(reviewer.provider, plain))) as Model<Api> | undefined;
   if (!model) return { ok: false, message: `reviewer model ${reviewer.provider}/${reviewer.model} is not available; set reviewer in Guardian's config.json` };
   return {
     ok: true,

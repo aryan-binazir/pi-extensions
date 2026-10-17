@@ -28,12 +28,24 @@ const input = (command: string, overrides = {}) => ({
   model: 'claude-opus-5-5', reasoning: 'high' as const, deadline: Date.now() + 10_000, ...overrides,
 });
 
-test('Claude reviews through claude -p with read-only tools and no user customizations', () => {
-  assert.deepEqual(claudeCliArgs({ systemPrompt: 'SYSTEM', model: 'claude-opus-5-5', reasoning: 'minimal' }), [
-    '-p', '--safe-mode', '--model', 'claude-opus-5-5', '--effort', 'low', '--system-prompt', 'SYSTEM',
+test('Claude reviews with read-only tools and no settings from the reviewed workspace', () => {
+  assert.deepEqual(claudeCliArgs({ systemPrompt: 'SYSTEM', model: 'claude-opus-5-5', reasoning: 'minimal', cwd: '/repo' }), [
+    '-p', '--safe-mode', '--restricted', '--setting-sources', '', '--strict-mcp-config', '--no-session-persistence',
+    '--add-dir', '/repo', '--model', 'claude-opus-5-5', '--effort', 'low', '--system-prompt', 'SYSTEM',
     '--tools', 'Read', 'Grep', 'Glob', '--allowedTools', 'Read', 'Grep', 'Glob', '--permission-mode', 'dontAsk',
-    '--strict-mcp-config', '--no-session-persistence', '--output-format', 'json',
+    '--output-format', 'json',
   ]);
+});
+
+test('Claude never runs in the reviewed workspace, so its settings and hooks cannot be planted there', async t => {
+  const { command, record } = fakeClaude(t, `process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: '{"outcome":"allow"}' }));`);
+  const workspace = mkdtempSync(join(tmpdir(), 'guardian-claude-workspace-'));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  await runClaudeCliReview(input(command, { cwd: workspace }));
+  const recorded = JSON.parse(readFileSync(record, 'utf8'));
+  assert.notEqual(recorded.cwd, workspace, 'the reviewer runs outside the directory the agent can write');
+  assert.ok(recorded.argv.includes('--restricted') && recorded.argv.includes('--setting-sources'));
+  assert.equal(recorded.argv[recorded.argv.indexOf('--add-dir') + 1], workspace, 'the workspace stays readable');
 });
 
 test('the assessment comes from the JSON result and the request goes on stdin', async t => {

@@ -4,11 +4,13 @@
 // `sandbox-exec -- <shell> -c <command>` so no unsandboxed shell runs first. Scripts are evaluated as
 // `bash -lc <command>`, the form Codex parses into command segments.
 import { spawn } from 'node:child_process';
+import { constants as osConstants } from 'node:os';
 import { type BashOperations, type BashToolDetails, createBashToolDefinition, getShellConfig, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import type { GuardianConfig } from './config.ts';
-import { commandsForExecPolicy, createExecApprovalRequirement, type SandboxPermissions } from './exec-policy.ts';
+import { createExecApprovalRequirement, type SandboxPermissions } from './exec-policy.ts';
+import { RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
 import type { Policy } from './rules.ts';
 import { createSeatbeltCommandArgs, MACOS_PATH_TO_SEATBELT_EXECUTABLE, sandboxEnv, type SandboxPolicy } from './seatbelt.ts';
 import type { Shell } from './shell.ts';
@@ -26,8 +28,6 @@ export interface ShellSettings {
 export interface BashRuntime {
   config(): GuardianConfig;
   policy(): Policy;
-  /** Bundled rules that apply even when Guardian is disabled or unrestricted. */
-  mandatoryPolicy(): Policy;
   shellSettings(): ShellSettings;
   shell: Shell;
   sandboxAvailable: boolean;
@@ -76,24 +76,16 @@ function sandboxedOperations(policy: SandboxPolicy, shellPath: string | undefine
           complete();
         };
         child.on('error', error => finish(() => reject(error)));
-        child.on('close', (code, killSignal) => finish(() => {
+        // Resolve when the command itself exits. Waiting for the streams to close hangs on a backgrounded
+        // process that inherited them.
+        child.on('exit', (code, killSignal) => finish(() => {
           if (signal?.aborted) return reject(new Error('aborted'));
           if (timedOut) return reject(new Error(`timeout:${timeout}`));
-          settled({ exitCode: code ?? (killSignal ? 1 : null) });
+          settled({ exitCode: code ?? (killSignal ? 128 + (osConstants.signals[killSignal] ?? 0) : null) });
         }));
       });
     },
   };
-}
-
-/**
- * Every command a script can run, as far as static parsing can tell: its plain segments when the script is
- * word-only, plus the literal commands Codex extracts from control flow, substitutions and nested shells.
- */
-function mandatoryCommands(shell: Shell, command: string[]): string[][] {
-  const seen = new Set<string>();
-  return [...commandsForExecPolicy(shell, command), ...shell.expandLiteralCommands(command)]
-    .filter(candidate => candidate.length && !seen.has(JSON.stringify(candidate)) && seen.add(JSON.stringify(candidate)));
 }
 
 const parameters = Type.Object({
@@ -133,14 +125,11 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
 
       const command = ['bash', '-lc', params.command];
       const unrestricted = config.sandbox.mode === 'danger-full-access';
-      // Bundled rules bind even when Guardian is off or unrestricted, so a hard deny cannot be configured away.
-      const mandatory = createExecApprovalRequirement(runtime.shell, runtime.mandatoryPolicy(), {
-        command, commands: mandatoryCommands(runtime.shell, command), approvalPolicy: config.approvalPolicy,
-        fileSystem: 'restricted', sandboxPermissions: 'use_default',
-      });
-      if (mandatory.type === 'forbidden') throw new Error(mandatory.reason);
+      // The Railway boundary binds before rules, settings and review, and even when Guardian is disabled.
+      const railway = railwayDecision(runtime.shell, command);
+      if (railway === 'forbidden') throw new Error(`\`${params.command}\` rejected: ${RAILWAY_FORBIDDEN_REASON}`);
       if (!config.enabled) {
-        if (mandatory.type === 'needs_approval') throw new Error(mandatory.reason ?? 'this command requires review, which is disabled');
+        if (railway === 'prompt') throw new Error(`\`${params.command}\` rejected: ${RAILWAY_REVIEW_REASON}, and Guardian is disabled`);
         return run(false);
       }
 
@@ -154,9 +143,9 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
         ...(params.prefix_rule ? { prefixRule: params.prefix_rule } : {}),
       });
       if (requirement.type === 'forbidden') throw new Error(requirement.reason);
-      // A mandatory prompt rule still requires approval when ordinary rules or settings would skip it.
-      const effective = requirement.type === 'skip' && mandatory.type === 'needs_approval'
-        ? { ...mandatory, proposedExecpolicyAmendment: undefined }
+      // A Railway command that can reach data is reviewed even when rules or settings would skip it.
+      const effective = requirement.type === 'skip' && railway === 'prompt'
+        ? { type: 'needs_approval' as const, reason: RAILWAY_REVIEW_REASON, proposedExecpolicyAmendment: undefined }
         : requirement;
 
       const approvalContext = ctx as unknown as ApprovalContext;

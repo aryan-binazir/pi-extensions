@@ -9,12 +9,10 @@ import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import { type BashRuntime, createGuardianBashTool, isLikelySandboxDenied } from './bash.ts';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import { Policy, PolicyParser } from './rules.ts';
-import { loadPolicies } from './policies.ts';
 import { loadShell } from './shell.ts';
 
 const darwin = { skip: process.platform !== 'darwin' && 'Seatbelt is macOS-only' };
 const shell = await loadShell();
-const { policy: mandatory } = await loadPolicies([]);
 
 function setup(t: test.TestContext, options: { rules?: string; config?: Partial<GuardianConfig>; decisions?: ApprovalDecision[]; sandboxAvailable?: boolean; shellSettings?: { shellPath?: string; commandPrefix?: string } } = {}) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bash-cwd-')));
@@ -38,7 +36,6 @@ function setup(t: test.TestContext, options: { rules?: string; config?: Partial<
     policy: () => policy,
     shell,
     sandboxAvailable: options.sandboxAvailable ?? true,
-    mandatoryPolicy: () => mandatory,
     shellSettings: () => options.shellSettings ?? {},
     approvals: { request: async request => { requests.push(request); return decisions.shift() ?? { type: 'rejected', message: 'no scripted decision' }; } },
     persistAmendment: async prefix => { persisted.push(prefix); },
@@ -53,7 +50,7 @@ function setup(t: test.TestContext, options: { rules?: string; config?: Partial<
 const text = (result: { content: { type: string; text?: string }[] }) => result.content.map(part => part.text ?? '').join('');
 
 test('the tool exposes Codex approval parameters', () => {
-  const tool = createGuardianBashTool({ config: () => DEFAULT_GUARDIAN_CONFIG, policy: () => Policy.empty(), mandatoryPolicy: () => Policy.empty(), shellSettings: () => ({}), shell, sandboxAvailable: true,
+  const tool = createGuardianBashTool({ config: () => DEFAULT_GUARDIAN_CONFIG, policy: () => Policy.empty(), shellSettings: () => ({}), shell, sandboxAvailable: true,
     approvals: { request: async () => ({ type: 'approved' }) }, persistAmendment: async () => {} }, '/');
   const properties = (tool.parameters as { properties: Record<string, { enum?: string[]; anyOf?: { const: string }[] }> }).properties;
   assert.deepEqual(Object.keys(properties), ['command', 'timeout', 'sandbox_permissions', 'justification', 'prefix_rule']);
@@ -192,7 +189,14 @@ test('bundled Railway rules apply everywhere a literal command can hide, even wi
 test('Railway commands that reach databases need review', async t => {
   const { run, requests } = setup(t, { decisions: [{ type: 'rejected', message: 'denied' }] });
   await assert.rejects(run({ command: 'railway connect postgres' }), /denied/);
-  assert.match(requests[0].reason ?? '', /`bash -lc 'railway connect postgres'` requires approval: Railway commands that can reach databases are reviewed/);
+  assert.match(requests[0].reason ?? '', /Railway commands that can reach databases or storage are reviewed/);
+});
+
+test('a backgrounded command does not hold the sandboxed call open', darwin, async t => {
+  const { run } = setup(t);
+  const started = Date.now();
+  assert.equal(text(await run({ command: 'sleep 5 & echo started' })).trim(), 'started');
+  assert.ok(Date.now() - started < 2_000, `returned in ${Date.now() - started}ms`);
 });
 
 test('sandbox denial heuristic matches Codex keywords', () => {

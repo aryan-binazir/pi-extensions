@@ -7,8 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import {
   createEditToolDefinition, createWriteToolDefinition, type EditOperations, type ToolDefinition, type WriteOperations,
 } from '@earendil-works/pi-coding-agent';
-import { readFile, writeFile } from 'node:fs/promises';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import type { GuardianConfig } from './config.ts';
 import { truncateText } from './review/context.ts';

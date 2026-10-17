@@ -61,9 +61,20 @@ registry rather than a catalog entry.
   Pi's `claude-bridge` provider only serves prompts captured through Pi's own agent lifecycle, so it
   cannot answer a review; configuring it is an error that names `claude-cli`.
 - `.pi` joins Codex's protected metadata names, because Pi loads project extensions and settings from it.
-- Guardian's bundled rules are evaluated separately from user rules and bind even when Guardian is
-  disabled, matched against the literal commands Codex extracts for its `rm -f` check, so a hard deny
-  cannot be configured away or hidden inside a wrapper.
+- The Railway boundary lives in code (`railway.ts`), not in a `.rules` file, and is checked before rules,
+  settings and review, including when Guardian is disabled. A data file under a writable checkout could be
+  edited, deleted or left unparsed, and the boundary must not depend on that. It normalizes wrappers,
+  package runners, paths and flags, and refuses unparsable scripts that name Railway beside a destructive
+  verb, accepting false refusals at that edge. The bundled `.rules` file remains as defence in depth.
+- Approved prefix rules are only persisted when they cannot widen a boundary: Railway programs, package
+  runners, wrapper commands and Codex's banned suggestions never become standing allow rules.
+- Claude runs with `--restricted --setting-sources ''` from a temporary directory outside the reviewed
+  workspace, with `--add-dir <cwd>` for reads. Otherwise a `.claude/settings.json` written in the
+  workspace could make the reviewer run a helper command on the host.
+- The reviewer model is resolved per review, and a `~fast` alias falls back to its plain model, so a
+  session without Fast mode (a subagent child) still reviews instead of rejecting every approval.
+- Sandboxed commands resolve when the command exits, not when its streams close, so a backgrounded
+  process does not hold the tool call open.
 - Subagent children load Guardian alongside hooks and refuse to start without it, so a child inherits the
   parent's sandbox, rules and review.
 - Destructive Railway operations are forbidden by bundled rules and an absolute reviewer deny that

@@ -50,8 +50,6 @@ so a typo never widens permissions. Unknown settings are errors.
   "approvalsReviewer": "auto_review",
   "reviewer": { "provider": "openai-codex", "model": "gpt-6-luna~fast", "reasoning": "low" },
   "autoReview": {
-    "policyFile": "policy.md",
-    "extraPolicyFile": "extra-policy.md",
     "failureFallback": "user"
   },
   "sandbox": {
@@ -77,9 +75,11 @@ so a typo never widens permissions. Unknown settings are errors.
 | `sandbox.writableRoots` | `[sandbox_workspace_write] writable_roots` | Extra absolute paths the sandbox may write. |
 | `sandbox.excludeTmpdirEnvVar` / `excludeSlashTmp` | same names | Drop `$TMPDIR` or `/tmp` from the writable roots. |
 
-Policy text may be inline (`policy`, `extraPolicy`) or a file (`policyFile`, `extraPolicyFile`),
-not both. File paths are relative to the config directory, so a shared file can be symlinked
-there or referenced by absolute path.
+The block above shows the defaults; `policy` and `extraPolicy` are unset by default. Policy text may be
+inline (`policy`, `extraPolicy`) or a file (`policyFile`, `extraPolicyFile`), not both. File paths are
+relative to the config directory, so a shared file can be symlinked there or referenced by absolute path.
+A policy file is reread when `config.json` changes, not when the file itself changes; `/guardian reload`
+picks it up.
 
 ## Command rules
 
@@ -98,9 +98,11 @@ host_executable(name = "git", paths = ["/usr/bin/git", "/opt/homebrew/bin/git"])
 ```
 
 When you approve a command with "Yes, and don't ask again for commands that start with …",
-Guardian appends that prefix to `rules/default.rules`. If a rules file cannot be read or parsed, your
-rules are skipped with a warning and the bundled rules still apply, so an unreadable file never grants
-permission.
+Guardian appends that prefix to `rules/default.rules`, unless the prefix would widen a boundary: Railway
+programs, package runners such as `npx`, wrapper commands such as `env`, `xargs` and `find`, and Codex's
+banned suggestions are never persisted. If a rules file cannot be read or parsed, all of your rules are
+skipped with a warning — including any `forbidden` rules of your own — and Guardian's own rules still
+apply. Fix the file to get your rules back.
 
 Guardian parses the `prefix_rule`, `host_executable` and `network_rule` calls that Codex's own rules
 files use, with string and list literals. Codex evaluates these files as Starlark, so rules built from
@@ -109,27 +111,39 @@ variables or expressions are rejected here.
 ## Shared rules: Railway
 
 `personal-settings/guardian/rules/railway.rules` and `personal-settings/guardian/extra-policy.md`
-load on every machine and cannot be turned off from config. Destructive Railway CLI commands
-(`railway delete`, `down`, and volume, environment, service and database deletion or reset) are
-`forbidden`, so no rule, approval or sandbox setting runs them, and the ban still applies when
-Guardian is disabled or the sandbox is off. Rules match the command's basename, so an absolute path
-is covered, and they also match literal commands hidden in control flow, substitutions, `sudo`, `env`,
-`trap` and nested shells. Railway commands that can reach a database (`connect`, `run`, `variables`,
-and the volume, database, environment, service and project subcommands) are always reviewed, so the
-reviewer can judge the actual statement, client or script. The reviewer also gets an absolute deny on
-destructive Railway database and storage operations through any other route.
+The boundary itself lives in code, in `extensions/guardian/railway.ts`, because a rules file inside a
+writable checkout could be edited, deleted, or left unparsed. It is checked before rules, settings and
+review, and it still applies when Guardian is disabled or the sandbox is off.
 
-A reviewer prompt is not a hard boundary for routes with no Railway command in them, such as a
-database client reading credentials from the environment: those depend on the review. Never test any
-of this by running Railway commands; `extensions/guardian/railway.test.ts` evaluates the rules
-directly.
+A destructive Railway operation is refused outright. That covers the CLI by any name or path
+(`railway`, `/opt/homebrew/bin/railway`, `./railway`, `~/.railway/bin/railway`), flags before the
+subcommand (`railway --json delete`), package runners (`npx @railway/cli delete`, `bunx railway down`),
+wrappers (`command`, `exec`, `nohup`, `timeout`, `nice`, `xargs`, `sudo`, `env`, `eval`), and literal
+commands hidden in control flow, substitutions or nested shells. Destructive verbs include `delete`,
+`down`, `destroy`, `remove`, `rm`, `reset`, `wipe`, `prune`, `restore` and `drop`, against any target
+including volumes, buckets, databases, environments, services and projects.
+
+A script that cannot be parsed statically but names Railway next to a destructive verb is also refused,
+even if the mention is only text: for a boundary this absolute, a false refusal beats a miss. Other
+Railway commands that can reach data (`connect`, `run`, `variables`, `ssh`, and the volume, database,
+environment, service and project subcommands) are always reviewed. `railway status`, `logs` and
+`whoami` are untouched.
+
+`personal-settings/guardian/rules/railway.rules` keeps the same denials as `.rules` data for defence in
+depth, and the reviewer additionally gets an absolute deny on destructive Railway database and storage
+operations through any other route — falling back to built-in text if the bundled policy file is
+unreadable. A review is not a hard boundary for routes that never name Railway, such as a database
+client reading credentials from the environment; those depend on the reviewer's judgement.
+
+Never test any of this by running Railway commands. `extensions/guardian/railway.test.ts` evaluates the
+decision function and the bash tool directly.
 
 ## Load order
 
-Guardian loads after Fast mode in `package.json`, because the default reviewer `gpt-6-luna~fast` is a
-virtual model Fast mode registers. Loaded alone, that reviewer does not resolve: Guardian then fails the
-review closed and the message names the setting to change. Set a plain model id, such as
-`gpt-6-luna`, to run without Fast mode.
+The default reviewer `gpt-6-luna~fast` is a virtual model Fast mode registers. Guardian resolves the
+reviewer when a review starts, not at load, and falls back to the plain `gpt-6-luna` when the `~fast`
+alias is unavailable — so a session without Fast mode, such as a subagent child, still reviews. Guardian
+still sits after Fast mode in `package.json` so the alias resolves when both are present.
 
 ## Commands and status
 

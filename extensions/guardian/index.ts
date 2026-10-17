@@ -8,7 +8,7 @@ import { createGuardianBashTool, sandboxPolicyFor } from './bash.ts';
 import { FAIL_CLOSED_CONFIG, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
 import { createGuardianFileTools } from './files.ts';
 import { permissionsInstructions } from './permissions.ts';
-import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, userRulesDir } from './policies.ts';
+import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, persistableAmendment, userRulesDir } from './policies.ts';
 import { collectReviewEvidence, composeReviewRequest, MANUAL_APPROVAL_MESSAGE_TYPE, prepareTranscript } from './review/context.ts';
 import { CLAUDE_CLI_PROVIDER } from './config.ts';
 import { runClaudeCliReview } from './review/claude-cli.ts';
@@ -27,6 +27,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   let contextFiles: { path: string; content: string }[] = [];
   let turn = 0;
   let cached: { stamp: string; config: GuardianConfig; error?: string } | undefined;
+  let lastValid: GuardianConfig | undefined;
   let reportedError: string | undefined;
 
   /**
@@ -38,11 +39,13 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     let stamp = 'missing';
     try { const info = statSync(path); stamp = `${info.ino}:${info.mtimeMs}:${info.size}`; } catch { /* missing means defaults */ }
     if (cached?.stamp !== stamp) {
-      try { cached = { stamp, config: loadGuardianConfig(path) }; }
-      catch (error) {
+      try {
+        lastValid = loadGuardianConfig(path);
+        cached = { stamp, config: lastValid };
+      } catch (error) {
         const message = `Guardian config error: ${(error as Error).message}`;
-        cached = cached?.error === undefined && cached
-          ? { stamp, config: cached.config, error: `${message}; keeping the last valid settings` }
+        cached = lastValid
+          ? { stamp, config: lastValid, error: `${message}; keeping the last valid settings` }
           : { stamp, config: FAIL_CLOSED_CONFIG, error: `${message}; every reviewable action needs approval until it is fixed` };
       }
     }
@@ -94,8 +97,13 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     };
   };
   pi.registerTool(createGuardianBashTool({
-    config, policy: () => policies.policy, mandatoryPolicy: () => policies.mandatory, shellSettings, shell, sandboxAvailable, approvals,
-    persistAmendment: async prefix => { await appendAllowPrefixRule(defaultRulesPath(), prefix); await reloadPolicies(); },
+    config, policy: () => policies.policy, shellSettings, shell, sandboxAvailable, approvals,
+    persistAmendment: async prefix => {
+      const persistable = persistableAmendment(shell, prefix);
+      if (!persistable) return;
+      await appendAllowPrefixRule(defaultRulesPath(), persistable);
+      await reloadPolicies();
+    },
   }, process.cwd()));
   for (const tool of createGuardianFileTools({ config, sandboxAvailable, approvals }, process.cwd())) pi.registerTool(tool);
 
@@ -117,9 +125,10 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     if (!settings.enabled) return;
     const sandboxed = settings.sandbox.mode !== 'danger-full-access' && sandboxAvailable;
     event.systemPromptOptions.sections.permissions_instructions = permissionsInstructions({
+      // Without a platform sandbox nothing is confined, and every command needs approval instead.
       sandboxMode: sandboxed ? settings.sandbox.mode : 'danger-full-access',
+      approvalPolicy: sandboxed ? settings.approvalPolicy : 'unless-trusted',
       networkAccess: settings.sandbox.networkAccess ? 'enabled' : 'restricted',
-      approvalPolicy: settings.approvalPolicy,
       reviewer: settings.approvalsReviewer,
       approvedCommandPrefixes: policies.policy.allowedPrefixes(),
       writableRoots: sandboxed && settings.sandbox.mode === 'workspace-write' ? workspaceWriteRoots(sandboxPolicyFor(settings), ctx.cwd, process.env).map(root => root.root) : [],
@@ -132,7 +141,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     async handler(args, ctx) {
       const action = args.trim() || 'status';
       if (action === 'approve') {
-        const denied = approvals.lastDenied();
+        const denied = approvals.takeDenied();
         if (!denied) return ctx.ui.notify('No denied action to approve.', 'info');
         pi.sendMessage({ customType: MANUAL_APPROVAL_MESSAGE_TYPE, content: manualApprovalMessage(denied.actionJson), display: true }, { triggerTurn: true });
         return ctx.ui.notify(`Approved: ${denied.summary}`, 'info');
@@ -141,6 +150,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
         await reloadPolicies();
         cached = undefined;
         reportedError = undefined;
+        config();
         reportProblems(ctx);
       } else if (action !== 'status') {
         return ctx.ui.notify('Usage: /guardian [status|approve|reload]', 'warning');

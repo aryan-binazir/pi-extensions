@@ -314,8 +314,13 @@ is preauthorized. Non-overwriting sibling backups of the config being worked on
 are part of authorized setup, even outside the repository; potentially overwriting
 copies receive revision guidance rather than a prompt. Screenshot/media-only
 pushes to dedicated `pr-assets/...` branches on the existing repository remote are
-also covered, including `--no-verify` only for those asset pushes. Sensitive effects
-retain review. Feedback should fit the command: `git -C` for Git, absolute paths or
+also covered, including standing `--no-verify` permission for those asset pushes.
+For ordinary code, verification/hooks stay enabled unless the user explicitly
+permits skipping them for the current operation. An otherwise authorized code
+command with an unapproved bypass receives **revise** guidance to remove it and
+resubmit normally, not a human approval prompt. Explicit user instructions to
+verify override prior skip permission and the screenshot exception. Sensitive
+effects retain review. Feedback should fit the command: `git -C` for Git, absolute paths or
 read/search tools for file inspection.
 
 ### Upgrading from 0.16.2

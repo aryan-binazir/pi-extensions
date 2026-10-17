@@ -78,6 +78,8 @@ function renderRoleLines(role: 'user' | 'assistant', text: string): string {
   return text.split('\n').map(line => line ? `${role}: ${line}\n` : '\n').join('');
 }
 
+/** Hosts bound verified answers before Codex collects them; the newest are kept within this budget. */
+const MAX_VERIFIED_ANSWERS_TOKENS = 8_000;
 const INCOMPLETE_VERIFIED_ANSWERS = 'Host notice: some verified user answers are unavailable within the evidence budget. Do not treat the remaining answers as complete authorization for an action.\n';
 
 function renderVerifiedAnswer(questions: QuestionnaireQuestion[], answers: QuestionnaireAnswer[]): string | undefined {
@@ -175,7 +177,10 @@ export function collectReviewEvidence(entries: readonly SessionEntry[], limits: 
         break;
     }
   }
-  return { transcript, trustedUserAnswers: answersComplete ? answers : [INCOMPLETE_VERIFIED_ANSWERS, ...answers] };
+  let answerTokens = 0;
+  const kept = answers.reverse().filter(answer => (answerTokens += approxTokensFromBytes(byteLength(answer))) <= MAX_VERIFIED_ANSWERS_TOKENS).reverse();
+  if (kept.length < answers.length) answersComplete = false;
+  return { transcript, trustedUserAnswers: answersComplete ? kept : [INCOMPLETE_VERIFIED_ANSWERS, ...kept] };
 }
 
 const AUTHORS: Record<TranscriptEntryKind, string> = {

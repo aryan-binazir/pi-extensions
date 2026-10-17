@@ -18,8 +18,9 @@ Guardian replaces Pi's `bash` tool and gates `write` and `edit`.
    strictest decision wins: `forbidden`, then `prompt`, then `allow`.
 2. A `forbidden` match is rejected before anything runs. A `prompt` match needs approval.
 3. Unmatched commands run inside the sandbox without review, unless they force-remove files
-   (`rm -f`, including inside `sudo`, `env`, `trap` and nested shells), run a destructive database
-   statement (see [Shared rules: Railway](#shared-rules-railway)), or ask to leave the sandbox.
+   (`rm -f`, including inside `sudo`, `env`, `trap` and nested shells) or ask to leave the sandbox. A
+   destructive database operation whose target is not provably local is refused outright (see
+   [Shared rules: Railway](#shared-rules-railway)).
 4. The sandbox lets commands read anywhere and write only in the working directory, `/tmp`,
    `$TMPDIR` and configured roots. `.git`, `.agents`, `.codex`, `.pi` and `.aws` stay read-only, and
    network access is off. `sandbox-exec` on macOS, or `bwrap` on Linux, is the first process, so no
@@ -175,9 +176,17 @@ always reviewed. `railway status`, `logs` and `whoami` are untouched.
 
 A destructive statement run through a database client (`psql`, `mysql`, `mongosh`, `redis-cli` and
 others), such as `psql "$DATABASE_URL" -c 'DROP TABLE users'`, and database wipe tools (`dropdb`,
-`prisma migrate reset`, `rails db:drop`) are reviewed even inside the sandbox. Their target usually
-comes from credentials such as `$DATABASE_URL` that Guardian cannot see, so it may be a Railway
-database, and the reviewer's Railway deny decides. Reading and creating data are not affected.
+`prisma migrate reset`, `rails db:drop`) run only when Guardian can prove the target is local:
+`localhost`, `127.0.0.1`, `::1`, a Unix socket or a SQLite file. It looks for URIs, `-h`/`--host`/
+`--socket` options, `host=` connection strings and assignments such as `PGHOST=…` in the command, and
+resolves referenced variables such as `$DATABASE_URL`, and those a tool reads (`PGHOST`,
+`DATABASE_URL`), from Pi's environment. A client that finds its server by default (`psql` without a
+host, `redis-cli`, `sqlite3`) counts as local. Anything else is refused outright, like the Railway
+boundary, because it may be a Railway database: a remote or unknown host, a variable the script sets
+or Pi's environment lacks, a command substitution, a remote shell such as `ssh` or `kubectl`, `mysql`
+without a host (its option files can name one), and Prisma or Rails without a local `DATABASE_URL`,
+since their `.env` and `database.yml` are not read. Name a local host explicitly, or run such commands
+yourself outside Pi. Reading and creating data are not affected.
 
 `personal-settings/guardian/rules/railway.rules` keeps the same denials as `.rules` data for defence in
 depth, and the reviewer additionally gets an absolute deny on destructive Railway database and storage

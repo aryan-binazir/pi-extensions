@@ -3,15 +3,17 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 import { availableModel, assertTaskFields, resolveProfile, type ProfileConfig } from './profiles.ts';
 import { ALL_TOOLS, READ_TOOLS, type ConnectorGrants, type TaskSpec, type ValidTask } from './task.ts';
-import { realpathSync } from 'node:fs';
-import { GUARDIAN_EXTENSION, prepareTask } from './registry.ts';
+import { prepareTask } from './registry.ts';
 import { CONNECTOR_FRAME_LIMIT, type ConnectorBridge } from './connector-bridge.ts';
 
-/** `guardian` is whether the parent runs Guardian; undefined when Pi cannot say, and children then load it. */
-interface DelegationScope { cwd: string; tools: string[]; delegatedTools?: ConnectorGrants; registeredTools?: string[]; callableTools?: string[]; builtinTools?: string[]; guardian?: boolean }
+/**
+ * `guardian` is the Guardian extension the parent runs, from whichever checkout, or null when it runs none;
+ * undefined when Pi cannot say, and children then load this checkout's Guardian.
+ */
+interface DelegationScope { cwd: string; tools: string[]; delegatedTools?: ConnectorGrants; registeredTools?: string[]; callableTools?: string[]; builtinTools?: string[]; guardian?: string | null }
 
-const canonical = (path: string) => { try { return realpathSync(path); } catch { return path; } };
 const GUARDIAN_TOOLS = ['bash', 'write', 'edit'];
+const GUARDIAN_SOURCE = /(^|[/\\])guardian[/\\]index\.ts$/;
 
 export function insideRoot(canonicalRoot: string, canonicalPath: string): boolean {
   const rel = relative(canonicalRoot, canonicalPath);
@@ -138,9 +140,8 @@ export class DelegationAdmission {
       registeredTools: registered?.map(tool => tool.name),
       callableTools: registered?.filter(tool => ['direct', 'deferred', 'codemode', 'codemode-deferred'].includes(tool.exposure ?? 'direct')).map(tool => tool.name),
       builtinTools: registered?.filter(tool => tool.sourceInfo?.path.startsWith('builtin:') && tool.sourceInfo.path !== 'builtin:mcp').map(tool => tool.name),
-      // Guardian replaces bash, write and edit, so its registrations show whether the parent runs it.
-      guardian: registered && registered.some(tool => GUARDIAN_TOOLS.includes(tool.name) && !!tool.sourceInfo?.path
-        && canonical(tool.sourceInfo.path) === canonical(GUARDIAN_EXTENSION)),
+      // Guardian replaces bash, write and edit, so its registrations show whether, and from where, the parent runs it.
+      guardian: registered && (registered.find(tool => GUARDIAN_TOOLS.includes(tool.name) && GUARDIAN_SOURCE.test(tool.sourceInfo?.path ?? ''))?.sourceInfo.path ?? null),
     };
   }
   private normalize(raw: Omit<TaskSpec, 'cwd'> & {cwd?: string}, ctx: ExtensionContext, config = this.source.config(ctx)): TaskSpec {
@@ -187,7 +188,7 @@ export class DelegationAdmission {
       spec = this.normalize(spec, ctx);
     }
     const scope = delegationScope(this.parent());
-    const task = await validateTask(spec, scope.tools, scope.readTools, undefined, this.parent().guardian === false ? null : undefined);
+    const task = await validateTask(spec, scope.tools, scope.readTools, undefined, this.parent().guardian);
     bridge = validateBridge(task, bridge);
     signal.throwIfAborted();
     const ctx = this.source.selection();
@@ -222,7 +223,7 @@ export class DelegationAdmission {
         if (Array.isArray(task.tools) && task.tools.every(name => typeof name === 'string')) assertToolSelection(task.tools, this.parent());
         task = resolveProfile(task, config, selection);
         const scope = delegationScope(this.parent());
-        const validated = await validateTask(task, scope.tools, scope.readTools, undefined, this.parent().guardian === false ? null : undefined);
+        const validated = await validateTask(task, scope.tools, scope.readTools, undefined, this.parent().guardian);
         if (!insideRoot(root, validated.cwd)) throw new Error('Child cwd escapes workflow cwd');
         return validated;
       },

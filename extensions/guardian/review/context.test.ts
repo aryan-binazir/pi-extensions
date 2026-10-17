@@ -124,6 +124,18 @@ test('questionnaire answers become verified answers ordered by their transcript 
   ]);
 });
 
+test('many verified answers keep the newest within the evidence budget, with a host notice', () => {
+  const entries = Array.from({ length: 400 }, (_, index) => [
+    assistant([{ type: 'toolCall', id: `q${index}`, name: 'questionnaire', arguments: { questions: [{ id: 'go', prompt: `Step ${index}: ${'detail '.repeat(80)}`, options: [] }] } }]),
+    toolResult(`q${index}`, 'questionnaire', '{}', { cancelled: false, answers: [{ id: 'go', value: 'yes', label: 'yes', wasCustom: true }] }),
+  ]).flat();
+  const { trustedUserAnswers } = collectReviewEvidence(entries as never);
+  const tokens = trustedUserAnswers.reduce((sum, answer) => sum + Math.ceil(Buffer.byteLength(answer) / 4), 0);
+  assert.ok(tokens <= 8_000 + 64, `${tokens} answer tokens retained`);
+  assert.match(trustedUserAnswers[0], /^Host notice: some verified user answers are unavailable/);
+  assert.match(trustedUserAnswers.at(-1)!, /Step 399:/, 'the newest answer is kept');
+});
+
 test('oversized verified answers are omitted atomically with a host notice', () => {
   const { trustedUserAnswers } = collectReviewEvidence([
     assistant([{ type: 'toolCall', id: 'q1', name: 'questionnaire', arguments: { questions: [{ id: 'big', prompt: 'p'.repeat(4_000), options: [] }] } }]),

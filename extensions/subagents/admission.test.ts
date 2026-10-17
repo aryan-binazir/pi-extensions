@@ -147,6 +147,10 @@ test('children load Guardian exactly when the parent runs it', async () => {
     assert.equal((await admit(() => [tool('read', 'builtin:read'), tool('bash', 'builtin:bash')])).guardian, undefined, 'a parent without Guardian keeps children without it');
     assert.equal((await admit(() => [tool('read', 'builtin:read'), tool('bash', guardianPath)])).guardian, await realpath(guardianPath));
     assert.equal((await admit()).guardian, await realpath(guardianPath), 'when Pi cannot say, children load Guardian');
+    const elsewhere = join(cwd, 'other-checkout', 'extensions', 'guardian', 'index.ts');
+    await mkdir(join(cwd, 'other-checkout', 'extensions', 'guardian'), {recursive: true});
+    await writeFile(elsewhere, 'export default () => {};');
+    assert.equal((await admit(() => [tool('bash', elsewhere)])).guardian, await realpath(elsewhere), 'children load the Guardian the parent runs, from its own checkout');
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 

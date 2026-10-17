@@ -77,7 +77,7 @@ const CAP = 64 * 1024;
 const RETAINED = 50;
 const ACTIVE_STATUS = new Set<TaskResult['status']>(['queued', 'running']);
 const HOOKS_EXTENSION = fileURLToPath(new URL('../hooks/index.ts', import.meta.url));
-export const GUARDIAN_EXTENSION = fileURLToPath(new URL('../guardian/index.ts', import.meta.url));
+const GUARDIAN_EXTENSION = fileURLToPath(new URL('../guardian/index.ts', import.meta.url));
 const FAST_ALIAS = new RegExp(`^(openai(?:-codex)?\\/.+)~fast(?=:${thinkingPattern}$|$)`);
 function withoutFastAlias(model: string): string {
   return model.replace(FAST_ALIAS, '$1');

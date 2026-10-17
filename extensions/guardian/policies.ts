@@ -24,8 +24,10 @@ export const defaultRulesPath = () => join(userRulesDir(), 'default.rules');
 export interface LoadedPolicies {
   /** Bundled rules plus your rules, when yours load. */
   policy: Policy;
-  /** Set when your rules could not be loaded; the bundled rules still apply. */
+  /** Set when your rules or the bundled rules could not be loaded. */
   warning?: string;
+  /** Your rules failed to load, so `policy` lacks them; a bundled-rules warning alone leaves this unset. */
+  userRulesFailed?: boolean;
 }
 
 export async function loadPolicies(userRulesDirs: readonly string[], bundledRulesDir = BUNDLED_RULES_DIR): Promise<LoadedPolicies> {
@@ -39,14 +41,14 @@ export async function loadPolicies(userRulesDirs: readonly string[], bundledRule
     try {
       return { policy: await loadExecPolicy([...userRulesDirs]), warning };
     } catch (userError) {
-      return { policy: Policy.empty(), warning: `${warning}; your rules files did not load either: ${(userError as Error).message}` };
+      return { policy: Policy.empty(), warning: `${warning}; your rules files did not load either: ${(userError as Error).message}`, userRulesFailed: true };
     }
   }
   if (!userRulesDirs.length) return { policy: bundled };
   try {
     return { policy: await loadExecPolicy([bundledRulesDir, ...userRulesDirs]) };
   } catch (error) {
-    return { policy: bundled, warning: `Guardian could not load your rules files, so only its bundled rules apply: ${(error as Error).message}` };
+    return { policy: bundled, warning: `Guardian could not load your rules files, so only its bundled rules apply: ${(error as Error).message}`, userRulesFailed: true };
   }
 }
 
@@ -56,7 +58,8 @@ export async function loadPolicies(userRulesDirs: readonly string[], bundledRule
  * rules apply alone.
  */
 export function retainPolicies(previous: LoadedPolicies | undefined, next: LoadedPolicies): LoadedPolicies {
-  if (!next.warning || !previous) return next;
+  // Keep the previous policy only when it holds your rules and the new load lost them.
+  if (!next.userRulesFailed || !previous || previous.userRulesFailed) return next;
   // `previous` may itself be retained from an earlier failure; its policy is still the last one that loaded.
   return { ...previous, warning: `${next.warning}; keeping the rules that last loaded` };
 }

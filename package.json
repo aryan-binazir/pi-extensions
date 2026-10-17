@@ -30,6 +30,7 @@
       "./extensions/computer-use/index.ts",
       "./extensions/fast-mode/index.ts",
       "./extensions/auto-caffeinate/index.ts",
+      "./extensions/guardian/index.ts",
       "./extensions/auto-permissions-status/index.ts",
       "./extensions/nvim-ide/index.ts"
     ]
@@ -62,7 +63,9 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "tree-sitter-bash": "0.25.1",
     "typescript": "~5.9.3",
+    "web-tree-sitter": "0.25.10",
     "ws": "^8.21.3"
   }
 }

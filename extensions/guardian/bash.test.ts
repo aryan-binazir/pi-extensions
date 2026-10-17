@@ -1,0 +1,203 @@
+// Orchestration ported from openai/codex codex-rs/core/src/tools/{orchestrator,sandboxing}.rs and
+// codex-rs/sandboxing/src/denial.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md.
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
+import { type BashRuntime, createGuardianBashTool, isLikelySandboxDenied } from './bash.ts';
+import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
+import { Policy, PolicyParser } from './rules.ts';
+import { loadPolicies } from './policies.ts';
+import { loadShell } from './shell.ts';
+
+const darwin = { skip: process.platform !== 'darwin' && 'Seatbelt is macOS-only' };
+const shell = await loadShell();
+const { policy: mandatory } = await loadPolicies([]);
+
+function setup(t: test.TestContext, options: { rules?: string; config?: Partial<GuardianConfig>; decisions?: ApprovalDecision[]; sandboxAvailable?: boolean; shellSettings?: { shellPath?: string; commandPrefix?: string } } = {}) {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bash-cwd-')));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bash-outside-')));
+  t.after(() => { rmSync(cwd, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
+  let policy = Policy.empty();
+  if (options.rules) {
+    const parser = new PolicyParser();
+    parser.parse('test.rules', options.rules);
+    policy = parser.build();
+  }
+  const requests: ApprovalRequest[] = [], persisted: string[][] = [];
+  const decisions = [...(options.decisions ?? [])];
+  const config: GuardianConfig = {
+    ...DEFAULT_GUARDIAN_CONFIG, ...options.config,
+    // Keep the scratch directory outside the sandbox's writable roots.
+    sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, excludeSlashTmp: true, excludeTmpdirEnvVar: true, ...options.config?.sandbox },
+  };
+  const runtime: BashRuntime = {
+    config: () => config,
+    policy: () => policy,
+    shell,
+    sandboxAvailable: options.sandboxAvailable ?? true,
+    mandatoryPolicy: () => mandatory,
+    shellSettings: () => options.shellSettings ?? {},
+    approvals: { request: async request => { requests.push(request); return decisions.shift() ?? { type: 'rejected', message: 'no scripted decision' }; } },
+    persistAmendment: async prefix => { persisted.push(prefix); },
+  };
+  const tool = createGuardianBashTool(runtime, cwd);
+  const ctx = { cwd, hasUI: true, abort: () => {}, ui: { notify: () => {}, select: async () => undefined },
+    sessionManager: { getSessionId: () => 's', getSessionFile: () => undefined } };
+  const run = (params: Record<string, unknown>) => tool.execute('call-1', params as never, undefined, undefined, ctx as never);
+  return { cwd, outside, run, requests, persisted };
+}
+
+const text = (result: { content: { type: string; text?: string }[] }) => result.content.map(part => part.text ?? '').join('');
+
+test('the tool exposes Codex approval parameters', () => {
+  const tool = createGuardianBashTool({ config: () => DEFAULT_GUARDIAN_CONFIG, policy: () => Policy.empty(), mandatoryPolicy: () => Policy.empty(), shellSettings: () => ({}), shell, sandboxAvailable: true,
+    approvals: { request: async () => ({ type: 'approved' }) }, persistAmendment: async () => {} }, '/');
+  const properties = (tool.parameters as { properties: Record<string, { enum?: string[]; anyOf?: { const: string }[] }> }).properties;
+  assert.deepEqual(Object.keys(properties), ['command', 'timeout', 'sandbox_permissions', 'justification', 'prefix_rule']);
+  assert.equal(tool.name, 'bash');
+});
+
+test('in-workspace commands run sandboxed without review', darwin, async t => {
+  const { cwd, outside, run, requests } = setup(t);
+  assert.equal(text(await run({ command: 'echo ok > inside.txt && cat inside.txt && echo $CODEX_SANDBOX' })), 'ok\nseatbelt\n');
+  const denied = await run({ command: `echo no > ${outside}/file.txt` });
+  assert.equal(denied.isError, true);
+  assert.match(text(denied), /Operation not permitted/);
+  assert.ok(existsSync(join(cwd, 'inside.txt')) && !existsSync(join(outside, 'file.txt')));
+  assert.deepEqual(requests, []);
+});
+
+test('forbidden rules reject before review or execution', async t => {
+  const { cwd, run, requests } = setup(t, { rules: 'prefix_rule(pattern=["touch"], decision="forbidden", justification="use the write tool")' });
+  await assert.rejects(run({ command: 'touch marker', sandbox_permissions: 'require_escalated' }), /`bash -lc 'touch marker'` rejected: use the write tool/);
+  assert.ok(!existsSync(join(cwd, 'marker')));
+  assert.deepEqual(requests, []);
+});
+
+test('escalation requests are reviewed with the action JSON and run unsandboxed when approved', darwin, async t => {
+  const { outside, run, requests } = setup(t, { decisions: [{ type: 'approved' }] });
+  const target = join(outside, 'escalated.txt');
+  await run({ command: `echo yes > ${target}`, sandbox_permissions: 'require_escalated', justification: 'Write the shared cache?', prefix_rule: ['tee'] });
+  assert.equal(readFileSync(target, 'utf8'), 'yes\n');
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].action, {
+    tool: 'bash', command: ['bash', '-lc', `echo yes > ${target}`], cwd: requests[0].action.cwd, sandbox_permissions: 'require_escalated',
+    justification: 'Write the shared cache?', environment_id: 'local',
+  });
+  assert.equal(requests[0].justification, 'Write the shared cache?');
+});
+
+test('rejected escalations return the rejection to the agent without running', async t => {
+  const { outside, run } = setup(t, { decisions: [{ type: 'rejected', message: 'This action was rejected due to unacceptable risk.' }] });
+  await assert.rejects(run({ command: `touch ${outside}/x`, sandbox_permissions: 'require_escalated' }), /unacceptable risk/);
+  assert.ok(!existsSync(join(outside, 'x')));
+});
+
+test('explicit allow rules bypass the sandbox for every segment', darwin, async t => {
+  const { outside, run, requests } = setup(t, { rules: 'prefix_rule(pattern=["touch"], decision="allow")' });
+  await run({ command: `touch ${outside}/allowed` });
+  assert.ok(existsSync(join(outside, 'allowed')));
+  assert.deepEqual(requests, []);
+});
+
+test('forced rm needs approval even inside the sandbox', async t => {
+  const { run, requests } = setup(t, { decisions: [{ type: 'rejected', message: 'no' }] });
+  await assert.rejects(run({ command: 'rm -rf build' }), /no/);
+  assert.equal(requests[0].action.sandbox_permissions, 'use_default');
+  assert.deepEqual(requests[0].amendment, ['rm', '-rf', 'build']);
+});
+
+test('approved prefix rules are persisted', darwin, async t => {
+  const { run, persisted } = setup(t, { decisions: [{ type: 'approved', persist: ['cargo', 'install'] }] });
+  await run({ command: 'true', sandbox_permissions: 'require_escalated', prefix_rule: ['cargo', 'install'] });
+  assert.deepEqual(persisted, [['cargo', 'install']]);
+});
+
+test('unless-trusted retries a sandbox denial outside the sandbox after approval', darwin, async t => {
+  const { outside, run, requests } = setup(t, { config: { approvalPolicy: 'unless-trusted' }, decisions: [{ type: 'approved' }, { type: 'approved' }] });
+  const target = join(outside, 'retried.txt');
+  await run({ command: `echo retried > ${target}` });
+  assert.equal(readFileSync(target, 'utf8'), 'retried\n');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].reason, 'command failed; retry without sandbox?');
+  assert.equal(requests[1].action.sandbox_permissions, 'require_escalated');
+});
+
+test('on-request returns sandbox denials to the agent without retrying', darwin, async t => {
+  const { outside, run, requests } = setup(t);
+  const result = await run({ command: `echo x > ${outside}/no.txt` });
+  assert.equal(result.isError, true);
+  assert.deepEqual(requests, []);
+});
+
+test('without a platform sandbox every command needs approval', async t => {
+  const { run, requests } = setup(t, { sandboxAvailable: false, decisions: [{ type: 'approved' }] });
+  assert.equal(text(await run({ command: 'echo unsandboxed' })), 'unsandboxed\n');
+  assert.equal(requests[0].action.sandbox_permissions, 'require_escalated');
+});
+
+test('disabled Guardian runs commands as plain Pi bash', async t => {
+  const { outside, run, requests } = setup(t, { config: { enabled: false } });
+  await run({ command: `touch ${outside}/plain` });
+  assert.ok(existsSync(join(outside, 'plain')));
+  assert.deepEqual(requests, []);
+});
+
+test('null optional arguments from strict tool schemas mean unset', darwin, async t => {
+  const { run, requests } = setup(t);
+  assert.equal(text(await run({ command: 'echo ok', timeout: null, sandbox_permissions: null, justification: null, prefix_rule: null })), 'ok\n');
+  assert.deepEqual(requests, []);
+});
+
+test('commands that cannot be quoted for the sandbox fail instead of running', darwin, async t => {
+  const { run } = setup(t);
+  await assert.rejects(run({ command: 'echo a\u0000b' }), /cannot be run in the sandbox: it contains a NUL byte/);
+});
+
+test('the sandbox starts directly, so no unsandboxed shell sources BASH_ENV first', darwin, async t => {
+  const { cwd, outside, run } = setup(t);
+  const marker = join(outside, 'pwned');
+  writeFileSync(join(cwd, 'startup.sh'), `echo pwned > ${marker} 2>/dev/null\n`);
+  const previous = process.env.BASH_ENV;
+  process.env.BASH_ENV = join(cwd, 'startup.sh');
+  t.after(() => { if (previous === undefined) delete process.env.BASH_ENV; else process.env.BASH_ENV = previous; });
+  const output = text(await run({ command: 'echo harmless' }));
+  assert.ok(output.includes('harmless'), output);
+  assert.ok(!existsSync(marker), 'the startup file ran only inside the sandbox, where its write was denied');
+  assert.match(output, /startup\.sh[\s\S]*Operation not permitted/);
+});
+
+test('sandboxed commands honor timeouts and Pi shell settings', darwin, async t => {
+  const { run } = setup(t, { shellSettings: { commandPrefix: 'export GREETING=prefixed' } });
+  assert.equal(text(await run({ command: 'echo $GREETING' })), 'prefixed\n');
+  await assert.rejects(run({ command: 'sleep 5', timeout: 1 }), /timed out after 1 seconds/);
+  const disabled = setup(t, { config: { enabled: false }, shellSettings: { commandPrefix: 'export GREETING=plain' } });
+  assert.equal(text(await disabled.run({ command: 'echo $GREETING' })), 'plain\n');
+});
+
+test('bundled Railway rules apply everywhere a literal command can hide, even with Guardian off', async t => {
+  for (const config of [{}, { enabled: false }, { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'danger-full-access' as const } }]) {
+    const { run, requests } = setup(t, { config, rules: 'prefix_rule(pattern=["/opt/homebrew/bin/railway"], decision="allow")\nprefix_rule(pattern=["railway"], decision="allow")' });
+    for (const command of ['railway delete', '/opt/homebrew/bin/railway volume delete pg', 'if true; then railway down; fi', 'echo "$(railway env rm prod)"',
+      "bash -c 'railway delete'", 'sudo railway volume rm pg', 'env RAILWAY_TOKEN=x railway delete', 'cd app > /dev/null && railway delete 2>&1']) {
+      await assert.rejects(run({ command }), /destructive Railway operations are permanently blocked/, `${JSON.stringify(config)} ${command}`);
+    }
+    assert.deepEqual(requests, []);
+  }
+});
+
+test('Railway commands that reach databases need review', async t => {
+  const { run, requests } = setup(t, { decisions: [{ type: 'rejected', message: 'denied' }] });
+  await assert.rejects(run({ command: 'railway connect postgres' }), /denied/);
+  assert.match(requests[0].reason ?? '', /`bash -lc 'railway connect postgres'` requires approval: Railway commands that can reach databases are reviewed/);
+});
+
+test('sandbox denial heuristic matches Codex keywords', () => {
+  assert.ok(isLikelySandboxDenied(1, 'bash: /x: Operation not permitted'));
+  assert.ok(isLikelySandboxDenied(2, 'touch: /x: Read-only file system'));
+  assert.ok(!isLikelySandboxDenied(0, 'Operation not permitted'));
+  assert.ok(!isLikelySandboxDenied(1, 'tests failed'));
+});

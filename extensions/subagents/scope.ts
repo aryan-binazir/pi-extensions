@@ -72,7 +72,7 @@ export async function assertWorkflowRead(parent: DelegationScope, path: string):
   await assertWorkspacePath(parent.cwd, path);
 }
 
-export function validateTask(spec: TaskSpec, allowedTools?: string[], readTools = READ_TOOLS, hooksExtension?: string): Promise<ValidTask> {
+export function validateTask(spec: TaskSpec, allowedTools?: string[], readTools = READ_TOOLS, hooksExtension?: string, guardianExtension?: string): Promise<ValidTask> {
   return prepareTask(spec, spec => {
     const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS).filter(tool => !allowedTools || allowedTools.includes(tool));
     if (!Array.isArray(tools) || tools.some(tool => typeof tool !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(tool)) || new Set(tools).size !== tools.length) throw new Error('Invalid child tool selection; use unique exact tool names');
@@ -82,7 +82,7 @@ export function validateTask(spec: TaskSpec, allowedTools?: string[], readTools 
     if (denied?.length) throw new Error(`Explicit child tools exceed parent permissions: ${denied.join(', ')}`);
     assertReaderSelection(spec.preset, tools, readTools);
     return tools;
-  }, hooksExtension);
+  }, hooksExtension, guardianExtension);
 }
 
 function assertReaderSelection(preset: TaskSpec['preset'], tools: string[], readTools: string[]): void {

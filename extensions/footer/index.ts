@@ -1,7 +1,7 @@
 import { readlinkSync, realpathSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { isBashToolResult, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { findConfigLoader, statusText, type ConfigLoader, type PermissionConfig } from './adapter.ts';
+import { findConfigLoader, type ConfigLoader } from './adapter.ts';
 
 import { permissionFooter, STATUS_KEY as KEY } from './footer.ts';
 import { pullRequests, type PullRequests, changesPullRequest } from './pull-request.ts';
@@ -10,7 +10,7 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined, changeTimer: ReturnType<typeof setTimeout> | undefined;
   let loader: ConfigLoader | undefined;
-  let config: PermissionConfig | undefined, stamp: string | undefined;
+  let config: unknown, stamp: string | undefined;
   const watchers = new Map<string, { watcher: FSWatcher; inode: number }>();
   let unavailable = 'Auto: unavailable';
   let previous: string | undefined;
@@ -21,7 +21,7 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   const refresh = () => {
     if (!context?.hasUI) return;
     let text = unavailable;
-    if (config) text = statusText(config, context.model);
+    if (config !== undefined && loader) text = loader.status(config, context.model);
     if (text !== previous) {
       context.ui.setStatus(KEY, text);
       previous = text;

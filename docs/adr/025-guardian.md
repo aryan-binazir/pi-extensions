@@ -107,11 +107,12 @@ registry rather than a catalog entry.
 - A Guardian that cannot start (unreadable bundled files, a parser that fails to load) still replaces `bash`,
   `write` and `edit` with tools that refuse, so Pi never falls back to its unguarded tools. A broken bundled
   rules file only drops those rules; the Railway boundary in code still applies.
-- A destructive statement through a database client (`psql`, `mysql`, `mongosh`, `redis-cli` and others) or a
-  database wipe tool (`dropdb`, `prisma migrate reset`, `rails db:drop`) is refused outright unless its target
-  is provably local (`database.ts`), checked with the Railway boundary before rules and review. Its target
-  usually comes from credentials Guardian cannot see, so it may be a Railway database; Ar chose refusal over
-  review, accepting that local resets configured only in `.env` or `database.yml` must run outside Pi.
+- A database command whose target is not provably local (`database.ts`) runs only when all of its SQL is
+  visible and none of it is destructive; otherwise it is refused outright, checked with the Railway boundary
+  before rules and review. Its target usually comes from credentials Guardian cannot see, so it may be a
+  Railway database. Ar chose refusal over review, accepting that local resets configured only in `.env` or
+  `database.yml`, or run through `docker exec`, must run outside Pi. Each client's options are read the way
+  the client reads them, and anything Guardian cannot follow counts as unproven.
 
 ## Verification
 

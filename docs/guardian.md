@@ -174,21 +174,25 @@ Railway. Other Railway commands that can reach data (`connect`, `run`, `variable
 database, environment, service and project subcommands, and any command calling a Railway data host) are
 always reviewed. `railway status`, `logs` and `whoami` are untouched.
 
-A destructive statement run through a database client (`psql`, `mysql`, `mongosh`, `redis-cli` and
-others), such as `psql "$DATABASE_URL" -c 'DROP TABLE users'`, and database wipe tools (`dropdb`,
-`prisma migrate reset`, `rails db:drop`) run only when Guardian can prove the target is local:
-`localhost`, `127.0.0.1`, `::1`, a Unix socket or a SQLite file. It looks for URIs, `-h`/`--host`/
-`--socket` options, `host=` connection strings and assignments such as `PGHOST=…` in the command, and
-resolves referenced variables such as `$DATABASE_URL`, and those a tool reads (`PGHOST`,
-`DATABASE_URL`), from Pi's environment, expanding them only where the shell would. Every host of a
-multi-host URI or host list must be local, since a client tries the next one when the first fails, and
-a libpq `service=` is refused because its host lives in a file Guardian does not read. A client that finds its server by default (`psql` without a
-host, `redis-cli`, `sqlite3`) counts as local. Anything else is refused outright, like the Railway
-boundary, because it may be a Railway database: a remote or unknown host, a variable the script sets
-or Pi's environment lacks, a command substitution, a remote shell such as `ssh` or `kubectl`, `mysql`
-without a host (its option files can name one), and Prisma or Rails without a local `DATABASE_URL`,
-since their `.env` and `database.yml` are not read. Name a local host explicitly, or run such commands
-yourself outside Pi. Reading and creating data are not affected.
+A database command (`psql`, `mysql`, `mongosh`, `redis-cli`, `pg_restore` and other clients, and the
+wipe tools `dropdb`, `prisma migrate reset` and `rails db:drop`) whose target Guardian cannot prove local
+runs only when all of its SQL is visible and none of it is destructive. Otherwise it is refused outright,
+like the Railway boundary, because the target may be a Railway database: `psql "$DATABASE_URL" -c 'DROP
+TABLE users'` against a remote or unknown database is refused, and so is SQL Guardian cannot see, from
+`-f`, standard input or `\i`, since it could be destructive. Local targets are `localhost`, `127.0.0.1`,
+`::1`, a Unix socket and a SQLite file.
+
+Guardian reads each client's options the way the client does: hosts, sockets and connection strings,
+including every host of a multi-host URI or list after libpq's percent-decoding, with `service=` refused
+because its host lives in a file it does not read. It resolves variables such as `$DATABASE_URL`, and
+those a tool reads (`PGHOST`, `DATABASE_URL`), from Pi's environment, including inside nested shells. A
+client that finds its server by default (`psql` without a host, `redis-cli`, `sqlite3`) counts as local.
+It cannot prove a target local when a variable is set by the script, missing from Pi's environment or
+would parse differently once substituted, when a command substitution is involved, when the client runs
+through `ssh`, `kubectl`, `docker exec` or another remote or container prefix, or when `xargs`, `find
+-exec` or `eval` supply its arguments. `mysql` needs an explicit host, since its option files can name
+one; Prisma and Rails need a local `DATABASE_URL`, since their `.env` and `database.yml` are not read.
+Name a local host explicitly, or run such commands yourself outside Pi.
 
 `personal-settings/guardian/rules/railway.rules` keeps the same denials as `.rules` data for defence in
 depth, and the reviewer additionally gets an absolute deny on destructive Railway database and storage

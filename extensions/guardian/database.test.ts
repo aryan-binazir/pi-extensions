@@ -75,9 +75,9 @@ test('every host of a target counts, however libpq would read it', () => {
   assert.deepEqual(connectionTargets('app_dev').hosts, []);
 });
 
-test('a nested shell expands what the outer one quoted', () => {
+test('a client does not share a script with a nested shell, which Guardian does not follow', () => {
   assert.equal(decide(`bash -c 'psql "$DATABASE_URL" -c "DROP TABLE customers"'`, REMOTE), 'forbidden');
-  assert.equal(decide(`bash -c 'psql "$DATABASE_URL" -c "DROP TABLE customers"'`, LOCAL), undefined);
+  assert.equal(decide(`bash -c 'psql "$DATABASE_URL" -c "select 1"'`, LOCAL), 'forbidden');
   assert.equal(decide(`sh -c "bash -c 'psql -h db.example.com -c \\"DROP TABLE t\\"'"`), 'forbidden', 'a client the parser cannot place is refused');
 });
 
@@ -205,12 +205,13 @@ test('wrapper options are read exactly, and unknown ones refuse when a client is
     "nice --frobnicate psql -h localhost -c 'select 1'",
     "flock /tmp/lock psql -h db.example.com -c 'DROP TABLE x'",
     "doppler run -- psql -c 'DROP TABLE x'",
+    "doppler run -- psql -c 'select 1'",
     "mywrapper psql -h db.example.com -c 'DROP TABLE x'",
   ]) {
     assert.equal(decide(script), 'forbidden', script);
   }
   for (const script of ["timeout --signal=TERM 5 psql -h localhost -c 'DROP TABLE t'", "env -i PATH=/usr/bin psql -h localhost -c 'DROP TABLE t'",
-    "command -v psql", "nice -n 10 psql -h localhost -c 'DROP TABLE t'", "doppler run -- psql -c 'select 1'", 'git log | grep psql']) {
+    "command -v psql", "nice -n 10 psql -h localhost -c 'DROP TABLE t'", 'git log | grep psql']) {
     assert.equal(decide(script), undefined, script);
   }
 });
@@ -242,14 +243,15 @@ test('commands that change what later commands see make later clients unproven',
   ]) {
     assert.equal(decide(script, LOCAL), 'forbidden', script);
   }
-  for (const script of ['set -euo pipefail; psql -h localhost -c "DROP TABLE t"', `source .env && psql "$DATABASE_URL" -c 'select 1'`, 'echo psql | grep p']) {
+  assert.equal(decide(`source .env && psql "$DATABASE_URL" -c 'select 1'`, LOCAL), 'forbidden');
+  for (const script of ['set -euo pipefail; psql -h localhost -c "DROP TABLE t"', 'echo psql | grep p']) {
     assert.equal(decide(script, LOCAL), undefined, script);
   }
 });
 
-test('positional parameters of a nested shell are its trailing arguments', () => {
+test('positional parameters cannot carry a target in through a nested shell', () => {
   assert.equal(decide(`sh -c 'psql "$1" -c "DROP TABLE t"' sh postgres://db.example.com/app`), 'forbidden');
-  assert.equal(decide(`sh -c 'psql "$1" -c "DROP TABLE t"' sh postgres://localhost/app`), undefined);
+  assert.equal(decide(`sh -c 'psql "$1" -c "DROP TABLE t"' sh postgres://localhost/app`), 'forbidden');
   assert.equal(decide(`bash -c 'psql "$@" -c "DROP TABLE t"' bash -h db.example.com`), 'forbidden', '$@ spread over several arguments is unreadable');
 });
 
@@ -280,6 +282,27 @@ test('a startup file that can connect elsewhere makes the target unproven unless
     'a script that writes files could create the startup file first');
   assert.equal(decide(`psql -h localhost -c 'DROP TABLE t' > drop.log`), 'forbidden');
   assert.equal(decide(`psql -X -h localhost -c 'DROP TABLE t' > drop.log`), undefined, '-X makes it safe to log');
+});
+
+test('a script involving a client may only add read-only tools with allowed options', () => {
+  for (const script of [
+    `env -S"psql -h db.example.com -c 'DROP TABLE customers'"`,
+    `trap 'psql -X -h db.example.com -c "DROP TABLE customers"' EXIT`,
+    'PGHOST=db.example.com rg --pre psql -n pattern app',
+    'rg -z psql .',
+    `git rebase --exec "psql -h db.example.com -c 'DROP TABLE t'" HEAD~1`,
+    'git -c alias.x="!psql" x',
+    "npm test && psql -h localhost -c 'select 1'",
+    "npx psql -h db.example.com -c 'DROP TABLE t'",
+    'man -P psql ls',
+  ]) {
+    assert.equal(decide(script), 'forbidden', script);
+  }
+  for (const script of ["rg -n psql . | sed -n '1,10p'", 'echo psql | command cat', 'rg -n -C2 --glob "*.ts" psql extensions/', 'grep -rn psql src | head -n 5',
+    'git commit -m "Use psql for imports"', 'brew install postgresql mysql', 'pip install pgcli', 'man psql', 'cd db && psql -h localhost -c "DROP TABLE t"',
+    'mysql --socket=/tmp/mysql.sock -e "DELETE FROM jobs"']) {
+    assert.equal(decide(script), undefined, script);
+  }
 });
 
 test('local hosts are loopback names and addresses or socket paths', () => {

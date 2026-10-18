@@ -183,27 +183,27 @@ TABLE users'` against a remote or unknown database is refused, and so is SQL Gua
 `::1`, a Unix socket and a SQLite file.
 
 Guardian evaluates the script with the bash grammar: each command's arguments as bash passes them, with
-variables such as `$DATABASE_URL` taken from Pi's environment only where bash would expand them, and
-nested shells and `eval` evaluated again. It reads each client's options the way the client does,
-including clusters such as `-qc`; an option it does not know counts as hidden SQL. Hosts come from host
-and socket options, connection strings and the variables a tool reads (`PGHOST`, and `PGHOSTADDR`, which
-libpq always uses), with every host of a multi-host URI or list counted after libpq's percent-decoding.
-A client that finds its server by default (`psql` without a host, `redis-cli`, `sqlite3`) counts as local.
-
-It cannot prove a target local when the script cannot be evaluated exactly (control flow, substitutions
-anywhere including redirections, an unset variable, a wrapper option it does not know, `env -S`), when an
-earlier command changes what later ones see (`source .env`, `read`, `set -a`, `set --`, `exec <file`),
-when a client named in one command's arguments is fed to another (`echo "psql …" | at now`), when the client
-runs through `ssh`, `kubectl`, `docker exec` or another remote or container prefix, or through a runner
-that can inject credentials (`doppler run`, `op run`, `aws-vault exec`, `dotenv` and similar), when
-`xargs` or `find -exec` supply its arguments, when a statement moves the session
-(`\connect`, `\!`, MongoDB's `connect()`), or when a `service=` names its host in a file Guardian does
-not read. A startup file can connect elsewhere before the statements run, so `psql` without `-X` and
-`mongosh` without `--norc` count as unproven when `~/.psqlrc` or `~/.mongoshrc.js` exists, when the
+variables such as `$DATABASE_URL` taken from Pi's environment only where bash would expand them. It reads
+each client's options the way the client does, including clusters such as `-qc`; an option it does not
+know counts as hidden SQL. Hosts come from host and socket options, connection strings and the variables
+a client reads (`PGHOST`, and `PGHOSTADDR`, which libpq always uses), with every host of a multi-host URI
+or list counted after libpq's percent-decoding. A client that finds its server by default (`psql`
+without a host, `redis-cli`, `sqlite3`) counts as local. A target is unproven when a statement moves the
+session (`\connect`, `\!`, mysql's `connect`, MongoDB's `connect()`), when a `service=` names its host in a
+file Guardian does not read, or when a startup file could connect elsewhere first: `psql` without `-X`
+and `mongosh` without `--norc` count as unproven when `~/.psqlrc` or `~/.mongoshrc.js` exists, when the
 command changes `HOME` or `PSQLRC`, or when it writes files and so could create one. `mysql` needs an
 explicit host, since its option files can name one; Prisma and Rails need a local `DATABASE_URL`, since
-their `.env` and `database.yml` are not read. Name a local host explicitly, or run such commands yourself
-outside Pi.
+their `.env` and `database.yml` are not read.
+
+A script that involves a database client may contain only commands Guardian can judge completely: client
+invocations, read-only tools used with options that keep them read-only (`rg` and `grep` without `--pre`
+or `-z`, `sed -n '1,10p'`, `git log`, `diff`, `commit` and similar without `-c` or `--exec`, `cat`,
+`head`, package installs), neutral builtins (`cd`, `set -e`), and the wrappers `sudo`, `env`, `timeout`,
+`nice`, `nohup` and `command` with their documented options. Anything else in such a script is refused,
+along with a script Guardian cannot evaluate exactly: nested shells, `eval`, `source`, `trap`, `ssh`,
+`docker exec`, `doppler run`, `xargs`, control flow and substitutions. Run those as separate commands,
+name a local host explicitly, or run them yourself outside Pi.
 
 `personal-settings/guardian/rules/railway.rules` keeps the same denials as `.rules` data for defence in
 depth, and the reviewer additionally gets an absolute deny on destructive Railway database and storage

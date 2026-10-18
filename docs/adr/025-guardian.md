@@ -112,7 +112,9 @@ registry rather than a catalog entry.
   before rules and review. Its target usually comes from credentials Guardian cannot see, so it may be a
   Railway database. Ar chose refusal over review, accepting that local resets configured only in `.env` or
   `database.yml`, or run through `docker exec`, must run outside Pi. Each client's options are read the way
-  the client reads them, and anything Guardian cannot follow counts as unproven.
+  the client reads them. A script involving a client may otherwise contain only read-only tools with
+  allowlisted options, neutral builtins and exactly parsed wrappers; anything else, including nested shells,
+  is refused, because following arbitrary programs left gaps in every attempt.
 
 ## Verification
 

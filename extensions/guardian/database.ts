@@ -158,10 +158,17 @@ const decode = (text: string) => { try { return decodeURIComponent(text); } catc
 const withoutPort = (host: string) => host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.replace(/:[^:]*$/, '');
 
 interface Targets {
-  /** Hosts and addresses named explicitly; none means the client's environment or default decides. */
+  /** Host names named explicitly; none means the client's environment or default decides. */
   hosts: string[];
+  /** Network addresses (`hostaddr`), which libpq connects to whatever the host is called. */
+  addresses: string[];
   /** A service, whose host lives in a file Guardian does not read. */
   service: boolean;
+}
+
+/** Where libpq connects: the addresses when any are set, padded with hosts that have none. */
+function effectiveHosts(targets: Pick<Targets, 'hosts' | 'addresses'>): string[] {
+  return targets.addresses.length ? [...targets.addresses, ...targets.hosts.slice(targets.addresses.length)] : targets.hosts;
 }
 
 /**
@@ -171,7 +178,7 @@ interface Targets {
  * way, and a MongoDB-style `host/db` address names its host. A plain database name names no server.
  */
 export function connectionTargets(value: string): Targets {
-  const targets: Targets = { hosts: [], service: false };
+  const targets: Targets = { hosts: [], addresses: [], service: false };
   const uri = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/is.exec(value);
   if (uri) {
     const rest = uri[2];
@@ -185,7 +192,8 @@ export function connectionTargets(value: string): Targets {
       const separator = pair.indexOf('=');
       const key = decode(separator === -1 ? pair : pair.slice(0, separator)).trim().toLowerCase();
       const parameter = separator === -1 ? '' : decode(pair.slice(separator + 1));
-      if (key === 'host' || key === 'hostaddr') targets.hosts.push(...parameter.split(','));
+      if (key === 'host') targets.hosts.push(...parameter.split(','));
+      if (key === 'hostaddr') targets.addresses.push(...parameter.split(','));
       if (key === 'service') targets.service = true;
     }
     return targets;
@@ -197,7 +205,8 @@ export function connectionTargets(value: string): Targets {
   }
   for (const match of value.matchAll(/([A-Za-z_]+)\s*=\s*(?:'((?:\\.|[^'\\])*)'|(\S*))/g)) {
     const key = match[1].toLowerCase(), parameter = (match[2] ?? match[3] ?? '').replace(/\\(.)/g, '$1');
-    if (key === 'host' || key === 'hostaddr') targets.hosts.push(...parameter.split(','));
+    if (key === 'host') targets.hosts.push(...parameter.split(','));
+    if (key === 'hostaddr') targets.addresses.push(...parameter.split(','));
     if (key === 'service') targets.service = true;
   }
   return targets;
@@ -214,6 +223,8 @@ interface Evaluated {
   argv: string[];
   /** Assignments before the command name, exported to it. */
   env: Map<string, string>;
+  /** Standard input comes from a pipe, file, heredoc or here-string rather than the terminal. */
+  fed: boolean;
 }
 
 function unquotedWord(text: string): string {
@@ -278,20 +289,46 @@ function argumentValues(node: Node, lookup: Lookup, positional: Positional): str
 function evaluateScript(shell: Shell, script: string, lookup: Lookup, positional: Positional): Evaluated[] | undefined {
   return shell.parseTree(script, root => {
     const commands: Evaluated[] = [];
-    const visit = (node: Node) => {
+    // A redirection target is evaluated like an argument, so a substitution there is as unreadable as anywhere.
+    const feeds = (redirect: Node): boolean => {
+      switch (redirect.type) {
+        case 'file_redirect': {
+          for (const target of redirect.namedChildren) if (target && target.type !== 'file_descriptor') argumentValues(target, lookup, positional);
+          return redirect.children.some(token => !!token && !token.isNamed && token.type.startsWith('<'));
+        }
+        case 'heredoc_redirect':
+          if (redirect.descendantsOfType(['command_substitution', 'process_substitution', 'simple_expansion', 'expansion', 'arithmetic_expansion']).length) {
+            throw new Unreadable();
+          }
+          return true;
+        case 'herestring_redirect':
+          for (const target of redirect.namedChildren) if (target) argumentValues(target, lookup, positional);
+          return true;
+        default: throw new Unreadable();
+      }
+    };
+    const visit = (node: Node, fed: boolean) => {
       switch (node.type) {
-        case 'program': case 'list': case 'pipeline':
-          for (const child of node.namedChildren) if (child) visit(child);
+        case 'program': case 'list':
+          for (const child of node.namedChildren) if (child) visit(child, fed);
           return;
-        case 'redirected_statement':
-          // Redirections only move input and output; a client without a visible statement counts as hidden anyway.
-          if (node.namedChildren[0]) visit(node.namedChildren[0]);
+        case 'pipeline':
+          node.namedChildren.forEach((child, index) => { if (child) visit(child, fed || index > 0); });
           return;
+        case 'redirected_statement': {
+          const [body, ...redirects] = node.namedChildren;
+          let input = fed;
+          for (const redirect of redirects) if (redirect && feeds(redirect)) input = true;
+          if (body) visit(body, input);
+          return;
+        }
         case 'comment': return;
         case 'command': {
           const env = new Map<string, string>(), argv: string[] = [];
+          let input = fed;
           for (const child of node.namedChildren) {
-            if (!child || child.type === 'comment' || child.type.endsWith('_redirect')) continue;
+            if (!child || child.type === 'comment') continue;
+            if (child.type.endsWith('_redirect')) { if (feeds(child)) input = true; continue; }
             if (child.type === 'variable_assignment') {
               const [name, value] = child.namedChildren;
               if (!name) throw new Unreadable();
@@ -305,14 +342,14 @@ function evaluateScript(shell: Shell, script: string, lookup: Lookup, positional
               argv.push(...argumentValues(child, lookup, positional));
             }
           }
-          commands.push({ argv, env });
+          commands.push({ argv, env, fed: input });
           return;
         }
         default: throw new Unreadable();
       }
     };
     try {
-      visit(root);
+      visit(root, false);
     } catch (error) {
       if (error instanceof Unreadable) return undefined;
       throw error;
@@ -345,11 +382,16 @@ function analyzeClient(spec: ClientSpec, args: readonly string[], lookup: Lookup
     if (args[0] !== spec.subcommand) return { local: true, destructive: false, hidden: false };
     args = args.slice(1);
   }
-  const hosts: string[] = [], statements: string[] = [];
+  const hosts: string[] = [], addresses: string[] = [], statements: string[] = [];
   let service = false, hidden = !!spec.hidden, sawSql = false, operandsOnly = false, skipsStartup = false;
   const apply = (kind: OptionKind, value: string) => {
     if (kind === 'host') hosts.push(...value.split(','));
-    else if (kind === 'connection') { const targets = connectionTargets(value); hosts.push(...targets.hosts); service ||= targets.service; }
+    else if (kind === 'connection') {
+      const targets = connectionTargets(value);
+      hosts.push(...targets.hosts);
+      addresses.push(...targets.addresses);
+      service ||= targets.service;
+    }
     else if (kind === 'sql') { statements.push(value); sawSql = true; }
     else if (kind === 'file') hidden = true;
   };
@@ -387,22 +429,24 @@ function analyzeClient(spec: ClientSpec, args: readonly string[], lookup: Lookup
   const fromEnv = (names: string[] | undefined) => (names ?? []).flatMap(name => {
     const value = lookup(name);
     if (value === undefined) return [];
-    if (value.includes('://') || value.includes('=')) { const targets = connectionTargets(value); service ||= targets.service; return targets.hosts; }
+    if (value.includes('://') || value.includes('=')) { const targets = connectionTargets(value); service ||= targets.service; return effectiveHosts(targets); }
     return value.split(',');
   });
+  // Each setting falls back to its own environment variable, as libpq resolves `host` and `hostaddr`.
   if (!hosts.length) hosts.push(...fromEnv(spec.env));
-  // libpq connects to `hostaddr` whatever the host is called.
-  hosts.push(...fromEnv(spec.addressEnv));
+  if (!addresses.length) addresses.push(...fromEnv(spec.addressEnv));
+  const targets = effectiveHosts({ hosts, addresses });
   if (!sawSql && !spec.destructive) hidden = true;
   if (statements.some(statement => HIDDEN_META.test(statement))) hidden = true;
   const destructive = !!spec.destructive || statements.some(statement => DESTRUCTIVE_STATEMENT.test(statement))
     || (spec.operands === 'command' && DESTRUCTIVE_REDIS.has((statements[0] ?? '').toLowerCase()));
   const retargets = statements.some(statement => RETARGET.test(statement));
   // A startup file runs before the statements and can connect elsewhere; one the command points at is the agent's.
-  const home = lookup('HOME') ?? homedir();
+  // Without HOME, as under `env -i`, the client falls back to the account's home directory.
+  const chosenHome = lookup('HOME');
   const startup = !!spec.startup && !skipsStartup && ((spec.startup.env !== undefined && lookup(spec.startup.env) !== undefined)
-    || home !== (context.root('HOME') ?? homedir()) || context.writes || spec.startup.files(home));
-  const local = !service && !retargets && !startup && (hosts.length ? hosts.every(isLocalHost) : spec.defaultLocal);
+    || (chosenHome !== undefined && chosenHome !== context.root('HOME')) || context.writes || spec.startup.files(chosenHome ?? homedir()));
+  const local = !service && !retargets && !startup && (targets.length ? targets.every(isLocalHost) : spec.defaultLocal);
   return { local, destructive, hidden: hidden || retargets };
 }
 
@@ -421,37 +465,88 @@ function shellScript(args: readonly string[]): { script: string; positional: str
   return undefined;
 }
 
+/** A wrapper's options, as its manual lists them; anything else makes the wrapped command unreadable. */
+interface WrapperSpec {
+  valued?: string[];
+  flags?: string[];
+  /** Words after the options that are not the command, as `timeout`'s duration. */
+  fixed?: number;
+  /** Options whose value is a command line, as `env -S`, or after which the rest runs through an escaping shell, as `sudo -s`. */
+  script?: string[];
+  shell?: string[];
+  /** Options after which nothing runs, as `command -v`. */
+  inert?: string[];
+  /** `NAME=VALUE` words set the command's environment, as for `env`. */
+  assignments?: boolean;
+}
+
+const WRAPPERS: Record<string, WrapperSpec> = {
+  sudo: {
+    valued: ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-r', '--role', '-t', '--type',
+      '-U', '--other-user', '-T', '--command-timeout'],
+    flags: ['-A', '--askpass', '-b', '--background', '-E', '--preserve-env', '-H', '--set-home', '-k', '--reset-timestamp', '-n', '--non-interactive',
+      '-P', '--preserve-groups', '-S', '--stdin', '-B', '--bell', '-N', '--no-update'],
+    shell: ['-s', '--shell', '-i', '--login'], inert: ['-l', '--list', '-v', '--validate', '-V', '--version', '-e', '--edit'],
+  },
+  env: { valued: ['-u', '--unset', '-C', '--chdir'], flags: ['-i', '--ignore-environment', '-0', '--null', '-v', '--debug', '-'], script: ['-S', '--split-string'],
+    assignments: true },
+  timeout: { valued: ['-s', '--signal', '-k', '--kill-after'], flags: ['--preserve-status', '--foreground', '-v', '--verbose'], fixed: 1 },
+  nice: { valued: ['-n', '--adjustment'] },
+  ionice: { valued: ['-c', '--class', '-n', '--classdata'], flags: ['-t', '--ignore'] },
+  stdbuf: { valued: ['-i', '--input', '-o', '--output', '-e', '--error'] },
+  nohup: {},
+  setsid: { flags: ['-c', '--ctty', '-f', '--fork', '-w', '--wait'] },
+  command: { flags: ['-p'], inert: ['-v', '-V'] },
+  exec: { valued: ['-a'], flags: ['-c', '-l'] },
+  builtin: {},
+  time: { valued: ['-f', '--format', '-o', '--output'], flags: ['-p', '-a', '--append', '-v', '--verbose', '-q', '--quiet'] },
+};
+/**
+ * Runners that start a command they are given, often with secrets in its environment (`doppler run`, `op run`,
+ * `aws-vault exec`), so a client they start has an unproven target.
+ */
+const RUNNERS_WITH_ENV = new Set(['doppler', 'op', 'infisical', 'aws-vault', 'dotenv', 'dotenvx', 'direnv', 'envdir', 'envconsul', 'chamber', 'teller',
+  'sops', 'with-env', 'flock', 'chronic', 'unbuffer', 'caffeinate', 'doas', 'pkexec', 'chroot', 'strace', 'ltrace', 'valgrind', 'firejail',
+  'nix-shell', 'systemd-run', 'scl', 'conda', 'poetry', 'uv', 'pipenv', 'mise', 'asdf', 'rtx', 'devbox']);
+
+type Unwrapped = { argv: string[] } | { script: string } | 'unknown';
+
 /** The command a wrapper runs, with the environment it sets; undefined when the word is not a wrapper. */
-function unwrap(argv: readonly string[], env: Map<string, string>): string[] | undefined {
-  const program = programOf(argv[0] ?? '');
-  const skip = (start: number, valued: RegExp) => {
-    let index = start;
-    while (index < argv.length && argv[index].startsWith('-') && argv[index] !== '--') index += valued.test(argv[index]) ? 2 : 1;
-    return argv[index] === '--' ? index + 1 : index;
-  };
-  switch (program) {
-    case 'sudo': return argv.slice(skip(1, /^-[ugpChDrtUT]$/));
-    case 'command': case 'exec': case 'nohup': case 'setsid': case 'time': case 'builtin': return argv.slice(skip(1, /^$/));
-    case 'nice': return argv.slice(skip(1, /^-n$/));
-    case 'ionice': return argv.slice(skip(1, /^-[cnp]$/));
-    case 'stdbuf': return argv.slice(skip(1, /^-[ioe]$/));
-    case 'timeout': { const index = skip(1, /^-[sk]$/); return argv.slice(index + 1); }
-    case 'env': {
-      let index = 1;
-      for (; index < argv.length; index++) {
-        const word = argv[index];
-        if (word === '--') { index++; break; }
-        if (word === '-i' || word === '--ignore-environment') continue;
-        if (word === '-u' || word === '--unset') { env.set(argv[++index] ?? '', ''); continue; }
-        const equals = word.indexOf('=');
-        if (equals > 0 && !word.startsWith('-')) { env.set(word.slice(0, equals), word.slice(equals + 1)); continue; }
-        if (word.startsWith('-')) continue;
-        break;
-      }
-      return argv.slice(index);
+function unwrap(argv: readonly string[], env: Map<string, string>): Unwrapped | undefined {
+  const spec = WRAPPERS[programOf(argv[0] ?? '')];
+  if (!spec) return undefined;
+  const has = (list: string[] | undefined, name: string) => list?.includes(name) ?? false;
+  let index = 1;
+  for (; index < argv.length; index++) {
+    const word = argv[index];
+    if (word === '--') { index++; break; }
+    if (spec.assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) { env.set(word.slice(0, word.indexOf('=')), word.slice(word.indexOf('=') + 1)); continue; }
+    if (!word.startsWith('-') || (word === '-' && !has(spec.flags, '-'))) break;
+    const equals = word.startsWith('--') ? word.indexOf('=') : -1;
+    const name = equals === -1 ? word : word.slice(0, equals);
+    const attached = !word.startsWith('--') && word.length > 2 ? word.slice(2) : undefined;
+    const short = attached === undefined ? name : word.slice(0, 2);
+    if (has(spec.inert, name)) return { argv: [] };
+    if (has(spec.script, name) || has(spec.script, short)) {
+      const value = equals !== -1 ? word.slice(equals + 1) : attached ?? argv[++index] ?? '';
+      return { script: [value, ...argv.slice(index + 1)].join(' ') };
     }
-    default: return undefined;
+    // `sudo -s` escapes each argument for the shell, so the command keeps its arguments.
+    if (has(spec.shell, name)) return { argv: argv.slice(index + 1) };
+    if (has(spec.valued, name) && equals === -1) {
+      const value = argv[++index] ?? '';
+      if (name === '-u' || name === '--unset') env.set(value, '');
+      continue;
+    }
+    if (has(spec.valued, name) || has(spec.valued, short)) {
+      if ((short === '-u' || name === '--unset')) env.set(equals !== -1 ? word.slice(equals + 1) : attached ?? '', '');
+      continue;
+    }
+    if (has(spec.flags, name)) { if (name === '-i' || name === '--ignore-environment' || name === '-') env.set('\0cleared', '1'); continue; }
+    if (programOf(argv[0]) === 'nice' && /^-\d+$/.test(word)) continue;
+    return 'unknown';
   }
+  return { argv: argv.slice(index + (spec.fixed ?? 0)) };
 }
 
 const MAX_DEPTH = 8;
@@ -463,9 +558,13 @@ function refuse(shell: Shell, commands: readonly Evaluated[], outer: Lookup, pos
   for (const command of commands) {
     const env = new Map(command.env);
     let argv = command.argv;
-    for (let unwrapped = unwrap(argv, env); unwrapped; unwrapped = unwrap(argv, env)) argv = unwrapped;
-    // Assignments reach the command they prefix, and a nested shell inherits them.
-    const lookup: Lookup = name => env.has(name) ? env.get(name) || undefined : outer(name);
+    // Assignments reach the command they prefix, and a nested shell inherits them; `env -i` drops the rest.
+    const lookup: Lookup = name => env.has(name) ? env.get(name) || undefined : env.has('\0cleared') ? undefined : outer(name);
+    let wrapped: Unwrapped | undefined = unwrap(argv, env);
+    for (; wrapped && wrapped !== 'unknown' && 'argv' in wrapped; wrapped = unwrap(argv, env)) argv = wrapped.argv;
+    // A wrapper option Guardian does not know could hide which command runs.
+    if (wrapped === 'unknown') { if (argv.some(mentionsClient)) return true; continue; }
+    if (wrapped && 'script' in wrapped) { if (judge(shell, wrapped.script, lookup, positional, remote, depth + 1, root)) return true; continue; }
     const program = programOf(argv[0] ?? '');
     const args = argv.slice(1);
 
@@ -480,6 +579,22 @@ function refuse(shell: Shell, commands: readonly Evaluated[], outer: Lookup, pos
     // `python -c "os.system('psql …')"`, cannot be followed.
     if (args.some(word => mentionsClient(word) && risky(word))) return true;
     if (OPAQUE.has(program)) { if (args.some(mentionsClient)) return true; continue; }
+    // A client such a runner starts gets an environment Guardian cannot see; one in an unknown command's arguments
+    // counts when options of that client follow it, as `mywrapper psql -h … -c …`.
+    const carried = args.findIndex((word, index) => {
+      const carriedSpec = CLIENTS[programOf(word)];
+      return !!carriedSpec && (RUNNERS_WITH_ENV.has(program) || (!CLIENTS[program] && !REMOTE.has(program)
+        && args.slice(index + 1).some(next => carriedSpec.options[next.split('=')[0]] !== undefined || carriedSpec.options[next.slice(0, 2)] !== undefined)));
+    });
+    if (carried !== -1 && !CLIENTS[program] && !REMOTE.has(program)) {
+      const invocation = analyzeClient(CLIENTS[programOf(args[carried])], args.slice(carried + 1), () => undefined, context);
+      if (invocation.destructive || invocation.hidden || command.fed) return true;
+      continue;
+    }
+    if (RUNNERS_WITH_ENV.has(program) && args.some(word => mentionsClient(word))) {
+      if (args.some(word => mentionsClient(word) && judge(shell, word, () => undefined, [], true, depth + 1, root))) return true;
+      continue;
+    }
     if (REMOTE.has(program)) {
       const at = args.findIndex(word => CLIENTS[programOf(word)] !== undefined);
       if (at !== -1) {
@@ -496,7 +611,7 @@ function refuse(shell: Shell, commands: readonly Evaluated[], outer: Lookup, pos
       if (!FRAMEWORK_WIPES[programOf(argv[frameworkAt])](argv.slice(frameworkAt + 1))) continue;
       const url = lookup('DATABASE_URL');
       const targets = url === undefined ? undefined : connectionTargets(url);
-      const local = !!targets && !targets.service && targets.hosts.length > 0 && targets.hosts.every(isLocalHost);
+      const local = !!targets && !targets.service && effectiveHosts(targets).length > 0 && effectiveHosts(targets).every(isLocalHost);
       if (!local || remote) return true;
       continue;
     }

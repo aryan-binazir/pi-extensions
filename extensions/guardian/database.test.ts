@@ -69,7 +69,8 @@ test('every host of a target counts, however libpq would read it', () => {
     assert.equal(decide(script), 'forbidden', script);
   }
   assert.deepEqual(connectionTargets('postgresql://%2Ftmp%2Cdb.example.com/app').hosts, ['/tmp', 'db.example.com']);
-  assert.deepEqual(connectionTargets('postgresql://u:p%40x@[::1]:5432,h2:5433/db?hostaddr=10.0.0.1').hosts, ['[::1]', 'h2', '10.0.0.1']);
+  const targets = connectionTargets('postgresql://u:p%40x@[::1]:5432,h2:5433/db?hostaddr=10.0.0.1');
+  assert.deepEqual([targets.hosts, targets.addresses], [['[::1]', 'h2'], ['10.0.0.1']]);
   assert.equal(connectionTargets("host='a b' service=prod").service, true);
   assert.deepEqual(connectionTargets('app_dev').hosts, []);
 });
@@ -175,6 +176,43 @@ test('every invocation is judged on its own', () => {
   assert.equal(decide(`python3 -c "import os; os.system('psql -h db.example.com -c \\"DROP TABLE x\\"')"`), 'forbidden', 'a client inside another program');
   assert.equal(decide("psql -h localhost -c 'DELETE FROM cache WHERE key = $tag$obsolete$tag$'"), undefined, 'tagged dollar quotes in single quotes are text');
   for (const script of ['rg mysql', 'rg -n psql src/', 'cat docs/psql.md', 'man psql']) assert.equal(decide(script), undefined, script);
+});
+
+test('host and hostaddr each fall back to their own environment variable', () => {
+  assert.equal(decide("psql 'hostaddr=127.0.0.1 dbname=app' -c 'DROP TABLE customers'", { PGHOSTADDR: '203.0.113.10' }), undefined,
+    'an explicit hostaddr overrides PGHOSTADDR');
+  assert.equal(decide("psql 'host=db.example.com hostaddr=127.0.0.1' -c 'DROP TABLE t'"), undefined, 'libpq connects to hostaddr');
+  assert.equal(decide("psql 'hostaddr=203.0.113.10' -h localhost -c 'DROP TABLE t'"), 'forbidden');
+});
+
+test('redirections and substitutions inside them are evaluated too', () => {
+  for (const script of [
+    "cat < <(psql -h db.example.com -c 'DROP TABLE customers')",
+    "echo hi > $(psql -h db.example.com -c 'DROP TABLE customers')",
+    "cat <<EOF\n$(psql -h db.example.com -c 'DROP TABLE customers')\nEOF",
+    "cat wipe.sql | flock /tmp/lock psql -h db.example.com",
+  ]) {
+    assert.equal(decide(script), 'forbidden', script);
+  }
+  assert.equal(decide("psql -X -h localhost -c 'select 1' 2>&1"), undefined);
+});
+
+test('wrapper options are read exactly, and unknown ones refuse when a client is involved', () => {
+  for (const script of [
+    "timeout --signal TERM 5 psql -h db.example.com -c 'DROP TABLE customers'",
+    `env -S "psql -h db.example.com -c 'DROP TABLE customers'"`,
+    "sudo -s psql -h db.example.com -c 'DROP TABLE x'",
+    "nice --frobnicate psql -h localhost -c 'select 1'",
+    "flock /tmp/lock psql -h db.example.com -c 'DROP TABLE x'",
+    "doppler run -- psql -c 'DROP TABLE x'",
+    "mywrapper psql -h db.example.com -c 'DROP TABLE x'",
+  ]) {
+    assert.equal(decide(script), 'forbidden', script);
+  }
+  for (const script of ["timeout --signal=TERM 5 psql -h localhost -c 'DROP TABLE t'", "env -i PATH=/usr/bin psql -h localhost -c 'DROP TABLE t'",
+    "command -v psql", "nice -n 10 psql -h localhost -c 'DROP TABLE t'", "doppler run -- psql -c 'select 1'", 'git log | grep psql']) {
+    assert.equal(decide(script), undefined, script);
+  }
 });
 
 test('positional parameters of a nested shell are its trailing arguments', () => {

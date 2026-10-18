@@ -215,6 +215,38 @@ test('wrapper options are read exactly, and unknown ones refuse when a client is
   }
 });
 
+test('forms that would need re-splitting or re-reading of the environment refuse or resolve exactly', () => {
+  assert.equal(decide("env -S psql -h db.example.com -c 'DROP TABLE customers'"), 'forbidden', 'env -S is outside the grammar');
+  assert.equal(decide(`env -S "psql -h localhost -c 'select 1'"`), 'forbidden');
+  assert.equal(decide("psql 'host=db.example.com hostaddr=' -c 'DROP TABLE customers'"), 'forbidden', 'an empty hostaddr uses its host');
+  assert.equal(decide("psql 'host=db.example.com,localhost hostaddr=,127.0.0.1' -c 'DROP TABLE t'"), 'forbidden');
+  assert.equal(decide("PGHOSTADDR=127.0.0.1 env -i PGHOST=db.example.com psql -X -c 'DROP TABLE customers'"), 'forbidden',
+    'env -i drops the assignments before it');
+  for (const script of ['rg psql -n extensions/', 'grep psql -n database.ts', 'git grep -n psql', 'pip install pgcli', 'echo x | rg mysql -i']) {
+    assert.equal(decide(script), undefined, script);
+  }
+});
+
+test('commands that change what later commands see make later clients unproven', () => {
+  for (const script of [
+    `source .env && psql "$DATABASE_URL" -c 'DROP TABLE customers'`,
+    `. ./secrets.sh; psql -c 'DROP TABLE customers'`,
+    `set -a; source .env; set +a; psql -c 'DROP TABLE t'`,
+    `read PGHOST < host.txt; psql -c 'DROP TABLE t'`,
+    `set -- postgres://db.example.com/app; psql "$1" -c 'DROP TABLE t'`,
+    `exec < wipe.sql; psql -h localhost`,
+    `echo "psql -h db.example.com -c 'DROP TABLE x'" | at now`,
+    `mysql -h 127.0.0.1 -e "connect app db.example.com; DROP TABLE x"`,
+    `mysql -h db.example.com -e "source wipe.sql"`,
+    `git -c alias.x='!psql -h db.example.com' x < wipe.sql`,
+  ]) {
+    assert.equal(decide(script, LOCAL), 'forbidden', script);
+  }
+  for (const script of ['set -euo pipefail; psql -h localhost -c "DROP TABLE t"', `source .env && psql "$DATABASE_URL" -c 'select 1'`, 'echo psql | grep p']) {
+    assert.equal(decide(script, LOCAL), undefined, script);
+  }
+});
+
 test('positional parameters of a nested shell are its trailing arguments', () => {
   assert.equal(decide(`sh -c 'psql "$1" -c "DROP TABLE t"' sh postgres://db.example.com/app`), 'forbidden');
   assert.equal(decide(`sh -c 'psql "$1" -c "DROP TABLE t"' sh postgres://localhost/app`), undefined);

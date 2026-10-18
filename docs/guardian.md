@@ -191,7 +191,9 @@ libpq always uses), with every host of a multi-host URI or list counted after li
 A client that finds its server by default (`psql` without a host, `redis-cli`, `sqlite3`) counts as local.
 
 It cannot prove a target local when the script cannot be evaluated exactly (control flow, substitutions
-anywhere including redirections, an unset variable, a wrapper option it does not know), when the client
+anywhere including redirections, an unset variable, a wrapper option it does not know, `env -S`), when an
+earlier command changes what later ones see (`source .env`, `read`, `set -a`, `set --`, `exec <file`),
+when a client named in one command's arguments is fed to another (`echo "psql …" | at now`), when the client
 runs through `ssh`, `kubectl`, `docker exec` or another remote or container prefix, or through a runner
 that can inject credentials (`doppler run`, `op run`, `aws-vault exec`, `dotenv` and similar), when
 `xargs` or `find -exec` supply its arguments, when a statement moves the session

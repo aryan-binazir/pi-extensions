@@ -129,13 +129,17 @@ const REMOTE = new Set(['ssh', 'kubectl', 'oc', 'heroku', 'fly', 'flyctl', 'gclo
 
 const DESTRUCTIVE_STATEMENT = /\b(?:drop\s+(?:table|database|schema|view|materialized\s+view|index|sequence|function|type|extension|collection|user|role|owned)\b|truncate\b|delete\s+from\b|alter\s+table\b[^;]*\bdrop\b|flushall\b|flushdb\b|dropdatabase\b)|\.drop(?:Database)?\s*\(|\bdelete(?:Many|One)\s*\(|\.remove\s*\(/i;
 const DESTRUCTIVE_REDIS = new Set(['flushall', 'flushdb', 'del', 'unlink', 'swapdb', 'migrate']);
-/** psql meta-commands that read a file or execute query results, hiding the statements they run. */
-const HIDDEN_META = /\\(?:i|ir|include|include_relative|gexec)\b/;
+/**
+ * Statements that run other statements Guardian cannot read: psql's `\i` and `\gexec`, mysql's `source` and `\.`,
+ * MongoDB's `load()`, and Redis's stored scripts and functions.
+ */
+const HIDDEN_META = /\\(?:i|ir|include|include_relative|gexec)\b|(?:^|;|\n)\s*(?:source|\\\.)\s|\bload\s*\(|^\s*(?:evalsha|evalsha_ro|fcall|fcall_ro)\b/i;
 /**
  * Statements that move the session to another server or run a program: psql's `\connect`, shell escapes and
- * program pipes, MongoDB's `connect()` and `new Mongo()`, and Redis's `MIGRATE`. After one, the target is unproven.
+ * program pipes, mysql's `connect` and `system`, MongoDB's `connect()` and `new Mongo()`, and Redis's `MIGRATE`.
+ * After one, the target is unproven.
  */
-const RETARGET = /\\(?:c|connect)\b|\\!|\\copy\b[^\n]*\bprogram\b|\\o\s*\||\b(?:connect|Mongo)\s*\(|^\s*migrate\b/i;
+const RETARGET = /\\(?:c|connect|r)\b|\\!|\\copy\b[^\n]*\bprogram\b|\\o\s*\||\b(?:connect|Mongo)\s*\(|^\s*migrate\b|(?:^|;|\n)\s*(?:connect|system)\s/i;
 const MENTION = new RegExp(`(^|[^A-Za-z0-9_-])(${[...Object.keys(CLIENTS), ...Object.keys(FRAMEWORK_WIPES)].join('|')})([^A-Za-z0-9_-]|$)`);
 /** Text that may destroy data or hide statements, for scripts Guardian cannot evaluate exactly. */
 const RISK_MARKERS = /<|\||(^|\s)(-f|--file|-i|--eval|-x)(\s|=|$)|\\i\b|\b(migrate\s+reset|db:(drop|reset|purge)|force-reset|accept-data-loss|dropdb|dropuser|pg_restore)\b|[$`]/;
@@ -166,9 +170,10 @@ interface Targets {
   service: boolean;
 }
 
-/** Where libpq connects: the addresses when any are set, padded with hosts that have none. */
+/** Where libpq connects: each entry's address when it has a non-empty one, otherwise its host. */
 function effectiveHosts(targets: Pick<Targets, 'hosts' | 'addresses'>): string[] {
-  return targets.addresses.length ? [...targets.addresses, ...targets.hosts.slice(targets.addresses.length)] : targets.hosts;
+  const count = Math.max(targets.hosts.length, targets.addresses.length);
+  return Array.from({ length: count }, (_, index) => targets.addresses[index] || (targets.hosts[index] ?? targets.addresses[index] ?? ''));
 }
 
 /**
@@ -471,8 +476,7 @@ interface WrapperSpec {
   flags?: string[];
   /** Words after the options that are not the command, as `timeout`'s duration. */
   fixed?: number;
-  /** Options whose value is a command line, as `env -S`, or after which the rest runs through an escaping shell, as `sudo -s`. */
-  script?: string[];
+  /** Options after which the rest runs through a shell that escapes each argument, as `sudo -s`. */
   shell?: string[];
   /** Options after which nothing runs, as `command -v`. */
   inert?: string[];
@@ -488,8 +492,8 @@ const WRAPPERS: Record<string, WrapperSpec> = {
       '-P', '--preserve-groups', '-S', '--stdin', '-B', '--bell', '-N', '--no-update'],
     shell: ['-s', '--shell', '-i', '--login'], inert: ['-l', '--list', '-v', '--validate', '-V', '--version', '-e', '--edit'],
   },
-  env: { valued: ['-u', '--unset', '-C', '--chdir'], flags: ['-i', '--ignore-environment', '-0', '--null', '-v', '--debug', '-'], script: ['-S', '--split-string'],
-    assignments: true },
+  // `env -S` re-splits a string with its own quoting rules; it is not in the grammar, so it refuses beside a client.
+  env: { valued: ['-u', '--unset', '-C', '--chdir'], flags: ['-i', '--ignore-environment', '-0', '--null', '-v', '--debug', '-'], assignments: true },
   timeout: { valued: ['-s', '--signal', '-k', '--kill-after'], flags: ['--preserve-status', '--foreground', '-v', '--verbose'], fixed: 1 },
   nice: { valued: ['-n', '--adjustment'] },
   ionice: { valued: ['-c', '--class', '-n', '--classdata'], flags: ['-t', '--ignore'] },
@@ -505,11 +509,40 @@ const WRAPPERS: Record<string, WrapperSpec> = {
  * Runners that start a command they are given, often with secrets in its environment (`doppler run`, `op run`,
  * `aws-vault exec`), so a client they start has an unproven target.
  */
+/** Commands that read or show their arguments and input and never run them, so a client name there is only text. */
+const READERS = new Set(['grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'cat', 'bat', 'head', 'tail', 'which', 'whereis', 'type', 'echo', 'printf', 'wc',
+  'sort', 'uniq', 'cut', 'diff', 'ls', 'file', 'stat', 'tldr', 'jq']);
+/**
+ * Commands that change what later commands see: variables (`source`, `read`, `set -a`, `printf -v`), positional
+ * parameters (`set --`), command lookup (`alias`, `hash`) or standard input (`exec <file`). After one, a client's
+ * target and statements are unproven.
+ */
+function changesLaterCommands(argv: readonly string[]): boolean {
+  const [program, ...args] = argv.map((word, index) => index === 0 ? programOf(word) : word);
+  switch (program) {
+    case 'source': case '.': case 'read': case 'mapfile': case 'readarray': case 'getopts': case 'let': case 'alias': case 'shopt': case 'hash':
+    case 'enable': case 'trap':
+      return true;
+    case 'set': {
+      // `-o NAME` names an option; `-a`/allexport exports later assignments, and `--` or other words set `$1`….
+      for (let index = 0; index < args.length; index++) {
+        const arg = args[index];
+        if (arg === '--' || !/^[-+]/.test(arg)) return true;
+        if (/^-[A-Za-z]*a/.test(arg)) return true;
+        if (/^[-+][A-Za-z]*o$/.test(arg) && args[++index] === 'allexport' && arg.startsWith('-')) return true;
+      }
+      return false;
+    }
+    case 'printf': return args.includes('-v');
+    case 'exec': return args.every(arg => /^\d*[<>]/.test(arg));
+    default: return false;
+  }
+}
 const RUNNERS_WITH_ENV = new Set(['doppler', 'op', 'infisical', 'aws-vault', 'dotenv', 'dotenvx', 'direnv', 'envdir', 'envconsul', 'chamber', 'teller',
   'sops', 'with-env', 'flock', 'chronic', 'unbuffer', 'caffeinate', 'doas', 'pkexec', 'chroot', 'strace', 'ltrace', 'valgrind', 'firejail',
   'nix-shell', 'systemd-run', 'scl', 'conda', 'poetry', 'uv', 'pipenv', 'mise', 'asdf', 'rtx', 'devbox']);
 
-type Unwrapped = { argv: string[] } | { script: string } | 'unknown';
+type Unwrapped = { argv: string[] } | 'unknown';
 
 /** The command a wrapper runs, with the environment it sets; undefined when the word is not a wrapper. */
 function unwrap(argv: readonly string[], env: Map<string, string>): Unwrapped | undefined {
@@ -527,10 +560,6 @@ function unwrap(argv: readonly string[], env: Map<string, string>): Unwrapped | 
     const attached = !word.startsWith('--') && word.length > 2 ? word.slice(2) : undefined;
     const short = attached === undefined ? name : word.slice(0, 2);
     if (has(spec.inert, name)) return { argv: [] };
-    if (has(spec.script, name) || has(spec.script, short)) {
-      const value = equals !== -1 ? word.slice(equals + 1) : attached ?? argv[++index] ?? '';
-      return { script: [value, ...argv.slice(index + 1)].join(' ') };
-    }
     // `sudo -s` escapes each argument for the shell, so the command keeps its arguments.
     if (has(spec.shell, name)) return { argv: argv.slice(index + 1) };
     if (has(spec.valued, name) && equals === -1) {
@@ -542,7 +571,11 @@ function unwrap(argv: readonly string[], env: Map<string, string>): Unwrapped | 
       if ((short === '-u' || name === '--unset')) env.set(equals !== -1 ? word.slice(equals + 1) : attached ?? '', '');
       continue;
     }
-    if (has(spec.flags, name)) { if (name === '-i' || name === '--ignore-environment' || name === '-') env.set('\0cleared', '1'); continue; }
+    if (has(spec.flags, name)) {
+      // A cleared environment drops what the command line assigned before it, too.
+      if (name === '-i' || name === '--ignore-environment' || name === '-') { env.clear(); env.set('\0cleared', '1'); }
+      continue;
+    }
     if (programOf(argv[0]) === 'nice' && /^-\d+$/.test(word)) continue;
     return 'unknown';
   }
@@ -555,16 +588,22 @@ const MAX_DEPTH = 8;
 function refuse(shell: Shell, commands: readonly Evaluated[], outer: Lookup, positional: Positional, remote: boolean, depth: number, script: string, root: Lookup): boolean {
   if (depth > MAX_DEPTH) return true;
   const context: StartupContext = { root, writes: OUTPUT_REDIRECT.test(script) || commands.some(command => WRITERS.has(programOf(command.argv[0] ?? ''))) };
+  // A client named in one command's arguments can be run by another reading it, as `echo "psql …" | at now`.
+  const named = commands.some(command => command.argv.slice(1).some(mentionsClient));
+  if (named && commands.some(command => command.fed && !READERS.has(programOf(command.argv[0] ?? '')) && !CLIENTS[programOf(command.argv[0] ?? '')])) return true;
+  let changed = false;
   for (const command of commands) {
+    // What runs after a command that changes variables, parameters or input is judged as if on another machine.
+    const unproven = remote || changed;
+    if (changesLaterCommands(command.argv)) { changed = true; continue; }
     const env = new Map(command.env);
     let argv = command.argv;
     // Assignments reach the command they prefix, and a nested shell inherits them; `env -i` drops the rest.
     const lookup: Lookup = name => env.has(name) ? env.get(name) || undefined : env.has('\0cleared') ? undefined : outer(name);
     let wrapped: Unwrapped | undefined = unwrap(argv, env);
-    for (; wrapped && wrapped !== 'unknown' && 'argv' in wrapped; wrapped = unwrap(argv, env)) argv = wrapped.argv;
+    for (; wrapped && wrapped !== 'unknown'; wrapped = unwrap(argv, env)) argv = wrapped.argv;
     // A wrapper option Guardian does not know could hide which command runs.
     if (wrapped === 'unknown') { if (argv.some(mentionsClient)) return true; continue; }
-    if (wrapped && 'script' in wrapped) { if (judge(shell, wrapped.script, lookup, positional, remote, depth + 1, root)) return true; continue; }
     const program = programOf(argv[0] ?? '');
     const args = argv.slice(1);
 
@@ -572,7 +611,7 @@ function refuse(shell: Shell, commands: readonly Evaluated[], outer: Lookup, pos
       const nested = program === 'eval' ? { script: args.join(' '), positional } : shellScript(args);
       // A shell reading a file or standard input runs something Guardian cannot see.
       if (nested === undefined) { if (mentionsClient(script)) return true; continue; }
-      if (judge(shell, nested.script, lookup, nested.positional, remote, depth + 1, root)) return true;
+      if (judge(shell, nested.script, unproven ? () => undefined : lookup, nested.positional, unproven, depth + 1, root)) return true;
       continue;
     }
     // A client named inside another program's arguments, as in `sqlite3 db ".shell psql …"` or
@@ -581,10 +620,10 @@ function refuse(shell: Shell, commands: readonly Evaluated[], outer: Lookup, pos
     if (OPAQUE.has(program)) { if (args.some(mentionsClient)) return true; continue; }
     // A client such a runner starts gets an environment Guardian cannot see; one in an unknown command's arguments
     // counts when options of that client follow it, as `mywrapper psql -h … -c …`.
-    const carried = args.findIndex((word, index) => {
+    const carried = READERS.has(program) ? -1 : args.findIndex((word, index) => {
       const carriedSpec = CLIENTS[programOf(word)];
-      return !!carriedSpec && (RUNNERS_WITH_ENV.has(program) || (!CLIENTS[program] && !REMOTE.has(program)
-        && args.slice(index + 1).some(next => carriedSpec.options[next.split('=')[0]] !== undefined || carriedSpec.options[next.slice(0, 2)] !== undefined)));
+      return !!carriedSpec && (RUNNERS_WITH_ENV.has(program) || (!CLIENTS[program] && !REMOTE.has(program) && (command.fed
+        || args.slice(index + 1).some(next => carriedSpec.options[next.split('=')[0]] !== undefined || carriedSpec.options[next.slice(0, 2)] !== undefined))));
     });
     if (carried !== -1 && !CLIENTS[program] && !REMOTE.has(program)) {
       const invocation = analyzeClient(CLIENTS[programOf(args[carried])], args.slice(carried + 1), () => undefined, context);
@@ -612,14 +651,14 @@ function refuse(shell: Shell, commands: readonly Evaluated[], outer: Lookup, pos
       const url = lookup('DATABASE_URL');
       const targets = url === undefined ? undefined : connectionTargets(url);
       const local = !!targets && !targets.service && effectiveHosts(targets).length > 0 && effectiveHosts(targets).every(isLocalHost);
-      if (!local || remote) return true;
+      if (!local || unproven) return true;
       continue;
     }
 
     const spec = CLIENTS[program];
     if (!spec) continue;
     const invocation = analyzeClient(spec, args, lookup, context);
-    if ((!invocation.local || remote) && (invocation.destructive || invocation.hidden)) return true;
+    if ((!invocation.local || unproven) && (invocation.destructive || invocation.hidden)) return true;
   }
   return false;
 }

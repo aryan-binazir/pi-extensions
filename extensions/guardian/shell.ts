@@ -136,6 +136,11 @@ function rmArgsIncludeForceOption(args: readonly string[]): boolean {
 export class Shell {
   constructor(private readonly parser: Parser) {}
 
+  /** Guardian's own walks over the syntax tree, such as the database boundary's; undefined when the script has errors. */
+  parseTree<T>(src: string, read: (root: Node) => T | undefined): T | undefined {
+    return this.withTree(src, read);
+  }
+
   private withTree<T>(src: string, read: (root: Node) => T | undefined): T | undefined {
     const tree = this.parser.parse(src);
     if (!tree) return undefined;

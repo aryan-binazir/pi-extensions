@@ -1,100 +1,152 @@
 // Ar's boundary for destructive database operations. A command rarely names a Railway database: its target
-// usually comes from credentials such as `$DATABASE_URL`. A database command runs against a target Guardian
-// cannot prove local only when all of its SQL is visible and none of it is destructive; anything else that could
-// reach such a target is refused outright, like the Railway boundary. Guardian reads each client's options the
-// way the client does, and fails closed on what it cannot follow. Never verified against a real database.
+// usually comes from credentials such as `$DATABASE_URL`. A database command runs against a target Guardian cannot
+// prove local only when all of its SQL is visible and none of it is destructive; anything else that could reach
+// such a target is refused outright, like the Railway boundary.
+//
+// Guardian evaluates the script with the bash grammar: each command's arguments as bash would pass them, with Pi's
+// environment substituted only where bash expands, nested shells and `eval` parsed again, and each client's options
+// read the way the client reads them. What it cannot evaluate exactly counts as unproven. Never verified against a
+// real database.
+import { existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { Node } from 'web-tree-sitter';
 import type { Shell } from './shell.ts';
 
 export const DATABASE_FORBIDDEN_REASON = 'destructive database operations are refused unless their target is provably local (localhost, 127.0.0.1, ::1, '
   + 'a Unix socket or a SQLite file), because an unresolved target may be a Railway database; this cannot be approved. SQL Guardian cannot see, '
   + 'from a file or standard input, counts as destructive. Name a local host explicitly, or run it yourself outside Pi.';
 
-/** How a client takes its server and its statements on the command line. */
+/** How a client reads one option: a host or socket, a network address, a connection string, a statement, a script file, another value, or none. */
+type OptionKind = 'host' | 'address' | 'connection' | 'sql' | 'file' | 'value' | 'optional' | 'flag';
+
 interface ClientSpec {
-  /** Options whose value is a host or socket path. */
-  host?: string[];
-  /** Options whose value is a connection string or URI. */
-  connection?: string[];
-  /** Options whose value is a statement Guardian can read. */
-  sql?: string[];
-  /** Options whose value names a script file Guardian does not read. */
-  file?: string[];
-  /** Other options that take a value, skipped so it is not mistaken for an operand. */
-  value?: string[];
-  /** The first operand may be a connection string, URI or `host/db` address. */
-  connectionOperand?: boolean;
-  /** Operands after the options are the statement, as for `redis-cli FLUSHALL`. */
-  commandOperands?: boolean;
-  /** Environment variables that name the server; a service names a file Guardian does not read. */
+  /** Every option the client accepts, short (`-h`) and long (`--host`); anything else counts as hidden SQL. */
+  options: Record<string, OptionKind>;
+  /** What operands are: connection strings, the statement itself (`redis-cli FLUSHALL`), or nothing Guardian needs. */
+  operands: 'connection' | 'command' | 'ignore';
+  /** Environment variables naming the server when the command names none, addresses that always apply, and a service. */
   env?: string[];
+  addressEnv?: string[];
   serviceEnv?: string[];
   /** Whether the client reaches a local server when nothing names one. */
   defaultLocal: boolean;
-  /** Every invocation destroys data, as `dropdb` does. */
+  /** Every invocation destroys data (`dropdb`), or runs statements Guardian cannot read (`pg_restore`). */
   destructive?: boolean;
+  hidden?: boolean;
   /** Every target is a local file. */
   local?: boolean;
+  /** Only this subcommand runs statements, as `cockroach sql`. */
+  subcommand?: string;
+  /** A startup file that can connect elsewhere before the statements run, and the flag that skips it. */
+  startup?: { skip: string[]; files: (home: string) => boolean; env?: string };
 }
 
-const PG_ENV = { env: ['PGHOST', 'PGHOSTADDR'], serviceEnv: ['PGSERVICE'] };
-const CLIENTS: Record<string, ClientSpec> = {
-  psql: { ...PG_ENV, host: ['-h', '--host'], connection: ['-d', '--dbname'], sql: ['-c', '--command'], file: ['-f', '--file'],
-    value: ['-p', '--port', '-U', '--username', '-v', '--set', '--variable', '-o', '--output', '-L', '--log-file', '-P', '--pset', '-T',
-      '--table-attr', '-F', '--field-separator', '-R', '--record-separator'], connectionOperand: true, defaultLocal: true },
-  pgcli: { ...PG_ENV, host: ['-h', '--host'], connection: ['-d', '--dbname'], value: ['-p', '--port', '-U', '--username', '-D', '--dsn'],
-    connectionOperand: true, defaultLocal: true },
-  pg_restore: { ...PG_ENV, host: ['-h', '--host'], connection: ['-d', '--dbname'], value: ['-p', '--port', '-U', '--username', '-f', '--file',
-    '-F', '--format', '-j', '--jobs', '-n', '--schema', '-t', '--table', '-L', '--use-list', '-S', '--superuser'], defaultLocal: true },
-  dropdb: { ...PG_ENV, host: ['-h', '--host'], connection: ['--maintenance-db'], value: ['-p', '--port', '-U', '--username'], defaultLocal: true, destructive: true },
-  dropuser: { ...PG_ENV, host: ['-h', '--host'], value: ['-p', '--port', '-U', '--username'], defaultLocal: true, destructive: true },
-  // Option files such as ~/.my.cnf can name the host, so these are local only when the command says so.
-  mysql: { host: ['-h', '--host', '-S', '--socket'], sql: ['-e', '--execute'], value: ['-u', '--user', '-P', '--port', '-D', '--database',
-    '--defaults-file', '--defaults-extra-file', '--login-path', '--protocol'], env: ['MYSQL_HOST'], defaultLocal: false },
-  mariadb: { host: ['-h', '--host', '-S', '--socket'], sql: ['-e', '--execute'], value: ['-u', '--user', '-P', '--port', '-D', '--database',
-    '--defaults-file', '--defaults-extra-file', '--protocol'], env: ['MYSQL_HOST'], defaultLocal: false },
-  mycli: { host: ['-h', '--host', '-S', '--socket'], sql: ['-e', '--execute'], value: ['-u', '--user', '-P', '--port', '-D', '--database'],
-    connectionOperand: true, env: ['MYSQL_HOST'], defaultLocal: false },
-  mongosh: { host: ['--host'], sql: ['--eval'], file: ['-f', '--file'], value: ['--port', '-u', '--username', '-p', '--password',
-    '--authenticationDatabase'], connectionOperand: true, defaultLocal: true },
-  mongo: { host: ['--host'], sql: ['--eval'], value: ['--port', '-u', '--username', '-p', '--password', '--authenticationDatabase'],
-    connectionOperand: true, defaultLocal: true },
-  'redis-cli': { host: ['-h', '-s'], connection: ['-u', '--uri'], file: ['--eval'], value: ['-p', '-a', '--user', '--pass', '-n', '-r', '-i'],
-    commandOperands: true, defaultLocal: true },
-  sqlcmd: { host: ['-S'], sql: ['-Q', '-q'], file: ['-i'], value: ['-U', '-P', '-d'], env: ['SQLCMDSERVER'], defaultLocal: true },
-  'clickhouse-client': { host: ['-h', '--host'], sql: ['-q', '--query'], file: ['--queries-file'], value: ['--port', '-u', '--user',
-    '--password', '-d', '--database'], env: ['CLICKHOUSE_HOST'], defaultLocal: false },
-  cockroach: { host: ['--host'], connection: ['--url'], sql: ['-e', '--execute'], file: ['-f', '--file'], value: ['--port', '-u', '--user',
-    '-d', '--database', '--certs-dir'], env: ['COCKROACH_HOST', 'COCKROACH_URL'], defaultLocal: true },
-  usql: { sql: ['-c', '--command'], file: ['-f', '--file'], connectionOperand: true, defaultLocal: false },
-  sqlite3: { defaultLocal: true, local: true },
-  litecli: { defaultLocal: true, local: true },
+const hasFile = (home: string, matches: (name: string) => boolean) => {
+  try { return readdirSync(home).some(matches); } catch { return false; }
 };
 
-/** Tools that wipe a database configured elsewhere, by the words that select the operation. */
-const FRAMEWORK_WIPES: { program: RegExp; operation: (words: string[]) => boolean }[] = [
-  { program: /^prisma$/, operation: words => (words[0] === 'migrate' && words[1] === 'reset')
-    || (words[0] === 'db' && words[1] === 'push' && words.some(word => word === '--force-reset' || word === '--accept-data-loss')) },
-  { program: /^(rails|rake)$/, operation: words => words.some(word => /^db:(drop|reset|purge)\b/.test(word)) },
-];
+const options = (kind: OptionKind, ...names: string[]) => Object.fromEntries(names.map(name => [name, kind]));
+const PG = { env: ['PGHOST'], addressEnv: ['PGHOSTADDR'], serviceEnv: ['PGSERVICE'] };
+const PG_CONNECTION = { ...options('host', '-h', '--host'), ...options('value', '-p', '--port', '-U', '--username'), ...options('flag', '-w', '--no-password', '-W', '--password') };
+
+const CLIENTS: Record<string, ClientSpec> = {
+  psql: { ...PG, defaultLocal: true, operands: 'connection',
+    startup: { skip: ['-X', '--no-psqlrc'], files: home => hasFile(home, name => name === '.psqlrc' || name.startsWith('.psqlrc-')), env: 'PSQLRC' },
+    options: {
+    ...PG_CONNECTION, ...options('connection', '-d', '--dbname'), ...options('sql', '-c', '--command'), ...options('file', '-f', '--file'),
+    ...options('value', '-v', '--set', '--variable', '-o', '--output', '-L', '--log-file', '-P', '--pset', '-T', '--table-attr', '-F',
+      '--field-separator', '-R', '--record-separator'),
+    ...options('flag', '-a', '--echo-all', '-A', '--no-align', '-b', '--echo-errors', '-e', '--echo-queries', '-E', '--echo-hidden', '-n',
+      '--no-readline', '-q', '--quiet', '-s', '--single-step', '-S', '--single-line', '-t', '--tuples-only', '-x', '--expanded', '-X', '--no-psqlrc',
+      '-1', '--single-transaction', '-H', '--html', '-z', '--field-separator-zero', '-0', '--record-separator-zero', '--csv', '-l', '--list',
+      '-V', '--version', '-?', '--help'),
+  } },
+  pgcli: { ...PG, defaultLocal: true, operands: 'connection', options: { ...PG_CONNECTION, ...options('connection', '-d', '--dbname', '-D', '--dsn') } },
+  pg_restore: { ...PG, defaultLocal: true, operands: 'ignore', hidden: true, options: {
+    ...PG_CONNECTION, ...options('connection', '-d', '--dbname'),
+    ...options('value', '-f', '--file', '-F', '--format', '-j', '--jobs', '-n', '--schema', '-t', '--table', '-L', '--use-list', '-S', '--superuser'),
+    ...options('flag', '-c', '--clean', '-C', '--create', '-1', '--single-transaction', '-e', '--exit-on-error', '-O', '--no-owner', '-x',
+      '--no-privileges', '-v', '--verbose', '-a', '--data-only', '-s', '--schema-only', '--if-exists'),
+  } },
+  dropdb: { ...PG, defaultLocal: true, operands: 'ignore', destructive: true, options: {
+    ...PG_CONNECTION, ...options('connection', '--maintenance-db'), ...options('flag', '-i', '--interactive', '-e', '--echo', '-f', '--force', '--if-exists'),
+  } },
+  dropuser: { ...PG, defaultLocal: true, operands: 'ignore', destructive: true, options: {
+    ...PG_CONNECTION, ...options('flag', '-i', '--interactive', '-e', '--echo', '--if-exists'),
+  } },
+  // Option files such as ~/.my.cnf can name the host, so these are local only when the command names one.
+  mysql: { env: ['MYSQL_HOST'], defaultLocal: false, operands: 'ignore', options: {
+    ...options('host', '-h', '--host', '-S', '--socket'), ...options('sql', '-e', '--execute'), ...options('optional', '-p', '--password'),
+    ...options('value', '-u', '--user', '-P', '--port', '-D', '--database', '--defaults-file', '--defaults-extra-file', '--login-path', '--protocol'),
+    ...options('flag', '-B', '--batch', '-N', '--skip-column-names', '-s', '--silent', '-t', '--table', '-E', '--vertical', '-r', '--raw', '-v', '--verbose'),
+  } },
+  mongosh: { defaultLocal: true, operands: 'connection', startup: { skip: ['--norc', '--nodb'], files: home => existsSync(join(home, '.mongoshrc.js')) },
+    options: {
+    ...options('host', '--host'), ...options('sql', '--eval'), ...options('file', '-f', '--file'),
+    ...options('value', '--port', '-u', '--username', '-p', '--password', '--authenticationDatabase'),
+    ...options('flag', '--quiet', '--norc', '--nodb', '--shell', '--json', '--tls'),
+  } },
+  'redis-cli': { defaultLocal: true, operands: 'command', options: {
+    ...options('host', '-h', '-s'), ...options('connection', '-u', '--uri'), ...options('file', '--eval', '-x'),
+    ...options('value', '-p', '-a', '--user', '--pass', '-n', '-r', '-i'), ...options('flag', '--raw', '--no-raw', '--no-auth-warning', '--tls', '-c', '-e'),
+  } },
+  sqlcmd: { env: ['SQLCMDSERVER'], defaultLocal: true, operands: 'ignore', options: {
+    ...options('host', '-S'), ...options('sql', '-Q', '-q'), ...options('file', '-i'), ...options('value', '-U', '-P', '-d'), ...options('flag', '-b', '-E', '-C'),
+  } },
+  'clickhouse-client': { env: ['CLICKHOUSE_HOST'], defaultLocal: false, operands: 'ignore', options: {
+    ...options('host', '-h', '--host'), ...options('sql', '-q', '--query'), ...options('file', '--queries-file'),
+    ...options('value', '--port', '-u', '--user', '--password', '-d', '--database'), ...options('flag', '-m', '--multiline', '-n', '--multiquery'),
+  } },
+  cockroach: { env: ['COCKROACH_HOST'], defaultLocal: true, operands: 'ignore', subcommand: 'sql', options: {
+    ...options('host', '--host'), ...options('connection', '--url'), ...options('sql', '-e', '--execute'), ...options('file', '-f', '--file'),
+    ...options('value', '--port', '-u', '--user', '-d', '--database', '--certs-dir'), ...options('flag', '--insecure'),
+  } },
+  usql: { defaultLocal: false, operands: 'connection', options: { ...options('sql', '-c', '--command'), ...options('file', '-f', '--file') } },
+  sqlite3: { defaultLocal: true, operands: 'ignore', local: true, options: {} },
+  litecli: { defaultLocal: true, operands: 'ignore', local: true, options: {} },
+};
+CLIENTS.mariadb = CLIENTS.mysql;
+CLIENTS.mycli = { ...CLIENTS.mysql, operands: 'connection' };
+CLIENTS.mongo = CLIENTS.mongosh;
+CLIENTS.cockroach.env = ['COCKROACH_HOST', 'COCKROACH_URL'];
+
+/** Frameworks that wipe a database configured in `.env` or `config/database.yml`, which Guardian does not read. */
+const FRAMEWORK_WIPES: Record<string, (words: string[]) => boolean> = {
+  prisma: words => (words[0] === 'migrate' && words[1] === 'reset')
+    || (words[0] === 'db' && words[1] === 'push' && words.some(word => word === '--force-reset' || word === '--accept-data-loss')),
+  rails: words => words.some(word => /^db:(drop|reset|purge)\b/.test(word)),
+  rake: words => words.some(word => /^db:(drop|reset|purge)\b/.test(word)),
+};
+/** Words that run a package's binary, so `npx prisma` and `bundle exec rails` reach the framework. */
+const RUNNERS = new Set(['npx', 'pnpx', 'bunx', 'yarn', 'pnpm', 'bun', 'npm', 'exec', 'x', 'dlx', 'bundle']);
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh']);
+/** Commands whose operands Guardian cannot follow, so a client they run may get arguments from elsewhere. */
+const OPAQUE = new Set(['xargs', 'find', 'parallel', 'watch']);
+/** Prefixes that run the client on another machine or in a container, where "localhost" is not this machine. */
+const REMOTE = new Set(['ssh', 'kubectl', 'oc', 'heroku', 'fly', 'flyctl', 'gcloud', 'az', 'aws', 'doctl', 'render', 'railway', 'docker',
+  'podman', 'nerdctl', 'docker-compose']);
 
 const DESTRUCTIVE_STATEMENT = /\b(?:drop\s+(?:table|database|schema|view|materialized\s+view|index|sequence|function|type|extension|collection|user|role|owned)\b|truncate\b|delete\s+from\b|alter\s+table\b[^;]*\bdrop\b|flushall\b|flushdb\b|dropdatabase\b)|\.drop(?:Database)?\s*\(|\bdelete(?:Many|One)\s*\(|\.remove\s*\(/i;
-const DESTRUCTIVE_REDIS = new Set(['flushall', 'flushdb', 'del', 'unlink', 'swapdb']);
-/** psql meta-commands that read a file or run a shell, hiding the statements they run. */
-const HIDDEN_META = /\\(?:i|ir|include|include_relative|gexec)\b|\\!/;
-const MENTION = new RegExp(`(^|[^A-Za-z0-9_-])(${[...Object.keys(CLIENTS), 'prisma', 'rails', 'rake'].join('|')})([^A-Za-z0-9_-]|$)`, 'g');
-/** Prefixes whose operands Guardian cannot follow, so the client's arguments or target may come from elsewhere. */
-const OPAQUE_PREFIX = new Set(['xargs', 'find', 'parallel', 'watch', 'eval']);
+const DESTRUCTIVE_REDIS = new Set(['flushall', 'flushdb', 'del', 'unlink', 'swapdb', 'migrate']);
+/** psql meta-commands that read a file or execute query results, hiding the statements they run. */
+const HIDDEN_META = /\\(?:i|ir|include|include_relative|gexec)\b/;
 /**
- * Prefixes that run the client on another machine, where "localhost" is that machine. A container counts: its
- * engine may be remote through a Docker context, and its database is not one of the local targets.
+ * Statements that move the session to another server or run a program: psql's `\connect`, shell escapes and
+ * program pipes, MongoDB's `connect()` and `new Mongo()`, and Redis's `MIGRATE`. After one, the target is unproven.
  */
-const REMOTE_PREFIX = new Set(['ssh', 'kubectl', 'oc', 'heroku', 'fly', 'flyctl', 'gcloud', 'az', 'aws', 'doctl', 'render', 'railway', 'docker',
-  'podman', 'nerdctl', 'docker-compose']);
-const ENV_ASSIGNMENT = /(?:^|[\s;&|(])(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(?:'([^']*)'|"([^"]*)"|([^\s;&|)]*))/g;
-/** Values that read the same in every quoting context, so they can be substituted into the script safely. */
-const SAFE_VALUE = /^[A-Za-z0-9_@%+=:,./~?!*#[\]{}^-]*$/;
+const RETARGET = /\\(?:c|connect)\b|\\!|\\copy\b[^\n]*\bprogram\b|\\o\s*\||\b(?:connect|Mongo)\s*\(|^\s*migrate\b/i;
+const MENTION = new RegExp(`(^|[^A-Za-z0-9_-])(${[...Object.keys(CLIENTS), ...Object.keys(FRAMEWORK_WIPES)].join('|')})([^A-Za-z0-9_-]|$)`);
+/** Text that may destroy data or hide statements, for scripts Guardian cannot evaluate exactly. */
+const RISK_MARKERS = /<|\||(^|\s)(-f|--file|-i|--eval|-x)(\s|=|$)|\\i\b|\b(migrate\s+reset|db:(drop|reset|purge)|force-reset|accept-data-loss|dropdb|dropuser|pg_restore)\b|[$`]/;
 
 const programOf = (word: string) => word.replace(/^\\/, '').split('/').pop() ?? word;
+/** Commands and redirections that write files, which could create a client's startup file before it runs. */
+const WRITERS = new Set(['tee', 'cp', 'mv', 'ln', 'install', 'rsync', 'dd', 'curl', 'wget', 'git', 'tar', 'unzip', 'sed', 'perl', 'python', 'python3',
+  'node', 'ruby']);
+const OUTPUT_REDIRECT = /(^|[^<>&])>/;
+const mentionsClient = (text: string) => MENTION.test(text);
+const risky = (text: string) => DESTRUCTIVE_STATEMENT.test(text) || RISK_MARKERS.test(text);
 
 /** Local hosts: loopback names and addresses, Unix socket directories, and libpq's empty host. */
 export function isLocalHost(host: string): boolean {
@@ -106,7 +158,7 @@ const decode = (text: string) => { try { return decodeURIComponent(text); } catc
 const withoutPort = (host: string) => host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.replace(/:[^:]*$/, '');
 
 interface Targets {
-  /** Hosts named explicitly; none means the client's environment or default decides. */
+  /** Hosts and addresses named explicitly; none means the client's environment or default decides. */
   hosts: string[];
   /** A service, whose host lives in a file Guardian does not read. */
   service: boolean;
@@ -116,7 +168,7 @@ interface Targets {
  * The servers a connection value names, as libpq reads it: a URI's hosts are split on commas, percent-decoded, and
  * split again, so an encoded comma adds a host; query parameters are decoded before they are matched; a keyword
  * string's `host` and `hostaddr` lists count, and a `service` cannot be followed. Other clients' URIs read the same
- * way. A plain database name names no server.
+ * way, and a MongoDB-style `host/db` address names its host. A plain database name names no server.
  */
 export function connectionTargets(value: string): Targets {
   const targets: Targets = { hosts: [], service: false };
@@ -139,7 +191,6 @@ export function connectionTargets(value: string): Targets {
     return targets;
   }
   if (!value.includes('=')) {
-    // A MongoDB-style `host[:port]/db` address names its host before the slash.
     const address = /^([^\s/=]+)\/[^\s]*$/.exec(value);
     if (address) targets.hosts.push(withoutPort(address[1]));
     return targets;
@@ -152,72 +203,318 @@ export function connectionTargets(value: string): Targets {
   return targets;
 }
 
-/**
- * Expands `$NAME` and `${NAME}` everywhere, including inside single quotes, because a nested shell expands what the
- * outer one quoted. `$$` is the process ID or an SQL dollar quote, and stays as written.
- */
-function expandVariables(text: string, lookup: (name: string) => string | undefined): { names: string[]; expanded: string } {
-  const names: string[] = [];
-  const expanded = text.replace(/\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (match, braced, plain) => {
-    if (match === '$$') return match;
-    const name = braced ?? plain;
-    names.push(name);
-    return lookup(name) ?? '';
+/** A script Guardian cannot evaluate exactly: control flow, substitutions, unset or unusual variables. */
+class Unreadable extends Error {}
+
+type Lookup = (name: string) => string | undefined;
+/** `$0`, `$1`… of the script being evaluated: none for `bash -lc`, the trailing arguments for `sh -c SCRIPT ARG0 ARG1`. */
+type Positional = readonly string[];
+
+interface Evaluated {
+  argv: string[];
+  /** Assignments before the command name, exported to it. */
+  env: Map<string, string>;
+}
+
+function unquotedWord(text: string): string {
+  // Globs, brace expansion and tilde expansion would change the argument.
+  if (/[*?[]|^~|\{[^}]*(,|\.\.)[^}]*\}/.test(text) || /\\$/.test(text)) throw new Unreadable();
+  return text.replace(/\\(.)/gs, '$1');
+}
+
+function expansionValue(node: Node, lookup: Lookup, positional: Positional): string {
+  const named = node.namedChildren.filter((child): child is Node => !!child);
+  if (node.type === 'expansion' && (named.length !== 1 || named[0].type !== 'variable_name' || node.text !== `\${${named[0].text}}`)) throw new Unreadable();
+  const name = named[0];
+  if (!name) throw new Unreadable();
+  if (/^\d+$/.test(name.text)) return positional[Number(name.text)] ?? '';
+  if (name.type === 'special_variable_name') {
+    // `$@` and `$*` would become several arguments; joined they could misplace a target.
+    if (name.text === '@' || name.text === '*') { if (positional.length > 1) throw new Unreadable(); return ''; }
+    return name.text === '#' ? String(Math.max(0, positional.length - 1)) : name.text === '$' ? '1' : name.text === '?' ? '0' : '';
+  }
+  const value = lookup(name.text);
+  if (value === undefined) throw new Unreadable();
+  return value;
+}
+
+function stringValue(node: Node, lookup: Lookup, positional: Positional): string {
+  let value = '';
+  for (const part of node.children) {
+    if (!part || part.type === '"') continue;
+    if (part.type === 'string_content') value += part.text.replace(/\\\n/g, '').replace(/\\([$`"\\])/g, '$1');
+    else if (part.type === 'simple_expansion' || part.type === 'expansion') value += expansionValue(part, lookup, positional);
+    else throw new Unreadable();
+  }
+  return value;
+}
+
+/** The arguments one syntax node becomes: unquoted expansions split on whitespace, quoted text kept whole. */
+function argumentValues(node: Node, lookup: Lookup, positional: Positional): string[] {
+  switch (node.type) {
+    case 'word': case 'number': return [unquotedWord(node.text)];
+    case 'raw_string': return [node.text.slice(1, -1)];
+    case 'string': return [stringValue(node, lookup, positional)];
+    case 'simple_expansion': case 'expansion': {
+      const value = expansionValue(node, lookup, positional);
+      if (/[*?[]/.test(value)) throw new Unreadable();
+      return value.split(/[ \t\n]+/).filter(Boolean);
+    }
+    case 'concatenation': {
+      let value = '';
+      for (const part of node.namedChildren) {
+        if (!part) continue;
+        const values = part.type === 'simple_expansion' || part.type === 'expansion' ? [expansionValue(part, lookup, positional)] : argumentValues(part, lookup, positional);
+        if (values.length !== 1 || ((part.type === 'simple_expansion' || part.type === 'expansion') && /[\s*?[]/.test(values[0]))) throw new Unreadable();
+        value += values[0];
+      }
+      return [value];
+    }
+    default: throw new Unreadable();
+  }
+}
+
+/** Every command of a script with its arguments as bash passes them, or undefined when the script cannot be evaluated exactly. */
+function evaluateScript(shell: Shell, script: string, lookup: Lookup, positional: Positional): Evaluated[] | undefined {
+  return shell.parseTree(script, root => {
+    const commands: Evaluated[] = [];
+    const visit = (node: Node) => {
+      switch (node.type) {
+        case 'program': case 'list': case 'pipeline':
+          for (const child of node.namedChildren) if (child) visit(child);
+          return;
+        case 'redirected_statement':
+          // Redirections only move input and output; a client without a visible statement counts as hidden anyway.
+          if (node.namedChildren[0]) visit(node.namedChildren[0]);
+          return;
+        case 'comment': return;
+        case 'command': {
+          const env = new Map<string, string>(), argv: string[] = [];
+          for (const child of node.namedChildren) {
+            if (!child || child.type === 'comment' || child.type.endsWith('_redirect')) continue;
+            if (child.type === 'variable_assignment') {
+              const [name, value] = child.namedChildren;
+              if (!name) throw new Unreadable();
+              const values = value ? argumentValues(value, lookup, positional) : [''];
+              env.set(name.text, values.join(' '));
+            } else if (child.type === 'command_name') {
+              const name = child.namedChildren[0];
+              if (!name) throw new Unreadable();
+              argv.push(...argumentValues(name, lookup, positional));
+            } else {
+              argv.push(...argumentValues(child, lookup, positional));
+            }
+          }
+          commands.push({ argv, env });
+          return;
+        }
+        default: throw new Unreadable();
+      }
+    };
+    try {
+      visit(root);
+    } catch (error) {
+      if (error instanceof Unreadable) return undefined;
+      throw error;
+    }
+    return commands;
   });
-  return { names, expanded };
 }
 
 interface Invocation {
   local: boolean;
   /** Visible statements include a destructive one, or the tool always destroys data. */
   destructive: boolean;
-  /** Some statements come from a file, standard input or a meta-command Guardian does not read. */
+  /** Some statements come from a file, standard input, a meta-command or an option Guardian does not know. */
   hidden: boolean;
 }
 
-function analyzeClient(spec: ClientSpec, args: readonly string[], envFor: (name: string) => string | undefined): Invocation {
+/**
+ * What decides whether a client's startup file is trustworthy: Pi's own `HOME` and startup variables, and whether
+ * the script writes files, since it could create the startup file before the client starts.
+ */
+interface StartupContext {
+  root: Lookup;
+  writes: boolean;
+}
+
+/** Reads a client's arguments as getopt does, including clustered short options such as `-qc`. */
+function analyzeClient(spec: ClientSpec, args: readonly string[], lookup: Lookup, context: StartupContext): Invocation {
   if (spec.local) return { local: true, destructive: false, hidden: false };
-  const hosts: string[] = [];
-  let service = false, hidden = false, sawSql = false;
-  const statements: string[] = [];
-  const addConnection = (value: string) => {
-    const targets = connectionTargets(value);
-    hosts.push(...targets.hosts);
-    service ||= targets.service;
+  if (spec.subcommand) {
+    if (args[0] !== spec.subcommand) return { local: true, destructive: false, hidden: false };
+    args = args.slice(1);
+  }
+  const hosts: string[] = [], statements: string[] = [];
+  let service = false, hidden = !!spec.hidden, sawSql = false, operandsOnly = false, skipsStartup = false;
+  const apply = (kind: OptionKind, value: string) => {
+    if (kind === 'host') hosts.push(...value.split(','));
+    else if (kind === 'connection') { const targets = connectionTargets(value); hosts.push(...targets.hosts); service ||= targets.service; }
+    else if (kind === 'sql') { statements.push(value); sawSql = true; }
+    else if (kind === 'file') hidden = true;
   };
   for (let index = 0; index < args.length; index++) {
     const word = args[index];
-    const option = (names: string[] | undefined) => {
-      for (const name of names ?? []) {
-        if (word === name) return args[++index] ?? '';
-        if (name.startsWith('--') && word.startsWith(`${name}=`)) return word.slice(name.length + 1);
-        if (!name.startsWith('--') && word.startsWith(name) && word.length > name.length) return word.slice(name.length);
+    if (!operandsOnly && word === '--') { operandsOnly = true; continue; }
+    if (!operandsOnly && word.startsWith('--')) {
+      const equals = word.indexOf('=');
+      const name = equals === -1 ? word : word.slice(0, equals);
+      const kind = spec.options[name];
+      if (spec.startup?.skip.includes(name)) skipsStartup = true;
+      if (kind === undefined) { hidden = true; continue; }
+      if (kind === 'flag' || kind === 'optional') continue;
+      apply(kind, equals === -1 ? args[++index] ?? '' : word.slice(equals + 1));
+      continue;
+    }
+    if (!operandsOnly && word.startsWith('-') && word.length > 1) {
+      for (let position = 1; position < word.length; position++) {
+        const kind = spec.options[`-${word[position]}`];
+        if (spec.startup?.skip.includes(`-${word[position]}`)) skipsStartup = true;
+        if (kind === undefined) { hidden = true; break; }
+        if (kind === 'flag') continue;
+        const attached = word.slice(position + 1);
+        if (kind === 'optional') break;
+        apply(kind, attached || (args[++index] ?? ''));
+        break;
       }
-      return undefined;
-    };
-    let value: string | undefined;
-    if ((value = option(spec.host)) !== undefined) hosts.push(...value.split(','));
-    else if ((value = option(spec.connection)) !== undefined) addConnection(value);
-    else if ((value = option(spec.sql)) !== undefined) { statements.push(value); sawSql = true; }
-    else if ((value = option(spec.file)) !== undefined) hidden = true;
-    else if (option(spec.value) !== undefined) continue;
-    else if (word.startsWith('-')) continue;
-    else if (spec.commandOperands) { statements.push(word); sawSql = true; }
-    // Any operand may be the connection string: an option Guardian does not know could have taken the one before.
+      continue;
+    }
+    if (spec.operands === 'command') { statements.push(word); sawSql = true; }
     else if (/\.js$/.test(word)) hidden = true;
-    else if (spec.connectionOperand) addConnection(word);
+    else if (spec.operands === 'connection') apply('connection', word);
   }
-  for (const name of spec.serviceEnv ?? []) if (envFor(name) !== undefined) service = true;
-  if (!hosts.length) for (const name of spec.env ?? []) {
-    const value = envFor(name);
-    if (value !== undefined) hosts.push(...(value.includes('://') || value.includes('=') ? connectionTargets(value).hosts : value.split(',')));
-  }
+  for (const name of spec.serviceEnv ?? []) if (lookup(name) !== undefined) service = true;
+  const fromEnv = (names: string[] | undefined) => (names ?? []).flatMap(name => {
+    const value = lookup(name);
+    if (value === undefined) return [];
+    if (value.includes('://') || value.includes('=')) { const targets = connectionTargets(value); service ||= targets.service; return targets.hosts; }
+    return value.split(',');
+  });
+  if (!hosts.length) hosts.push(...fromEnv(spec.env));
+  // libpq connects to `hostaddr` whatever the host is called.
+  hosts.push(...fromEnv(spec.addressEnv));
   if (!sawSql && !spec.destructive) hidden = true;
   if (statements.some(statement => HIDDEN_META.test(statement))) hidden = true;
   const destructive = !!spec.destructive || statements.some(statement => DESTRUCTIVE_STATEMENT.test(statement))
-    || (spec.commandOperands === true && DESTRUCTIVE_REDIS.has((statements[0] ?? '').toLowerCase()));
-  const local = !service && (hosts.length ? hosts.every(isLocalHost) : spec.defaultLocal);
-  return { local, destructive, hidden };
+    || (spec.operands === 'command' && DESTRUCTIVE_REDIS.has((statements[0] ?? '').toLowerCase()));
+  const retargets = statements.some(statement => RETARGET.test(statement));
+  // A startup file runs before the statements and can connect elsewhere; one the command points at is the agent's.
+  const home = lookup('HOME') ?? homedir();
+  const startup = !!spec.startup && !skipsStartup && ((spec.startup.env !== undefined && lookup(spec.startup.env) !== undefined)
+    || home !== (context.root('HOME') ?? homedir()) || context.writes || spec.startup.files(home));
+  const local = !service && !retargets && !startup && (hosts.length ? hosts.every(isLocalHost) : spec.defaultLocal);
+  return { local, destructive, hidden: hidden || retargets };
+}
+
+/**
+ * The script a shell runs with `-c`, as `bash -euc SCRIPT`, and the arguments that follow it, which become `$0`,
+ * `$1`…; undefined when the shell reads a file or standard input.
+ */
+function shellScript(args: readonly string[]): { script: string; positional: string[] } | undefined {
+  let command = false;
+  for (let index = 0; index < args.length; index++) {
+    const word = args[index];
+    if (word === '-o' || word === '+o') { index++; continue; }
+    if (/^[-+][A-Za-z]+$/.test(word)) { if (word.slice(1).includes('c')) command = true; continue; }
+    return command ? { script: word, positional: args.slice(index + 1) } : undefined;
+  }
+  return undefined;
+}
+
+/** The command a wrapper runs, with the environment it sets; undefined when the word is not a wrapper. */
+function unwrap(argv: readonly string[], env: Map<string, string>): string[] | undefined {
+  const program = programOf(argv[0] ?? '');
+  const skip = (start: number, valued: RegExp) => {
+    let index = start;
+    while (index < argv.length && argv[index].startsWith('-') && argv[index] !== '--') index += valued.test(argv[index]) ? 2 : 1;
+    return argv[index] === '--' ? index + 1 : index;
+  };
+  switch (program) {
+    case 'sudo': return argv.slice(skip(1, /^-[ugpChDrtUT]$/));
+    case 'command': case 'exec': case 'nohup': case 'setsid': case 'time': case 'builtin': return argv.slice(skip(1, /^$/));
+    case 'nice': return argv.slice(skip(1, /^-n$/));
+    case 'ionice': return argv.slice(skip(1, /^-[cnp]$/));
+    case 'stdbuf': return argv.slice(skip(1, /^-[ioe]$/));
+    case 'timeout': { const index = skip(1, /^-[sk]$/); return argv.slice(index + 1); }
+    case 'env': {
+      let index = 1;
+      for (; index < argv.length; index++) {
+        const word = argv[index];
+        if (word === '--') { index++; break; }
+        if (word === '-i' || word === '--ignore-environment') continue;
+        if (word === '-u' || word === '--unset') { env.set(argv[++index] ?? '', ''); continue; }
+        const equals = word.indexOf('=');
+        if (equals > 0 && !word.startsWith('-')) { env.set(word.slice(0, equals), word.slice(equals + 1)); continue; }
+        if (word.startsWith('-')) continue;
+        break;
+      }
+      return argv.slice(index);
+    }
+    default: return undefined;
+  }
+}
+
+const MAX_DEPTH = 8;
+
+/** Whether any command in an evaluated script must be refused. `remote` means "localhost" is another machine. */
+function refuse(shell: Shell, commands: readonly Evaluated[], outer: Lookup, positional: Positional, remote: boolean, depth: number, script: string, root: Lookup): boolean {
+  if (depth > MAX_DEPTH) return true;
+  const context: StartupContext = { root, writes: OUTPUT_REDIRECT.test(script) || commands.some(command => WRITERS.has(programOf(command.argv[0] ?? ''))) };
+  for (const command of commands) {
+    const env = new Map(command.env);
+    let argv = command.argv;
+    for (let unwrapped = unwrap(argv, env); unwrapped; unwrapped = unwrap(argv, env)) argv = unwrapped;
+    // Assignments reach the command they prefix, and a nested shell inherits them.
+    const lookup: Lookup = name => env.has(name) ? env.get(name) || undefined : outer(name);
+    const program = programOf(argv[0] ?? '');
+    const args = argv.slice(1);
+
+    if (SHELLS.has(program) || program === 'eval') {
+      const nested = program === 'eval' ? { script: args.join(' '), positional } : shellScript(args);
+      // A shell reading a file or standard input runs something Guardian cannot see.
+      if (nested === undefined) { if (mentionsClient(script)) return true; continue; }
+      if (judge(shell, nested.script, lookup, nested.positional, remote, depth + 1, root)) return true;
+      continue;
+    }
+    // A client named inside another program's arguments, as in `sqlite3 db ".shell psql …"` or
+    // `python -c "os.system('psql …')"`, cannot be followed.
+    if (args.some(word => mentionsClient(word) && risky(word))) return true;
+    if (OPAQUE.has(program)) { if (args.some(mentionsClient)) return true; continue; }
+    if (REMOTE.has(program)) {
+      const at = args.findIndex(word => CLIENTS[programOf(word)] !== undefined);
+      if (at !== -1) {
+        const invocation = analyzeClient(CLIENTS[programOf(args[at])], args.slice(at + 1), () => undefined, context);
+        if (invocation.destructive || invocation.hidden) return true;
+      } else if (args.some(word => mentionsClient(word) && judge(shell, word, () => undefined, [], true, depth + 1, root))) {
+        return true;
+      }
+      continue;
+    }
+
+    const frameworkAt = argv.findIndex(word => FRAMEWORK_WIPES[programOf(word)] !== undefined);
+    if (frameworkAt !== -1 && argv.slice(0, frameworkAt).every(word => RUNNERS.has(programOf(word)) || word.startsWith('-'))) {
+      if (!FRAMEWORK_WIPES[programOf(argv[frameworkAt])](argv.slice(frameworkAt + 1))) continue;
+      const url = lookup('DATABASE_URL');
+      const targets = url === undefined ? undefined : connectionTargets(url);
+      const local = !!targets && !targets.service && targets.hosts.length > 0 && targets.hosts.every(isLocalHost);
+      if (!local || remote) return true;
+      continue;
+    }
+
+    const spec = CLIENTS[program];
+    if (!spec) continue;
+    const invocation = analyzeClient(spec, args, lookup, context);
+    if ((!invocation.local || remote) && (invocation.destructive || invocation.hidden)) return true;
+  }
+  return false;
+}
+
+function judge(shell: Shell, script: string, lookup: Lookup, positional: Positional, remote: boolean, depth: number, root: Lookup): boolean {
+  if (!mentionsClient(script)) return false;
+  const commands = evaluateScript(shell, script, lookup, positional);
+  // A script Guardian cannot evaluate exactly is refused when it could destroy data or hide what it runs.
+  if (!commands) return remote || risky(script);
+  return refuse(shell, commands, lookup, positional, remote, depth, script, root);
 }
 
 export type DatabaseDecision = 'forbidden' | undefined;
@@ -227,49 +524,7 @@ export type DatabaseDecision = 'forbidden' | undefined;
  * cannot prove local. Everything else, including any command against a local target, is left to the normal flow.
  */
 export function databaseDecision(shell: Shell, command: readonly string[], env: NodeJS.ProcessEnv = process.env): DatabaseDecision {
-  const text = shell.extractBashCommand(command)?.[1] ?? command.join(' ');
-  if (!text.match(MENTION)) return undefined;
-
-  const assigned = new Map<string, string>();
-  for (const match of text.matchAll(ENV_ASSIGNMENT)) assigned.set(match[1], match[2] ?? match[3] ?? match[4] ?? '');
-  const { names, expanded } = expandVariables(text, name => env[name]);
-  // A variable the script sets, Pi's environment lacks, or whose value would change how the script parses could
-  // hold any target, and so could a command substitution.
-  const unresolved = /\$\(|`/.test(text) || names.some(name => assigned.has(name) || env[name] === undefined || !SAFE_VALUE.test(env[name]!));
-
-  const covered = new Set<string>();
-  for (const argv of shell.expandLiteralCommands(['bash', '-lc', expanded])) {
-    const index = argv.findIndex(word => CLIENTS[programOf(word)] !== undefined || FRAMEWORK_WIPES.some(wipe => wipe.program.test(programOf(word))));
-    if (index === -1 || (argv[0] === 'bash' && argv[1] === '-lc' && argv[2] === expanded)) continue;
-    const program = programOf(argv[index]);
-    covered.add(program);
-    const prefix = argv.slice(0, index).map(programOf);
-    const prefixEnv = new Map(argv.slice(0, index).flatMap(word => /^[A-Za-z_][A-Za-z0-9_]*=/.test(word) ? [[word.slice(0, word.indexOf('=')), word.slice(word.indexOf('=') + 1)] as const] : []));
-    const envFor = (name: string) => prefixEnv.get(name) ?? assigned.get(name) ?? env[name];
-    if (prefix.some(word => OPAQUE_PREFIX.has(word))) return 'forbidden';
-    const remote = prefix.some(word => REMOTE_PREFIX.has(word));
-
-    const wipe = FRAMEWORK_WIPES.find(candidate => candidate.program.test(program));
-    let invocation: Invocation;
-    if (wipe) {
-      if (!wipe.operation(argv.slice(index + 1))) continue;
-      const url = envFor('DATABASE_URL');
-      invocation = { local: url !== undefined && connectionTargets(url).hosts.length > 0 && connectionTargets(url).hosts.every(isLocalHost)
-        && !connectionTargets(url).service, destructive: true, hidden: false };
-    } else {
-      invocation = analyzeClient(CLIENTS[program], argv.slice(index + 1), envFor);
-    }
-    // What an unresolved variable or substitution holds could be a statement as well as a target.
-    const local = invocation.local && !remote && !unresolved;
-    if (!local && (invocation.destructive || invocation.hidden || unresolved)) return 'forbidden';
-  }
-
-  // A client the parser could not place in a command, as inside `sh -c` with escaped quotes, cannot be judged.
-  const mentioned = [...expanded.matchAll(MENTION)].map(match => match[2]);
-  const unplaced = mentioned.some(name => !covered.has(name));
-  if (unplaced && (DESTRUCTIVE_STATEMENT.test(expanded) || /(^|\s)(-f|--file|-i|--eval)(\s|=|$)|<|\||\\i\b/.test(expanded)
-    || /\b(migrate\s+reset|db:(drop|reset|purge)|--force-reset|--accept-data-loss|dropdb|dropuser|pg_restore)\b/.test(expanded))) {
-    return 'forbidden';
-  }
-  return undefined;
+  const script = shell.extractBashCommand(command)?.[1] ?? command.join(' ');
+  const root: Lookup = name => env[name];
+  return judge(shell, script, root, [], false, 0, root) ? 'forbidden' : undefined;
 }

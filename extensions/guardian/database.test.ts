@@ -1,12 +1,18 @@
 // Ar's database boundary: a database command may run destructive or unseen SQL only against a provably local
 // target. Evaluated as text; no database is contacted.
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test, { after } from 'node:test';
 import { connectionTargets, databaseDecision, isLocalHost } from './database.ts';
 import { loadShell } from './shell.ts';
 
 const shell = await loadShell();
-const decide = (script: string, env: NodeJS.ProcessEnv = {}) => databaseDecision(shell, ['bash', '-lc', script], env);
+/** A home without startup files, so the machine running the tests does not decide them. */
+const HOME = mkdtempSync(join(tmpdir(), 'guardian-database-home-'));
+after(() => rmSync(HOME, { recursive: true, force: true }));
+const decide = (script: string, env: NodeJS.ProcessEnv = {}) => databaseDecision(shell, ['bash', '-lc', script], { HOME, ...env });
 const REMOTE = { DATABASE_URL: 'postgres://me@prod.example.com:5432/app' };
 const LOCAL = { DATABASE_URL: 'postgres://me@localhost:5432/app' };
 
@@ -145,8 +151,65 @@ test('visible, non-destructive statements run against any target', () => {
 test('commands that are not database operations are untouched', () => {
   for (const script of ['git commit -m "drop table support"', 'grep -r "DROP TABLE" migrations/', 'npx prisma migrate deploy', 'echo $HOME',
     'bin/rails server', 'git commit -m "use psql for the import"']) {
-    assert.equal(decide(script, { HOME: '/Users/ar' }), undefined, script);
+    assert.equal(decide(script), undefined, script);
   }
+});
+
+test('libpq settings that apply whatever the host is called still count', () => {
+  assert.equal(decide("psql -h localhost -c 'DROP TABLE customers'", { PGHOSTADDR: '203.0.113.10' }), 'forbidden', 'hostaddr is the network address');
+  assert.equal(decide("psql -h localhost -c 'DROP TABLE customers'", { PGHOST: 'db.example.com' }), undefined, 'an explicit host overrides PGHOST');
+  assert.equal(decide('env -u PGHOST psql -c "DROP TABLE t"', { PGHOST: 'db.example.com' }), undefined, 'env -u removes it');
+});
+
+test('options are read the way getopt reads them', () => {
+  assert.equal(decide("psql -h db.example.com -c 'SELECT 1' -qc 'DROP TABLE customers'"), 'forbidden', '-qc is -q then -c');
+  assert.equal(decide("psql --frobnicate -h db.example.com -c 'SELECT 1'"), 'forbidden', 'an unknown option counts as hidden SQL');
+  assert.equal(decide("psql -h localhost --frobnicate -c 'DROP TABLE x'"), undefined, 'against a local target it runs');
+  assert.equal(decide('mysql -h127.0.0.1 -psecret -e "DROP DATABASE t"'), undefined, "mysql's -p takes only an attached value");
+  assert.equal(decide("psql -X -1 -v ON_ERROR_STOP=1 -h db.example.com -c 'SELECT 1'"), undefined);
+});
+
+test('every invocation is judged on its own', () => {
+  assert.equal(decide(`psql -h localhost -c 'SELECT 1'; bash -euc 'psql -h db.example.com -c "DROP TABLE customers"'`), 'forbidden');
+  assert.equal(decide("echo \"psql -h db.example.com -c 'DROP TABLE x'\" | bash"), 'forbidden', 'a shell reading standard input');
+  assert.equal(decide(`python3 -c "import os; os.system('psql -h db.example.com -c \\"DROP TABLE x\\"')"`), 'forbidden', 'a client inside another program');
+  assert.equal(decide("psql -h localhost -c 'DELETE FROM cache WHERE key = $tag$obsolete$tag$'"), undefined, 'tagged dollar quotes in single quotes are text');
+  for (const script of ['rg mysql', 'rg -n psql src/', 'cat docs/psql.md', 'man psql']) assert.equal(decide(script), undefined, script);
+});
+
+test('positional parameters of a nested shell are its trailing arguments', () => {
+  assert.equal(decide(`sh -c 'psql "$1" -c "DROP TABLE t"' sh postgres://db.example.com/app`), 'forbidden');
+  assert.equal(decide(`sh -c 'psql "$1" -c "DROP TABLE t"' sh postgres://localhost/app`), undefined);
+  assert.equal(decide(`bash -c 'psql "$@" -c "DROP TABLE t"' bash -h db.example.com`), 'forbidden', '$@ spread over several arguments is unreadable');
+});
+
+test('statements that move the session elsewhere make the target unproven', () => {
+  for (const script of [
+    `psql -h localhost -c '\\c postgres://db.example.com/app' -c 'DROP TABLE x'`,
+    `psql -h localhost -c '\\! psql -h db.example.com -c "DROP TABLE x"'`,
+    `mongosh --eval "db = connect('mongodb://db.example.com/app'); db.dropDatabase()"`,
+    `sqlite3 x.db ".shell psql -h db.example.com -c 'DROP TABLE x'"`,
+  ]) {
+    assert.equal(decide(script), 'forbidden', script);
+  }
+});
+
+test('a startup file that can connect elsewhere makes the target unproven unless skipped', () => {
+  const home = join(HOME, 'with-rc');
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, '.psqlrc'), '\\c postgres://db.example.com/app\n');
+  writeFileSync(join(home, '.mongoshrc.js'), "db = connect('mongodb://db.example.com/app');\n");
+  assert.equal(decide("psql -h localhost -c 'DROP TABLE t'", { HOME: home }), 'forbidden');
+  assert.equal(decide("psql -X -h localhost -c 'DROP TABLE t'", { HOME: home }), undefined, '-X skips ~/.psqlrc');
+  assert.equal(decide(`mongosh --eval 'db.dropDatabase()'`, { HOME: home }), 'forbidden');
+  assert.equal(decide(`mongosh --norc --eval 'db.dropDatabase()'`, { HOME: home }), undefined);
+  assert.equal(decide("psql -h localhost -c 'DROP TABLE t'", { PSQLRC: '/tmp/x' }), 'forbidden');
+  assert.equal(decide("PSQLRC=./rc psql -h localhost -c 'DROP TABLE t'"), 'forbidden');
+  assert.equal(decide("HOME=./fake psql -h localhost -c 'DROP TABLE t'"), 'forbidden', 'a home the command chooses could hold anything');
+  assert.equal(decide(`echo '\\c postgres://db.example.com/app' > ~/.psqlrc && psql -h localhost -c 'DROP TABLE t'`), 'forbidden',
+    'a script that writes files could create the startup file first');
+  assert.equal(decide(`psql -h localhost -c 'DROP TABLE t' > drop.log`), 'forbidden');
+  assert.equal(decide(`psql -X -h localhost -c 'DROP TABLE t' > drop.log`), undefined, '-X makes it safe to log');
 });
 
 test('local hosts are loopback names and addresses or socket paths', () => {

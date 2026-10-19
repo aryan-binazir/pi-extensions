@@ -329,19 +329,23 @@ test('cancellation escalation does not signal the process group again at exit or
   } finally { await registry.shutdown(); }
 });
 
-test('every child loads the hooks extension before any other and refuses to start without it', async () => {
+test('every child loads the hooks and Guardian extensions before any other and refuses to start without them', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'subagent-hooks-'));
   try {
     const hooks = fileURLToPath(new URL('../hooks/index.ts', import.meta.url));
+    const guardian = fileURLToPath(new URL('../guardian/index.ts', import.meta.url));
     const extra = join(cwd, 'extra.ts');
     await writeFile(extra, 'export default () => {};');
-    const spec = await validateTask({task: 'Check', cwd, tools: [], extensions: [extra, hooks]}, []);
+    const spec = await validateTask({task: 'Check', cwd, tools: [], extensions: [extra, hooks, guardian]}, []);
     const args = piInvocation(spec).args;
-    assert.deepEqual(args.flatMap((arg, i) => arg === '-e' ? [args[i + 1]] : []), [await realpath(hooks), await realpath(extra)]);
+    assert.deepEqual(args.flatMap((arg, i) => arg === '-e' ? [args[i + 1]] : []), [await realpath(hooks), await realpath(guardian), await realpath(extra)]);
     await symlink(join(cwd, 'gone.ts'), join(cwd, 'dangling.ts'));
     for (const missing of [join(cwd, 'missing.ts'), join(cwd, 'dangling.ts')]) {
       await assert.rejects(validateTask({task: 'Check', cwd, tools: []}, [], undefined, missing), /Subagents do not start without the hooks extension/);
+      await assert.rejects(validateTask({task: 'Check', cwd, tools: []}, [], undefined, undefined, missing), /Subagents do not start without the guardian extension/);
     }
+    const withoutGuardian = piInvocation(await validateTask({task: 'Check', cwd, tools: []}, [], undefined, undefined, null)).args;
+    assert.deepEqual(withoutGuardian.flatMap((arg, i) => arg === '-e' ? [withoutGuardian[i + 1]] : []), [await realpath(hooks)], 'a parent without Guardian adds none');
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });
 

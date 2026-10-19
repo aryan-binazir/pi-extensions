@@ -77,6 +77,7 @@ const CAP = 64 * 1024;
 const RETAINED = 50;
 const ACTIVE_STATUS = new Set<TaskResult['status']>(['queued', 'running']);
 const HOOKS_EXTENSION = fileURLToPath(new URL('../hooks/index.ts', import.meta.url));
+const GUARDIAN_EXTENSION = fileURLToPath(new URL('../guardian/index.ts', import.meta.url));
 const FAST_ALIAS = new RegExp(`^(openai(?:-codex)?\\/.+)~fast(?=:${thinkingPattern}$|$)`);
 function withoutFastAlias(model: string): string {
   return model.replace(FAST_ALIAS, '$1');
@@ -107,7 +108,8 @@ function cloneResult(result: TaskResult): TaskResult {
   return snapshot;
 }
 
-export async function prepareTask(spec: TaskSpec, selectTools: (task: TaskSpec) => string[], hooksExtension = HOOKS_EXTENSION): Promise<ValidTask> {
+/** `guardianExtension` is null when the parent does not run Guardian; children then match the parent. */
+export async function prepareTask(spec: TaskSpec, selectTools: (task: TaskSpec) => string[], hooksExtension = HOOKS_EXTENSION, guardianExtension: string | null = GUARDIAN_EXTENSION): Promise<ValidTask> {
   if (!spec || typeof spec.task !== 'string' || !spec.task.trim() || spec.task.length > 32000) throw new Error('Task brief must contain 1–32000 characters');
   if (typeof spec.cwd !== 'string' || !isAbsolute(spec.cwd)) throw new Error('Task cwd must be absolute');
   const cwd = await realpath(spec.cwd);
@@ -126,14 +128,20 @@ export async function prepareTask(spec: TaskSpec, selectTools: (task: TaskSpec) 
     if (!(await stat(canonical)).isFile()) throw new Error('Extension must be a file');
     extensions.push(canonical);
   }
-  let hooks: string;
-  try {
-    hooks = await realpath(hooksExtension);
-    if (!(await stat(hooks)).isFile()) throw new Error('not a file');
-  } catch (error) {
-    throw new Error(`Subagents do not start without the hooks extension at ${hooksExtension}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return { ...spec, model, cwd, tools: [...tools], extensions: extensions.filter(path => path !== hooks), hooks, timeout };
+  // Children must carry the parent's protections: hooks block configured calls, and Guardian, when the parent runs
+  // it, keeps their commands and file changes under the same sandbox, rules and review.
+  const mandatory = async (path: string, name: string) => {
+    try {
+      const resolved = await realpath(path);
+      if (!(await stat(resolved)).isFile()) throw new Error('not a file');
+      return resolved;
+    } catch (error) {
+      throw new Error(`Subagents do not start without the ${name} extension at ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  const hooks = await mandatory(hooksExtension, 'hooks');
+  const guardian = guardianExtension === null ? undefined : await mandatory(guardianExtension, 'guardian');
+  return { ...spec, model, cwd, tools: [...tools], extensions: extensions.filter(path => path !== hooks && path !== guardian), hooks, ...(guardian ? { guardian } : {}), timeout };
 }
 
 export class SubagentRegistry {
@@ -526,6 +534,7 @@ export function piInvocation(spec: ValidTask, connectors = false) {
   if (spec.model) args.push('--model', spec.model, '--models', spec.model);
   if (spec.thinking) args.push('--thinking', spec.thinking);
   args.push('-e', spec.hooks);
+  if (spec.guardian) args.push('-e', spec.guardian);
   if (connectors) args.push('-e', fileURLToPath(new URL('./connector-bridge.ts', import.meta.url)));
   for (const extension of new Set(spec.extensions)) args.push('-e', extension);
   args.push('--', spec.task.startsWith('@') ? `\n${spec.task}` : spec.task);

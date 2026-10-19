@@ -13,7 +13,8 @@ export interface TaskSpec {
   timeout?: number;
 }
 
-export interface ValidTask extends TaskSpec { tools: string[]; extensions: string[]; hooks: string; timeout: number }
+/** `guardian` is set when the parent runs Guardian, so the child loads it too. */
+export interface ValidTask extends TaskSpec { tools: string[]; extensions: string[]; hooks: string; guardian?: string; timeout: number }
 export const READ_TOOLS = ['read', 'grep', 'find', 'ls'];
 export const ALL_TOOLS = [...READ_TOOLS, 'write', 'edit', 'bash'];
 export const TIMEOUT_BOUNDS = {minimum: 10, maximum: 3600000};

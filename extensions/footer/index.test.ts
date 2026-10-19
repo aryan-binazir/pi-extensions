@@ -12,6 +12,7 @@ import { type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-cod
 import { withPi } from '../../tests/pi-session.ts';
 import statusExtension from './index.ts';
 import { findConfigLoader, statusText, type PermissionConfig } from './adapter.ts';
+import { detectPlatformSandbox } from '../guardian/sandbox.ts';
 
 const config: PermissionConfig = {
   enabled: true, reviewAllShell: true, rules: [{}],
@@ -95,8 +96,32 @@ test('retains discovery of the reviewed legacy package and its prefilter status'
     assert.deepEqual(loaded, legacyConfig);
     assert.equal(statusText(loaded, undefined), 'Auto: on · Luna low');
     await writeFile(f.file, JSON.stringify({ ...legacyConfig, reviewer: { ...legacyConfig.reviewer!, prefilter: true } }));
-    assert.equal(statusText((await findConfigLoader(commands(f.root, '0.16.2')))!.load(), undefined), 'Auto: on · Luna low · prefilter minimal');
+    const reloaded = (await findConfigLoader(commands(f.root, '0.16.2')))!;
+    assert.equal(reloaded.status(reloaded.load(), undefined), 'Auto: on · Luna low · prefilter minimal');
   } finally { await f.close(); }
+});
+
+test('Guardian takes precedence over Auto Permissions and renders its own config', async t => {
+  const agentDir = await mkdtemp(join(tmpdir(), 'pi-guardian-status-'));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const f = await fixture();
+  t.after(async () => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(agentDir, { recursive: true, force: true });
+    await f.close();
+  });
+  const guardianCommand = { name: 'guardian', source: 'extension',
+    sourceInfo: { path: fileURLToPath(new URL('../guardian/index.ts', import.meta.url)), source: 'local', scope: 'user', origin: 'top-level' } } as ReturnType<ExtensionAPI['getCommands']>[number];
+  const sandbox = (await detectPlatformSandbox()).sandbox ? '' : ' · no sandbox';
+  const loader = (await findConfigLoader([...commands(f.root), guardianCommand]))!;
+  assert.equal(loader.path, join(agentDir, 'guardian', 'config.json'));
+  assert.equal(loader.status(loader.load(), undefined), `Auto: on · Luna low${sandbox}`);
+  await mkdir(join(agentDir, 'guardian'));
+  await writeFile(loader.path, JSON.stringify({ reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } }));
+  assert.equal(loader.status(loader.load(), undefined), `Auto: on · Opus high${sandbox}`);
+  const impostor = { ...guardianCommand, sourceInfo: { ...guardianCommand.sourceInfo, path: '/elsewhere/guardian/index.ts' } };
+  assert.equal(await findConfigLoader([impostor]), undefined);
 });
 
 test('discovery leaves startup immediately and watches atomic idle config edits without polling', async t => {

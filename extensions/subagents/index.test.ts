@@ -18,7 +18,8 @@ function assertChildTools(child: {args: string[]}, tools: string[]) {
   assert.equal(child.args[child.args.indexOf('--tools') + 1], tools.join(','));
   assert.ok(child.args.includes('--no-extensions'));
   const loaded = child.args.flatMap((arg, i) => arg === '-e' ? [child.args[i + 1]] : []);
-  assert.deepEqual(loaded.map(path => path.split('/').slice(-3).join('/')), ['extensions/hooks/index.ts'], 'hooks are the only mandatory child extension');
+  assert.deepEqual(loaded.map(path => path.split('/').slice(-3).join('/')), ['extensions/hooks/index.ts', 'extensions/guardian/index.ts'],
+    'hooks and Guardian are the mandatory child extensions, so a child cannot run what the parent would review');
 }
 
 test('workflow registration requires exact source approval and protects sensitive reads', async () =>

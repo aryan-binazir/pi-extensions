@@ -6,6 +6,7 @@ import test from 'node:test';
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
 import { withPi } from '../../tests/pi-session.ts';
 import { DEFAULT_GUARDIAN_CONFIG } from './config.ts';
+import { APPROVAL_AUDIT_ENTRY_TYPE, type ApprovalAuditEntry } from './approvals.ts';
 import guardian, { instructedPermissions, registerFailClosed } from './index.ts';
 import { MANUAL_APPROVAL_DEVELOPER_PREFIX } from './review/context.ts';
 import { detectPlatformSandbox } from './sandbox.ts';
@@ -74,6 +75,45 @@ test('an approved escalation runs outside the sandbox', sandboxed, async t => {
   } }, async ({ session }) => {
     await session.prompt('Write it.');
     assert.equal(readFileSync(target, 'utf8'), 'approved\n');
+  });
+});
+
+test('approval history persists across resume, identifies review context, and stays out of model evidence', async () => {
+  const notices: string[] = [];
+  await withPi({ extensions: [guardian], responses: [
+    fauxAssistantMessage(fauxToolCall('bash', { command: 'echo reviewed', sandbox_permissions: 'require_escalated' })),
+    fauxAssistantMessage('{"outcome":"allow","rationale":"audit-only-rationale"}'),
+    fauxAssistantMessage('Done.'),
+  ], configure: ({ agentDir }, provider) => {
+    writeConfig(agentDir, { reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
+    return { model: provider.getModel() };
+  }, bind: session => ({ mode: 'tui', uiContext: {
+    ...session.extensionRunner.createContext().ui,
+    notify: message => { notices.push(message); },
+  } }) }, async fixture => {
+    await fixture.session.prompt('Run the reviewed command.');
+    const records = fixture.session.sessionManager.getBranch().flatMap(entry => entry.type === 'custom' && entry.customType === APPROVAL_AUDIT_ENTRY_TYPE
+      ? [entry.data as ApprovalAuditEntry & { sessionId: string; sessionLeafId: string }] : []);
+    assert.equal(records.length, 1);
+    const record = records[0];
+    assert.equal(record.decider, 'auto_review');
+    assert.equal(record.verdict, 'approved');
+    assert.equal(record.rationale, 'audit-only-rationale');
+    assert.match(record.contextSha256!, /^[a-f0-9]{64}$/);
+    assert.equal(record.sessionId, fixture.session.sessionManager.getSessionId());
+    assert.ok(fixture.session.sessionManager.getBranch().some(entry => entry.id === record.sessionLeafId));
+    assert.ok(!JSON.stringify(fixture.session.messages).includes('audit-only-rationale'));
+    const sessionFile = fixture.session.sessionManager.getSessionFile()!;
+    const saved = readFileSync(sessionFile, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(saved.find(entry => entry.customType === APPROVAL_AUDIT_ENTRY_TYPE).data, record);
+    await fixture.runtime.switchSession(sessionFile);
+    await fixture.session.prompt('/guardian audit');
+    const history = notices.at(-1)!;
+    assert.match(history, /auto_review: approved/);
+    assert.match(history, /echo reviewed/);
+    assert.match(history, /audit-only-rationale/);
+    assert.match(history, new RegExp(record.requestId));
+    assert.ok(history.includes(sessionFile));
   });
 });
 

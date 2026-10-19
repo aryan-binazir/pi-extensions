@@ -29,7 +29,7 @@ function policyArg(args: string[]): string {
 
 function run(args: string[], cwd: string, env: NodeJS.ProcessEnv = process.env) {
   const result = spawnSync(MACOS_PATH_TO_SEATBELT_EXECUTABLE, args, { cwd, env, encoding: 'utf8' });
-  return { success: result.status === 0, stderr: result.stderr };
+  return { success: result.status === 0, stderr: result.stderr, stdout: result.stdout };
 }
 
 function assertSeatbeltDenied(stderr: string, path: string): void {
@@ -69,6 +69,21 @@ test('base policy allows node cpu sysctls and KMP registration shm', () => {
   ipc-posix-shm-write-create
   ipc-posix-shm-write-unlink
   (ipc-posix-name-regex #"^/__KMP_REGISTERED_LIB_[0-9]+$"))`));
+});
+
+test('process information stays scoped to the same sandbox', () => {
+  const policy = policyArg(createSeatbeltCommandArgs(['/usr/bin/true'], isolatedWorkspace, '/'));
+  assert.match(policy, /\(allow process-info\* \(target same-sandbox\)\)/);
+  assert.ok(!policy.includes('(sysctl-name "kern.proc.all")'));
+});
+
+test('ps can inspect its shell and a child inside the same sandbox', darwin, t => {
+  const cwd = tempDir(t);
+  const script = '/bin/ps -p "$$" -o pid=,comm= || exit; /bin/sleep 5 & child=$!; /bin/ps -p "$child" -o pid=,comm=; result=$?; kill "$child"; wait "$child" 2>/dev/null; exit "$result"';
+  const result = run(createSeatbeltCommandArgs(['/bin/sh', '-c', script], isolatedWorkspace, cwd), cwd);
+  assert.ok(result.success, result.stderr);
+  assert.match(result.stdout, /\bsh\b/);
+  assert.match(result.stdout, /\bsleep\b/);
 });
 
 test('seatbelt allows semaphore limit sysconf', darwin, t => {

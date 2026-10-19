@@ -227,6 +227,7 @@ still sits after Fast mode in `package.json` so the alias resolves when both are
 - `/guardian approve` approves the most recently denied action. It records Codex's trusted manual
   approval message in the session, so the reviewer can allow that exact action when the agent retries.
 - `/guardian reload` rereads the rules and config.
+- `/guardian audit` shows the current session branch's recent approval decisions.
 
 The footer's top-right indicator shows `Auto: on · Luna low`, `Auto: on · Opus high`,
 `Auto: on · you review` or `Auto: off`, and adds `· network` or `· no sandbox` when they apply.
@@ -234,3 +235,41 @@ While a review runs, the status line shows "Reviewing approval request…".
 
 Guardian replaces Auto Permissions. If both are loaded, commands are reviewed twice and Guardian
 warns at session start.
+
+## Approval history
+
+`/guardian audit` shows the last 20 approval decisions on the current session branch and the session
+file containing the full history. Guardian saves decisions as `guardian-approval-decision` custom
+entries in Pi's session JSONL. These entries do not enter the agent's or reviewer's conversation.
+
+Each entry records the exact action, verdict, automatic reviewer or human decider, rationale,
+timestamp and decision latency. Automatic decisions also record the configured reviewer and its
+risk and authorization assessment. A failed review and a subsequent human decision have separate
+entries with the same request ID. `/guardian approve` records the human's approval of the previously
+denied action. If a decision cannot be saved, the operation does not proceed.
+
+The session ID and leaf entry identify the conversation at the decision. Automatic reviews also save
+a SHA-256 fingerprint of the initial policy, transcript and action prompt sent to the reviewer.
+Different fingerprints establish that the initial context differed. The hash does not cover later
+read-only tool results, and identical fingerprints do not make model verdicts deterministic.
+Compare the recorded rationale and transcript before attributing a disagreement to inconsistent
+policy. An ignored scratch directory may contain user work, so being ignored does not bypass review.
+
+## Understanding sandbox failures
+
+Guardian preserves the original failure and exit status. Failed network requests, and authentication
+errors from recognized network clients, receive a hint when network access is disabled. Permission
+failures receive a sandbox-access hint. A hint is diagnostic context, not proof that the sandbox caused
+the error, and it does not change approval or retry decisions.
+
+Git writes such as `add`, `fetch`, `checkout` and `commit` need escalation under the default policy
+because `.git` is read-only. Keeping only hooks and config read-only would broaden the existing
+metadata boundary; this implementation retains it. An `allow` command rule is not a confined Git
+exception: it runs the matching command outside the sandbox.
+Reducing approval traffic safely needs an operation-specific Git runner that also confines hooks,
+config-selected helpers, alternate repository paths and linked worktrees.
+
+On macOS the policy already allows process information for processes in the same sandbox. Broad
+process enumeration is not enabled. Prefer `ps -p <pid>` for a shell or child from that invocation.
+The Pi host and processes started outside that sandbox are outside this permission's scope. Native
+macOS tests exercise the shell and child queries; Linux runs verify the generated policy only.

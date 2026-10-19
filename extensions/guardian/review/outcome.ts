@@ -14,7 +14,7 @@ export type ReviewError =
   | { type: 'timeout' }
   | { type: 'cancelled' };
 
-export type ReviewOutcome = { type: 'completed'; assessment: GuardianAssessment } | { type: 'error'; error: ReviewError };
+export type ReviewOutcome = ({ type: 'completed'; assessment: GuardianAssessment } | { type: 'error'; error: ReviewError }) & { contextSha256?: string };
 
 export type ReviewDecision =
   | { type: 'approved' }

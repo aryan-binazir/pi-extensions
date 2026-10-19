@@ -1,7 +1,8 @@
 // Orchestration ported from openai/codex codex-rs/core/src/tools/{orchestrator,sandboxing}.rs and
 // codex-rs/sandboxing/src/denial.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md.
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -132,6 +133,49 @@ test('on-request returns sandbox denials to the agent without retrying', sandbox
   const { outside, run, requests } = setup(t);
   const result = await run({ command: `echo x > ${outside}/no.txt` });
   assert.equal(result.isError, true);
+  assert.deepEqual(requests, []);
+});
+
+test('a misleading authentication failure retains its error and explains the disabled network', sandboxed, async t => {
+  const { cwd, run, requests } = setup(t);
+  writeFileSync(join(cwd, 'gh'), '#!/bin/sh\nprintf "token invalid\\n" >&2\nexit 1\n');
+  chmodSync(join(cwd, 'gh'), 0o755);
+  const result = await run({ command: './gh auth status' });
+  assert.equal(result.isError, true);
+  assert.match(text(result), /token invalid/);
+  assert.match(text(result), /network access is disabled/i);
+  assert.match(text(result), /require_escalated/);
+  const structured = result.structuredContent as { exit_code: number; output: string };
+  assert.equal(structured.exit_code, 1);
+  assert.match(structured.output, /network access is disabled/i);
+  assert.deepEqual(requests, []);
+});
+
+test('network hints cover DNS failures without blaming ordinary failures or enabled networking', sandboxed, async t => {
+  const disabled = setup(t);
+  const dns = await disabled.run({ command: 'printf "Could not resolve host: example.invalid\\n" >&2; exit 1' });
+  assert.match(text(dns), /network access is disabled/i);
+  const ordinary = await disabled.run({ command: 'printf "token invalid\\n" >&2; exit 1' });
+  assert.doesNotMatch(text(ordinary), /network access is disabled/i);
+  const enabled = setup(t, { config: { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, networkAccess: true } } });
+  const failed = await enabled.run({ command: 'printf "Could not resolve host: example.invalid\\n" >&2; exit 1' });
+  assert.doesNotMatch(text(failed), /network access is disabled/i);
+});
+
+test('Git index writes require escalation and repository config and hooks remain protected', sandboxed, async t => {
+  const { cwd, run, requests } = setup(t);
+  const initialized = spawnSync('git', ['init', '-q', '--template=', cwd], { encoding: 'utf8' });
+  assert.equal(initialized.status, 0, initialized.stderr);
+  writeFileSync(join(cwd, 'tracked.txt'), 'local work');
+  const configPath = join(cwd, '.git', 'config');
+  const before = readFileSync(configPath, 'utf8');
+  const added = await run({ command: 'git add tracked.txt' });
+  assert.equal(added.isError, true);
+  assert.ok(!existsSync(join(cwd, '.git', 'index')));
+  const tampering = await run({ command: 'printf unsafe > .git/config; mkdir -p .git/hooks; printf unsafe > .git/hooks/pre-commit' });
+  assert.equal(tampering.isError, true);
+  assert.equal(readFileSync(configPath, 'utf8'), before);
+  assert.ok(!existsSync(join(cwd, '.git', 'hooks', 'pre-commit')));
   assert.deepEqual(requests, []);
 });
 

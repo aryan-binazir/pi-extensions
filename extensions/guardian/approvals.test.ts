@@ -2,7 +2,7 @@
 // codex-rs/core/src/tools/approvals.rs and codex-rs/core/src/context/guardian_approved_action.rs @ ce0323f (Apache-2.0).
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Approvals, type ApprovalContext, formatActionPretty, manualApprovalMessage } from './approvals.ts';
+import { Approvals, type ApprovalAuditEntry, type ApprovalContext, formatActionPretty, manualApprovalMessage } from './approvals.ts';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import type { ReviewOutcome } from './review/outcome.ts';
 import { MANUAL_APPROVAL_DEVELOPER_PREFIX } from './review/context.ts';
@@ -14,11 +14,13 @@ const request = { action: { tool: 'bash', command: ['bash', '-lc', 'git push ori
 
 function harness(outcomes: ReviewOutcome[], config: Partial<GuardianConfig> = {}, ui: { hasUI?: boolean; choice?: string } = {}) {
   const reviews: { actionJson: string; reason?: string }[] = [], notices: [string, string][] = [], prompts: [string, string[]][] = [];
+  const records: ApprovalAuditEntry[] = [];
   let aborted = 0;
   const approvals = new Approvals({
     config: () => ({ ...DEFAULT_GUARDIAN_CONFIG, ...config }),
     review: async input => { reviews.push({ actionJson: input.actionJson, ...(input.reason === undefined ? {} : { reason: input.reason }) }); return outcomes.shift()!; },
     turnId: () => 'turn-1',
+    record: entry => { records.push(entry); },
   });
   const ctx: ApprovalContext = {
     hasUI: ui.hasUI ?? true,
@@ -28,7 +30,7 @@ function harness(outcomes: ReviewOutcome[], config: Partial<GuardianConfig> = {}
       select: async (title, options) => { prompts.push([title, options]); return ui.choice === undefined ? undefined : options.find(option => option.startsWith(ui.choice!)); },
     },
   };
-  return { approvals, ctx, reviews, notices, prompts, aborted: () => aborted };
+  return { approvals, ctx, reviews, notices, prompts, records, aborted: () => aborted };
 }
 
 test('on-request auto review approves through Guardian with the pretty sorted action', async () => {
@@ -75,6 +77,7 @@ test('a review that throws takes the failure fallback instead of failing the too
   const notices: string[] = [];
   const approvals = new Approvals({
     config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => 'turn-1',
+    record: () => {},
     review: async () => { throw new Error("ENOENT: no such file or directory, mkdtemp '/missing/guardian-claude-'"); },
   });
   const ctx: ApprovalContext = { hasUI: true, abort: () => {}, ui: { notify: message => { notices.push(message); }, select: async (_title, options) => options[0] } };
@@ -121,4 +124,70 @@ test('an action too large to review completely is rejected without a review', as
   assert.equal(decision.type, 'rejected');
   assert.match(decision.type === 'rejected' ? decision.message : '', /too large to review/);
   assert.deepEqual(h.reviews, []);
+  assert.equal(h.records[0].decider, 'policy');
+  assert.equal(h.records[0].verdict, 'rejected');
+});
+
+test('automatic decisions retain the exact action, reviewer, rationale and latency', async () => {
+  const h = harness([allow, deny]);
+  for (let i = 0; i < 2; i++) await h.approvals.request({ ...request, reason: 'Protected metadata' }, h.ctx);
+  assert.equal(h.records.length, 2);
+  assert.deepEqual(h.records.map(record => [record.decider, record.verdict, record.rationale]), [
+    ['auto_review', 'approved', 'ok'], ['auto_review', 'rejected', 'Pushes to main.'],
+  ]);
+  assert.notEqual(h.records[0].requestId, h.records[1].requestId);
+  for (const record of h.records) {
+    assert.equal(record.actionJson, formatActionPretty(request.action));
+    assert.equal(record.requestReason, 'Protected metadata');
+    assert.deepEqual(record.reviewer, DEFAULT_GUARDIAN_CONFIG.reviewer);
+    assert.equal(record.approvalPolicy, 'on-request');
+    assert.ok(Number.isFinite(Date.parse(record.timestamp)));
+    assert.ok(record.durationMs >= 0 && record.durationMs < 10_000);
+  }
+  assert.deepEqual(h.records[1].assessment, deny.type === 'completed' && deny.assessment);
+});
+
+test('a failed review and the human fallback are distinct linked decisions', async () => {
+  const h = harness([{ type: 'error', error: { type: 'timeout' } }], {}, { choice: 'Yes, proceed' });
+  await h.approvals.request(request, h.ctx);
+  assert.deepEqual(h.records.map(record => [record.decider, record.verdict]), [['auto_review', 'error'], ['user', 'approved']]);
+  assert.equal(h.records[0].requestId, h.records[1].requestId);
+  assert.match(h.records[0].rationale, /timed out/);
+  assert.match(h.records[1].rationale, /Yes, proceed/);
+  assert.equal(h.records[1].reviewer, undefined);
+});
+
+test('human rejection, cancellation and unavailable approval are recorded accurately', async () => {
+  const rejected = harness([], { approvalsReviewer: 'user' }, { choice: 'No' });
+  await rejected.approvals.request(request, rejected.ctx);
+  assert.equal(rejected.records[0].decider, 'user');
+  assert.equal(rejected.records[0].verdict, 'aborted');
+  const headless = harness([], { approvalsReviewer: 'user' }, { hasUI: false });
+  await headless.approvals.request(request, headless.ctx);
+  assert.equal(headless.records[0].decider, 'policy');
+  assert.equal(headless.records[0].verdict, 'rejected');
+  const cancelled = harness([{ type: 'error', error: { type: 'cancelled' } }]);
+  await cancelled.approvals.request(request, cancelled.ctx);
+  assert.equal(cancelled.records[0].verdict, 'aborted');
+});
+
+test('manual approval records the denied action once without replaying its reviewer assessment', async () => {
+  const h = harness([deny]);
+  await h.approvals.request(request, h.ctx);
+  assert.equal(h.approvals.takeDenied(h.ctx)?.actionJson, formatActionPretty(request.action));
+  assert.equal(h.approvals.takeDenied(h.ctx), undefined);
+  assert.equal(h.records.length, 2);
+  assert.equal(h.records[1].requestId, h.records[0].requestId);
+  assert.equal(h.records[1].decider, 'user');
+  assert.equal(h.records[1].verdict, 'approved');
+  assert.equal(h.records[1].assessment, undefined);
+  assert.match(h.records[1].rationale, /guardian approve/);
+});
+
+test('a decision that cannot be recorded never approves execution', async () => {
+  const approvals = new Approvals({
+    config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => 'turn-1', review: async () => allow,
+    record: () => { throw new Error('audit disk full'); },
+  });
+  await assert.rejects(approvals.request(request, harness([]).ctx), /audit disk full/);
 });

@@ -21,6 +21,9 @@ import type { Shell } from './shell.ts';
 const RETRY_REASON = 'command failed; retry without sandbox?';
 const NEVER_ESCALATE = 'approval policy is Never; reject command — you cannot request escalated permissions unless the approval policy is OnRequest';
 const NEVER_WITHOUT_SANDBOX = 'approval policy is Never and no platform sandbox is available, so commands cannot run without approval; reject command';
+const NETWORK_FAILURE = /could not resolve host|unable to resolve host|ENOTFOUND|EAI_AGAIN|network is unreachable|network unreachable|failed to connect|could not connect|connection timed out/i;
+const AUTH_FAILURE = /invalid (?:authentication )?token|token[^\n]{0,200}\binvalid|bad credentials|authentication failed|failed to log in|not logged in|HTTP (?:401|403)/i;
+const NETWORK_CLIENTS = new Set(['gh', 'glab', 'curl', 'wget', 'git', 'ssh', 'scp', 'sftp']);
 
 export interface ShellSettings {
   shellPath?: string;
@@ -185,7 +188,25 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       // On-request returns sandbox denials to the agent; unless-trusted asks to retry outside the sandbox.
       const exitCode = (result as { structuredContent?: { exit_code?: number } }).structuredContent?.exit_code ?? 0;
       const output = result.content.map(part => part.type === 'text' ? part.text : '').join('');
-      if (bypass || config.approvalPolicy !== 'unless-trusted' || !isLikelySandboxDenied(exitCode, output, runtime.sandbox?.kind)) return result;
+      const sandboxDenied = isLikelySandboxDenied(exitCode, output, runtime.sandbox?.kind);
+      let hint: string | undefined;
+      if (!bypass && exitCode !== 0) {
+        const networkClient = runtime.shell.parseShellLcPlainCommands(command)?.some(argv => NETWORK_CLIENTS.has(argv[0]?.split('/').pop() ?? ''));
+        if (!config.sandbox.networkAccess && (NETWORK_FAILURE.test(output) || (networkClient && AUTH_FAILURE.test(output)))) {
+          hint = 'Sandbox hint: network access is disabled. If this command needs network access, retry with sandbox_permissions: "require_escalated" and a justification. The original error may also have another cause.';
+        } else if (sandboxDenied) {
+          hint = 'Sandbox hint: this command may have hit a sandbox access restriction. If it needs access outside the sandbox, retry with sandbox_permissions: "require_escalated" and a justification.';
+        }
+      }
+      let diagnostic = result;
+      if (hint) {
+        const structured = (result as { structuredContent?: Record<string, unknown> }).structuredContent;
+        diagnostic = {
+          ...result, content: [...result.content, { type: 'text', text: hint }],
+          ...(structured ? { structuredContent: { ...structured, output: `${structured.output ?? output}\n\n${hint}` } } : {}),
+        };
+      }
+      if (bypass || config.approvalPolicy !== 'unless-trusted' || !sandboxDenied) return diagnostic;
       // As in Codex, a command you already approved is retried without asking again.
       if (!approved) await approve('require_escalated', RETRY_REASON, effective.type === 'needs_approval' ? effective.proposedExecpolicyAmendment : undefined);
       return run(false);

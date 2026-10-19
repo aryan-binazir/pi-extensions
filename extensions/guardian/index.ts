@@ -1,15 +1,16 @@
 // Guardian: Codex's approval stack for Pi. Our inspiration from this code comes from there. The source is openai/codex
 // (https://github.com/openai/codex, Apache-2.0) at ce0323f2f2d3b25e82806cd555237da3db4e1897. See docs/licenses/README.md.
+import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { createBashToolDefinition, createEditToolDefinition, createWriteToolDefinition, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { appendAllowPrefixRule } from './amend.ts';
-import { type ApprovalContext, Approvals, manualApprovalMessage } from './approvals.ts';
+import { APPROVAL_AUDIT_ENTRY_TYPE, type ApprovalAuditEntry, type ApprovalContext, Approvals, manualApprovalMessage } from './approvals.ts';
 import { createGuardianBashTool, sandboxPolicyFor } from './bash.ts';
 import { CLAUDE_CLI_PROVIDER, FAIL_CLOSED_CONFIG, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
 import { createGuardianFileTools } from './files.ts';
 import { permissionsInstructions } from './permissions.ts';
 import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, persistableAmendment, retainPolicies, userRulesDir } from './policies.ts';
-import { collectReviewEvidence, composeReviewRequest, MANUAL_APPROVAL_MESSAGE_TYPE, prepareTranscript } from './review/context.ts';
+import { collectReviewEvidence, composeReviewRequest, MANUAL_APPROVAL_MESSAGE_TYPE, prepareTranscript, truncateText } from './review/context.ts';
 import { runClaudeCliReview } from './review/claude-cli.ts';
 import { resolveReviewer } from './review/model.ts';
 import { MAX_REVIEW_ATTEMPTS, REVIEW_TIMEOUT_MS, type ReviewOutcome, runWithRetry } from './review/outcome.ts';
@@ -97,9 +98,10 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     const reviewer = claudeCli ? undefined : resolveReviewer(ctx.modelRegistry, settings.reviewer, `guardian-${sessionId}`);
     if (reviewer && !reviewer.ok) return { type: 'error', error: { type: 'prompt_build', message: reviewer.message } };
     const evidence = collectReviewEvidence(ctx.sessionManager.getBranch(), undefined, { delegated: process.env.PI_SUBAGENT_TIMEOUT_MS !== undefined });
+    const transcript = prepareTranscript(evidence.transcript, 0, 'line');
+    const plannedAction = { json: input.actionJson, ...(input.reason === undefined ? {} : { reason: input.reason }) };
     const request = composeReviewRequest({
-      transcript: prepareTranscript(evidence.transcript, 0, 'line'), sessionId, trustedUserAnswers: evidence.trustedUserAnswers, environmentId: 'local',
-      plannedAction: { json: input.actionJson, ...(input.reason === undefined ? {} : { reason: input.reason }) },
+      transcript, sessionId, trustedUserAnswers: evidence.trustedUserAnswers, environmentId: 'local', plannedAction,
     });
     const now = new Date();
     const prompt = buildReviewerPrompt({
@@ -108,17 +110,26 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
       date: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, request,
     });
+    const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const contextHashes = {
+      policy: hash(prompt.systemPrompt), instructions: hash(contextFiles), action: hash(plannedAction),
+      transcript: hash({ transcript, trustedUserAnswers: evidence.trustedUserAnswers }),
+    };
     if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, 'Reviewing approval request…');
     try {
-      return await runWithRetry({ maxAttempts: MAX_REVIEW_ATTEMPTS, deadline: Date.now() + REVIEW_TIMEOUT_MS }, signal, deadline => reviewer
+      const outcome = await runWithRetry({ maxAttempts: MAX_REVIEW_ATTEMPTS, deadline: Date.now() + REVIEW_TIMEOUT_MS }, signal, deadline => reviewer
         ? runReviewerTurn({ ...prompt, cwd: ctx.cwd, deadline, ...(signal ? { signal } : {}), complete: reviewer.complete,
           runCommand: (command, workdir, commandSignal) => runReadOnlyCommand(command, workdir, commandSignal, sandbox) })
         : runClaudeCliReview({ ...prompt, cwd: ctx.cwd, model: settings.reviewer.model, reasoning: settings.reviewer.reasoning, deadline, ...(signal ? { signal } : {}) }));
+      return { ...outcome, contextHashes };
     } finally {
       if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
     }
   };
-  const approvals = new Approvals({ config, review, turnId: () => String(turn) });
+  const approvals = new Approvals({
+    config, review, turnId: () => String(turn),
+    record: entry => { pi.appendEntry(APPROVAL_AUDIT_ENTRY_TYPE, entry); },
+  });
 
   const shellSettings = () => {
     const settings = pi.getSettings() as { shellPath?: string; shellCommandPrefix?: string };
@@ -166,12 +177,32 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   });
 
   pi.registerCommand('guardian', {
-    description: 'Show Guardian approval settings, approve the last denied action, or reload rules',
-    getArgumentCompletions: prefix => ['status', 'approve', 'reload'].filter(name => name.startsWith(prefix)).map(value => ({ value, label: value })),
+    description: 'Show Guardian settings or approval history, approve the last denied action, or reload rules',
+    getArgumentCompletions: prefix => ['status', 'audit', 'approve', 'reload'].filter(name => name.startsWith(prefix)).map(value => ({ value, label: value })),
     async handler(args, ctx) {
       const action = args.trim() || 'status';
+      if (action === 'audit') {
+        const entries = ctx.sessionManager.getBranch().flatMap(entry => {
+          if (entry.type !== 'custom' || entry.customType !== APPROVAL_AUDIT_ENTRY_TYPE || !entry.data || typeof entry.data !== 'object') return [];
+          const data = entry.data as Partial<ApprovalAuditEntry>;
+          const { version, timestamp, summary, rationale, requestId, decider, verdict, durationMs } = data;
+          if (version !== 1 || typeof timestamp !== 'string' || typeof summary !== 'string' || typeof rationale !== 'string' || typeof requestId !== 'string'
+            || !['auto_review', 'user', 'policy'].includes(decider ?? '') || !['approved', 'rejected', 'aborted', 'error'].includes(verdict ?? '')
+            || typeof durationMs !== 'number' || !Number.isFinite(durationMs)) return [];
+          return [{ timestamp, summary, rationale, requestId, decider, verdict, durationMs }];
+        });
+        const lines = entries.slice(-20).map(entry => [
+          `${entry.timestamp} ${entry.decider}: ${entry.verdict} (${entry.durationMs} ms)`,
+          truncateText(entry.summary, 128), truncateText(entry.rationale, 128), `Request: ${entry.requestId}`,
+        ].join('\n'));
+        return ctx.ui.notify([
+          lines.length ? lines.join('\n\n') : 'No Guardian approval decisions recorded on this session branch.',
+          ...(entries.length > lines.length ? [`Showing the latest ${lines.length} of ${entries.length} decisions; older entries remain in the session file.`] : []),
+          `Session: ${ctx.sessionManager.getSessionFile() ?? 'in memory'}`,
+        ].join('\n\n'), 'info');
+      }
       if (action === 'approve') {
-        const denied = approvals.takeDenied();
+        const denied = approvals.takeDenied(ctx as unknown as ApprovalContext);
         if (!denied) return ctx.ui.notify('No denied action to approve.', 'info');
         pi.sendMessage({ customType: MANUAL_APPROVAL_MESSAGE_TYPE, content: manualApprovalMessage(denied.actionJson), display: true }, { triggerTurn: true });
         return ctx.ui.notify(`Approved: ${denied.summary}`, 'info');
@@ -183,7 +214,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
         config();
         reportProblems(ctx);
       } else if (action !== 'status') {
-        return ctx.ui.notify('Usage: /guardian [status|approve|reload]', 'warning');
+        return ctx.ui.notify('Usage: /guardian [status|audit|approve|reload]', 'warning');
       }
       const settings = config();
       ctx.ui.notify([

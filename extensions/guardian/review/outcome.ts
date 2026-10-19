@@ -14,7 +14,8 @@ export type ReviewError =
   | { type: 'timeout' }
   | { type: 'cancelled' };
 
-export type ReviewOutcome = { type: 'completed'; assessment: GuardianAssessment } | { type: 'error'; error: ReviewError };
+export type ReviewContextHashes = Record<'policy' | 'instructions' | 'action' | 'transcript', string>;
+export type ReviewOutcome = ({ type: 'completed'; assessment: GuardianAssessment } | { type: 'error'; error: ReviewError }) & { contextHashes?: ReviewContextHashes };
 
 export type ReviewDecision =
   | { type: 'approved' }

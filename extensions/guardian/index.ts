@@ -10,7 +10,7 @@ import { CLAUDE_CLI_PROVIDER, FAIL_CLOSED_CONFIG, type GuardianConfig, guardianS
 import { createGuardianFileTools } from './files.ts';
 import { permissionsInstructions } from './permissions.ts';
 import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, persistableAmendment, retainPolicies, userRulesDir } from './policies.ts';
-import { collectReviewEvidence, composeReviewRequest, MANUAL_APPROVAL_MESSAGE_TYPE, prepareTranscript } from './review/context.ts';
+import { collectReviewEvidence, composeReviewRequest, MANUAL_APPROVAL_MESSAGE_TYPE, prepareTranscript, truncateText } from './review/context.ts';
 import { runClaudeCliReview } from './review/claude-cli.ts';
 import { resolveReviewer } from './review/model.ts';
 import { MAX_REVIEW_ATTEMPTS, REVIEW_TIMEOUT_MS, type ReviewOutcome, runWithRetry } from './review/outcome.ts';
@@ -98,9 +98,10 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     const reviewer = claudeCli ? undefined : resolveReviewer(ctx.modelRegistry, settings.reviewer, `guardian-${sessionId}`);
     if (reviewer && !reviewer.ok) return { type: 'error', error: { type: 'prompt_build', message: reviewer.message } };
     const evidence = collectReviewEvidence(ctx.sessionManager.getBranch(), undefined, { delegated: process.env.PI_SUBAGENT_TIMEOUT_MS !== undefined });
+    const transcript = prepareTranscript(evidence.transcript, 0, 'line');
+    const plannedAction = { json: input.actionJson, ...(input.reason === undefined ? {} : { reason: input.reason }) };
     const request = composeReviewRequest({
-      transcript: prepareTranscript(evidence.transcript, 0, 'line'), sessionId, trustedUserAnswers: evidence.trustedUserAnswers, environmentId: 'local',
-      plannedAction: { json: input.actionJson, ...(input.reason === undefined ? {} : { reason: input.reason }) },
+      transcript, sessionId, trustedUserAnswers: evidence.trustedUserAnswers, environmentId: 'local', plannedAction,
     });
     const now = new Date();
     const prompt = buildReviewerPrompt({
@@ -109,26 +110,25 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
       date: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, request,
     });
-    const contextSha256 = createHash('sha256').update(JSON.stringify(prompt)).digest('hex');
+    const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const contextHashes = {
+      policy: hash(prompt.systemPrompt), instructions: hash(contextFiles), action: hash(plannedAction),
+      transcript: hash({ transcript, trustedUserAnswers: evidence.trustedUserAnswers }),
+    };
     if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, 'Reviewing approval request…');
     try {
       const outcome = await runWithRetry({ maxAttempts: MAX_REVIEW_ATTEMPTS, deadline: Date.now() + REVIEW_TIMEOUT_MS }, signal, deadline => reviewer
         ? runReviewerTurn({ ...prompt, cwd: ctx.cwd, deadline, ...(signal ? { signal } : {}), complete: reviewer.complete,
           runCommand: (command, workdir, commandSignal) => runReadOnlyCommand(command, workdir, commandSignal, sandbox) })
         : runClaudeCliReview({ ...prompt, cwd: ctx.cwd, model: settings.reviewer.model, reasoning: settings.reviewer.reasoning, deadline, ...(signal ? { signal } : {}) }));
-      return { ...outcome, contextSha256 };
+      return { ...outcome, contextHashes };
     } finally {
       if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
     }
   };
   const approvals = new Approvals({
     config, review, turnId: () => String(turn),
-    record: (entry, approvalContext) => {
-      const ctx = approvalContext as unknown as ExtensionContext;
-      pi.appendEntry(APPROVAL_AUDIT_ENTRY_TYPE, {
-        ...entry, sessionId: ctx.sessionManager.getSessionId(), sessionLeafId: ctx.sessionManager.getLeafId(),
-      });
-    },
+    record: entry => { pi.appendEntry(APPROVAL_AUDIT_ENTRY_TYPE, entry); },
   });
 
   const shellSettings = () => {
@@ -182,14 +182,22 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     async handler(args, ctx) {
       const action = args.trim() || 'status';
       if (action === 'audit') {
-        const entries = ctx.sessionManager.getBranch().flatMap(entry => entry.type === 'custom' && entry.customType === APPROVAL_AUDIT_ENTRY_TYPE
-          && entry.data && typeof entry.data === 'object' && 'version' in entry.data && entry.data.version === 1 ? [entry.data as ApprovalAuditEntry] : []);
+        const entries = ctx.sessionManager.getBranch().flatMap(entry => {
+          if (entry.type !== 'custom' || entry.customType !== APPROVAL_AUDIT_ENTRY_TYPE || !entry.data || typeof entry.data !== 'object') return [];
+          const data = entry.data as Partial<ApprovalAuditEntry>;
+          const { version, timestamp, summary, rationale, requestId, decider, verdict, durationMs } = data;
+          if (version !== 1 || typeof timestamp !== 'string' || typeof summary !== 'string' || typeof rationale !== 'string' || typeof requestId !== 'string'
+            || !['auto_review', 'user', 'policy'].includes(decider ?? '') || !['approved', 'rejected', 'aborted', 'error'].includes(verdict ?? '')
+            || typeof durationMs !== 'number' || !Number.isFinite(durationMs)) return [];
+          return [{ timestamp, summary, rationale, requestId, decider, verdict, durationMs }];
+        });
         const lines = entries.slice(-20).map(entry => [
           `${entry.timestamp} ${entry.decider}: ${entry.verdict} (${entry.durationMs} ms)`,
-          entry.summary, entry.rationale, `Request: ${entry.requestId}`,
+          truncateText(entry.summary, 128), truncateText(entry.rationale, 128), `Request: ${entry.requestId}`,
         ].join('\n'));
         return ctx.ui.notify([
           lines.length ? lines.join('\n\n') : 'No Guardian approval decisions recorded on this session branch.',
+          ...(entries.length > lines.length ? [`Showing the latest ${lines.length} of ${entries.length} decisions; older entries remain in the session file.`] : []),
           `Session: ${ctx.sessionManager.getSessionFile() ?? 'in memory'}`,
         ].join('\n\n'), 'info');
       }

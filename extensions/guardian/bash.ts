@@ -21,7 +21,7 @@ import type { Shell } from './shell.ts';
 const RETRY_REASON = 'command failed; retry without sandbox?';
 const NEVER_ESCALATE = 'approval policy is Never; reject command — you cannot request escalated permissions unless the approval policy is OnRequest';
 const NEVER_WITHOUT_SANDBOX = 'approval policy is Never and no platform sandbox is available, so commands cannot run without approval; reject command';
-const NETWORK_FAILURE = /could not resolve host|unable to resolve host|ENOTFOUND|EAI_AGAIN|network is unreachable|network unreachable|failed to connect|could not connect|connection timed out/i;
+const NETWORK_FAILURE = /could not resolve host|unable to resolve host|ENOTFOUND|EAI_AGAIN|network is unreachable|network unreachable/i;
 const AUTH_FAILURE = /invalid (?:authentication )?token|token[^\n]{0,200}\binvalid|bad credentials|authentication failed|failed to log in|not logged in|HTTP (?:401|403)/i;
 const NETWORK_CLIENTS = new Set(['gh', 'glab', 'curl', 'wget', 'git', 'ssh', 'scp', 'sftp']);
 
@@ -191,15 +191,17 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       const sandboxDenied = isLikelySandboxDenied(exitCode, output, runtime.sandbox?.kind);
       let hint: string | undefined;
       if (!bypass && exitCode !== 0) {
-        const networkClient = runtime.shell.parseShellLcPlainCommands(command)?.some(argv => NETWORK_CLIENTS.has(argv[0]?.split('/').pop() ?? ''));
+        const networkClient = runtime.shell.expandLiteralCommands(command).some(argv => NETWORK_CLIENTS.has(argv[0]?.split('/').pop() ?? ''));
         if (!config.sandbox.networkAccess && (NETWORK_FAILURE.test(output) || (networkClient && AUTH_FAILURE.test(output)))) {
-          hint = 'Sandbox hint: network access is disabled. If this command needs network access, retry with sandbox_permissions: "require_escalated" and a justification. The original error may also have another cause.';
+          hint = 'Sandbox hint: network access is disabled. The original error may also have another cause.';
         } else if (sandboxDenied) {
-          hint = 'Sandbox hint: this command may have hit a sandbox access restriction. If it needs access outside the sandbox, retry with sandbox_permissions: "require_escalated" and a justification.';
+          hint = 'Sandbox hint: this command may have hit a sandbox access restriction.';
         }
       }
       let diagnostic = result;
       if (hint) {
+        hint += config.approvalPolicy === 'never' ? ' Escalation is disabled by the current approval policy.'
+          : ' If the task requires access outside the sandbox, retry with sandbox_permissions: "require_escalated" and a justification.';
         const structured = (result as { structuredContent?: Record<string, unknown> }).structuredContent;
         diagnostic = {
           ...result, content: [...result.content, { type: 'text', text: hint }],

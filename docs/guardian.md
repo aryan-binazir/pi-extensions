@@ -242,25 +242,38 @@ warns at session start.
 file containing the full history. Guardian saves decisions as `guardian-approval-decision` custom
 entries in Pi's session JSONL. These entries do not enter the agent's or reviewer's conversation.
 
-Each entry records the exact action, verdict, automatic reviewer or human decider, rationale,
-timestamp and decision latency. Automatic decisions also record the configured reviewer and its
+Each entry records the action, verdict, automatic reviewer, human or policy decider, rationale,
+timestamp and handling latency. Automatic decisions also record the configured reviewer and its
 risk and authorization assessment. A failed review and a subsequent human decision have separate
 entries with the same request ID. `/guardian approve` records the human's approval of the previously
-denied action. If a decision cannot be saved, the operation does not proceed.
+denied action, with its immediate command-handling latency rather than the time since the denial.
+Human entries distinguish approval, a requested standing rule, rejection and dismissal. Requested
+rules are not proof that the subsequent rule write succeeded. If a decision cannot be saved, the
+operation does not proceed. These are permission decisions, not a command-execution log.
 
-The session ID and leaf entry identify the conversation at the decision. Automatic reviews also save
-a SHA-256 fingerprint of the initial policy, transcript and action prompt sent to the reviewer.
-Different fingerprints establish that the initial context differed. The hash does not cover later
-read-only tool results, and identical fingerprints do not make model verdicts deterministic.
-Compare the recorded rationale and transcript before attributing a disagreement to inconsistent
-policy. An ignored scratch directory may contain user work, so being ignored does not bypass review.
+Actions up to 256 KiB are stored exactly. Larger actions have a bounded preview, original byte count
+and `actionTruncated: true`; the original tool call remains in the referenced transcript. The audit
+view bounds command and reason previews and reports when older entries were omitted. Full records
+remain in the session file. Hard policy refusals before an approval request still appear as tool
+errors; this history covers approval requests, including their internal policy rejections.
+
+The session ID and leaf entry identify the conversation at the decision. Automatic reviews save
+separate SHA-256 hashes for the system policy, AGENTS instructions, planned action and retained
+transcript with trusted answers. These hashes omit the session ID, date and timezone, so the components
+can be compared across sessions. Later read-only tool results are not hashed. Identical hashes do not
+make model verdicts deterministic. Compare the recorded rationale and transcript before attributing
+a disagreement to inconsistent policy.
 
 ## Understanding sandbox failures
 
 Guardian preserves the original failure and exit status. Failed network requests, and authentication
-errors from recognized network clients, receive a hint when network access is disabled. Permission
-failures receive a sandbox-access hint. A hint is diagnostic context, not proof that the sandbox caused
-the error, and it does not change approval or retry decisions.
+errors from recognized network clients, receive a hint when network access is disabled. Failures that
+match the sandbox-denial heuristic receive an access hint. The hints appear when a failure is returned;
+an `unless-trusted` retry still returns its own result. A hint is diagnostic context, not proof that
+the sandbox caused the error, and it does not change approval or retry decisions. With approval policy
+`never`, hints state that escalation is disabled.
+
+An ignored scratch directory may contain user work, so being ignored does not bypass review.
 
 Git writes such as `add`, `fetch`, `checkout` and `commit` need escalation under the default policy
 because `.git` is read-only. Keeping only hooks and config read-only would broaden the existing
@@ -270,6 +283,7 @@ Reducing approval traffic safely needs an operation-specific Git runner that als
 config-selected helpers, alternate repository paths and linked worktrees.
 
 On macOS the policy already allows process information for processes in the same sandbox. Broad
-process enumeration is not enabled. Prefer `ps -p <pid>` for a shell or child from that invocation.
-The Pi host and processes started outside that sandbox are outside this permission's scope. Native
-macOS tests exercise the shell and child queries; Linux runs verify the generated policy only.
+process enumeration is not enabled. The Pi host and processes started outside that sandbox are
+outside this permission's scope. A native macOS test targets `ps -p <pid>` for that invocation's shell
+and child. It has not run on this Linux machine, so runtime `ps` compatibility remains unverified.
+Linux runs verify the generated policy only.

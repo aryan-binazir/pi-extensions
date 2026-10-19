@@ -24,6 +24,7 @@ function harness(outcomes: ReviewOutcome[], config: Partial<GuardianConfig> = {}
   });
   const ctx: ApprovalContext = {
     hasUI: ui.hasUI ?? true,
+    sessionManager: { getSessionId: () => 'session-1', getLeafId: () => 'leaf-1' },
     abort: () => { aborted++; },
     ui: {
       notify: (message, type = 'info') => { notices.push([type, message]); },
@@ -47,7 +48,7 @@ test('a Guardian denial returns Codex rejection text and is remembered for manua
     type: 'rejected', message: `This action was rejected due to unacceptable risk.\nReason: Pushes to main.\n${REJECTION_INSTRUCTIONS}`,
   });
   assert.deepEqual(h.notices, [['warning', 'Automatic approval review denied (risk: high, authorization: low): Pushes to main.']]);
-  assert.equal(h.approvals.lastDenied()?.summary, 'git push origin main');
+  assert.equal(h.approvals.takeDenied(h.ctx)?.summary, 'git push origin main');
 });
 
 test('three consecutive denials interrupt the turn like Codex', async () => {
@@ -65,24 +66,29 @@ test('review timeouts and failures fall back to you by default and never auto-al
     const none = harness([outcome], {}, { hasUI: false });
     const decision = await none.approvals.request(request, none.ctx);
     assert.equal(decision.type, 'rejected');
+    assert.deepEqual(none.records.map(entry => [entry.decider, entry.verdict]), [['auto_review', 'error'], ['policy', 'rejected']]);
   }
   const timedOut = harness([{ type: 'error', error: { type: 'timeout' } }], { autoReview: { ...DEFAULT_GUARDIAN_CONFIG.autoReview, failureFallback: 'reject' } });
   assert.deepEqual(await timedOut.approvals.request(request, timedOut.ctx), { type: 'rejected', message: TIMEOUT_INSTRUCTIONS });
   const failed = harness([{ type: 'error', error: { type: 'parse', message: 'bad JSON' } }], { autoReview: { ...DEFAULT_GUARDIAN_CONFIG.autoReview, failureFallback: 'reject' } });
   assert.deepEqual(await failed.approvals.request(request, failed.ctx), { type: 'rejected', message: `Automatic approval review failed: bad JSON\n${REVIEW_FAILURE_INSTRUCTIONS}` });
   assert.deepEqual(timedOut.prompts, []);
+  assert.equal(failed.records.at(-1)?.verdict, 'rejected');
 });
 
 test('a review that throws takes the failure fallback instead of failing the tool call', async () => {
   const notices: string[] = [];
+  const records: ApprovalAuditEntry[] = [];
   const approvals = new Approvals({
     config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => 'turn-1',
-    record: () => {},
+    record: entry => { records.push(entry); },
     review: async () => { throw new Error("ENOENT: no such file or directory, mkdtemp '/missing/guardian-claude-'"); },
   });
-  const ctx: ApprovalContext = { hasUI: true, abort: () => {}, ui: { notify: message => { notices.push(message); }, select: async (_title, options) => options[0] } };
+  const ctx: ApprovalContext = { hasUI: true, sessionManager: { getSessionId: () => 's', getLeafId: () => null }, abort: () => {}, ui: { notify: message => { notices.push(message); }, select: async (_title, options) => options[0] } };
   assert.deepEqual(await approvals.request(request, ctx), { type: 'approved' });
   assert.match(notices.join('\n'), /ENOENT[\s\S]*asking you instead/);
+  assert.deepEqual(records.map(entry => entry.verdict), ['error', 'approved']);
+  assert.match(records[0].rationale, /ENOENT/);
 });
 
 test('a cancelled review aborts', async () => {
@@ -104,11 +110,15 @@ test('the user prompt offers Codex choices, including persisting the proposed pr
   const always = harness([], { approvalsReviewer: 'user' }, { choice: "Yes, and don't ask again" });
   assert.deepEqual(await always.approvals.request(amend, always.ctx), { type: 'approved', persist: ['git', 'push'] });
   assert.deepEqual(always.prompts[0][1], ['Yes, proceed', "Yes, and don't ask again for commands that start with `git push`", 'No, and tell the agent what to do differently']);
+  assert.equal(always.records[0].userChoice, 'approve_and_persist');
+  assert.deepEqual(always.records[0].requestedRule, ['git', 'push']);
   const no = harness([], { approvalsReviewer: 'user' }, { choice: 'No' });
   assert.deepEqual(await no.approvals.request(request, no.ctx), { type: 'aborted', message: 'rejected by user' });
   assert.equal(no.aborted(), 1);
+  assert.equal(no.records[0].userChoice, 'reject');
   const dismissed = harness([], { approvalsReviewer: 'user' });
   assert.equal((await dismissed.approvals.request(request, dismissed.ctx)).type, 'aborted');
+  assert.equal(dismissed.records[0].userChoice, 'dismiss');
   const headless = harness([], { approvalsReviewer: 'user' }, { hasUI: false });
   assert.deepEqual(await headless.approvals.request(request, headless.ctx), { type: 'rejected', message: 'approval required, but no interactive user is available to approve it' });
 });
@@ -126,6 +136,9 @@ test('an action too large to review completely is rejected without a review', as
   assert.deepEqual(h.reviews, []);
   assert.equal(h.records[0].decider, 'policy');
   assert.equal(h.records[0].verdict, 'rejected');
+  assert.equal(h.records[0].actionTruncated, true);
+  assert.ok(h.records[0].actionBytes > 600_000);
+  assert.ok(Buffer.byteLength(h.records[0].actionJson) <= 256 * 1024);
 });
 
 test('automatic decisions retain the exact action, reviewer, rationale and latency', async () => {
@@ -141,6 +154,9 @@ test('automatic decisions retain the exact action, reviewer, rationale and laten
     assert.equal(record.requestReason, 'Protected metadata');
     assert.deepEqual(record.reviewer, DEFAULT_GUARDIAN_CONFIG.reviewer);
     assert.equal(record.approvalPolicy, 'on-request');
+    assert.equal(record.sessionId, 'session-1');
+    assert.equal(record.sessionLeafId, 'leaf-1');
+    assert.equal(record.actionTruncated, false);
     assert.ok(Number.isFinite(Date.parse(record.timestamp)));
     assert.ok(record.durationMs >= 0 && record.durationMs < 10_000);
   }
@@ -190,4 +206,28 @@ test('a decision that cannot be recorded never approves execution', async () => 
     record: () => { throw new Error('audit disk full'); },
   });
   await assert.rejects(approvals.request(request, harness([]).ctx), /audit disk full/);
+});
+
+test('failed audit writes preserve human rejection and the denial circuit breaker', async () => {
+  for (const choice of ['Yes, proceed', 'No']) {
+    const h = harness([], {}, { choice });
+    const approvals = new Approvals({
+      config: () => ({ ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: 'user' }), turnId: () => 't', review: async () => allow,
+      record: () => { throw new Error('disk full'); },
+    });
+    await assert.rejects(approvals.request(request, h.ctx), /disk full/);
+    assert.equal(h.aborted(), choice === 'No' ? 1 : 0);
+  }
+  const h = harness([]);
+  let fail = true;
+  const approvals = new Approvals({
+    config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => 't', review: async () => deny,
+    record: () => { if (fail) throw new Error('disk full'); },
+  });
+  for (let i = 0; i < 3; i++) await assert.rejects(approvals.request(request, h.ctx), /disk full/);
+  assert.equal(h.aborted(), 1);
+  assert.throws(() => approvals.takeDenied(h.ctx), /disk full/);
+  fail = false;
+  assert.equal(approvals.takeDenied(h.ctx)?.summary, request.summary);
+  assert.equal(approvals.takeDenied(h.ctx), undefined);
 });

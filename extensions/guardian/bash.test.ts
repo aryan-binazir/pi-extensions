@@ -160,6 +160,33 @@ test('network hints cover DNS failures without blaming ordinary failures or enab
   const enabled = setup(t, { config: { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, networkAccess: true } } });
   const failed = await enabled.run({ command: 'printf "Could not resolve host: example.invalid\\n" >&2; exit 1' });
   assert.doesNotMatch(text(failed), /network access is disabled/i);
+  const success = await disabled.run({ command: 'printf "Could not resolve host: example.invalid\\n"' });
+  assert.doesNotMatch(text(success), /Sandbox hint/);
+  const access = await disabled.run({ command: `printf nope > ${disabled.outside}/denied` });
+  assert.match(text(access), /sandbox access restriction/i);
+  assert.doesNotMatch(text(access), /network access is disabled/i);
+  const socket = await disabled.run({ command: 'printf "could not connect to server: No such file or directory\\n" >&2; exit 1' });
+  assert.doesNotMatch(text(socket), /network access is disabled/i);
+});
+
+test('never-policy hints do not recommend forbidden escalation', sandboxed, async t => {
+  const { outside, run, requests } = setup(t, { config: { approvalPolicy: 'never' } });
+  for (const command of ['printf "Could not resolve host: example.invalid\\n" >&2; exit 1', `printf nope > ${outside}/denied`]) {
+    const result = await run({ command });
+    assert.equal(result.isError, true);
+    assert.match(text(result), /escalation is disabled/i);
+    assert.doesNotMatch(text(result), /require_escalated/);
+  }
+  assert.deepEqual(requests, []);
+});
+
+test('authentication hints recognize shell prefixes, assignments, redirects and env wrappers', sandboxed, async t => {
+  const { cwd, run } = setup(t, { shellSettings: { commandPrefix: 'export GUARDIAN_HINT_FIXTURE=1' } });
+  writeFileSync(join(cwd, 'gh'), '#!/bin/sh\nprintf "token invalid\\n" >&2\nexit 1\n');
+  chmodSync(join(cwd, 'gh'), 0o755);
+  for (const command of ['./gh auth status 2>&1', 'GH_TOKEN=fixture ./gh auth status', 'env GH_TOKEN=fixture ./gh auth status']) {
+    assert.match(text(await run({ command })), /network access is disabled/i, command);
+  }
 });
 
 test('Git index writes require escalation and repository config and hooks remain protected', sandboxed, async t => {

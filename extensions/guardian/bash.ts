@@ -185,7 +185,6 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       // Under `never`, an unmatched command is allowed to run in the sandbox; with no sandbox it cannot run at all.
       if (!bypass && !runtime.sandbox) throw new Error(NEVER_WITHOUT_SANDBOX);
       const result = await run(!bypass);
-      // On-request returns sandbox denials to the agent; unless-trusted asks to retry outside the sandbox.
       const exitCode = (result as { structuredContent?: { exit_code?: number } }).structuredContent?.exit_code ?? 0;
       const output = result.content.map(part => part.type === 'text' ? part.text : '').join('');
       const sandboxDenied = isLikelySandboxDenied(exitCode, output, runtime.sandbox?.kind);
@@ -209,7 +208,6 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
         };
       }
       if (bypass || config.approvalPolicy !== 'unless-trusted' || !sandboxDenied) return diagnostic;
-      // As in Codex, a command you already approved is retried without asking again.
       if (!approved) await approve('require_escalated', RETRY_REASON, effective.type === 'needs_approval' ? effective.proposedExecpolicyAmendment : undefined);
       return run(false);
     },

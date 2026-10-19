@@ -140,9 +140,7 @@ export class Approvals {
       this.record(audit, decision, ctx, now - started, config);
       started = now;
     };
-    // Codex routes only on-request approvals to the auto reviewer.
     if (config.approvalsReviewer !== 'auto_review' || config.approvalPolicy !== 'on-request') return this.askUser(request, ctx, record);
-    // The reviewer must see the whole action it approves; one this large is split by the agent instead.
     if (actionBytes > MAX_REVIEWED_ACTION_BYTES) {
       const message = `This action is too large to review completely (${actionBytes} bytes, limit ${MAX_REVIEWED_ACTION_BYTES}). Split it into smaller changes and retry.`;
       record({ decider: 'policy', verdict: 'rejected', rationale: message });

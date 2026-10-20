@@ -2,10 +2,10 @@ import { execFile } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { constants } from 'node:fs';
-import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, rmdir, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
-import { basename, dirname, join, relative } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import { decide, policyState, resolveStep, type Plan } from './policy.ts';
 
@@ -22,15 +22,22 @@ interface HookInput {
   tool_name?: unknown; tool_input?: unknown; tool_use_id?: unknown; tool_response?: unknown; error?: unknown; last_assistant_message?: unknown;
 }
 type Settle = { ok: true; responses: unknown[] } | { ok: false; error: Error };
-/** `stopAfter` ends the job early after a planned call's result, for example when an update's read is stale. */
-interface ConverseOptions { signal?: AbortSignal; stopAfter?: (step: number, response: unknown) => boolean }
+/**
+ * `cwd` is the job's own folder under the helper folder (a staged page's folder); without it the job makes one.
+ * `stopAfter` ends the job early after a planned call's result, for example when an update's read is stale.
+ */
+interface ConverseOptions { signal?: AbortSignal; cwd?: string; stopAfter?: (step: number, response: unknown) => boolean }
 
 const helperRoot = () => join(getAgentDir(), 'claude-artifacts', 'helper');
 const verifiedPaths = new Set<string>();
 
-/** The Artifact tool itself reported a failure for the planned call at `step`. */
+/** The Artifact tool reported a failure for the planned call at `step`; `refused` means the service published nothing. */
 export class ArtifactToolError extends Error {
-  constructor(readonly step: number, readonly detail: string) { super(`Claude Code's Artifact tool failed: ${detail}`); }
+  readonly refused: boolean;
+  constructor(readonly step: number, readonly detail: string) {
+    super(`Claude Code's Artifact tool failed: ${detail}`);
+    this.refused = /^(Publish refused|You hadn't viewed the live version)/.test(detail);
+  }
 }
 
 /** Saves artifact source privately for the model to read and returns its path. */
@@ -44,7 +51,7 @@ export async function saveSource(name: string, text: string) {
 
 /** A read-only copy of the page in the helper folder: the exact bytes the user approves and Claude Code uploads. */
 export interface Staged {
-  source: string; file: string; relative: string; sha256: string; bytes: number; text: string;
+  source: string; dir: string; file: string; name: string; sha256: string; bytes: number; text: string;
   verify(reportedPath: unknown): Promise<void>;
   dispose(): Promise<void>;
 }
@@ -55,8 +62,8 @@ export async function stage(path: string): Promise<Staged> {
   const content = await readPage(source);
   const root = helperRoot();
   await mkdir(root, { recursive: true, mode: 0o700 });
-  const dir = await mkdtemp(join(root, 'job-')), file = join(dir, basename(source));
-  const dispose = () => rm(dir, { recursive: true, force: true });
+  const dir = await mkdtemp(join(root, 'job-')), name = basename(source), file = join(dir, name);
+  const dispose = () => rm(dir, { recursive: true, force: true }).catch(() => {});
   try {
     await writeFile(file, content, { mode: 0o400, flag: 'wx' });
     const sha256 = hash(content);
@@ -65,7 +72,7 @@ export async function stage(path: string): Promise<Staged> {
       if (!same) throw new Error(`Claude Code reported uploading ${String(reportedPath)}, not the approved file.`);
       if (hash(await readFile(file)) !== sha256) throw new Error('The approved copy changed before Claude Code uploaded it.');
     };
-    return { source, file, relative: relative(root, file), sha256, bytes: content.length, text: content.toString('utf8'), verify, dispose };
+    return { source, dir, file, name, sha256, bytes: content.length, text: content.toString('utf8'), verify, dispose };
   } catch (error) { await dispose(); throw error; }
 }
 
@@ -85,14 +92,14 @@ async function readPage(source: string) {
 const hash = (content: Buffer) => createHash('sha256').update(content).digest('hex');
 
 /** Runs one hidden interactive `claude` session that may make exactly the Artifact calls the plan lists. */
-export async function converse(plan: Plan, { signal, stopAfter }: ConverseOptions = {}): Promise<unknown[]> {
+export async function converse(plan: Plan, { signal, cwd: given, stopAfter }: ConverseOptions = {}): Promise<unknown[]> {
   const { steps } = plan;
   const env = claudeEnv();
   signal?.throwIfAborted();
   await requireVersion(env);
   const sessionId = randomUUID(), token = randomBytes(24).toString('hex');
-  const cwd = helperRoot();
-  await mkdir(cwd, { recursive: true, mode: 0o700 });
+  await mkdir(helperRoot(), { recursive: true, mode: 0o700 });
+  const cwd = given ?? await mkdtemp(join(helperRoot(), 'job-'));
   const handshake = `PIJOB ${randomBytes(16).toString('hex')}: carry out the Pi artifact job instruction supplied in the hook context for this prompt. If no such instruction is present, do nothing and reply "no job".`;
   const policy = policyState(), responses: unknown[] = [], resolved = new Set<number>(), written: { transcript?: unknown; scratchpad?: unknown } = {};
   let started = false, settled = false, settle!: (outcome: Settle) => void;
@@ -126,8 +133,9 @@ export async function converse(plan: Plan, { signal, stopAfter }: ConverseOption
       case 'PostToolUseFailure': {
         const step = policy.reserved.get(String(input.tool_use_id));
         if (step === undefined) return {};
-        resolved.add(step);
-        settle({ ok: false, error: new ArtifactToolError(step, String(input.error ?? 'unknown error')) });
+        const error = new ArtifactToolError(step, String(input.error ?? 'unknown error'));
+        if (steps[step].input.action !== 'publish' || error.refused) resolved.add(step);
+        settle({ ok: false, error });
         return done;
       }
       case 'PermissionRequest':
@@ -153,20 +161,19 @@ export async function converse(plan: Plan, { signal, stopAfter }: ConverseOption
       const dead = (await tmux('display-message', '-p', '-t', 'job', '#{pane_dead}').catch(() => '1')).trim() === '1';
       if (settled) return;
       if (started) { if (dead) settle(fail(`Claude Code exited before finishing the job.${lastScreen(screen)}`)); continue; }
-      const blocker = startupBlocker(screen, dead, cwd);
+      const blocker = startupBlocker(screen, dead, helperRoot());
       if (blocker) settle(fail(blocker));
       else if (Date.now() > deadline) settle(fail(`Claude Code did not reach Pi's hooks within ${START_TIMEOUT_MS / 1000} s, so nothing was sent to it.${lastScreen(screen)}`));
     }
   };
 
-  let hooks: Awaited<ReturnType<typeof listen>> | undefined, launched = Date.now();
+  let hooks: Awaited<ReturnType<typeof listen>> | undefined;
   try {
     hooks = await listen(token, respond);
     const settings = join(scratch, 'settings.json'), tmuxConf = join(scratch, 'tmux.conf');
     await writeFile(tmuxConf, 'set -g remain-on-exit on\n', { mode: 0o600 });
     const hook = { type: 'http', url: hooks.url, timeout: 30, onFailure: 'block' };
     await writeFile(settings, JSON.stringify({ hooks: Object.fromEntries(HOOK_EVENTS.map(event => [event, [{ matcher: '*', hooks: [hook] }]])) }), { mode: 0o600 });
-    launched = Date.now();
     await run('tmux', ['-S', socket, '-f', tmuxConf, 'new-session', '-d', '-s', 'job', '-x', '200', '-y', '50', '-c', cwd,
       'claude', '--restricted', '--tools', 'Artifact,Read', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--permission-mode', 'dontAsk',
       '--model', 'haiku', '--session-id', sessionId, '--settings', settings, handshake], env);
@@ -186,10 +193,11 @@ export async function converse(plan: Plan, { signal, stopAfter }: ConverseOption
     settled = true;
     const pid = Number(await tmux('display-message', '-p', '-t', 'job', '#{pane_pid}').catch(() => ''));
     await tmux('kill-server').catch(() => {});
-    await exited(pid);
+    await stopped(pid);
     await hooks?.close();
-    await rm(scratch, { recursive: true, force: true });
-    await removeSessionFiles(sessionId, written, launched);
+    await removeSessionFiles(sessionId, written, cwd);
+    await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    if (!given) await rm(cwd, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -202,32 +210,46 @@ function closed(event: unknown): object {
   return { continue: false, stopReason: reason };
 }
 
-async function exited(pid: number) {
-  for (let waited = 0; pid > 0 && waited < 5_000; waited += 50) {
-    try { process.kill(pid, 0); } catch { return; }
+/** Waits for the pane's process group to end after the hangup, then kills whatever is left. */
+async function stopped(pid: number) {
+  if (!(pid > 0) || await gone(pid, 3_000)) return;
+  for (const target of [-pid, pid]) try { process.kill(target, 'SIGKILL'); } catch { /* already gone */ }
+  await gone(pid, 2_000);
+}
+
+async function gone(pid: number, ms: number) {
+  const alive = () => [-pid, pid].some(target => { try { process.kill(target, 0); return true; } catch { return false; } });
+  for (let waited = 0; waited < ms; waited += 50) {
+    if (!alive()) return true;
     await delay(50);
   }
+  return !alive();
 }
 
 /**
- * Deletes the transcript (it holds a copy of the page) and session folders, but only paths named by this session's id.
- * Claude Code also starts an empty scratchpad under a second id that no hook reports; empty ones made since launch go too.
+ * Deletes the transcript (it holds a copy of the page) and the session's folders. Claude Code keeps state under
+ * folders named after the working directory; the job's own folders, named after its unique working directory, go
+ * whole, including the empty scratchpad Claude Code starts under a second, unreported id. Anything else goes only
+ * when named by this session's id.
  */
-async function removeSessionFiles(sessionId: string, written: { transcript?: unknown; scratchpad?: unknown }, since: number) {
+async function removeSessionFiles(sessionId: string, written: { transcript?: unknown; scratchpad?: unknown }, cwd: string) {
+  const owned = new Set([folderName(cwd), folderName(await realpath(cwd).catch(() => cwd))]);
   const targets: string[] = [];
-  if (typeof written.transcript === 'string' && basename(written.transcript) === `${sessionId}.jsonl`) targets.push(written.transcript, join(dirname(written.transcript), sessionId));
-  const sessions = typeof written.scratchpad === 'string' && basename(dirname(written.scratchpad)) === sessionId ? dirname(dirname(written.scratchpad)) : undefined;
-  if (sessions) targets.push(join(sessions, sessionId));
+  if (typeof written.transcript === 'string' && basename(written.transcript) === `${sessionId}.jsonl`) {
+    const project = dirname(written.transcript);
+    targets.push(...owned.has(basename(project)) ? [project] : [written.transcript, join(project, sessionId)]);
+  }
+  if (typeof written.scratchpad === 'string' && basename(dirname(written.scratchpad)) === sessionId) {
+    const sessions = dirname(dirname(written.scratchpad));
+    targets.push(owned.has(basename(sessions)) ? sessions : dirname(written.scratchpad));
+  }
   for (const target of targets) {
     const info = await lstat(target).catch(() => undefined);
-    if (info && !info.isSymbolicLink()) await rm(target, { recursive: info.isDirectory(), force: true });
-  }
-  if (!sessions) return;
-  for (const entry of await readdir(sessions).catch(() => [])) {
-    const dir = join(sessions, entry), info = await lstat(dir).catch(() => undefined);
-    if (info?.isDirectory() && info.mtimeMs >= since - 1_000) await rmdir(join(dir, 'scratchpad')).then(() => rmdir(dir)).catch(() => {});
+    if (info && !info.isSymbolicLink()) await rm(target, { recursive: true, force: true }).catch(() => {});
   }
 }
+
+const folderName = (path: string) => path.replace(/[^A-Za-z0-9]/g, '-');
 
 function startupBlocker(screen: string, dead: boolean, cwd: string) {
   if (/trust this folder|Accessing workspace/i.test(screen)) return `Claude Code asks whether to trust the artifact helper folder ${cwd}. Trust it once: run \`claude\` in that folder, choose "Yes, I trust this folder", exit, and retry.`;

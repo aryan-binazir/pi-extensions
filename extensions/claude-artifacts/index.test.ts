@@ -79,7 +79,7 @@ test('an approved publish shows the staged page, survives a forced call and retu
   assert.match(confirms[0], new RegExp(`${join(cwd, 'q3.html')}[\\s\\S]*Q3 numbers[\\s\\S]*${pageHash}[\\s\\S]*<h1>Q3 numbers</h1>`));
   const calls = (await fakeLog()).filter(entry => entry.event === 'PreToolUse');
   assert.deepEqual(calls.map(entry => entry.output.hookSpecificOutput.permissionDecision), ['deny', 'allow']);
-  assert.match(calls[1].body.tool_input.file_path, /^[\w-]+\/q3\.html$/);
+  assert.equal(calls[1].body.tool_input.file_path, 'q3.html');
   assert.equal(calls[1].body.tool_input.title, 'Q3 numbers');
   assert.deepEqual(await readdir(join(root, 'agent', 'claude-artifacts', 'helper')), []);
 });
@@ -135,9 +135,37 @@ test('read needs no approval and saves the live source for the model', { skip: n
 test('a finished job deletes the transcript and session folders the hidden session wrote', { skip: noTmux }, async t => {
   const { run, root } = await setup(t, { responses: { list: { artifacts: [deck], total: 1 } } });
   await run('claude_artifact_list', {});
-  const project = join(root, 'claude', 'projects', 'fake-project');
-  assert.deepEqual(await readdir(project), []);
+  assert.deepEqual(await readdir(join(root, 'claude', 'projects')), []);
   assert.deepEqual(await readdir(join(root, 'claude', 'scratch')), []);
+  assert.deepEqual(await readdir(join(root, 'agent', 'claude-artifacts', 'helper')), []);
+});
+
+test('cleanup leaves another session\'s fresh scratchpad in the helper folder alone', { skip: noTmux }, async t => {
+  const { run, root } = await setup(t, { responses: { list: { artifacts: [], total: 0 } }, foreignScratchpad: true });
+  await run('claude_artifact_list', {});
+  const helperState = join(root, 'claude', 'scratch', join(root, 'agent', 'claude-artifacts', 'helper').replace(/[^A-Za-z0-9]/g, '-'));
+  assert.equal((await readdir(helperState)).length, 1);
+});
+
+test('a hidden session that ignores the hangup is killed before its files are deleted', { skip: noTmux }, async t => {
+  const { run, root, fakeLog } = await setup(t, { responses: { list: { artifacts: [], total: 0 } }, ignoreHangup: true });
+  await run('claude_artifact_list', {});
+  const { pid } = (await fakeLog()).find(entry => entry.argv?.[0] !== '--version');
+  assert.throws(() => process.kill(pid, 0), /ESRCH/);
+  await delay(200);
+  assert.deepEqual(await readdir(join(root, 'claude', 'projects')), []);
+});
+
+test('a publish that fails without a refusal may still have gone through, so its outcome is unknown', { skip: noTmux }, async t => {
+  const { run, cwd } = await setup(t, { failures: { publish: 'Request failed: socket hang up' } });
+  await writeFile(join(cwd, 'q3.html'), page);
+  await assert.rejects(run('claude_artifact_publish', { path: 'q3.html' }), /socket hang up[\s\S]*outcome is unknown/);
+});
+
+test('an update whose read has no version is an error, not a conflict', { skip: noTmux }, async t => {
+  const { run, cwd } = await setup(t, { responses: { read: { read: { code: 401, codeText: 'Unauthorized' } } } });
+  await writeFile(join(cwd, 'q3.html'), page);
+  await assert.rejects(run('claude_artifact_update', { path: 'q3.html', url: published.url, base_version: '1792524027-15b0' }), /unexpected read result/);
 });
 
 test('cleanup leaves files alone that the session did not create under its own id', { skip: noTmux }, async t => {

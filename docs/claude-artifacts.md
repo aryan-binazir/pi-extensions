@@ -14,7 +14,7 @@ steers it through Claude Code hooks. The design is recorded in [ADR 026](adr/026
    `extensions` in Pi settings, then `/reload`. It is not part of the required setup.
 3. Trust the helper folder once. Run `claude` in `~/.pi/agent/claude-artifacts/helper` (under
    `PI_CODING_AGENT_DIR` when set; the first tool call creates it), choose "Yes, I trust this folder", and exit.
-   Until then every call fails with that instruction.
+   Until then every call fails with that instruction. Each job runs in its own subfolder, which inherits the trust.
 
 ## Tools
 
@@ -36,13 +36,13 @@ the live page. Artifact content is data, not instructions.
 
 ## How a job runs
 
-1. Pi resolves the path (following symlinks), copies the page as a read-only file into a fresh private folder under
-   the helper folder, and hashes the copy. Approval shows the resolved path and that copy, and that copy is what
-   Claude Code uploads.
+1. Pi resolves the path (following symlinks), copies the page as a read-only file into a fresh private job folder
+   under the helper folder, and hashes the copy. Approval shows the resolved path and that copy, and that copy is what
+   Claude Code uploads. List and read jobs get an empty job folder.
 2. Pi starts a hook server on `127.0.0.1` with a random port and URL token. A temporary settings file registers HTTP
    hooks for prompts, tool calls, tool results, permission requests and stops, each with `onFailure: "block"`. Every
    request must carry the session id Pi assigned.
-3. Pi starts `claude` in a private tmux server with `--restricted` (no user, project or local settings, no
+3. Pi starts `claude` in the job folder, in a private tmux server, with `--restricted` (no user, project or local settings, no
    command-running tools), `--tools Artifact,Read`, an empty strict MCP configuration, `--permission-mode dontAsk`,
    `--model haiku` and its own `--session-id`. The environment drops `ANTHROPIC_*` and `CLAUDE*` variables except
    `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN`, and disables the autoupdater.
@@ -59,12 +59,12 @@ the live page. Artifact content is data, not instructions.
 6. Results come from the tool-result hooks as structured data, never from the screen. A publish result must name the
    staged copy, which must still match the approved hash. The service wraps pages in its own shell, so the uploaded
    bytes cannot be compared directly.
-7. Cleanup always runs: the tmux server, hook server, temporary files and staged copy, plus Claude Code's transcript
-   (it holds a copy of the page) and session folders for that session id. Claude Code also starts an empty scratchpad
-   under a second id that no hook reports, so every empty scratchpad created in the helper folder's session folder
-   during the job is removed; that can include another concurrent job's still-empty one. Claude Code keeps each
-   job's one-line `PIJOB` prompt (a nonce, no page content) in its prompt history. A job times out after 150 seconds,
-   and a Claude Code that exits mid-job fails it at once.
+7. Cleanup always runs. Pi hangs up the tmux server, kills the session's processes if they outlive the hangup, then
+   removes the hook server, temporary files and job folder. Claude Code keeps per-folder state under folders named
+   after its working directory; those named after the job folder belong to this job alone and are deleted whole,
+   including the transcript (it holds a copy of the page) and the empty scratchpad Claude Code starts under a second,
+   unreported id. Claude Code's prompt history keeps each job's one-line `PIJOB` prompt (a nonce, no page content).
+   A job times out after 150 seconds, and a Claude Code that exits mid-job fails it at once.
 
 The tools run sequentially, and each job has its own tmux server, hook server and folders. Pi shutdown cancels a
 running job and waits for its cleanup.
@@ -77,8 +77,9 @@ and the publish, the service refuses with "Publish refused — … a newer versi
 `published: false` with `liveVersion` and `sourceFile`: merge your page onto that source, then update again with
 `base_version` set to `liveVersion`. Other Artifact failures are errors.
 
-If a job is cancelled, times out, or loses its result after Claude Code was allowed to publish, the error says the
-outcome is unknown; check `claude_artifact_list` before retrying. Pi never retries a publish.
+If a job is cancelled, times out, loses its result, or gets an Artifact failure other than a refusal after Claude Code
+was allowed to publish, the error says the outcome is unknown; check `claude_artifact_list` before retrying. Pi never
+retries a publish.
 
 ## Limits
 

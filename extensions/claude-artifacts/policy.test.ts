@@ -49,8 +49,12 @@ test('the next call waits until the previous call has a result', () => {
   const early = decide(update, state, artifact({ action: 'publish', file_path: 'job-1/page.html', url }, 'toolu_publish'));
   assert.equal(early.allow, false);
   assert.match(!early.allow ? early.reason : '', /result/);
-  resolveStep(state, 'toolu_read');
-  assert.equal(decide(update, state, artifact({ action: 'publish', file_path: 'job-1/page.html', url }, 'toolu_publish')).allow, true);
+  assert.equal(decide(update, state, artifact({ action: 'publish', file_path: 'job-1/page.html', url }, 'toolu_publish_again')).allow, false);
+  const third = decide(update, state, artifact({ action: 'publish', file_path: 'job-1/page.html', url }, 'toolu_publish_third'));
+  assert.deepEqual(third.allow ? undefined : third.fatal, true);
+  const waited = policyState();
+  decide(update, waited, artifact({ action: 'read', url }, 'toolu_read')); resolveStep(waited, 'toolu_read');
+  assert.equal(decide(update, waited, artifact({ action: 'publish', file_path: 'job-1/page.html', url }, 'toolu_publish')).allow, true);
 });
 
 test('a reused tool-use id is denied, and the third denial ends the job', () => {

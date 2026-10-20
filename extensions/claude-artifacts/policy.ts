@@ -19,7 +19,7 @@ export function decide(plan: Plan, state: PolicyState, call: ToolCall): Decision
   if (call.tool === 'Read' && plan.readable && call.input.file_path === plan.readable && Object.keys(call.input).every(key => ['file_path', 'offset', 'limit'].includes(key))) return { allow: true, step: 'read' };
   const step = plan.steps[state.next];
   if (call.tool === 'Artifact' && step && !state.reserved.has(call.id) && matches(step, call.input)) {
-    if (state.awaiting !== undefined) return { allow: false, reason: 'Wait for the previous Artifact call\'s result, then make this call.', fatal: false };
+    if (state.awaiting !== undefined) return { allow: false, reason: 'Wait for the previous Artifact call\'s result, then make this call.', fatal: ++state.denials >= MAX_DENIALS };
     state.reserved.set(call.id, state.next); state.awaiting = call.id;
     return { allow: true, step: state.next++ };
   }

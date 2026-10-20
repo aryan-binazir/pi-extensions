@@ -57,8 +57,8 @@ export default function claudeArtifacts(pi: ExtensionAPI) {
       const staged = await stage(resolveToolPath(params.path, ctx.cwd));
       try {
         await approve(ctx, signal, 'Publish a new claude.ai artifact?', staged, params.title ? [`Title: ${params.title}`] : []);
-        const input = { action: 'publish', file_path: staged.relative, ...(params.title ? { title: params.title } : {}) };
-        const [response] = await converse({ steps: [{ input, icon: true }], readable: staged.file }, { signal }) as [Published];
+        const input = { action: 'publish', file_path: staged.name, ...(params.title ? { title: params.title } : {}) };
+        const [response] = await converse({ steps: [{ input, icon: true }], readable: staged.file }, { signal, cwd: staged.dir }) as [Published];
         await checkUpload(staged, response);
         return result({ url: response.url, version: response.version, title: response.title, artifactId: response.artifact_id, audience: response.audience, warnings: response.warnings ?? [] });
       } finally { await staged.dispose(); }
@@ -79,16 +79,20 @@ export default function claudeArtifacts(pi: ExtensionAPI) {
           return result({ published: false, url: params.url, baseVersion: params.base_version, liveVersion, sourceFile,
             reason: `The live artifact is not at base_version, so nothing was published. Merge your page onto the live source in sourceFile, then ${next}.` });
         };
-        const plan = { steps: [{ input: { action: 'read', url: params.url } }, { input: { action: 'publish', file_path: staged.relative, url: params.url } }], readable: staged.file };
+        const plan = { steps: [{ input: { action: 'read', url: params.url } }, { input: { action: 'publish', file_path: staged.name, url: params.url } }], readable: staged.file };
         const stale = (response: unknown) => (response as Read | undefined)?.artifactRead?.ver !== params.base_version;
         let responses: unknown[];
-        try { responses = await converse(plan, { signal, stopAfter: (step, response) => step === 0 && stale(response) }); }
+        try { responses = await converse(plan, { signal, cwd: staged.dir, stopAfter: (step, response) => step === 0 && stale(response) }); }
         catch (error) {
-          if (!(error instanceof ArtifactToolError && error.step === 1 && /^(Publish refused|You hadn't viewed the live version)/.test(error.detail))) throw error;
+          if (!(error instanceof ArtifactToolError && error.step === 1 && error.refused)) throw error;
           return conflict(/newer version \(([^)\s]+)\)/.exec(error.detail)?.[1], error.detail);
         }
         const [live, response] = responses as [Read, Published | undefined];
-        if (!response) return conflict(live?.artifactRead?.ver, live?.read?.result ?? '');
+        if (!response) {
+          const version = live?.artifactRead?.ver, source = live?.read?.result;
+          if (typeof version !== 'string' || typeof source !== 'string') throw unexpected('read', live);
+          return conflict(version, source);
+        }
         await checkUpload(staged, response);
         return result({ published: true, url: response.url, version: response.version, baseVersion: params.base_version });
       } finally { await staged.dispose(); }

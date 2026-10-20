@@ -38,13 +38,16 @@ description Ar shared of an equivalent extension in another repository; that cod
 - **Conflicts come from the service.** Update compares the read's `artifactRead.ver` with `base_version` and stops
   on a mismatch. A competing publish between that read and the publish was refused by the service ("Publish refused
   — … a newer version …"), observed with a second session, so the check is not only preliminary. Only those refusal
-  texts are conflicts; other failures are errors. A publish that was allowed but never reported back is "outcome
-  unknown", and Pi never retries it.
-- **Leave little behind.** The tmux socket, settings and staged copy live in private temporary folders. Pi assigns
-  `--session-id` and deletes the transcript and session folders named by it. Claude Code also starts an empty
-  scratchpad under a second, unreported id, so Pi removes every empty scratchpad created in that session folder
-  since launch; `rmdir` cannot remove one with content, but it can take a concurrent job's still-empty one. Claude
-  Code's prompt history keeps the one-line `PIJOB` prompt, which holds only a nonce.
+  texts are conflicts and prove nothing was published; any other failure after an allowed publish, or no result at
+  all, is "outcome unknown", and Pi never retries it.
+- **Leave little behind, and delete only what the job owns.** Each job runs in its own folder under the trusted
+  helper folder; subfolders inherit Claude Code's folder trust (observed). Claude Code names its per-folder state
+  after the working directory (path characters other than letters and digits become `-`), so the folders named
+  after the job folder belong to that job alone and are deleted whole. That covers the transcript and the empty
+  scratchpad Claude Code starts under a second, unreported id. Paths not named after the job folder are deleted only
+  when named by Pi's `--session-id`. Pi kills the session's process group if it outlives the tmux hangup, so nothing
+  rewrites files after cleanup. Claude Code's prompt history keeps the one-line `PIJOB` prompt, which holds only a
+  nonce.
 
 ## Consequences
 

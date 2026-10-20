@@ -8,7 +8,7 @@ const scenario = JSON.parse(process.env.FAKE_CLAUDE_SCENARIO ?? '{}');
 const log = entry => { if (process.env.FAKE_CLAUDE_LOG) appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify(entry) + '\n'); };
 const idle = () => setInterval(() => {}, 60_000);
 const argv = process.argv.slice(2);
-log({ argv, env: Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(ANTHROPIC_|CLAUDE|DISABLE_AUTOUPDATER)/.test(key))) });
+log({ pid: process.pid, argv, env: Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(ANTHROPIC_|CLAUDE|DISABLE_AUTOUPDATER)/.test(key))) });
 if (argv[0] === '--version') { console.log(`${scenario.version ?? '2.1.302'} (Claude Code)`); process.exit(0); }
 const option = name => argv[argv.indexOf(name) + 1];
 
@@ -20,13 +20,16 @@ else await run();
 async function run() {
   const settings = JSON.parse(readFileSync(option('--settings'), 'utf8'));
   const sessionId = scenario.sessionId ?? option('--session-id');
-  const config = process.env.CLAUDE_CONFIG_DIR;
-  const transcript = join(config, 'projects', 'fake-project', `${sessionId}.jsonl`);
-  const scratchpad = join(config, 'scratch', sessionId, 'scratchpad');
+  // Like Claude Code, keep per-folder state under the working directory's path with every other character as '-'.
+  const config = process.env.CLAUDE_CONFIG_DIR, folder = name => name.replace(/[^A-Za-z0-9]/g, '-');
+  const transcript = join(config, 'projects', folder(process.cwd()), `${sessionId}.jsonl`);
+  const sessions = join(config, 'scratch', folder(process.cwd())), scratchpad = join(sessions, sessionId, 'scratchpad');
   mkdirSync(dirname(transcript), { recursive: true }); writeFileSync(transcript, '{"page":"source"}\n');
   mkdirSync(join(dirname(transcript), sessionId), { recursive: true });
   mkdirSync(scratchpad, { recursive: true });
-  mkdirSync(join(config, 'scratch', randomUUID(), 'scratchpad'), { recursive: true }); // Claude Code also starts an empty scratchpad under a second id
+  mkdirSync(join(sessions, randomUUID(), 'scratchpad'), { recursive: true }); // Claude Code also starts an empty scratchpad under a second id
+  if (scenario.foreignScratchpad) mkdirSync(join(config, 'scratch', folder(dirname(process.cwd())), randomUUID(), 'scratchpad'), { recursive: true });
+  if (scenario.ignoreHangup) { process.on('SIGHUP', () => {}); setInterval(() => writeFileSync(transcript, '{"page":"source"}\n'), 50); }
   const base = { session_id: sessionId, transcript_path: scenario.transcriptPath ?? transcript, cwd: process.cwd(), scratchpad_dir: scenario.scratchpadDir ?? scratchpad, permission_mode: 'dontAsk' };
   const hook = async (event, body) => {
     const entry = settings.hooks?.[event]?.[0]?.hooks?.[0];

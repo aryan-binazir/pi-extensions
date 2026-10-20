@@ -25,7 +25,9 @@ description Ar shared of an equivalent extension in another repository; that cod
   publish after a read in the same conversation. `PostToolUse` returning `continue: false` ends the session as soon
   as the last planned result, or a stale read, arrives.
 - **Pi decides every call.** `policy.ts` allows only the planned calls, in order and each once, with exact fields
-  (plus the one-word `icon` Claude adds to a first publish), and `Read` only for the staged copy. `Read` must be in
+  (plus the one-word `icon` Claude adds to a first publish), and `Read` only for the staged copy. A call waits for
+  the previous call's result, so an update's publish cannot be allowed before its read shows `base_version`, even
+  when Claude asks for both at once. Once a job has settled, every hook answer refuses and stops Claude Code. `Read` must be in
   `--tools` even though Claude rarely calls it: without it the CLI refuses publish, because publishing reads the
   file. Hooks use `onFailure: "block"`, so a hook that times out or fails blocks the call; this was observed
   with a held `PreToolUse`.
@@ -38,9 +40,11 @@ description Ar shared of an equivalent extension in another repository; that cod
   — … a newer version …"), observed with a second session, so the check is not only preliminary. Only those refusal
   texts are conflicts; other failures are errors. A publish that was allowed but never reported back is "outcome
   unknown", and Pi never retries it.
-- **Leave nothing behind.** The tmux socket, settings and staged copy live in private temporary folders. Pi assigns
-  `--session-id` and deletes only the transcript and session folders named by it, plus the empty scratchpad Claude
-  Code starts under a second id at launch.
+- **Leave little behind.** The tmux socket, settings and staged copy live in private temporary folders. Pi assigns
+  `--session-id` and deletes the transcript and session folders named by it. Claude Code also starts an empty
+  scratchpad under a second, unreported id, so Pi removes every empty scratchpad created in that session folder
+  since launch; `rmdir` cannot remove one with content, but it can take a concurrent job's still-empty one. Claude
+  Code's prompt history keeps the one-line `PIJOB` prompt, which holds only a nonce.
 
 ## Consequences
 

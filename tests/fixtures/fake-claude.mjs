@@ -41,15 +41,16 @@ async function run() {
 
   const submitted = await hook('UserPromptSubmit', { prompt: argv.at(-1) });
   if (submitted.failed || submitted.decision === 'block') { console.log('prompt blocked'); return idle(); }
+  if (scenario.exitAfterPrompt) { console.log('fake claude crashed'); process.exit(1); }
   for (const { event, body } of scenario.events ?? []) await hook(event, body);
   const instruction = submitted.hookSpecificOutput?.additionalContext ?? '';
   const inputs = jsonObjects(instruction);
-  const calls = scenario.calls ?? inputs.map((_, index) => ({ from: index }));
-  for (const [index, call] of calls.entries()) {
-    const tool_name = call.tool ?? 'Artifact';
-    const tool_input = { ...(call.from === undefined ? {} : inputs[call.from]), ...call.input, ...call.add };
-    const tool_use_id = `toolu_fake_${index}`;
-    const decision = await hook('PreToolUse', { tool_name, tool_input, tool_use_id });
+  const calls = (scenario.calls ?? inputs.map((_, index) => ({ from: index }))).map((call, index) => ({
+    tool_name: call.tool ?? 'Artifact', tool_input: { ...(call.from === undefined ? {} : inputs[call.from]), ...call.input, ...call.add }, tool_use_id: `toolu_fake_${index}` }));
+  // `parallel` asks permission for every call before running any, as Claude Code may for one message's tool calls.
+  const decisions = scenario.parallel ? await Promise.all(calls.map(call => hook('PreToolUse', call))) : [];
+  for (const [index, { tool_name, tool_input, tool_use_id }] of calls.entries()) {
+    const decision = decisions[index] ?? await hook('PreToolUse', { tool_name, tool_input, tool_use_id });
     if (decision.continue === false) return idle();
     if (decision.failed || decision.hookSpecificOutput?.permissionDecision !== 'allow') continue;
     if (scenario.stall === tool_input.action) return idle();

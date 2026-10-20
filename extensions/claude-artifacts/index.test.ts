@@ -56,14 +56,14 @@ const page = '<!doctype html><html><head><title>Q3</title></head><body><h1>Q3 nu
 const pageHash = createHash('sha256').update(page).digest('hex');
 const published = { url: 'https://claude.ai/artifact/1Tnqd5SZSshD1VHdpDgJW8', artifact_id: '03bd963d-ef4b-4a48-b88f-faaee477cc35', title: 'Q3', updated: false, owned: true, icon: 'chart', audience: 'owner', seq: 1, version: '1792524027-15b0', warnings: ['The document\'s own <title> names this artifact.'], contract: '0.0.0', liveSubscription: 'arming' };
 
-test('publish refuses without an approval dialog and never starts Claude Code', { skip: noTmux }, async t => {
+test('publish refuses without an approval dialog and never starts Claude Code', async t => {
   const { run, cwd, ctx, fakeLog } = await setup(t);
   await writeFile(join(cwd, 'q3.html'), page);
   await assert.rejects(run('claude_artifact_publish', { path: 'q3.html' }, { ...ctx, hasUI: false }), /approval/);
   await assert.rejects(fakeLog(), /ENOENT/);
 });
 
-test('a declined publish never starts Claude Code and leaves no staged copy', { skip: noTmux }, async t => {
+test('a declined publish never starts Claude Code and leaves no staged copy', async t => {
   const { run, cwd, ctx, root, fakeLog } = await setup(t);
   await writeFile(join(cwd, 'q3.html'), page);
   await assert.rejects(run('claude_artifact_publish', { path: 'q3.html' }, { ...ctx, ui: { confirm: async () => false } }), /declined/);
@@ -82,12 +82,6 @@ test('an approved publish shows the staged page, survives a forced call and retu
   assert.match(calls[1].body.tool_input.file_path, /^[\w-]+\/q3\.html$/);
   assert.equal(calls[1].body.tool_input.title, 'Q3 numbers');
   assert.deepEqual(await readdir(join(root, 'agent', 'claude-artifacts', 'helper')), []);
-});
-
-test('a publish result for any file but the approved copy is an error', { skip: noTmux }, async t => {
-  const { run, cwd } = await setup(t, { responses: { publish: { ...published, path: '/home/ar/.ssh/config' } } });
-  await writeFile(join(cwd, 'q3.html'), page);
-  await assert.rejects(run('claude_artifact_publish', { path: 'q3.html' }), /not the approved file/);
 });
 
 const liveSource = '[Artifact 03bd963d (version 1792524210-5480) — owned by you, private; raw HTML follows]\n<html><body><h1>Q3 numbers (edited in the page)</h1></body></html>';
@@ -217,7 +211,87 @@ test('a permission prompt in the hidden session ends the job instead of waiting 
   assert.equal(request.output.hookSpecificOutput.decision.behavior, 'deny');
 });
 
-test('publish accepts only an HTML page', { skip: noTmux }, async t => {
+test('once a job has failed, the hooks allow nothing more', { skip: noTmux }, async t => {
+  const { run, cwd, fakeLog } = await setup(t, { events: [{ event: 'PermissionRequest', body: { tool_name: 'Artifact', tool_input: { action: 'share' } } }], responses: { publish: published } });
+  await writeFile(join(cwd, 'q3.html'), page);
+  await assert.rejects(run('claude_artifact_publish', { path: 'q3.html' }), /permission/);
+  assert.ok(!(await fakeLog()).some(entry => entry.event === 'PreToolUse' && entry.output?.hookSpecificOutput?.permissionDecision === 'allow'));
+});
+
+test('an update publishes only after the read result shows base_version, even when both calls are asked at once', { skip: noTmux }, async t => {
+  const { run, cwd, fakeLog } = await setup(t, { parallel: true, responses: { read: read('1792524210-5480'), publish: updated } });
+  await writeFile(join(cwd, 'q3.html'), page);
+  const result = await run('claude_artifact_update', { path: 'q3.html', url: published.url, base_version: '1792524027-15b0' });
+  assert.equal(result.details.published, false);
+  const decisions = (await fakeLog()).filter(entry => entry.event === 'PreToolUse').map(entry => [entry.body.tool_input.action, entry.output?.hookSpecificOutput?.permissionDecision]);
+  assert.deepEqual(decisions, [['read', 'allow'], ['publish', 'deny']]);
+});
+
+test('cancelling while the approval dialog is open is a cancellation, not a decline', async t => {
+  const { run, cwd, ctx } = await setup(t);
+  await writeFile(join(cwd, 'q3.html'), page);
+  const controller = new AbortController();
+  const confirm = (_title: string, _message: string, options: { signal: AbortSignal }) => new Promise<boolean>(resolve => options.signal.addEventListener('abort', () => resolve(false)));
+  const job = run('claude_artifact_publish', { path: 'q3.html' }, { ...ctx, ui: { confirm } }, controller.signal);
+  await delay(50); controller.abort();
+  await assert.rejects(job, (error: Error) => !/declined/.test(error.message));
+});
+
+test('a refusal that names no live version points the model to claude_artifact_read', { skip: noTmux }, async t => {
+  const refusal = "You hadn't viewed the live version of this artifact, so the publish was refused.";
+  const { run, cwd } = await setup(t, { responses: { read: read('1792524027-15b0') }, failures: { publish: refusal } });
+  await writeFile(join(cwd, 'q3.html'), page);
+  const result = await run('claude_artifact_update', { path: 'q3.html', url: published.url, base_version: '1792524027-15b0' });
+  assert.deepEqual([result.details.published, result.details.liveVersion], [false, undefined]);
+  assert.match(result.details.reason, /claude_artifact_read/);
+});
+
+test('a result missing the fields the tool reports is an error, not an empty success', { skip: noTmux }, async t => {
+  const { run } = await setup(t, { responses: { list: { items: [] } } });
+  await assert.rejects(run('claude_artifact_list', {}), /unexpected/);
+});
+
+test('a publish that went through but fails verification says it may be live and where', { skip: noTmux }, async t => {
+  const { run, cwd } = await setup(t, { responses: { publish: { ...published, path: '/home/ar/.ssh/config' } } });
+  await writeFile(join(cwd, 'q3.html'), page);
+  await assert.rejects(run('claude_artifact_publish', { path: 'q3.html' }), new RegExp(`${published.url}[\\s\\S]*not the approved file`));
+});
+
+test('Claude Code dying after the job started fails it without waiting for the timeout', { skip: noTmux }, async t => {
+  const { run } = await setup(t, { exitAfterPrompt: true });
+  const started = Date.now();
+  await assert.rejects(run('claude_artifact_list', {}), /exited/);
+  assert.ok(Date.now() - started < 10_000);
+});
+
+test('a signed-out Claude Code stops the job with a sign-in instruction', { skip: noTmux }, async t => {
+  const { run } = await setup(t, { screen: 'Select login method:\n ❯ 1. Claude account with subscription' });
+  await assert.rejects(run('claude_artifact_list', {}), /not signed in/);
+});
+
+test('a Claude Code turn that fails outright ends the job with its error', { skip: noTmux }, async t => {
+  const { run } = await setup(t, { events: [{ event: 'StopFailure', body: { error: 'rate_limit: try again later' } }], stall: 'list' });
+  await assert.rejects(run('claude_artifact_list', {}), /rate_limit/);
+});
+
+test('the approval preview shows the first lines and marks the rest as clipped', async t => {
+  const { run, cwd, ctx } = await setup(t);
+  const long = Array.from({ length: 40 }, (_, line) => `<p>line ${line + 1}</p>`).join('\n');
+  await writeFile(join(cwd, 'long.html'), long);
+  let shown = '';
+  await assert.rejects(run('claude_artifact_publish', { path: 'long.html' }, { ...ctx, ui: { confirm: async (_title: string, message: string) => { shown = message; return false; } } }), /declined/);
+  assert.match(shown, /<p>line 20<\/p>\n…$/);
+  assert.doesNotMatch(shown, /line 21/);
+});
+
+test('publish refuses pages over 10 MiB before asking', async t => {
+  const { run, cwd, confirms } = await setup(t);
+  await writeFile(join(cwd, 'big.html'), Buffer.alloc(10 * 1024 * 1024 + 1, 'a'));
+  await assert.rejects(run('claude_artifact_publish', { path: 'big.html' }), /larger than 10 MiB/);
+  assert.deepEqual(confirms, []);
+});
+
+test('publish accepts only an HTML page', async t => {
   const { run, cwd } = await setup(t);
   await writeFile(join(cwd, 'notes.txt'), 'notes');
   await assert.rejects(run('claude_artifact_publish', { path: 'notes.txt' }), /\.html/);

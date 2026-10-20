@@ -71,6 +71,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
 | [Guardian](docs/guardian.md) | Codex's approval stack ported to Pi: sandboxed `bash` (Seatbelt on macOS, bubblewrap and seccomp on Linux), `.rules` command rules, and a configurable Claude or GPT reviewer for actions that leave the sandbox. `/guardian` switches it off or on for the session. Replaces Auto Permissions. |
 | [Footer](docs/agent-setup.md#footer) | Replaces Pi's footer: directory, branch and clickable GitHub PR link, session, token/cost/context usage, model, Guardian or Auto Permissions status, and other extensions' statuses. |
+| [Claude artifacts](docs/claude-artifacts.md) | Optional. Publishes, updates, reads and lists claude.ai artifacts through a hidden interactive Claude Code on your claude.ai login. Publish and update need approval in Pi. |
 | [Neovim IDE](docs/nvim-ide.md) | Connects to claudecode.nvim: bounded request snapshots, reliable editor sends, editor tools, and coalesced live follow with reconnect replay. |
 
 See [session and editor behavior](docs/extension-behavior.md)

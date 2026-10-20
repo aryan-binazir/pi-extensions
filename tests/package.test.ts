@@ -25,6 +25,7 @@ const expected = new Map<string, { tools: string[]; commands: string[]; shortcut
   ['guardian', {tools: ['bash', 'edit', 'write'], commands: ['guardian'], shortcuts: []}],
   ['auto-permissions-status', {tools: [], commands: [], shortcuts: []}],
   ['nvim-ide', {tools: ['nvim_context', 'nvim_diagnostics', 'nvim_open'], commands: ['vim'], shortcuts: []}],
+  ['claude-artifacts', {tools: ['claude_artifact_list', 'claude_artifact_publish', 'claude_artifact_read', 'claude_artifact_update'], commands: [], shortcuts: []}],
 ]);
 const intended = [...expected.keys()];
 

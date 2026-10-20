@@ -4,8 +4,8 @@ import { decide, policyState, resolveStep, type Plan } from './policy.ts';
 
 const url = 'https://claude.ai/artifact/1Tnqd5SZSshD1VHdpDgJW8';
 const staged = '/home/ar/.pi/agent/claude-artifacts/helper/job-1/page.html';
-const publish: Plan = { steps: [{ input: { action: 'publish', file_path: 'job-1/page.html' }, icon: true }], readable: staged };
-const update: Plan = { steps: [{ input: { action: 'read', url } }, { input: { action: 'publish', file_path: 'job-1/page.html', url } }], readable: staged };
+const publish: Plan = { steps: [{ input: { action: 'publish', file_path: 'job-1/page.html' }, allowIcon: true }], readableFile: staged };
+const update: Plan = { steps: [{ input: { action: 'read', url } }, { input: { action: 'publish', file_path: 'job-1/page.html', url } }], readableFile: staged };
 const artifact = (input: Record<string, unknown>, id = 'toolu_1') => ({ tool: 'Artifact', input, id });
 
 test('only the planned Artifact call is allowed, and its tool-use id is reserved for the result', () => {

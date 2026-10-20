@@ -319,6 +319,13 @@ test('publish refuses pages over 10 MiB before asking', async t => {
   assert.deepEqual(confirms, []);
 });
 
+test('publish refuses a named pipe without blocking on it', { timeout: 5_000 }, async t => {
+  const { run, cwd, confirms } = await setup(t);
+  assert.equal(spawnSync('mkfifo', [join(cwd, 'pipe.html')]).status, 0);
+  await assert.rejects(run('claude_artifact_publish', { path: 'pipe.html' }), /Not a regular file/);
+  assert.deepEqual(confirms, []);
+});
+
 test('publish accepts only an HTML page', async t => {
   const { run, cwd } = await setup(t);
   await writeFile(join(cwd, 'notes.txt'), 'notes');

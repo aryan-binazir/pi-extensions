@@ -1,5 +1,3 @@
-// Stands in for the interactive `claude` CLI inside tmux: it posts the hook events Claude Code would send and
-// follows the instruction delivered through the UserPromptSubmit hook, misbehaving as FAKE_CLAUDE_SCENARIO says.
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -20,14 +18,14 @@ else await run();
 async function run() {
   const settings = JSON.parse(readFileSync(option('--settings'), 'utf8'));
   const sessionId = scenario.sessionId ?? option('--session-id');
-  // Like Claude Code, keep per-folder state under the working directory's path with every other character as '-'.
   const config = process.env.CLAUDE_CONFIG_DIR, folder = name => name.replace(/[^A-Za-z0-9]/g, '-');
   const transcript = join(config, 'projects', folder(process.cwd()), `${sessionId}.jsonl`);
   const sessions = join(config, 'scratch', folder(process.cwd())), scratchpad = join(sessions, sessionId, 'scratchpad');
   mkdirSync(dirname(transcript), { recursive: true }); writeFileSync(transcript, '{"page":"source"}\n');
   mkdirSync(join(dirname(transcript), sessionId), { recursive: true });
   mkdirSync(scratchpad, { recursive: true });
-  mkdirSync(join(sessions, randomUUID(), 'scratchpad'), { recursive: true }); // Claude Code also starts an empty scratchpad under a second id
+  const unreportedScratchpad = join(sessions, randomUUID(), 'scratchpad');
+  mkdirSync(unreportedScratchpad, { recursive: true });
   if (scenario.foreignScratchpad) mkdirSync(join(config, 'scratch', folder(dirname(process.cwd())), randomUUID(), 'scratchpad'), { recursive: true });
   if (scenario.ignoreHangup) { process.on('SIGHUP', () => {}); setInterval(() => writeFileSync(transcript, '{"page":"source"}\n'), 50); }
   const base = { session_id: sessionId, transcript_path: scenario.transcriptPath ?? transcript, cwd: process.cwd(), scratchpad_dir: scenario.scratchpadDir ?? scratchpad, permission_mode: 'dontAsk' };
@@ -50,7 +48,6 @@ async function run() {
   const inputs = jsonObjects(instruction);
   const calls = (scenario.calls ?? inputs.map((_, index) => ({ from: index }))).map((call, index) => ({
     tool_name: call.tool ?? 'Artifact', tool_input: { ...(call.from === undefined ? {} : inputs[call.from]), ...call.input, ...call.add }, tool_use_id: `toolu_fake_${index}` }));
-  // `parallel` asks permission for every call before running any, as Claude Code may for one message's tool calls.
   const decisions = scenario.parallel ? await Promise.all(calls.map(call => hook('PreToolUse', call))) : [];
   for (const [index, { tool_name, tool_input, tool_use_id }] of calls.entries()) {
     const decision = decisions[index] ?? await hook('PreToolUse', { tool_name, tool_input, tool_use_id });
@@ -78,8 +75,13 @@ function jsonObjects(text) {
   const found = [];
   for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
     for (let end = text.indexOf('}', start); end !== -1; end = text.indexOf('}', end + 1)) {
-      try { found.push(JSON.parse(text.slice(start, end + 1))); start = end; break; } catch { /* keep extending */ }
+      const value = parseJson(text.slice(start, end + 1));
+      if (value !== undefined) { found.push(value); start = end; break; }
     }
   }
   return found;
+}
+
+function parseJson(text) {
+  try { return JSON.parse(text); } catch { return undefined; }
 }

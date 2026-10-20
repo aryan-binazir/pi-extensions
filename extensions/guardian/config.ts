@@ -13,6 +13,9 @@ export type SandboxMode = 'workspace-write' | 'read-only' | 'danger-full-access'
 /** Reviews with Claude Code's `claude -p` instead of a model in Pi's registry. */
 export const CLAUDE_CLI_PROVIDER = 'claude-cli';
 
+/** Emitted on Pi's event bus as `{ enabled }` when `/guardian on|off|toggle` overrides `enabled` for this session. */
+export const GUARDIAN_ENABLED_EVENT = 'guardian:enabled';
+
 export interface ReviewerModel {
   /** A provider in Pi's model registry, or `claude-cli` for Claude Code's print mode. */
   provider: string;

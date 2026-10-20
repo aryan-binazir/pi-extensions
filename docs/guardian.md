@@ -223,14 +223,21 @@ still sits after Fast mode in `package.json` so the alias resolves when both are
 
 ## Commands and status
 
-- `/guardian` shows the effective settings and file locations.
+- `/guardian` (or `/guardian toggle`) turns Guardian off or back on for this session; `/guardian off` and
+  `/guardian on` set it explicitly. Off works like `"enabled": false`: commands and file changes run
+  without the sandbox or review, and the agent gets no permission instructions. The Railway and database
+  boundaries still apply. The switch lasts until the session ends, so `/reload`, `/new`, `/resume`,
+  `/fork` and restarting Pi return to `config.json`, which it never changes. Other Pi sessions and
+  subagent children keep following `config.json`.
+- `/guardian status` shows the effective settings and file locations.
 - `/guardian approve` approves the most recently denied action. It records Codex's trusted manual
   approval message in the session, so the reviewer can allow that exact action when the agent retries.
 - `/guardian reload` rereads the rules and config.
 - `/guardian audit` shows the current session branch's recent approval decisions.
 
 The footer's top-right indicator shows `Auto: on · Luna low`, `Auto: on · Opus high`,
-`Auto: on · you review` or `Auto: off`, and adds `· network` or `· no sandbox` when they apply.
+`Auto: on · you review` or `Auto: off` (also while `/guardian off` is in effect), and adds
+`· network` or `· no sandbox` when they apply.
 While a review runs, the status line shows "Reviewing approval request…".
 
 Guardian replaces Auto Permissions. If both are loaded, commands are reviewed twice and Guardian

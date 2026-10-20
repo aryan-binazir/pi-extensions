@@ -13,7 +13,8 @@ export interface PermissionConfig {
 export interface ConfigLoader {
   load(): unknown;
   path: string;
-  status(config: unknown, model: ExtensionContext['model']): string;
+  /** `guardianEnabled` is Guardian's `/guardian on|off` override for this session, when one is set. */
+  status(config: unknown, model: ExtensionContext['model'], guardianEnabled?: boolean): string;
 }
 
 const GUARDIAN_INDEX = fileURLToPath(new URL('../guardian/index.ts', import.meta.url));
@@ -29,7 +30,10 @@ export async function findConfigLoader(commands: ReturnType<ExtensionAPI['getCom
     ]);
     const sandboxAvailable = (await detectPlatformSandbox()).sandbox !== undefined;
     const path = guardianConfigPath();
-    return { path, load: () => loadGuardianConfig(path), status: config => guardianStatusText(config as ReturnType<typeof loadGuardianConfig>, sandboxAvailable) };
+    return { path, load: () => loadGuardianConfig(path), status: (config, _model, enabled) => {
+      const settings = config as ReturnType<typeof loadGuardianConfig>;
+      return guardianStatusText(enabled === undefined ? settings : { ...settings, enabled }, sandboxAvailable);
+    } };
   }
   for (const command of commands) {
     if (command.source !== 'extension' || command.name.split(':')[0] !== 'auto-permissions') continue;

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
 import { withPi } from '../../tests/pi-session.ts';
-import { DEFAULT_GUARDIAN_CONFIG } from './config.ts';
+import { DEFAULT_GUARDIAN_CONFIG, GUARDIAN_ENABLED_EVENT } from './config.ts';
 import { APPROVAL_AUDIT_ENTRY_TYPE, type ApprovalAuditEntry } from './approvals.ts';
 import guardian, { instructedPermissions, registerFailClosed } from './index.ts';
 import { MANUAL_APPROVAL_DEVELOPER_PREFIX } from './review/context.ts';
@@ -260,6 +260,43 @@ test('/guardian approve records a trusted manual approval of the last denied act
   });
   assert.ok(secondReview.includes(`developer: ${MANUAL_APPROVAL_DEVELOPER_PREFIX}`), 'the reviewer sees the approval as a trusted developer entry');
   assert.ok(secondReview.includes('git push origin main'));
+});
+
+test('/guardian turns Guardian off and back on for this session only', async t => {
+  const target = join(outsideDir(t), 'unguarded.txt');
+  const emitted: unknown[] = [], notices: string[] = [], mainRequests: string[] = [];
+  let reviews = 0;
+  await withPi({ extensions: [guardian, pi => { pi.events.on(GUARDIAN_ENABLED_EVENT, data => { emitted.push(data); }); }], responses: [
+    context => { mainRequests.push(contextText(context)); return fauxAssistantMessage(fauxToolCall('bash', { command: `echo off > ${target}`, sandbox_permissions: 'require_escalated' })); },
+    fauxAssistantMessage('Done.'),
+    fauxAssistantMessage(fauxToolCall('bash', { command: `echo on > ${target}`, sandbox_permissions: 'require_escalated' })),
+    () => { reviews++; return fauxAssistantMessage('{"outcome":"deny","rationale":"Guardian is back on."}'); },
+    fauxAssistantMessage('Stopped.'),
+  ], configure: ({ agentDir }, provider) => {
+    writeConfig(agentDir, { reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
+    return { model: provider.getModel() };
+  }, bind: session => ({ mode: 'tui', uiContext: {
+    ...session.extensionRunner.createContext().ui,
+    notify: message => { notices.push(message); },
+  } }) }, async fixture => {
+    await fixture.session.prompt('/guardian off');
+    assert.match(notices.at(-1)!, /off for this session/);
+    await fixture.session.prompt('Write it unguarded.');
+    assert.equal(readFileSync(target, 'utf8'), 'off\n', 'an escalation runs without review while Guardian is off');
+    assert.equal(reviews, 0);
+    assert.ok(!mainRequests[0].includes('<permissions_instructions>'), 'the agent is not told about a sandbox that is off');
+    await fixture.session.prompt('/guardian');
+    assert.match(notices.at(-1)!, /on for this session/);
+    await fixture.session.prompt('Write it again.');
+    assert.equal(reviews, 1, 'escalations are reviewed again');
+    assert.equal(readFileSync(target, 'utf8'), 'off\n');
+    await fixture.session.prompt('/guardian status');
+    assert.match(notices.at(-1)!, /Turned on for this session with \/guardian/);
+    await fixture.runtime.newSession();
+    await fixture.session.prompt('/guardian status');
+    assert.doesNotMatch(notices.at(-1)!, /for this session/, 'a new session follows config.json again');
+  });
+  assert.deepEqual(emitted, [{ enabled: false }, { enabled: true }]);
 });
 
 test('a claude-cli reviewer runs claude -p and its verdict decides the escalation', sandboxed, async t => {

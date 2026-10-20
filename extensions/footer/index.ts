@@ -1,6 +1,7 @@
 import { readlinkSync, realpathSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { isBashToolResult, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { GUARDIAN_ENABLED_EVENT } from '../guardian/config.ts';
 import { findConfigLoader, type ConfigLoader } from './adapter.ts';
 
 import { permissionFooter, STATUS_KEY as KEY } from './footer.ts';
@@ -17,11 +18,12 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   let generation = 0;
   let ownsFooter = false;
   let prs: PullRequests | undefined;
+  let guardianEnabled: boolean | undefined;
 
   const refresh = () => {
     if (!context?.hasUI) return;
     let text = unavailable;
-    if (config !== undefined && loader) text = loader.status(config, context.model);
+    if (config !== undefined && loader) text = loader.status(config, context.model, guardianEnabled);
     if (text !== previous) {
       context.ui.setStatus(KEY, text);
       previous = text;
@@ -123,7 +125,13 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   const adopt = (_event: unknown, ctx: ExtensionContext) => { if (context) { context = ctx; observeConfig(); readConfig(); refresh(); } };
   pi.on('model_select', adopt);
   pi.on('agent_start', adopt);
-  pi.on('session_shutdown', stop);
+  const unsubscribe = pi.events.on(GUARDIAN_ENABLED_EVENT, data => {
+    const enabled = (data as { enabled?: unknown } | undefined)?.enabled;
+    if (typeof enabled !== 'boolean') return;
+    guardianEnabled = enabled;
+    refresh();
+  });
+  pi.on('session_shutdown', event => { unsubscribe(); stop(event); });
   pi.on('agent_end', () => { prs?.refresh(false); });
   pi.on('tool_result', event => {
     if (isBashToolResult(event) && changesPullRequest(String(event.input.command ?? ''))) prs?.refresh();

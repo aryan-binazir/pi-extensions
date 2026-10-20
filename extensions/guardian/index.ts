@@ -6,7 +6,7 @@ import { createBashToolDefinition, createEditToolDefinition, createWriteToolDefi
 import { appendAllowPrefixRule } from './amend.ts';
 import { APPROVAL_AUDIT_ENTRY_TYPE, type ApprovalAuditEntry, type ApprovalContext, Approvals, manualApprovalMessage } from './approvals.ts';
 import { createGuardianBashTool, sandboxPolicyFor } from './bash.ts';
-import { CLAUDE_CLI_PROVIDER, FAIL_CLOSED_CONFIG, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
+import { CLAUDE_CLI_PROVIDER, FAIL_CLOSED_CONFIG, GUARDIAN_ENABLED_EVENT, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
 import { createGuardianFileTools } from './files.ts';
 import { permissionsInstructions } from './permissions.ts';
 import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, persistableAmendment, retainPolicies, userRulesDir } from './policies.ts';
@@ -60,12 +60,14 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   let cached: { stamp: string; config: GuardianConfig; error?: string } | undefined;
   let lastValid: GuardianConfig | undefined;
   let reportedError: string | undefined;
+  /** Set by `/guardian on|off|toggle`. Pi builds a new Guardian for each session, so it never outlives this one. */
+  let sessionEnabled: boolean | undefined;
 
   /**
    * Reads config.json when it changes. An invalid file keeps the last valid settings, so a typo never relaxes
    * permissions; with no valid settings yet, every reviewable action is sent to review or to you.
    */
-  const config = (): GuardianConfig => {
+  const fileConfig = (): GuardianConfig => {
     const path = guardianConfigPath();
     let stamp = 'missing';
     try { const info = statSync(path); stamp = `${info.ino}:${info.mtimeMs}:${info.size}`; } catch { /* missing means defaults */ }
@@ -81,6 +83,10 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
       }
     }
     return cached.config;
+  };
+  const config = (): GuardianConfig => {
+    const settings = fileConfig();
+    return sessionEnabled === undefined ? settings : { ...settings, enabled: sessionEnabled };
   };
   const reportProblems = (ctx: ExtensionContext) => {
     config();
@@ -177,10 +183,17 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   });
 
   pi.registerCommand('guardian', {
-    description: 'Show Guardian settings or approval history, approve the last denied action, or reload rules',
-    getArgumentCompletions: prefix => ['status', 'audit', 'approve', 'reload'].filter(name => name.startsWith(prefix)).map(value => ({ value, label: value })),
+    description: 'Turn Guardian on or off for this session, show its settings or approval history, approve the last denied action, or reload rules',
+    getArgumentCompletions: prefix => ['on', 'off', 'toggle', 'status', 'audit', 'approve', 'reload'].filter(name => name.startsWith(prefix)).map(value => ({ value, label: value })),
     async handler(args, ctx) {
-      const action = args.trim() || 'status';
+      const action = args.trim() || 'toggle';
+      if (action === 'on' || action === 'off' || action === 'toggle') {
+        sessionEnabled = action === 'toggle' ? !config().enabled : action === 'on';
+        pi.events.emit(GUARDIAN_ENABLED_EVENT, { enabled: sessionEnabled });
+        return sessionEnabled
+          ? ctx.ui.notify('Guardian is on for this session.', 'info')
+          : ctx.ui.notify('Guardian is off for this session: commands and file changes run without the sandbox or review. The Railway and database boundaries still apply. /guardian on turns it back on.', 'warning');
+      }
       if (action === 'audit') {
         const entries = ctx.sessionManager.getBranch().flatMap(entry => {
           if (entry.type !== 'custom' || entry.customType !== APPROVAL_AUDIT_ENTRY_TYPE || !entry.data || typeof entry.data !== 'object') return [];
@@ -214,11 +227,12 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
         config();
         reportProblems(ctx);
       } else if (action !== 'status') {
-        return ctx.ui.notify('Usage: /guardian [status|audit|approve|reload]', 'warning');
+        return ctx.ui.notify('Usage: /guardian [on|off|toggle|status|audit|approve|reload]', 'warning');
       }
       const settings = config();
       ctx.ui.notify([
         guardianStatusText(settings, sandboxAvailable),
+        ...(sessionEnabled === undefined ? [] : [`Turned ${sessionEnabled ? 'on' : 'off'} for this session with /guardian; config.json is unchanged`]),
         `Config: ${guardianConfigPath()}${cached?.error ? ` (${cached.error})` : ''}`,
         `Approvals: ${settings.approvalPolicy}, reviewed by ${settings.approvalsReviewer === 'user' ? 'you' : `${settings.reviewer.provider}/${settings.reviewer.model} (${settings.reviewer.reasoning})`}`,
         `Sandbox: ${sandbox ? `${settings.sandbox.mode} via ${sandbox.summary}` : `unavailable${sandboxWarning ? ` (${sandboxWarning})` : ' on this platform'}`}, network ${settings.sandbox.networkAccess ? 'on' : 'off'}`,

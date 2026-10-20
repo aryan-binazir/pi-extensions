@@ -8,10 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { createEventBus, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { withPi } from '../../tests/pi-session.ts';
 import statusExtension from './index.ts';
 import { findConfigLoader, statusText, type PermissionConfig } from './adapter.ts';
+import { GUARDIAN_ENABLED_EVENT } from '../guardian/config.ts';
 import { detectPlatformSandbox } from '../guardian/sandbox.ts';
 
 const config: PermissionConfig = {
@@ -40,15 +41,16 @@ function harness(list: ReturnType<ExtensionAPI['getCommands']> = [], exec?: Exte
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   const statuses: (string | undefined)[] = [];
   let discoveryCount = 0;
+  const events = createEventBus();
   statusExtension({
     on: (name: string, hook: (event: unknown, ctx: ExtensionContext) => unknown) => handlers.set(name, hook),
     getCommands: () => { discoveryCount++; return list; },
-    exec,
+    exec, events,
   } as unknown as ExtensionAPI);
   const ctx = { hasUI: true, ui: { setStatus: (key: string, text: string | undefined) => {
     assert.equal(key, 'auto-permissions-status'); statuses.push(text);
   } } } as unknown as ExtensionContext;
-  return { statuses, ctx, emit: (name: string, context = ctx, event: object = {}) => handlers.get(name)!(event, context), discoveryCount: () => discoveryCount };
+  return { statuses, ctx, events, emit: (name: string, context = ctx, event: object = {}) => handlers.get(name)!(event, context), discoveryCount: () => discoveryCount };
 }
 
 async function until(predicate: () => boolean) {
@@ -120,8 +122,34 @@ test('Guardian takes precedence over Auto Permissions and renders its own config
   await mkdir(join(agentDir, 'guardian'));
   await writeFile(loader.path, JSON.stringify({ reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } }));
   assert.equal(loader.status(loader.load(), undefined), `Auto: on · Opus high${sandbox}`);
+  assert.equal(loader.status(loader.load(), undefined, false), 'Auto: off');
   const impostor = { ...guardianCommand, sourceInfo: { ...guardianCommand.sourceInfo, path: '/elsewhere/guardian/index.ts' } };
   assert.equal(await findConfigLoader([impostor]), undefined);
+});
+
+test('the Guardian indicator follows /guardian on and off for this session until shutdown', async t => {
+  const agentDir = await mkdtemp(join(tmpdir(), 'pi-guardian-status-'));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(agentDir, { recursive: true, force: true });
+  });
+  await mkdir(join(agentDir, 'guardian'));
+  await writeFile(join(agentDir, 'guardian', 'config.json'), JSON.stringify({ enabled: false }));
+  const sandbox = (await detectPlatformSandbox()).sandbox ? '' : ' · no sandbox';
+  const h = harness([{ name: 'guardian', source: 'extension',
+    sourceInfo: { path: fileURLToPath(new URL('../guardian/index.ts', import.meta.url)), source: 'local', scope: 'user', origin: 'top-level' } }]);
+  await h.emit('session_start');
+  await until(() => h.statuses.at(-1) === 'Auto: off');
+  h.events.emit(GUARDIAN_ENABLED_EVENT, { enabled: true });
+  assert.equal(h.statuses.at(-1), `Auto: on · Luna low${sandbox}`);
+  h.events.emit(GUARDIAN_ENABLED_EVENT, { enabled: false });
+  assert.equal(h.statuses.at(-1), 'Auto: off');
+  await h.emit('session_shutdown');
+  const stopped = h.statuses.length;
+  h.events.emit(GUARDIAN_ENABLED_EVENT, { enabled: true });
+  assert.equal(h.statuses.length, stopped, 'a stopped footer no longer listens');
 });
 
 test('discovery leaves startup immediately and watches atomic idle config edits without polling', async t => {

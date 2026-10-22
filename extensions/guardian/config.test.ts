@@ -88,7 +88,7 @@ test('reviewer labels name Claude and GPT families', () => {
   assert.equal(reviewerLabel({ provider: 'x', model: 'odd model!' }), 'odd?model?');
 });
 
-test('status text keeps the Auto Permissions indicator format', () => {
+test('status text names the reviewer and flags network or a missing sandbox', () => {
   assert.equal(guardianStatusText(DEFAULT_GUARDIAN_CONFIG, true), 'Auto: on · Luna low');
   assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, enabled: false }, true), 'Auto: off');
   assert.equal(guardianStatusText(DEFAULT_GUARDIAN_CONFIG, false), 'Auto: on · Luna low · no sandbox');

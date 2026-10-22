@@ -1,41 +1,39 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { mkdtemp, mkdir, readFile, writeFile, rename, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rename, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createEventBus, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { withPi } from '../../tests/pi-session.ts';
 import statusExtension from './index.ts';
-import { findConfigLoader, statusText, type PermissionConfig } from './adapter.ts';
+import { findConfigLoader } from './adapter.ts';
 import { GUARDIAN_ENABLED_EVENT } from '../guardian/config.ts';
 import { detectPlatformSandbox } from '../guardian/sandbox.ts';
 
-const config: PermissionConfig = {
-  enabled: true, reviewAllShell: true, rules: [{}],
-  reviewer: { provider: 'openai-codex', model: 'gpt-6-luna', reasoningEffort: 'low' },
-};
-const legacyConfig: PermissionConfig = {
-  ...config, reviewer: { ...config.reviewer!, model: 'gpt-5.6-luna', prefilter: false },
-};
-const commands = (root: string, version = '0.21.0'): ReturnType<ExtensionAPI['getCommands']> => [{
-  name: 'auto-permissions', source: 'extension',
-  sourceInfo: { path: join(root, 'index.ts'), source: `npm:@hank-warren/pi-auto-permissions@${version}`, scope: 'user', origin: 'package' },
-}];
-async function fixture(version = '0.21.0', fixtureConfig = config) {
-  const root = await mkdtemp(join(tmpdir(), 'pi-auto-status-'));
-  await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@hank-warren/pi-auto-permissions', version, type: 'module' }));
-  const file = join(root, 'settings', 'config.json');
+const GUARDIAN_INDEX = fileURLToPath(new URL('../guardian/index.ts', import.meta.url));
+const guardian = (path = GUARDIAN_INDEX): ReturnType<ExtensionAPI['getCommands']> => [{ name: 'guardian', source: 'extension',
+  sourceInfo: { path, source: 'local', scope: 'user', origin: 'top-level' } }];
+const off = { enabled: false };
+
+/** A temporary agent directory holding Guardian's config; `on` is the status its defaults render on this machine. */
+async function fixture(t: TestContext, initial?: object) {
+  const agentDir = await mkdtemp(join(tmpdir(), 'pi-guardian-status-'));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(agentDir, { recursive: true, force: true });
+  });
+  const file = join(agentDir, 'guardian', 'config.json');
   await mkdir(dirname(file));
-  await writeFile(join(root, 'config.ts'), `import {readFileSync} from 'node:fs';
-export function autoPermissionsConfigPath() { return ${JSON.stringify(file)}; }
-export function loadAutoPermissionsConfig() { return JSON.parse(readFileSync(${JSON.stringify(file)}, 'utf8')); }`);
-  await writeFile(file, JSON.stringify(fixtureConfig));
-  return { root, file, close: () => rm(root, { recursive: true, force: true }) };
+  if (initial) await writeFile(file, JSON.stringify(initial));
+  const on = `Auto: on · Luna low${(await detectPlatformSandbox()).sandbox ? '' : ' · no sandbox'}`;
+  return { agentDir, file, on };
 }
 function harness(list: ReturnType<ExtensionAPI['getCommands']> = [], exec?: ExtensionAPI['exec']) {
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
@@ -61,89 +59,27 @@ async function until(predicate: () => boolean) {
   }
 }
 
-test('formats on/off, rules-only, empty rules, prefilter and active-model fallback', () => {
-  assert.equal(statusText(config, undefined), 'Auto: on · Luna low');
-  assert.equal(statusText(legacyConfig, undefined), 'Auto: on · Luna low');
-  assert.equal(statusText({ ...config, reviewer: { ...config.reviewer!, provider: 'other' } }, undefined), 'Auto: on · gpt-6-luna low');
-  assert.equal(statusText({ ...config, enabled: false }, undefined), 'Auto: off');
-  assert.equal(statusText({ ...config, reviewAllShell: false }, undefined), 'Auto: on · Luna low · rules only');
-  assert.equal(statusText({ ...config, reviewAllShell: false, rules: [] }, undefined), 'Auto: on · no rules');
-  assert.equal(statusText({ ...legacyConfig, reviewer: { ...legacyConfig.reviewer!, prefilter: true } }, undefined), 'Auto: on · Luna low · prefilter minimal');
-  assert.equal(statusText({ ...config, reviewer: undefined }, { provider: 'test', id: 'model' } as ExtensionContext['model']), 'Auto: on · model low');
-  assert.equal(statusText({ ...config, reviewer: { ...config.reviewer!, model: '\u001b[31m\nBad\u202e' } }, undefined), 'Auto: on · ??31m?Bad? low');
-});
-
-test('requires loaded command provenance and a supported package version', async () => {
-  const f = await fixture();
-  try {
-    assert.equal(await findConfigLoader([]), undefined);
-    const loaded = (await findConfigLoader(commands(f.root)))!.load();
-    assert.deepEqual(loaded, config);
-    assert.equal(loaded.reviewer?.prefilter, undefined);
-    const suffixed = commands(f.root); suffixed[0].name += ':2';
-    assert.ok(await findConfigLoader(suffixed));
-    await writeFile(join(f.root, 'package.json'), JSON.stringify({ name: '@ogulcancelik/pi-auto-permissions', version: '0.21.0' }));
-    assert.equal(await findConfigLoader(commands(f.root)), undefined);
-    for (const version of ['0.20.0', '0.21.1', '99.0.0']) {
-      await writeFile(join(f.root, 'package.json'), JSON.stringify({ name: '@hank-warren/pi-auto-permissions', version }));
-      await assert.rejects(findConfigLoader(commands(f.root)), /Unsupported/);
-    }
-  } finally { await f.close(); }
-});
-
-test('retains discovery of the reviewed legacy package and its prefilter status', async () => {
-  const f = await fixture('0.16.2', legacyConfig);
-  try {
-    const loaded = (await findConfigLoader(commands(f.root, '0.16.2')))!.load();
-    assert.deepEqual(loaded, legacyConfig);
-    assert.equal(statusText(loaded, undefined), 'Auto: on · Luna low');
-    await writeFile(f.file, JSON.stringify({ ...legacyConfig, reviewer: { ...legacyConfig.reviewer!, prefilter: true } }));
-    const reloaded = (await findConfigLoader(commands(f.root, '0.16.2')))!;
-    assert.equal(reloaded.status(reloaded.load(), undefined), 'Auto: on · Luna low · prefilter minimal');
-  } finally { await f.close(); }
-});
-
-test('Guardian takes precedence over Auto Permissions and renders its own config', async t => {
-  const agentDir = await mkdtemp(join(tmpdir(), 'pi-guardian-status-'));
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
-  const f = await fixture();
-  t.after(async () => {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
-    await rm(agentDir, { recursive: true, force: true });
-    await f.close();
-  });
-  const guardianCommand = { name: 'guardian', source: 'extension',
-    sourceInfo: { path: fileURLToPath(new URL('../guardian/index.ts', import.meta.url)), source: 'local', scope: 'user', origin: 'top-level' } } as ReturnType<ExtensionAPI['getCommands']>[number];
-  const sandbox = (await detectPlatformSandbox()).sandbox ? '' : ' · no sandbox';
-  const loader = (await findConfigLoader([...commands(f.root), guardianCommand]))!;
-  assert.equal(loader.path, join(agentDir, 'guardian', 'config.json'));
-  assert.equal(loader.status(loader.load(), undefined), `Auto: on · Luna low${sandbox}`);
-  await mkdir(join(agentDir, 'guardian'));
+test('discovers only the Guardian this package loaded and renders its config', async t => {
+  const f = await fixture(t);
+  assert.equal(await findConfigLoader([]), undefined);
+  const loader = (await findConfigLoader(guardian()))!;
+  assert.equal(loader.path, f.file);
+  assert.equal(loader.status(loader.load()), f.on, 'a missing config means the defaults');
   await writeFile(loader.path, JSON.stringify({ reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } }));
-  assert.equal(loader.status(loader.load(), undefined), `Auto: on · Opus high${sandbox}`);
-  assert.equal(loader.status(loader.load(), undefined, false), 'Auto: off');
-  const impostor = { ...guardianCommand, sourceInfo: { ...guardianCommand.sourceInfo, path: '/elsewhere/guardian/index.ts' } };
-  assert.equal(await findConfigLoader([impostor]), undefined);
+  assert.equal(loader.status(loader.load()), f.on.replace('Luna low', 'Opus high'));
+  assert.equal(loader.status(loader.load(), false), 'Auto: off');
+  const suffixed = guardian(); suffixed[0].name += ':2';
+  assert.ok(await findConfigLoader(suffixed));
+  assert.equal(await findConfigLoader(guardian('/elsewhere/guardian/index.ts')), undefined);
 });
 
 test('the Guardian indicator follows /guardian on and off for this session until shutdown', async t => {
-  const agentDir = await mkdtemp(join(tmpdir(), 'pi-guardian-status-'));
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
-  t.after(async () => {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
-    await rm(agentDir, { recursive: true, force: true });
-  });
-  await mkdir(join(agentDir, 'guardian'));
-  await writeFile(join(agentDir, 'guardian', 'config.json'), JSON.stringify({ enabled: false }));
-  const sandbox = (await detectPlatformSandbox()).sandbox ? '' : ' · no sandbox';
-  const h = harness([{ name: 'guardian', source: 'extension',
-    sourceInfo: { path: fileURLToPath(new URL('../guardian/index.ts', import.meta.url)), source: 'local', scope: 'user', origin: 'top-level' } }]);
+  const f = await fixture(t, off);
+  const h = harness(guardian());
   await h.emit('session_start');
   await until(() => h.statuses.at(-1) === 'Auto: off');
   h.events.emit(GUARDIAN_ENABLED_EVENT, { enabled: true });
-  assert.equal(h.statuses.at(-1), `Auto: on · Luna low${sandbox}`);
+  assert.equal(h.statuses.at(-1), f.on);
   h.events.emit(GUARDIAN_ENABLED_EVENT, { enabled: false });
   assert.equal(h.statuses.at(-1), 'Auto: off');
   await h.emit('session_shutdown');
@@ -154,42 +90,28 @@ test('the Guardian indicator follows /guardian on and off for this session until
 
 test('discovery leaves startup immediately and watches atomic idle config edits without polling', async t => {
   const interval = t.mock.method(globalThis, 'setInterval');
-  const f = await fixture(); const h = harness(commands(f.root));
+  const f = await fixture(t, {}); const h = harness(guardian());
   try {
     assert.deepEqual(h.statuses, [], 'factory starts no UI or background work');
     assert.equal(h.emit('session_start'), undefined, 'Pi must not await config discovery');
-    await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
+    await until(() => h.statuses.at(-1) === f.on);
     const count = h.statuses.length;
     await delay(30);
     assert.equal(h.statuses.length, count, 'unchanged state does not repaint');
-    await writeFile(f.file + '.tmp', JSON.stringify({ ...config, enabled: false }));
+    await writeFile(f.file + '.tmp', JSON.stringify(off));
     await rename(f.file + '.tmp', f.file);
     await until(() => h.statuses.at(-1) === 'Auto: off');
     await writeFile(f.file, '{');
     await until(() => h.statuses.at(-1) === 'Auto: config error');
-    await writeFile(f.file, JSON.stringify(config));
-    await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
+    await writeFile(f.file, '{}');
+    await until(() => h.statuses.at(-1) === f.on);
     assert.equal(interval.mock.callCount(), 0, 'the watcher has no polling timer');
     await h.emit('session_shutdown');
     const stopped = h.statuses.length;
-    await writeFile(f.file, JSON.stringify({ ...config, enabled: false }));
+    await writeFile(f.file, JSON.stringify(off));
     await delay(30);
     assert.equal(h.statuses.length, stopped, 'no stale watcher after shutdown');
-  } finally { await h.emit('session_shutdown'); await f.close(); }
-});
-
-test('model and turn events recompute cached config labels for the active model', async () => {
-  const f = await fixture('0.21.0', { ...config, reviewer: undefined });
-  const h = harness(commands(f.root));
-  try {
-    await h.emit('session_start');
-    await until(() => h.statuses.at(-1) === 'Auto: on · no?model low');
-    const model = (id: string) => ({ ...h.ctx, model: { provider: 'test', id } } as ExtensionContext);
-    await h.emit('model_select', model('first'));
-    assert.equal(h.statuses.at(-1), 'Auto: on · first low');
-    await h.emit('agent_start', model('second'));
-    assert.equal(h.statuses.at(-1), 'Auto: on · second low');
-  } finally { await h.emit('session_shutdown'); await f.close(); }
+  } finally { await h.emit('session_shutdown'); }
 });
 
 test('unavailable settles without any timer or watcher; headless mode never discovers', async t => {
@@ -217,23 +139,18 @@ test('unavailable settles without any timer or watcher; headless mode never disc
   assert.equal(watcher.mock.callCount(), 0);
 });
 
-test('real Pi loader discovers command provenance and dynamically loads the optional config adapter', async () => {
-  const f = await fixture();
-  try {
-    await writeFile(join(f.root, 'index.ts'), `export default function(pi) {
-      pi.registerCommand('auto-permissions', {description: 'Synthetic settings', handler: async () => {}});
-    }`);
-    const path = fileURLToPath(new URL('./index.ts', import.meta.url));
-    const statuses: (string | undefined)[] = [];
-    await withPi({ cwd: f.root, settings: { extensions: [path, join(f.root, 'index.ts')] },
-      bind: session => ({ mode: 'rpc', uiContext: { ...session.extensionRunner.createContext().ui, setStatus: (_key, value) => statuses.push(value) } }),
-    }, async ({ runtime }) => {
-      const loaded = runtime.services.resourceLoader.getExtensions();
-      assert.ok(loaded.extensions.find(entry => entry.path === path));
-      await until(() => statuses.at(-1) === 'Auto: on · Luna low');
-    });
-    assert.equal(statuses.at(-1), undefined);
-  } finally { await f.close(); }
+test('real Pi loader discovers Guardian by command provenance and dynamically loads its config', async () => {
+  const footer = fileURLToPath(new URL('./index.ts', import.meta.url));
+  const statuses: (string | undefined)[] = [];
+  const on = `Auto: on · Luna low${(await detectPlatformSandbox()).sandbox ? '' : ' · no sandbox'}`;
+  await withPi({ settings: { extensions: [footer, GUARDIAN_INDEX] },
+    bind: session => ({ mode: 'rpc', uiContext: { ...session.extensionRunner.createContext().ui, setStatus: (_key, value) => statuses.push(value) } }),
+  }, async ({ runtime }) => {
+    const loaded = runtime.services.resourceLoader.getExtensions();
+    assert.ok(loaded.extensions.find(entry => entry.path === footer));
+    await until(() => statuses.at(-1) === on);
+  });
+  assert.equal(statuses.at(-1), undefined);
 });
 
 test('TUI installs and restores the compact footer; RPC retains its status API', async () => {
@@ -330,54 +247,60 @@ test('mutation command words handle quoting, assignments, global flags and comma
 });
 
 for (const fails of [false, true]) test(`late ${fails ? 'failed' : 'successful'} config discovery cannot attach to a replacement session`, async t => {
-  const f = await fixture(), list = commands(f.root), h = harness(list);
+  await fixture(t, {});
+  // A command without source info makes discovery throw.
+  const list = fails ? [{ name: 'guardian', source: 'extension' }] as ReturnType<ExtensionAPI['getCommands']> : guardian();
+  const h = harness(list);
   const watcher = t.mock.method(fs, 'watch'); syncBuiltinESMExports();
   t.after(() => { watcher.mock.restore(); syncBuiltinESMExports(); });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    const module = join(f.root, 'config.ts');
-    await writeFile(module, `await new Promise(resolve => setTimeout(resolve, 50));
-${fails ? "throw new Error('synthetic discovery failure');" : ''}
-` + await readFile(module, 'utf8'));
     h.emit('session_start');
-    await until(() => h.discoveryCount() === 1);
+    t.mock.timers.tick(0);
+    assert.equal(h.discoveryCount(), 1, 'discovery is pending');
     list.length = 0;
     h.emit('session_start');
-    await until(() => h.discoveryCount() === 2);
-    await delay(150);
+    t.mock.timers.tick(0);
+    assert.equal(h.discoveryCount(), 2);
+    for (let i = 0; i < 20; i++) await new Promise(setImmediate);
     assert.equal(h.statuses.at(-1), 'Auto: unavailable');
     assert.equal(watcher.mock.callCount(), 0, 'stale discovery must not install a watcher');
-  } finally { await h.emit('session_shutdown'); await f.close(); }
+  } finally {
+    await h.emit('session_shutdown');
+    // Restore real timers before cleanup re-syncs builtin exports, or later tests keep the mocked timers/promises.
+    t.mock.timers.reset();
+  }
 });
 
-test('an atomically replaced config directory is watched again while idle', async () => {
-  const f = await fixture(), h = harness(commands(f.root));
+test('an atomically replaced config directory is watched again while idle', async t => {
+  const f = await fixture(t, {}), h = harness(guardian());
   try {
     h.emit('session_start');
-    await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
+    await until(() => h.statuses.at(-1) === f.on);
     await rm(dirname(f.file), { recursive: true });
     await delay(100);
     await mkdir(dirname(f.file));
-    await writeFile(f.file, JSON.stringify({ ...config, enabled: false }));
+    await writeFile(f.file, JSON.stringify(off));
     await until(() => h.statuses.at(-1) === 'Auto: off');
-    await writeFile(f.file, JSON.stringify(config));
-    await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
-  } finally { await h.emit('session_shutdown'); await f.close(); }
+    await writeFile(f.file, '{}');
+    await until(() => h.statuses.at(-1) === f.on);
+  } finally { await h.emit('session_shutdown'); }
 });
 
-test('config symlinks observe target edits and atomic retargeting while idle', async () => {
-  const f = await fixture(), h = harness(commands(f.root));
-  const target = join(f.root, 'target', 'config.json'), other = join(f.root, 'other', 'config.json');
+test('config symlinks observe target edits and atomic retargeting while idle', async t => {
+  const f = await fixture(t, {}), h = harness(guardian());
+  const target = join(f.agentDir, 'target', 'config.json'), other = join(f.agentDir, 'other', 'config.json');
   try {
     await mkdir(dirname(target)); await mkdir(dirname(other));
     await rename(f.file, target); await symlink(target, f.file);
     h.emit('session_start');
-    await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
-    await writeFile(target, JSON.stringify({ ...config, enabled: false }));
+    await until(() => h.statuses.at(-1) === f.on);
+    await writeFile(target, JSON.stringify(off));
     await until(() => h.statuses.at(-1) === 'Auto: off');
-    await writeFile(other, JSON.stringify(config));
+    await writeFile(other, '{}');
     await symlink(other, f.file + '.next'); await rename(f.file + '.next', f.file);
-    await until(() => h.statuses.at(-1) === 'Auto: on · Luna low');
-    await writeFile(other, JSON.stringify({ ...config, enabled: false }));
+    await until(() => h.statuses.at(-1) === f.on);
+    await writeFile(other, JSON.stringify(off));
     await until(() => h.statuses.at(-1) === 'Auto: off');
-  } finally { await h.emit('session_shutdown'); await f.close(); }
+  } finally { await h.emit('session_shutdown'); }
 });

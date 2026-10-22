@@ -25,16 +25,11 @@ load; helpers and tests are not extensions.
    this checkout's [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) into
    `~/.pi/agent/APPEND_SYSTEM.md`. Use a stable checkout; preserve existing files.
    Package installation does **not** create the link.
-3. **Install Bash approvals separately (required).** Follow
-   [Automatic Bash permissions](docs/agent-setup.md#automatic-bash-permissions-external-package)
-   to configure Hank Warren's Auto Permissions with `openai-codex/gpt-6-luna~fast`
-   at explicit low reasoning, and symlink the required
-   [shared reviewer policy](docs/agent-setup.md#shared-auto-permissions-policy)
-   into the local Auto Permissions config directory.
-   This repo's footer only displays its status; it is not the approval engine.
+3. **Enable Guardian (required).** Follow [Guardian setup](docs/agent-setup.md#guardian)
+   to select it, install bubblewrap on Linux, and keep its reviewer at
+   `openai-codex/gpt-6-luna~fast` with low reasoning.
 4. **Enable Hooks (required).** Follow [Hooks setup](#hooks) to select the
-   extension, load it before Auto Permissions, and remove Guard where it is still
-   installed.
+   extension and remove Guard where it is still installed.
 5. **Enable the footer (required).** Select this repo's footer extension (its
    entry point is still `extensions/auto-permissions-status/index.ts`) and install
    the GitHub CLI signed in to GitHub; see [footer setup](docs/agent-setup.md#footer).
@@ -69,8 +64,8 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
-| [Guardian](docs/guardian.md) | Codex's approval stack ported to Pi: sandboxed `bash` (Seatbelt on macOS, bubblewrap and seccomp on Linux), `.rules` command rules, and a configurable Claude or GPT reviewer for actions that leave the sandbox. `/guardian` switches it off or on for the session. Replaces Auto Permissions. |
-| [Footer](docs/agent-setup.md#footer) | Replaces Pi's footer: directory, branch and clickable GitHub PR link, session, token/cost/context usage, model, Guardian or Auto Permissions status, and other extensions' statuses. |
+| [Guardian](docs/guardian.md) | Codex's approval stack ported to Pi: sandboxed `bash` (Seatbelt on macOS, bubblewrap and seccomp on Linux), `.rules` command rules, and a configurable Claude or GPT reviewer for actions that leave the sandbox. `/guardian` switches it off or on for the session. |
+| [Footer](docs/agent-setup.md#footer) | Replaces Pi's footer: directory, branch and clickable GitHub PR link, session, token/cost/context usage, model, Guardian status, and other extensions' statuses. |
 | [Claude artifacts](docs/claude-artifacts.md) | Optional. Publishes, updates, reads and lists claude.ai artifacts through a hidden interactive Claude Code on your claude.ai login. Publish and update need approval in Pi. |
 | [Neovim IDE](docs/nvim-ide.md) | Connects to claudecode.nvim: bounded request snapshots, reliable editor sends, editor tools, and coalesced live follow with reconnect replay. |
 
@@ -105,7 +100,7 @@ public: keep private information out of it. Design: [ADR 014](docs/adr/014-hooks
 - `rg-replace-flag` (advise): after `rg -r` or `rg --replace`, notes that `-r`
   means `--replace` in rg, not recursive.
 
-Hooks run before Auto Permissions: a blocked call never reaches its reviewer, and
+Hooks run before Guardian: a blocked call never reaches its reviewer, and
 calls that hooks allow are still reviewed. Subagents load hooks before any other
 child extension and do not start without them.
 
@@ -122,16 +117,13 @@ and `questionnaire` until the user fixes it.
 
 1. Select Hooks with `pi config`, or add the checkout's `extensions/hooks/index.ts`
    to `extensions` in your Pi settings. Preserve other entries.
-2. Load Hooks before Auto Permissions. Pi loads `extensions` entries before
-   `packages`, so a local path already does; with the Git package, list it before
-   `npm:@hank-warren/pi-auto-permissions` in `packages`.
-3. Remove Guard where it is still installed: delete the `extensions/guard/index.ts`
+2. Remove Guard where it is still installed: delete the `extensions/guard/index.ts`
    entry from Pi settings and the `guard.json` link in the agent directory
    (`$PI_CODING_AGENT_DIR`, default `~/.pi/agent`). If `guard.json` is a regular
    file rather than a link, back it up and ask the user before removing it.
 
-Completion: Hooks is selected and loads before Auto Permissions, no Guard entry or
-`guard.json` remains, and the user has run `/reload`.
+Completion: Hooks is selected, no Guard entry or `guard.json` remains, and the
+user has run `/reload`.
 
 **Scope is a workflow guardrail, not a sandbox.** Bash hooks recognize literal
 simple commands, absolute command paths, leading environment assignments, quoting

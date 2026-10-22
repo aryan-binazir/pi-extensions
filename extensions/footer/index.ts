@@ -7,7 +7,7 @@ import { findConfigLoader, type ConfigLoader } from './adapter.ts';
 import { permissionFooter, STATUS_KEY as KEY } from './footer.ts';
 import { pullRequests, type PullRequests, changesPullRequest } from './pull-request.ts';
 
-export default function autoPermissionsStatus(pi: ExtensionAPI): void {
+export default function footer(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined, changeTimer: ReturnType<typeof setTimeout> | undefined;
   let loader: ConfigLoader | undefined;
@@ -23,7 +23,7 @@ export default function autoPermissionsStatus(pi: ExtensionAPI): void {
   const refresh = () => {
     if (!context?.hasUI) return;
     let text = unavailable;
-    if (config !== undefined && loader) text = loader.status(config, context.model, guardianEnabled);
+    if (config !== undefined && loader) text = loader.status(config, guardianEnabled);
     if (text !== previous) {
       context.ui.setStatus(KEY, text);
       previous = text;

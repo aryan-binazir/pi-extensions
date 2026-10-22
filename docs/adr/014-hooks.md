@@ -46,8 +46,8 @@ assignments or options that run programs or write output.
 
 On the Pi 1.0.2 runtime (tests use the 0.99.1 SDK), `tool_call` handlers run in
 load order and stop at the first block, and settings `extensions` entries load
-before `packages`. The manifest lists hooks
-first; setup loads hooks before Auto Permissions, so a blocked call never reaches
+before `packages`. The manifest lists hooks first. Guardian decides inside its
+tools, which run after every `tool_call` handler, so a blocked call never reaches
 its reviewer while allowed calls still do. Subagents pass hooks as the first `-e`
 extension and refuse to start when its entrypoint is missing.
 

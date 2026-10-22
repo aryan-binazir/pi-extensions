@@ -165,7 +165,7 @@ export function reviewerLabel(reviewer: Pick<ReviewerModel, 'provider' | 'model'
   return family ? capitalize(family) : sanitizeTerminalLabel(reviewer.model);
 }
 
-/** The footer's top-right indicator, in the format Auto Permissions used. */
+/** The footer's top-right indicator. */
 export function guardianStatusText(config: GuardianConfig, sandboxAvailable: boolean): string {
   if (!config.enabled) return 'Auto: off';
   // Codex sends only on-request approvals to the reviewer model; `untrusted` asks you, and `never` asks no one.

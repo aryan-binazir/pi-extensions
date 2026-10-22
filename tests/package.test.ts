@@ -95,7 +95,7 @@ test('todo context composes with the structured subagent prompt section', async 
   assert.doesNotMatch(JSON.stringify(result.systemPromptOptions.sections), /Composed task/);
 }));
 
-test('hooks block before a later package such as Auto Permissions sees the call, and allowed calls still reach it', async () => {
+test('hooks block before a later reviewing package sees the call, and allowed calls still reach it', async () => {
   const fixtures = await mkdtemp(join(tmpdir(), 'pi-hooks-order-'));
   const reviewer = join(fixtures, 'reviewer.ts');
   const seen = Symbol.for('pi-extensions.test.reviewed-tool-calls');

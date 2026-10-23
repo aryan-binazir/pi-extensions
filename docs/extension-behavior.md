@@ -65,8 +65,9 @@ alone. Bash commands, retry backoff and compaction use Pi's current Escape
 handling when user input is queued. Messages waiting for compaction count as
 queued input. With no queued user message or pending promotion, the chord does
 nothing, including during an active run, Bash command, retry or compaction;
-use Escape to stop. With no activity, the chord also does nothing; it does not
-open the session tree or clear a Bash draft.
+use Escape to stop. With queued input but no active run, promotion, Bash command,
+retry or compaction, the chord also does nothing; it does not open the session
+tree or clear a Bash draft.
 A second chord stops a pending promotion just as a second Escape does.
 
 Standalone Ctrl-S still stashes the draft. Standalone Ctrl-X is forwarded to Pi

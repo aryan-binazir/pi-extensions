@@ -159,8 +159,9 @@ function decorate(host: Host, state: Adapter): void {
           if (!current()) return false;
           if (prefix !== undefined && performance.now() <= deadline && matchesKey(data, 'ctrl+s')) {
             resetPrefix();
-            const queued = session.pendingMessageCount > 0 || (Array.isArray(host.compactionQueuedMessages) && host.compactionQueuedMessages.length > 0);
-            if (!registration.pending && !queued) return true;
+            const queues = queueLayout(session)?.agent;
+            const queued = queues ? queues.steeringQueue.messages.some(isUser) || queues.followUpQueue.messages.some(isUser) : session.pendingMessageCount > 0;
+            if (!registration.pending && !queued && !(Array.isArray(host.compactionQueuedMessages) && host.compactionQueuedMessages.length > 0)) return true;
             if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
               (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
             return true;

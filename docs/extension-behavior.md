@@ -57,12 +57,17 @@ user input; they stay queued for subsequent normal boundaries. The unsubmitted e
 With no queued user message, normal Escape behavior applies.
 
 Ctrl-X followed by Ctrl-S within 750 ms invokes the live interrupt handler
-directly in the main editor without leaving Vi insert mode. Agent-run
+when a user message is queued or a promotion is pending, directly in the main
+editor without leaving Vi insert mode. Agent-run
 interruptions preserve the cursor and draft.
 It interrupts immediately even when autocomplete is open, leaving the popup
 alone. Bash commands, retry backoff and compaction use Pi's current Escape
-handling. With no active run, promotion, Bash command, retry or compaction, the
-chord does nothing; it does not open the session tree or clear a Bash draft.
+handling when user input is queued. Messages waiting for compaction count as
+queued input. With no queued user message or pending promotion, the chord does
+nothing, including during an active run, Bash command, retry or compaction;
+use Escape to stop. With queued input but no active run, promotion, Bash command,
+retry or compaction, the chord also does nothing; it does not open the session
+tree or clear a Bash draft.
 A second chord stops a pending promotion just as a second Escape does.
 
 Standalone Ctrl-S still stashes the draft. Standalone Ctrl-X is forwarded to Pi

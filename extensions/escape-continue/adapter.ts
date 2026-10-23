@@ -4,7 +4,7 @@ import { matchesKey, type Component } from '@earendil-works/pi-tui';
 import { isUser, startPromotion, SupersededPromotion, textParts, type Message, type Promotion, type SessionPort } from './promotion.ts';
 import { installEditorInput, registerMainEditorBinding } from '../editor-input.ts';
 
-type Host = { session: AgentSession; defaultEditor?: CustomEditor; editor?: CustomEditor; ui?: { getFocusedComponent(): Component | null; requestRender(): void } };
+type Host = { session: AgentSession; defaultEditor?: CustomEditor; editor?: CustomEditor; compactionQueuedMessages?: unknown[]; ui?: { getFocusedComponent(): Component | null; requestRender(): void } };
 type Registration = { ctx: ExtensionContext; pending?: Promotion; warned: boolean; input?: { editor: CustomEditor; reset(): void } };
 type Checkpoint = { session: AgentSession; check(): void };
 type Adapter = {
@@ -159,6 +159,9 @@ function decorate(host: Host, state: Adapter): void {
           if (!current()) return false;
           if (prefix !== undefined && performance.now() <= deadline && matchesKey(data, 'ctrl+s')) {
             resetPrefix();
+            const queues = queueLayout(session)?.agent;
+            const queued = queues ? queues.steeringQueue.messages.some(isUser) || queues.followUpQueue.messages.some(isUser) : session.pendingMessageCount > 0;
+            if (!registration.pending && !queued && !(Array.isArray(host.compactionQueuedMessages) && host.compactionQueuedMessages.length > 0)) return true;
             if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
               (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
             return true;

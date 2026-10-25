@@ -39,7 +39,7 @@ test('compact summary prioritizes the current task and toggles without changing 
   const app = runtime();
   assert.equal(app.shortcut(), 'alt+t');
   await app.call([{ content: 'Done', status: 'completed' }, { content: 'Next', status: 'pending' }, { content: 'Current', status: 'in_progress' }]);
-  assert.deepEqual(app.widget(), ['Todos 1/3 · alt+t · Current']);
+  assert.deepEqual(app.widget(), ['Todos · 1/3 · Current · alt+t']);
   const saved = app.branch();
   const reminder = await app.reminder();
   await app.toggle();
@@ -48,11 +48,11 @@ test('compact summary prioritizes the current task and toggles without changing 
   await app.hook('session_tree');
   assert.ok(app.widget()!.length > 1);
   await app.toggle();
-  assert.deepEqual(app.widget(), ['Todos 1/3 · alt+t · Current']);
+  assert.deepEqual(app.widget(), ['Todos · 1/3 · Current · alt+t']);
   assert.deepEqual(app.branch(), saved);
   assert.equal(await app.reminder(), reminder);
   await app.call([{ content: 'Done', status: 'completed' }, { content: 'Next', status: 'pending' }]);
-  assert.deepEqual(app.widget(), ['Todos 1/2 · alt+t · Next']);
+  assert.deepEqual(app.widget(), ['Todos · 1/2 · Next · alt+t']);
   await app.toggle();
   await app.call([{ content: 'Done', status: 'completed' }]);
   assert.equal(app.widget(), undefined);
@@ -60,7 +60,7 @@ test('compact summary prioritizes the current task and toggles without changing 
   assert.equal(app.widget(), undefined);
   const resumed = runtime(saved);
   await resumed.hook('session_start');
-  assert.deepEqual(resumed.widget(), ['Todos 1/3 · alt+t · Current']);
+  assert.deepEqual(resumed.widget(), ['Todos · 1/3 · Current · alt+t']);
 });
 
 test('real Pi todo widget follows the shared panel and alt+t toggles both states', async () => {
@@ -74,7 +74,7 @@ test('real Pi todo widget follows the shared panel and alt+t toggles both states
     const tasks = [{ content: 'Inspect 界 🧪', status: 'in_progress' }, { content: 'Verify long row '.repeat(8).trim(), status: 'pending' }];
     await session.getToolDefinition('todo_write')!.execute('seed', { todos: tasks }, undefined, undefined, runner.createToolContext('seed', undefined));
     const panel = new FramedPanel('alt+t', 'wrap');
-    const content = { summary: `Todos 0/2 · ${blue('alt+t')} · Inspect 界 🧪`, title: `Todo — declared progress · ${blue('alt+t')}`, rows: [`${blue('→')} ${tasks[0].content}`, `${blue('○')} ${tasks[1].content}`] };
+    const content = { summary: `Todos · 0/2 · Inspect 界 🧪 · ${blue('alt+t')}`, title: `Todo — declared progress · ${blue('alt+t')}`, rows: [`${blue('→')} ${tasks[0].content}`, `${blue('○')} ${tasks[1].content}`] };
     const toggle = runner.getShortcuts({}).get('alt+t')!;
     assert.ok(toggle);
     assert.deepEqual(runner.getShortcutDiagnostics(), []);
@@ -224,7 +224,7 @@ test('todo accepts 100 tasks and rejects an oversized replacement without changi
   const app = runtime();
   const tasks = Array.from({ length: 100 }, (_, index) => ({ content: `Task ${index + 1}`, status: 'pending' }));
   await app.call(tasks);
-  assert.deepEqual(app.widget(), ['Todos 0/100 · alt+t · Task 1']);
+  assert.deepEqual(app.widget(), ['Todos · 0/100 · Task 1 · alt+t']);
   await app.toggle();
   assert.match(app.widget()!.join('\n'), /Task 100/);
   const before = app.branch();
@@ -241,11 +241,11 @@ test('repeated branch switches restore each branch and still warn once per inval
   const second = [broken, snapshot('Alpha', 2), snapshot('Gamma', 3)];
   for (let pass = 0; pass < 3; pass++) {
     app.switchTo(first); await app.hook('session_tree');
-    assert.deepEqual(app.widget(), ['Todos 0/1 · alt+t · Beta']);
+    assert.deepEqual(app.widget(), ['Todos · 0/1 · Beta · alt+t']);
     assert.equal(app.warnings().length, pass * 2 + 1);
     assert.equal(app.warnings().at(-1), 'Skipped 2 invalid or unsupported todo snapshots: Unsupported todo snapshot');
     app.switchTo(second); await app.hook('session_tree');
-    assert.deepEqual(app.widget(), ['Todos 0/1 · alt+t · Gamma']);
+    assert.deepEqual(app.widget(), ['Todos · 0/1 · Gamma · alt+t']);
     assert.equal(app.warnings().length, pass * 2 + 2);
     assert.equal(app.warnings().at(-1), 'Skipped 1 invalid or unsupported todo snapshot: Unsupported todo snapshot');
   }

@@ -48,7 +48,7 @@ export default function todo(pi: ExtensionAPI): void {
     ctx.ui.setWidget('interactive-tools:todo', (_tui, theme) => {
       const blue = (text: string) => theme.fg('border', text);
       const current = state.todos.find(item => item.status === 'in_progress') ?? state.todos.find(item => item.status === 'pending');
-      const summary = `Todos ${state.todos.filter(item => item.status === 'completed').length}/${state.todos.length} · ${blue(panel.shortcut)} · ${terminalLabel(current?.content ?? '')}`;
+      const summary = `Todos · ${state.todos.filter(item => item.status === 'completed').length}/${state.todos.length} · ${terminalLabel(current?.content ?? '')} · ${blue(panel.shortcut)}`;
       const title = `Todo — declared progress · ${blue(panel.shortcut)}`;
       const rows = state.todos.map(item => `${blue(item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '→' : '○')} ${terminalLabel(item.content)}`);
       return {

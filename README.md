@@ -43,7 +43,7 @@ load; helpers and tests are not extensions.
    machine's existing model connections.
 8. **Enable Thread Header (required).** Follow
    [Thread Header setup](docs/agent-setup.md#thread-header) to show the thread name
-   above the conversation.
+   in a fixed line at the top of the viewport.
 9. **Reload Pi.** Complete provider authentication where required. Pi manages MCP
    servers through its built-in MCP support and `~/.pi/agent/mcp.json`.
 
@@ -70,7 +70,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
 | [Guardian](docs/guardian.md) | Codex's approval stack ported to Pi: sandboxed `bash` (Seatbelt on macOS, bubblewrap and seccomp on Linux), `.rules` command rules, and a configurable Claude or GPT reviewer for actions that leave the sandbox. `/guardian` switches it off or on for the session. |
-| [Thread Header](docs/agent-setup.md#thread-header) | Shows the thread name above the conversation and updates on `/name`. |
+| [Thread Header](docs/agent-setup.md#thread-header) | Keeps the thread name visible at the top of the viewport and updates on `/name`. |
 | [Footer](docs/agent-setup.md#footer) | Replaces Pi's footer: directory, branch and clickable GitHub PR link, session, token/cost/context usage, model, Guardian status, and other extensions' statuses. |
 | [Claude artifacts](docs/claude-artifacts.md) | Optional. Publishes, updates, reads and lists claude.ai artifacts through a hidden interactive Claude Code on your claude.ai login. Publish and update need approval in Pi. |
 | [Neovim IDE](docs/nvim-ide.md) | Connects to claudecode.nvim: bounded request snapshots, reliable editor sends, editor tools, and coalesced live follow with reconnect replay. |

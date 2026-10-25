@@ -2,30 +2,47 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { stripVTControlCharacters } from 'node:util';
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from '@earendil-works/pi-coding-agent';
-import { visibleWidth } from '@earendil-works/pi-tui';
+import { TuiMainScreen, visibleWidth, type Component, type OverlayOptions, type Terminal } from '@earendil-works/pi-tui';
 import { withPi } from '../../tests/pi-session.ts';
 import threadHeader, { sanitizeName } from './index.ts';
 
 type Factory = Parameters<ExtensionUIContext['setHeader']>[0];
 function render(factory: Factory, width = 80) {
   assert.ok(factory);
-  const component = factory({} as any, { fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[0m` } as any);
+  let overlay!: Component;
+  const component = factory({
+    showOverlay: (content: Component, options: OverlayOptions) => {
+      assert.deepEqual(options, { row: 0, col: 0, width: '100%', maxHeight: 1, nonCapturing: true });
+      overlay = content;
+      return { hide() {} };
+    },
+    requestRender() {},
+  } as any, { fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[0m` } as any);
   component.invalidate();
-  return component.render(width);
+  assert.deepEqual(component.render(width), [], 'the scrolling header no longer contains the title');
+  return overlay.render(width);
 }
 
 function harness(mode = 'tui') {
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => void>();
   const headers: Factory[] = [];
+  const commands = new Map<string, { handler(args: string, ctx: ExtensionContext): Promise<void> }>();
+  const notices: string[] = [];
   let name: string | undefined = 'original';
   const ctx = { mode, hasUI: mode === 'tui' || mode === 'rpc',
     sessionManager: { getSessionName: () => name },
-    ui: { setHeader: (factory: Factory) => headers.push(factory) },
+    ui: { setHeader: (factory: Factory) => headers.push(factory),
+      theme: { fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[0m` },
+      notify: (text: string) => notices.push(text),
+    },
   } as unknown as ExtensionContext;
-  threadHeader({ on: (event: string, handler: any) => handlers.set(event, handler) } as unknown as ExtensionAPI);
-  return { headers, setName: (value: string | undefined) => { name = value; },
+  threadHeader({ on: (event: string, handler: any) => handlers.set(event, handler),
+    registerCommand: (name: string, command: any) => commands.set(name, command),
+  } as unknown as ExtensionAPI);
+  return { headers, notices, command: (args: string) => commands.get('thread-header')!.handler(args, ctx),
+    setName: (value: string | undefined) => { name = value; },
     emit: (type: string, data = {}) => handlers.get(type)!({ type, ...data }, ctx),
-    line: (width = 80) => stripVTControlCharacters(render(headers.at(-1), width)[0]),
+    line: (width = 80) => stripVTControlCharacters(render(headers.at(-1), width)[0]).trimEnd(),
   };
 }
 
@@ -63,6 +80,27 @@ for (const mode of ['rpc', 'json', 'print']) {
   });
 }
 
+test('on/off removes the overlay owner and reattaches it with the current session name', async () => {
+  const h = harness();
+  h.emit('session_start');
+  assert.equal(h.line(), 'π · original');
+  await h.command('off');
+  assert.equal(h.headers.at(-1), undefined);
+  const count = h.headers.length;
+  h.emit('session_start');
+  h.emit('session_info_changed', { name: 'while disabled' });
+  assert.equal(h.headers.length, count);
+  h.setName('current thread');
+  await h.command('on');
+  assert.equal(h.line(), 'π · current thread');
+  await h.command('invalid');
+  assert.deepEqual(h.notices, ['Usage: /thread-header [on|off]']);
+  await h.command('');
+  assert.equal(h.headers.at(-1), undefined);
+  await h.command('');
+  assert.equal(h.line(), 'π · current thread');
+});
+
 test('names are single-line plain text without terminal controls or bidi overrides', () => {
   assert.equal(sanitizeName('\x1b[31mhey\x1b[0m\n\tthere\x07\u202e'), 'hey there');
   assert.equal(sanitizeName('\x1b]0;evil title\x07hello'), 'hello');
@@ -76,6 +114,7 @@ test('names are single-line plain text without terminal controls or bidi overrid
 
 test('header fits narrow terminal columns, Unicode graphemes, ANSI styling, and resize', () => {
   const h = harness();
+  h.emit('session_start');
   h.emit('session_info_changed', { name: '\x1b[31m你好 👩‍💻 é long title\x1b[0m' });
   for (let width = 0; width < 40; width++) {
     const lines = render(h.headers.at(-1), width);
@@ -87,13 +126,51 @@ test('header fits narrow terminal columns, Unicode graphemes, ANSI styling, and 
   assert.equal(h.line(80), 'π · 你好 👩‍💻 é long title');
 });
 
+test('native overlays keep the header visible over long transcripts without stealing editor or dialog focus', () => {
+  class Viewport extends TuiMainScreen {
+    override requestRender() {}
+    visible(lines: string[], width: number, height: number) {
+      return this.compositeOverlays(lines, width, height).slice(-height).map(line => stripVTControlCharacters(line));
+    }
+  }
+  const tui = new Viewport({ columns: 40, rows: 10, hideCursor() {} } as Terminal);
+  const editor = { focused: false, render: () => ['draft'], invalidate() {} };
+  tui.addChild(editor);
+  tui.setFocus(editor);
+  const h = harness();
+  h.emit('session_start');
+  const header = h.headers.at(-1)!(tui, { fg: (_color: string, text: string) => text } as any);
+  const transcript = Array.from({ length: 120 }, (_, index) => `Transcript line ${index}`);
+  try {
+    assert.equal(editor.focused, true);
+    assert.deepEqual(header.render(40), []);
+    assert.equal(tui.visible(transcript, 40, 10)[0].trimEnd(), 'π · original');
+    h.emit('session_info_changed', { name: 'hey' });
+    assert.equal(h.headers.length, 1, 'renames update the existing overlay instead of raising it above dialogs');
+    assert.equal(tui.visible(transcript, 40, 10)[0].trimEnd(), 'π · hey');
+    assert.equal(tui.visible(transcript, 12, 5)[0].trimEnd(), 'π · hey');
+    const dialog = { focused: false, render: () => ['Dialog'], invalidate() {} };
+    const handle = tui.showOverlay(dialog, { row: 0, width: '100%', maxHeight: 1 });
+    h.emit('session_info_changed', { name: 'renamed' });
+    assert.equal(dialog.focused, true);
+    assert.ok(tui.visible(transcript, 40, 10)[0].startsWith('Dialog'));
+    handle.hide();
+    assert.equal(editor.focused, true);
+    assert.equal(tui.visible(transcript, 40, 10)[0].trimEnd(), 'π · renamed');
+  } finally {
+    header.dispose?.();
+  }
+  assert.equal(tui.hasOverlay(), false, 'disposing the header removes its passive overlay');
+});
+
 test('real Pi session name API updates the header and session replacement resets it', async () => {
   const headers: Factory[] = [];
   await withPi({ extensions: [threadHeader], bind: session => ({ mode: 'tui', uiContext: {
     ...session.extensionRunner.createContext().ui,
+    theme: { fg: (_color: string, text: string) => text } as any,
     setHeader: factory => headers.push(factory),
   } }) }, async fixture => {
-    const line = () => stripVTControlCharacters(render(headers.at(-1))[0]);
+    const line = () => stripVTControlCharacters(render(headers.at(-1))[0]).trimEnd();
     assert.equal(line(), 'π · Unnamed thread');
     fixture.session.setSessionName('hey');
     assert.equal(line(), 'π · hey');

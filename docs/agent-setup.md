@@ -235,17 +235,23 @@ stable checkout's absolute `extensions/thread-header/index.ts` path to
 `extensions` in user-scoped `settings.json`. Preserve unrelated selections and
 load it only once, through either the package or the local path.
 
-It replaces Pi's startup header with a single line showing the thread name.
-`/name` updates it immediately; unnamed threads show a fallback label. Names are
-sanitized and clipped to the terminal width. It uses the header slot, leaving
-editors and footers alone; another custom-header extension would compete for
-that slot. The header is above the conversation and scrolls with the transcript,
-not a fixed terminal row. Non-TUI modes are unchanged. Pi's native thread-name
-labels elsewhere are unchanged.
+It shows the thread name in a fixed line at the top of Pi's terminal viewport,
+even when a long conversation scrolls. `/name` updates it immediately; unnamed
+threads show a fallback label. Names are sanitized and clipped to the terminal
+width. A passive overlay displays the line without taking keyboard focus; it
+covers the first visible transcript row rather than reserving a layout row.
+Dialogs opened above it retain focus and visual priority. The extension uses
+the startup-header slot to manage the overlay's lifetime, leaving editors and
+footers alone; another custom-header extension would compete for that slot.
+Pi prevents renderer-mode changes while any overlay exists. Run
+`/thread-header off`, change the renderer mode, then `/thread-header on` to
+reattach it. With no argument, `/thread-header` toggles visibility for this run.
+Non-TUI modes and Pi's native thread-name labels elsewhere are unchanged.
 
 Completion: verify the selected entrypoint exists in a stable checkout, then ask
-Ar to run `/reload`. In Pi, `/name hey` should show `hey` in the header above the
-conversation. Selection on disk does not verify loaded behavior.
+Ar to run `/reload`. In Pi, `/name hey` should show `hey` at the top of the
+viewport, including while viewing the bottom of a long conversation. Selection
+on disk does not verify loaded behavior.
 
 ## Footer
 

@@ -15,6 +15,7 @@ const expected = new Map<string, { tools: string[]; commands: string[]; shortcut
   ['todo', {tools: ['todo_write'], commands: [], shortcuts: ['alt+t']}],
   ['effort', {tools: [], commands: ['effort'], shortcuts: []}],
   ['btw', {tools: [], commands: ['btw', 'side'], shortcuts: []}],
+  ['regen', {tools: [], commands: ['regen-name'], shortcuts: []}],
   ['vi-mode', {tools: [], commands: [], shortcuts: []}],
   ['prompt-stash', {tools: [], commands: [], shortcuts: []}],
   ['escape-continue', {tools: [], commands: [], shortcuts: []}],

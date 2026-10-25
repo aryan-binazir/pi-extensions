@@ -16,7 +16,7 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    and installed manifests to verify the repository package or intended local
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
-   skipped, not missing setup. Escape Continue, Guardian, Hooks, the footer
+   skipped, not missing setup. Escape Continue, Regen, Guardian, Hooks, the footer
    with PR links, and Claude bridge are required;
    a missing or disabled component
    is setup drift, not a skipped optional feature.
@@ -24,10 +24,13 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    this repository's tracked file in a stable checkout. With Subagents selected,
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
-   Escape Continue, Guardian, Hooks, the footer with PR links, Claude bridge,
+   Escape Continue, Regen, Guardian, Hooks, the footer with PR links, Claude bridge,
    and each configured or requested optional feature. For Escape Continue, compare
    selected entrypoints with [its configuration requirements](#escape-continue),
-   read-only. Check external package pins and their documented config;
+   read-only. For [Regen](#regen), verify its entrypoint is selected and its
+   configured model (Luna 6 by default) resolves in the offline registry;
+   no live naming request is needed for this audit.
+   Check external package pins and their documented config;
    for [Guardian](#guardian), check it is selected from the footer's stable
    checkout, `bwrap --help` lists `--as-pid-1` and `--perms` on Linux, any
    `guardian/config.json` parses and keeps the required reviewer, and the retired
@@ -94,6 +97,27 @@ with no queued message should stop. See
 [behavior and compatibility limits](extension-behavior.md#escape-continue).
 Ctrl-X, Ctrl-S invokes the same interrupt action while retaining Vi insert
 mode. It needs no additional keybinding setup.
+
+## Regen
+
+Install this repository package using the [README install commands](../README.md#install)
+and enable `regen` with `pi config`. If the package is already installed, update it
+with `pi update git:git@github.com:aryan-binazir/pi-extensions@main` first. For a
+local checkout installation, select the stable checkout's absolute
+`extensions/regen/index.ts` path in user-scoped `settings.json`. Keep other
+extension selections and avoid loading a second copy from another checkout.
+Obtain Ar's approval before changing personal settings.
+
+Regen names fresh threads automatically after their first user message and
+exposes `/regen-name` for manual regeneration. It defaults to
+`openai-codex/gpt-6-luna` with low reasoning; optional trusted project
+`.pi/regen.json` overrides are described in [Regen](regen.md#project-local-configuration).
+The naming model must be registered and authenticated, but its scoped-model
+selection is independent of Regen.
+
+Completion: `extensions/regen/index.ts` exists and is selected, and the configured
+model resolves in the offline model list. Ask Ar to run `/reload`. Disk selection
+and model registration do not prove live naming behavior or provider sign-in.
 
 ## Default thinking
 

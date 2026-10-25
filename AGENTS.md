@@ -6,6 +6,8 @@ During setup, ensure the scoped models include `gpt-6.1-sol`, `gpt-6-luna`, and 
 
 Escape Continue is required. During setup, [install and enable it](docs/agent-setup.md#escape-continue), preserving other extension selections.
 
+Regen is required. During setup, [install and enable it](docs/agent-setup.md#regen), preserving other extension selections.
+
 Guardian is the required approval engine. During setup, [enable it](docs/agent-setup.md#guardian) from the same stable checkout as the footer. Its shared reviewer policy and rules load from that checkout's `personal-settings/guardian/`; keep shared policy there, not in a machine-local fork.
 
 # MCP configuration

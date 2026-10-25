@@ -19,7 +19,8 @@ load; helpers and tests are not extensions.
 ## Agent setup checklist
 
 1. **Install and select extensions** using the commands above. Enable
-   [Escape Continue (required)](docs/agent-setup.md#escape-continue).
+   [Escape Continue (required)](docs/agent-setup.md#escape-continue) and
+   [Regen (required)](docs/agent-setup.md#regen).
 2. **Link the shared instructions.** Follow the guarded
    [symlink setup](docs/agent-setup.md#global-system-prompt-append-agent-setup) to link
    this checkout's [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) into
@@ -57,6 +58,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | Todo | Compact task summary; `alt+t` toggles the full list. Session-backed progress and stale-progress reminders. |
 | Effort | `/effort` changes reasoning; `/effort new` starts a temporary model/effort session. |
 | BTW | `/btw` or `/side` opens a private, tool-free side conversation. |
+| [Regen](docs/regen.md) | Names new threads automatically; `/regen-name` regenerates a short title. Defaults to Luna 6 / low, with a project-local model override. |
 | Vi mode | Modal editor with motions, operators, registers, and undo. |
 | Prompt stash | `Ctrl+S` stashes or swaps the main editor draft. |
 | [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape or Ctrl-X, Ctrl-S stops the active run and starts the next queued user message; no queued message means stop. The chord preserves Vi insert mode. |

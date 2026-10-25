@@ -34,8 +34,7 @@
       "./extensions/guardian/index.ts",
       "./extensions/auto-permissions-status/index.ts",
       "./extensions/nvim-ide/index.ts",
-      "./extensions/claude-artifacts/index.ts",
-      "./extensions/thread-header/index.ts"
+      "./extensions/claude-artifacts/index.ts"
     ]
   },
   "scripts": {

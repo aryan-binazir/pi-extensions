@@ -59,7 +59,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | BTW | `/btw` or `/side` opens a private, tool-free side conversation. |
 | Vi mode | Modal editor with motions, operators, registers, and undo. |
 | Prompt stash | `Ctrl+S` stashes or swaps the main editor draft. |
-| [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape stops the active run and starts the next queued user message, or stops if none is queued. Ctrl-X, Ctrl-S interrupts only with queued user input or a pending promotion, preserving Vi insert mode. |
+| [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape or Ctrl-X, Ctrl-S stops the active run and starts the next queued user message; no queued message means stop. The chord preserves Vi insert mode. |
 | [Subagents](docs/subagents.md) | Background workers, model profiles, approved TypeScript workflows; `alt+r` toggles the compact/full panel. |
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |

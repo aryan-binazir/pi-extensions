@@ -52,9 +52,12 @@ cancel pending commands and consume their argument.
 `/` and `?` capture up to 256 UTF-16 code units in the mode label without
 searching. Enter ends capture without submitting; Escape cancels. Backspace
 removes a grapheme, or cancels an empty query. Native editor actions are
-absorbed, app actions and extension shortcuts keep their normal routing, and
+absorbed, app actions and extension shortcuts keep their normal priority, and
 bracketed paste appends control-stripped text to the query. The draft and
-selection stay unchanged. Real search and repeat-dot remain unsupported.
+selection stay unchanged unless a forwarded handler changes them. Capture also
+starts after pending `g` or text-object prefixes. Enter while awaiting a find
+or replace argument cancels that command without submitting. Real search and
+repeat-dot remain unsupported.
 Escape from insert mode also closes the completion popup. The exact supported vi
 command set is documented in [ADR 001](adr/001-editor.md).
 

@@ -111,6 +111,7 @@ class ViMode {
   private insertion?: Snapshot;
   private discardArgument = false;
   private argument = "";
+  private argumentSurrogate = "";
   private argumentCount = 1;
   private lastFind: { command: string; char: string } | undefined;
   private search: string | undefined;
@@ -143,11 +144,13 @@ class ViMode {
   constructor(private readonly editor: CustomEditor) {
     const internal = editor as unknown as {
       tui: TUI;
+      keybindings?: { matches(data: string, id: string): boolean; getResolvedBindings(): Record<string, unknown> };
       renderTopBorder(width: number, hidden: number): string;
       renderBottomBorder(width: number, hidden: number): string;
     };
     this.tui = internal.tui;
     this.base = {
+      keybindings: internal.keybindings,
       getText: editor.getText.bind(editor),
       setText: editor.setText.bind(editor),
       handleInput: attachEditorInput(editor).bind(editor),
@@ -182,6 +185,7 @@ class ViMode {
     this.count = "";
     this.registerPending = false;
     this.argument = "";
+    this.argumentSurrogate = "";
     this.search = undefined;
   }
   private cancel(): void {
@@ -645,10 +649,22 @@ class ViMode {
     }
   }
   private takeArgument(data: string): void {
+    if (this.argumentSurrogate) {
+      if (!/^[\udc00-\udfff]$/.test(data)) {
+        this.cancel();
+        return;
+      }
+      data = this.argumentSurrogate + data;
+      this.argumentSurrogate = "";
+    }
+    if (/^[\ud800-\udbff]$/.test(data)) {
+      this.argumentSurrogate = data;
+      return;
+    }
     const command = this.argument,
       n = this.argumentCount;
     this.argument = "";
-    if (/[\x00-\x1f\x7f-\x9f]/.test(data) || !this.oneGrapheme(data)) {
+    if (/[\x00-\x1f\x7f-\x9f\ud800-\udfff]/u.test(data) || !this.oneGrapheme(data)) {
       this.cancel();
       return;
     }
@@ -706,6 +722,9 @@ class ViMode {
       if (op === "c" && insertOnEmpty) {
         this.insertion = this.snapshot();
         this.mode = "insert";
+        this.cursorShape();
+      } else if (op[0] === "g") {
+        this.mode = "normal";
         this.cursorShape();
       }
       this.resetPending();
@@ -907,39 +926,53 @@ class ViMode {
       this.search += segment;
     }
   }
-  private searchKey(data: string): boolean {
-    const editor = this.editor as unknown as {
-      keybindings?: { matches(data: string, id: string): boolean; getResolvedBindings(): Record<string, unknown> };
-      actionHandlers?: Map<string, unknown>;
-    };
-    if (matchesKey(data, "escape") || matchesKey(data, "enter") || editor.keybindings?.matches(data, "tui.input.submit")) {
+  private searchKey(data: string): void {
+    const keybindings = this.base.keybindings;
+    if (matchesKey(data, "escape") || matchesKey(data, "enter") || keybindings?.matches(data, "tui.input.submit")) {
       this.search = undefined;
-      return true;
+      return;
     }
     if (matchesKey(data, "backspace")) {
       const body = this.search!.slice(1);
       let last = 0;
       for (const { index } of segmenter().segment(body)) last = index;
       this.search = body ? this.search![0] + body.slice(0, last) : undefined;
-      return true;
+      return;
     }
-    const key = decodePrintable(data) ?? data;
-    if (!/[\x00-\x1f\x7f-\x9f]/.test(key)) {
-      this.appendSearch(key);
-      return true;
+    if (matchesKey(data, "ctrl+r")) return;
+    if (this.editor.onExtensionShortcut?.(data)) return;
+    let application = !!keybindings?.matches(data, "app.clipboard.pasteImage");
+    if (keybindings?.matches(data, "app.interrupt") && !this.editor.isShowingAutocomplete() &&
+        (this.editor.onEscape || this.editor.actionHandlers.has("app.interrupt"))) application = true;
+    if (keybindings?.matches(data, "app.exit") && !this.text()) application = true;
+    if (!application && (keybindings?.matches(data, "tui.editor.historyPrevious") || keybindings?.matches(data, "tui.editor.historyNext"))) return;
+    if (!application) {
+      for (const action of this.editor.actionHandlers.keys()) {
+        if (action !== "app.interrupt" && action !== "app.exit" && keybindings?.matches(data, action)) {
+          application = true;
+          break;
+        }
+      }
     }
-    if (matchesKey(data, "ctrl+r")) return true;
-    let native = false;
-    for (const id of Object.keys(editor.keybindings?.getResolvedBindings() ?? {})) {
-      if (!editor.keybindings!.matches(data, id)) continue;
-      if (id.startsWith("tui.")) native = true;
-      else if (id === "app.exit" ? !this.text() : editor.actionHandlers?.has(id)) return false;
+    if (!application) {
+      const key = decodePrintable(data) ?? data;
+      if (!/[\x00-\x1f\x7f-\x9f]/.test(key)) {
+        this.appendSearch(key);
+        return;
+      }
+      if (Object.keys(keybindings?.getResolvedBindings() ?? {}).some(id => id.startsWith("tui.") && keybindings!.matches(data, id))) return;
     }
-    return native;
+    const shortcut = this.editor.onExtensionShortcut;
+    this.editor.onExtensionShortcut = undefined;
+    try { this.baseInput(data); }
+    finally { this.editor.onExtensionShortcut ??= shortcut; }
   }
   private handleKey(data: string): void {
     if (this.mode !== "insert" || matchesKey(data, "escape")) this.clearGhost();
-    if (this.search !== undefined && this.searchKey(data)) return;
+    if (this.search !== undefined) {
+      this.searchKey(data);
+      return;
+    }
     if (matchesKey(data, "escape")) {
       const discarded = this.discardArgument;
       this.discardArgument = false;
@@ -978,6 +1011,10 @@ class ViMode {
       this.baseInput(data);
       return;
     }
+    if (this.argument && (matchesKey(data, "enter") || this.base.keybindings?.matches(data, "tui.input.submit"))) {
+      this.cancel();
+      return;
+    }
     data = decodePrintable(data) ?? data;
     if (!/^[^\x00-\x1f]+$/u.test(data) && !matchesKey(data, "ctrl+r")) {
       this.baseInput(data);
@@ -1000,8 +1037,13 @@ class ViMode {
       }
       return;
     }
+    if (data === "/" || data === "?") {
+      this.cancel();
+      this.search = data;
+      return;
+    }
     const visual = this.mode === "visual" || this.mode === "line";
-    if (data === "u" || data === "U" || data === "~") {
+    if ((data === "u" || data === "U" || data === "~") && this.prefix !== "i" && this.prefix !== "a") {
       const op = "g" + data;
       if (this.prefix === "g") {
         this.prefix = "";
@@ -1064,11 +1106,6 @@ class ViMode {
       this.resetPending();
       return;
     }
-    if (data === "/" || data === "?") {
-      this.cancel();
-      this.search = data;
-      return;
-    }
     if ("fFtT".includes(data) || (data === "r" && !this.op && this.mode === "normal")) {
       this.argument = data;
       this.argumentCount = Math.min(10000, Number(this.count || 1) * (this.op ? this.opCount : 1));
@@ -1115,7 +1152,7 @@ class ViMode {
       return;
     }
     if (visual && "sXDYCS".includes(data)) {
-      if (data === "s") this.apply("c", ...this.range(), this.mode === "line");
+      if (data === "s") this.apply("c", ...this.range(), this.mode === "line", true);
       else {
         const a = Math.min(this.anchor, this.pos()),
           b = Math.max(this.anchor, this.pos()),
@@ -1175,6 +1212,10 @@ class ViMode {
           p = this.wordEndBack(p, data === "E");
           if (p === before) break;
         }
+        if (p === this.pos()) {
+          this.cancel();
+          return;
+        }
       } else p = this.lineTarget(this.prefixCount);
     } else if (data === "g") {
       this.prefix = "g";
@@ -1200,7 +1241,7 @@ class ViMode {
         this.cancel();
         return;
       }
-      this.target(p, data === "$" || data === "e" || data === "E" || changeWord, "Ggjk".includes(data));
+      this.target(p, (data === "$" && p < this.lineEnd(p)) || data === "e" || data === "E" || changeWord, "Ggjk".includes(data));
       return;
     }
     if (data === "v" || data === "V") {

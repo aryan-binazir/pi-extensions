@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { editor, keys } from "./test-support.ts";
 import type { ViEditor } from "./editor.ts";
 import { restoreRawDraft, placeCursor } from "./adapter.ts";
+import { KeybindingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 function undoRedoRestoresPut(e: ViEditor, before: string) {
   const visible = e.getText(),
     expanded = e.getExpandedText();
@@ -1774,10 +1775,10 @@ test("f and t are inclusive and F and T exclusive for operators, and extend visu
   }
 });
 test("find arguments are whole graphemes from one event, decoded printables, and never marker text", () => {
-  for (const [argument, expected] of [["e\u0301", "ab"], ["\x1b[128512u", "a😀b"], ["\x1b[27;1;98~", "a😀"]]) {
+  for (const [argument, expected] of [["e\u0301", "e\u0301b"], ["\x1b[128512u", "😀e\u0301b"], ["\x1b[27;1;98~", "b"]]) {
     const e = editor(); e.setText("a😀e\u0301b"); keys(e, "\x1b0");
     e.handleInput("d"); e.handleInput("t"); e.handleInput(argument);
-    assert.equal(e.getText(), expected === "ab" ? "e\u0301b" : expected === "a😀b" ? "😀e\u0301b" : "b", JSON.stringify(argument));
+    assert.equal(e.getText(), expected, JSON.stringify(argument));
     e.dispose();
   }
   const payload = "payload [x] p\n".repeat(20);
@@ -2193,4 +2194,163 @@ test("a bracketed paste during search joins the search instead of the draft", ()
   e.setText("replaced");
   assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), "draft replacement clears the search");
   e.dispose();
+});
+test("search captures queries after pending text-object and g prefixes", () => {
+  for (const prefix of ["di", "da", "g", "gUi", "gUa", "vi", "va"]) {
+    for (const search of ["/", "?"]) {
+      const e = editor(); const submitted: string[] = [];
+      e.onSubmit = text => { submitted.push(text); };
+      e.setText("abc def"); keys(e, "\x1bgg0" + prefix + search + "de\r");
+      assert.equal(e.getText(), "abc def", prefix + search);
+      assert.deepEqual(submitted, [], prefix + search);
+      e.dispose();
+    }
+  }
+  const e = editor(); e.setText("a/b"); keys(e, "\x1b0f/x");
+  assert.equal(e.getText(), "ab", "a find still consumes its slash argument");
+  keys(e, "0r/"); assert.equal(e.getText(), "/b");
+  e.dispose();
+});
+test("submit keys cancel find and replace arguments without submitting", () => {
+  for (const pending of ["f", "F", "t", "T", "df", "r"]) {
+    for (const input of ["\r", "\n", "\x1b[13u"]) {
+      const e = editor(); const submitted: string[] = [];
+      e.onSubmit = text => { submitted.push(text); };
+      e.setText("abc def"); keys(e, "\x1b0" + pending); e.handleInput(input);
+      assert.equal(e.getText(), "abc def", pending + JSON.stringify(input));
+      assert.deepEqual(submitted, []);
+      assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+      keys(e, "x"); assert.equal(e.getText(), "bc def");
+      e.dispose();
+    }
+  }
+});
+test("search absorbs history bindings even when an app action shares the key", () => {
+  const e = editor();
+  const bindings = (e as unknown as { keybindings: KeybindingsManager }).keybindings;
+  bindings.setUserBindings({ "tui.editor.historyPrevious": "up", "app.model.cycleForward": "up" });
+  e.addToHistory("old history");
+  let cycled = 0;
+  e.onAction("app.model.cycleForward", () => { cycled++; });
+  e.setText("keep"); keys(e, "\x1b0/ab"); e.handleInput("\x1b[A");
+  assert.equal(e.getText(), "keep");
+  assert.equal(cycled, 0);
+  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /ab "));
+  e.dispose();
+});
+test("search preserves extension, image-paste and app handlers before native editing", () => {
+  for (const kind of ["extension", "image", "app", "interrupt", "exit"]) {
+    const e = editor();
+    const bindings = (e as unknown as { keybindings: KeybindingsManager }).keybindings;
+    e.setText(kind === "exit" ? "" : "keep"); keys(e, "\x1b0/ab");
+    let handled = 0;
+    const input = kind === "app" ? "z" : kind === "exit" ? "\x04" : "\x15";
+    if (kind === "extension") e.onExtensionShortcut = () => { handled++; return true; };
+    if (kind === "image") {
+      bindings.setUserBindings({ "app.clipboard.pasteImage": "ctrl+u", "tui.editor.historyPrevious": "ctrl+u" });
+      e.onPasteImage = () => { handled++; };
+    }
+    if (kind === "app") {
+      bindings.setUserBindings({ "app.model.select": "z" });
+      e.onAction("app.model.select", () => { handled++; });
+    }
+    if (kind === "interrupt") {
+      bindings.setUserBindings({ "app.interrupt": "ctrl+u", "tui.editor.historyPrevious": "ctrl+u" });
+      e.onEscape = () => { handled++; };
+    }
+    if (kind === "exit") e.onCtrlD = () => { handled++; };
+    e.handleInput(input);
+    assert.equal(handled, 1, kind);
+    assert.equal(e.getText(), kind === "exit" ? "" : "keep", kind);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /ab "), kind);
+    e.dispose();
+  }
+  const e = editor(); e.setText("keep"); keys(e, "\x1b0/ab");
+  let checked = 0;
+  e.onExtensionShortcut = () => { checked++; return false; };
+  e.handleInput("\x13");
+  assert.equal(checked, 1, "unhandled forwarded keys check the extension once");
+  e.handleInput("\x12");
+  assert.equal(checked, 1, "Ctrl+R remains absorbed before extension handlers");
+  e.dispose();
+});
+test("case operators and visual mode retain undo after pending text-object prefixes", () => {
+  for (const input of ["xguiu", "xguau", "xgUiu", "xviu", "xvau"]) {
+    const e = editor(); e.setText("ABC DEF"); keys(e, "\x1b0" + input);
+    assert.equal(e.getText(), "ABC DEF", input);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), input);
+    e.dispose();
+  }
+  for (const input of ["xgUiU", "xg~i~"]) {
+    const e = editor(); e.setText("abc def"); keys(e, "\x1b0" + input);
+    assert.equal(e.getText(), "bc def", input);
+    e.dispose();
+  }
+});
+test("failed ge and gE operators preserve text, registers, mode and redo", () => {
+  for (const motion of ["ge", "gE"]) {
+    for (const op of ["d", "c", "y", "gu", "gU", "g~"]) {
+      const e = editor(); e.setText("abc def"); keys(e, "\x1b0" + op + motion);
+      assert.equal(e.getText(), "abc def", op + motion);
+      assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), op + motion);
+      keys(e, "x"); assert.equal(e.getText(), "bc def", op + motion);
+      e.dispose();
+    }
+    const e = editor(); e.setText("abc def"); keys(e, "\x1b0yiwd" + motion + "P");
+    assert.equal(e.getText(), "abcabc def", "failed motion retains the previous yank");
+    e.setText("abc def"); keys(e, "0xud" + motion); e.handleInput("\x12");
+    assert.equal(e.getText(), "bc def", "failed motion retains redo");
+    e.dispose();
+  }
+});
+test("counted dollar operators exclude an empty destination line's newline", () => {
+  for (const [input, expected] of [
+    ["ld2$", "x\nb"],
+    ["lc2$Z\x1b", "xZ\nb"],
+    ["ly2$G$p", "xa\n\nba\n"],
+    ["l2D", "x\nb"],
+    ["l2CZ\x1b", "xZ\nb"],
+    ["l2YG$p", "xa\n\nba\n"],
+    ["ld2$u", "xa\n\nb"],
+  ]) {
+    const e = editor(); e.setText("xa\n\nb"); keys(e, "\x1bgg0" + input);
+    assert.equal(e.getText(), expected, input);
+    e.dispose();
+  }
+});
+test("empty visual substitutions insert and empty case commands return to normal mode", () => {
+  for (const draft of ["", "a\n"]) {
+    for (const visual of ["v", "V"]) {
+      const e = editor(); e.setText(draft); keys(e, "\x1bG" + visual + "sZ\x1b");
+      assert.equal(e.getText(), draft + "Z", JSON.stringify(draft) + visual);
+      assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+      keys(e, "u"); assert.equal(e.getText(), draft);
+      e.dispose();
+      for (const op of ["u", "U", "~"]) {
+        const c = editor(); c.setText(draft); keys(c, "\x1bG" + visual + op);
+        assert.equal(c.getText(), draft);
+        assert.ok(c.render(40).at(-1)!.endsWith(" NORMAL "), visual + op);
+        c.dispose();
+      }
+    }
+  }
+});
+test("find and replace arguments assemble legacy surrogate-pair key frames", () => {
+  for (const [command, finish, expected] of [["r", "", "😀😀b"], ["f", "x", "ab"]]) {
+    const e = editor(); e.setText("a😀b"); keys(e, "\x1b0" + command);
+    e.handleInput("\ud83d");
+    assert.equal(e.getText(), "a😀b", command + " waits for the second half");
+    e.handleInput("\ude00");
+    keys(e, finish);
+    assert.equal(e.getText(), expected);
+    e.dispose();
+  }
+  for (const input of ["\x1b", "\r", "x"]) {
+    const e = editor(); const submitted: string[] = [];
+    e.onSubmit = text => { submitted.push(text); };
+    e.setText("abc"); keys(e, "\x1b0r"); e.handleInput("\ud83d"); e.handleInput(input);
+    assert.equal(e.getText(), "abc"); assert.deepEqual(submitted, []);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+    e.dispose();
+  }
 });

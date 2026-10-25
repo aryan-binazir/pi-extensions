@@ -49,7 +49,9 @@ const CLOSING: Record<string, string> = {
   "`": "`",
 };
 const OPENING: Record<string, string> = { ")": "(", "]": "[", "}": "{", ">": "<" };
+const BRACKETS = "()[]{}";
 const MAX_DRAFT = 1024 * 1024;
+const MAX_SEARCH = 256;
 const CONTROLS_EXCEPT_TAB_LF_CR = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
 const CONTROLS_EXCEPT_TAB_LF = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 function safeDraft(text: string): string {
@@ -69,6 +71,16 @@ function decodePrintable(data: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+function changeCase(op: string, text: string): string {
+  let out = "";
+  for (const c of text) {
+    const upper = c.toUpperCase(),
+      lower = c.toLowerCase();
+    const changed = op === "gU" ? upper : op === "gu" ? lower : c === upper ? lower : upper;
+    out += changed.length === 1 || (changed.length === 2 && changed.codePointAt(0)! > 0xffff) ? changed : c;
+  }
+  return out;
 }
 type Snapshot = {
   text: string;
@@ -98,6 +110,10 @@ class ViMode {
   private redoHistory: Snapshot[] = [];
   private insertion?: Snapshot;
   private discardArgument = false;
+  private argument = "";
+  private argumentCount = 1;
+  private lastFind: { command: string; char: string } | undefined;
+  private search: string | undefined;
   private preferredColumn: number | undefined;
   private visualScroll = 0;
   private boundaryText = "";
@@ -165,6 +181,12 @@ class ViMode {
     this.prefix = "";
     this.count = "";
     this.registerPending = false;
+    this.argument = "";
+    this.search = undefined;
+  }
+  private cancel(): void {
+    this.resetPending();
+    this.register = '"';
   }
   private text(): string {
     return (this.draft ??= this.base.getText());
@@ -207,28 +229,57 @@ class ViMode {
     }
     return this.markerList;
   }
-  private wordClass(p: number, text = this.text()): number {
+  private wordClass(p: number, text = this.text(), wide = false): number {
     const code = text.codePointAt(p);
     if (code === undefined) return 0;
-    if (code < 128) return (asciiClasses ?? buildAsciiClasses())[code];
-    const c = String.fromCodePoint(code);
-    return SPACE.test(c) ? 0 : WORD.test(c) ? 1 : 2;
+    let c: number;
+    if (code < 128) c = (asciiClasses ?? buildAsciiClasses())[code];
+    else {
+      const char = String.fromCodePoint(code);
+      c = SPACE.test(char) ? 0 : WORD.test(char) ? 1 : 2;
+    }
+    return wide && c ? 1 : c;
   }
-  private wordNext(p: number): number {
+  private wordNext(p: number, wide = false, eol = false): number {
     const text = this.text(),
-      kind = this.wordClass(p, text),
+      kind = this.wordClass(p, text, wide),
       end = text.length;
-    while (p < end && this.wordClass(p, text) === kind) p = this.next(p);
-    while (p < end && this.wordClass(p, text) === 0) p = this.next(p);
+    const lineBreak = (from: number, to: number) =>
+      eol && (to >= end || text.charCodeAt(from) === 10 || text.charCodeAt(to) === 10);
+    let q = this.next(p);
+    if (q === p || lineBreak(p, q)) return q;
+    while (kind && q < end && this.wordClass(q, text, wide) === kind) {
+      const after = this.next(q);
+      if (lineBreak(q, after)) return after;
+      q = after;
+    }
+    while (q < end && this.wordClass(q, text, wide) === 0) {
+      if (text.charCodeAt(q) === 10 && text.charCodeAt(q - 1) === 10) break;
+      const after = this.next(q);
+      if (lineBreak(q, after)) return after;
+      q = after;
+    }
+    return q;
+  }
+  private wordEnd(p: number, wide = false): number {
+    const text = this.text(),
+      end = text.length;
+    while (p < end && this.wordClass(p, text, wide) === 0) p = this.next(p);
+    const kind = this.wordClass(p, text, wide);
+    for (let after = this.next(p); after < end && this.wordClass(after, text, wide) === kind; after = this.next(p))
+      p = after;
     return p;
   }
-  private wordEnd(p: number): number {
+  private wordEndBack(p: number, wide: boolean): number {
     const text = this.text(),
-      end = text.length;
-    while (p < end && this.wordClass(p, text) === 0) p = this.next(p);
-    const kind = this.wordClass(p, text);
-    for (let after = this.next(p); after < end && this.wordClass(after, text) === kind; after = this.next(p))
-      p = after;
+      kind = this.wordClass(p, text, wide);
+    if (p <= 0) return 0;
+    p = this.previous(p);
+    while (kind && p > 0 && this.wordClass(p, text, wide) === kind) p = this.previous(p);
+    while (p > 0 && this.wordClass(p, text, wide) === 0) {
+      if (text.charCodeAt(p) === 10 && text.charCodeAt(p - 1) === 10) break;
+      p = this.previous(p);
+    }
     return p;
   }
   private baseInput(data: string): void {
@@ -421,6 +472,44 @@ class ViMode {
     for (let i = 0; i < n && p < end; i++) p = this.next(p);
     return p;
   }
+  private countedLineEnd(n: number): number {
+    const starts = this.starts();
+    return this.lineEnd(starts[Math.min(starts.length - 1, this.editor.getCursor().line + n - 1)]);
+  }
+  private lines(op: string, count: number): void {
+    const length = this.text().length;
+    let b = this.pos();
+    for (let i = 0; i < Math.min(10000, count) && b < length; i++) b = Math.min(length, this.lineEnd(b) + 1);
+    this.apply(op, this.lineStart(), b, true, op === "c", this.lineTarget(this.editor.getCursor().line + 1));
+  }
+  private join(count: number): void {
+    const text = this.text(),
+      start = this.lineStart(),
+      lines = Math.min(Math.max(2, count), this.starts().length - this.editor.getCursor().line);
+    this.cancel();
+    if (lines < 2) return;
+    let end = this.lineEnd(),
+      length = end,
+      at = end,
+      last = end > start ? text[end - 1] : "";
+    const pieces = [text.slice(0, end)];
+    for (let i = 1; i < lines; i++) {
+      let next = end + 1;
+      while (text[next] === " " || text[next] === "\t") next++;
+      end = text.indexOf("\n", next);
+      if (end < 0) end = text.length;
+      const content = text.slice(next, end);
+      const space = last && content && content[0] !== ")" && last !== " " && last !== "\t" ? " " : "";
+      at = length;
+      pieces.push(space, content);
+      length += space.length + content.length;
+      if (content) last = content[content.length - 1];
+    }
+    pieces.push(text.slice(end));
+    this.checkpoint();
+    this.writeText(pieces.join(""));
+    this.move(this.onGrapheme(at));
+  }
   private lineTarget(number: number): number {
     const text = this.text(),
       starts = this.starts();
@@ -461,21 +550,136 @@ class ViMode {
           this.next(p),
         );
       else if (key === "0") return this.lineStart(p);
-      else if (key === "$")
-        return Math.max(this.lineStart(p), this.previous(this.lineEnd(p)));
+      else if (key === "$") {
+        const end = this.countedLineEnd(n);
+        return Math.max(this.lineStart(end), this.previous(end));
+      }
       else if (key === "^") return this.lineTarget(this.editor.getCursor().line + 1);
-      else if (key === "w") p = this.wordNext(p);
-      else if (key === "e") p = this.wordEnd(this.next(p));
-      else if (key === "b") {
+      else if (key === "w" || key === "W") p = this.wordNext(p, key === "W", !!this.op && i === n - 1);
+      else if (key === "e" || key === "E") p = this.wordEnd(this.next(p), key === "E");
+      else if (key === "b" || key === "B") {
+        const text = this.text(), wide = key === "B";
         p = this.previous(p);
-        while (p > 0 && this.wordClass(p) === 0) p = this.previous(p);
-        const kind = this.wordClass(p);
-        while (p > 0 && this.wordClass(this.previous(p)) === kind)
+        while (p > 0 && this.wordClass(p, text, wide) === 0) p = this.previous(p);
+        const kind = this.wordClass(p, text, wide);
+        while (p > 0 && this.wordClass(this.previous(p), text, wide) === kind)
           p = this.previous(p);
       } else return undefined;
       if (p === before) break;
     }
     return p;
+  }
+  private find(command: string, char: string, n: number, repeat: boolean): number | undefined {
+    const text = this.text(),
+      forward = command === "f" || command === "t",
+      till = command === "t" || command === "T",
+      start = this.lineStart(),
+      end = this.lineEnd(),
+      markers = new Set(this.markers().map((m) => m.index));
+    let p = this.pos(),
+      skip = repeat && till && n === 1;
+    for (let found = 0; found < Math.min(10000, n); ) {
+      if (forward) {
+        p = this.next(p);
+        if (p >= end) return;
+      } else {
+        if (p <= start) return;
+        p = this.previous(p);
+      }
+      if (skip) skip = false;
+      else if (!markers.has(p) && text.startsWith(char, p)) found++;
+    }
+    return till ? (forward ? this.previous(p) : this.next(p)) : p;
+  }
+  private target(p: number, inclusive: boolean, linewise = false): void {
+    if (!this.op) {
+      this.move(this.mode === "normal" ? this.onGrapheme(p) : p);
+      return;
+    }
+    const pos = this.pos(),
+      length = this.text().length;
+    if (linewise) {
+      this.apply(
+        this.op,
+        this.lineStart(Math.min(pos, p)),
+        Math.min(length, this.lineEnd(Math.max(pos, p)) + 1),
+        true,
+        false,
+        Math.min(pos, p),
+      );
+      return;
+    }
+    this.apply(
+      this.op,
+      Math.min(pos, p),
+      Math.min(length, inclusive ? this.next(Math.max(pos, p)) : Math.max(pos, p)),
+    );
+  }
+  private matchBracket(): number | undefined {
+    const text = this.text(),
+      lineEnd = this.lineEnd(),
+      forward = new Map<number, number>(),
+      backward = new Map<number, number>();
+    for (const marker of this.markers()) {
+      forward.set(marker.index, marker.index + marker[0].length);
+      backward.set(marker.index + marker[0].length - 1, marker.index - 1);
+    }
+    let i = this.pos();
+    while (i < lineEnd && (forward.has(i) || !BRACKETS.includes(text[i]))) i = forward.get(i) ?? i + 1;
+    if (i >= lineEnd) return;
+    const k = BRACKETS.indexOf(text[i]),
+      open = BRACKETS[k & ~1],
+      close = BRACKETS[k | 1],
+      step = k & 1 ? -1 : 1,
+      skip = step > 0 ? forward : backward;
+    for (let j = i, depth = 0; j >= 0 && j < text.length; ) {
+      const jump = skip.get(j);
+      if (jump !== undefined) {
+        j = jump;
+        continue;
+      }
+      if (text[j] === open) depth += step;
+      else if (text[j] === close) depth -= step;
+      if (depth === 0) return j;
+      j += step;
+    }
+  }
+  private takeArgument(data: string): void {
+    const command = this.argument,
+      n = this.argumentCount;
+    this.argument = "";
+    if (/[\x00-\x1f\x7f-\x9f]/.test(data) || !this.oneGrapheme(data)) {
+      this.cancel();
+      return;
+    }
+    this.preferredColumn = undefined;
+    if (command === "r") {
+      this.replace(data, n);
+      return;
+    }
+    this.lastFind = { command, char: data };
+    const p = this.find(command, data, n, false);
+    if (p === undefined) this.cancel();
+    else this.target(p, command === "f" || command === "t");
+  }
+  private replace(char: string, n: number): void {
+    const a = this.pos(),
+      end = this.lineEnd(),
+      text = this.text();
+    let b = a,
+      replaced = 0;
+    for (; replaced < n && b < end; replaced++) b = this.next(b);
+    const growth = char.length * n - expandPastes(this.editor, text.slice(a, b)).length;
+    this.cancel();
+    if (replaced < n || this.getExpandedText().length + growth > MAX_DRAFT) return;
+    this.checkpoint();
+    this.writeText(text.slice(0, a) + char.repeat(n) + text.slice(b));
+    this.move(a + char.length * (n - 1));
+  }
+  private oneGrapheme(data: string): boolean {
+    if (data.length === 1) return true;
+    const segments = segmenter().segment(data)[Symbol.iterator]();
+    return !segments.next().done && segments.next().done === true;
   }
   private range(): [number, number] {
     const a = Math.min(this.anchor, this.pos()),
@@ -487,7 +691,7 @@ class ViMode {
         ]
       : [a, this.next(b)];
   }
-  private apply(op: string, a: number, b: number, line = false, insertOnEmpty = false): void {
+  private apply(op: string, a: number, b: number, line = false, insertOnEmpty = false, cursor = a): void {
     this.preferredColumn = undefined;
     const text = this.text();
     for (const marker of this.markers()) {
@@ -506,6 +710,25 @@ class ViMode {
       }
       this.resetPending();
       this.register = '"';
+      return;
+    }
+    if (op[0] === "g") {
+      let changed = text.slice(0, a),
+        at = a;
+      for (const marker of this.markers()) {
+        if (marker.index < a || marker.index >= b) continue;
+        changed += changeCase(op, text.slice(at, marker.index)) + marker[0];
+        at = marker.index + marker[0].length;
+      }
+      changed += changeCase(op, text.slice(at, b)) + text.slice(b);
+      if (changed !== text) {
+        this.checkpoint();
+        this.writeText(changed);
+      }
+      this.move(this.onGrapheme(cursor));
+      this.mode = "normal";
+      this.cancel();
+      this.cursorShape();
       return;
     }
     const value = { text: expandPastes(this.editor, text.slice(a, b)), line };
@@ -582,10 +805,7 @@ class ViMode {
       p = this.pos();
     if (key === "w" || key === "W") {
       const wide = key === "W";
-      const kindAt = (pos: number) => {
-        const c = this.wordClass(pos, t);
-        return wide ? (c === 0 ? 0 : 1) : c;
-      };
+      const kindAt = (pos: number) => this.wordClass(pos, t, wide);
       const kind = kindAt(p);
       let a = p,
         b = p;
@@ -595,6 +815,8 @@ class ViMode {
         while (b < t.length && this.wordClass(b, t) === 0) b = this.next(b);
       return [a, b];
     }
+    if (key === "b") key = "(";
+    else if (key === "B") key = "{";
     const close = CLOSING[key];
     if (!close) return;
     const open = OPENING[key] ?? key;
@@ -653,6 +875,10 @@ class ViMode {
   }
   private consumePaste(data: string): void {
     this.clearGhost();
+    if (this.search !== undefined) {
+      this.appendSearch(data.replace(/[\x00-\x1f\x7f-\x9f]/g, ""));
+      return;
+    }
     const payload = safeDraft(data.replace(/\x1b\[(\d+);5u/g, (sequence, code: string) => {
       const cp = Number(code);
       return cp >= 97 && cp <= 122 ? String.fromCharCode(cp - 96)
@@ -675,13 +901,50 @@ class ViMode {
     this.insertion = undefined;
     this.move(p + visible.length);
   }
+  private appendSearch(text: string): void {
+    for (const { segment } of segmenter().segment(text)) {
+      if (this.search!.length - 1 + segment.length > MAX_SEARCH) return;
+      this.search += segment;
+    }
+  }
+  private searchKey(data: string): boolean {
+    const editor = this.editor as unknown as {
+      keybindings?: { matches(data: string, id: string): boolean; getResolvedBindings(): Record<string, unknown> };
+      actionHandlers?: Map<string, unknown>;
+    };
+    if (matchesKey(data, "escape") || matchesKey(data, "enter") || editor.keybindings?.matches(data, "tui.input.submit")) {
+      this.search = undefined;
+      return true;
+    }
+    if (matchesKey(data, "backspace")) {
+      const body = this.search!.slice(1);
+      let last = 0;
+      for (const { index } of segmenter().segment(body)) last = index;
+      this.search = body ? this.search![0] + body.slice(0, last) : undefined;
+      return true;
+    }
+    const key = decodePrintable(data) ?? data;
+    if (!/[\x00-\x1f\x7f-\x9f]/.test(key)) {
+      this.appendSearch(key);
+      return true;
+    }
+    if (matchesKey(data, "ctrl+r")) return true;
+    let native = false;
+    for (const id of Object.keys(editor.keybindings?.getResolvedBindings() ?? {})) {
+      if (!editor.keybindings!.matches(data, id)) continue;
+      if (id.startsWith("tui.")) native = true;
+      else if (id === "app.exit" ? !this.text() : editor.actionHandlers?.has(id)) return false;
+    }
+    return native;
+  }
   private handleKey(data: string): void {
     if (this.mode !== "insert" || matchesKey(data, "escape")) this.clearGhost();
+    if (this.search !== undefined && this.searchKey(data)) return;
     if (matchesKey(data, "escape")) {
       const discarded = this.discardArgument;
       this.discardArgument = false;
       this.visualScroll = 0;
-      if (this.mode === "normal" && !this.op && !this.prefix && !this.count && !discarded && !this.registerPending) {
+      if (this.mode === "normal" && !this.op && !this.prefix && !this.count && !discarded && !this.registerPending && !this.argument) {
         this.baseInput(data);
         return;
       }
@@ -724,6 +987,10 @@ class ViMode {
       this.discardArgument = false;
       return;
     }
+    if (this.argument) {
+      this.takeArgument(data);
+      return;
+    }
     if (this.registerPending) {
       this.registerPending = false;
       if (/^[a-z"]$/.test(data)) this.register = data;
@@ -732,6 +999,29 @@ class ViMode {
         this.register = '"';
       }
       return;
+    }
+    const visual = this.mode === "visual" || this.mode === "line";
+    if (data === "u" || data === "U" || data === "~") {
+      const op = "g" + data;
+      if (this.prefix === "g") {
+        this.prefix = "";
+        if (visual) this.apply(op, ...this.range(), this.mode === "line");
+        else if (this.op === op) this.lines(op, this.prefixCount * this.opCount);
+        else if (this.op) this.cancel();
+        else {
+          this.op = op;
+          this.opCount = this.prefixCount;
+        }
+        return;
+      }
+      if (this.op === op) {
+        this.lines(op, Number(this.count || 1) * this.opCount);
+        return;
+      }
+      if (visual) {
+        this.apply(op, ...this.range(), this.mode === "line");
+        return;
+      }
     }
     if (data === "u" || matchesKey(data, "ctrl+r")) {
       const redo = data !== "u";
@@ -770,11 +1060,22 @@ class ViMode {
       this.register = '"';
       return;
     }
-    if (this.prefix === "g" && data !== "g") {
+    if (this.prefix === "g" && data !== "g" && data !== "e" && data !== "E") {
       this.resetPending();
       return;
     }
-    if ("rmqfFtT".includes(data)) {
+    if (data === "/" || data === "?") {
+      this.cancel();
+      this.search = data;
+      return;
+    }
+    if ("fFtT".includes(data) || (data === "r" && !this.op && this.mode === "normal")) {
+      this.argument = data;
+      this.argumentCount = Math.min(10000, Number(this.count || 1) * (this.op ? this.opCount : 1));
+      this.count = "";
+      return;
+    }
+    if ("rmq".includes(data)) {
       this.resetPending();
       this.register = '"';
       this.discardArgument = true;
@@ -807,27 +1108,74 @@ class ViMode {
       this.cursorShape();
       return;
     }
+    if (visual && (data === "o" || data === "O")) {
+      const p = this.pos();
+      this.move(this.anchor);
+      this.anchor = p;
+      return;
+    }
+    if (visual && "sXDYCS".includes(data)) {
+      if (data === "s") this.apply("c", ...this.range(), this.mode === "line");
+      else {
+        const a = Math.min(this.anchor, this.pos()),
+          b = Math.max(this.anchor, this.pos()),
+          op = data === "Y" ? "y" : data === "C" || data === "S" ? "c" : "d";
+        this.apply(op, this.lineStart(a), Math.min(this.text().length, this.lineEnd(b) + 1), true, op === "c");
+      }
+      this.cursorShape();
+      return;
+    }
+    if (data === "J" && visual) {
+      const a = Math.min(this.anchor, this.pos()),
+        b = Math.max(this.anchor, this.pos());
+      let count = 1;
+      for (let i = this.text().indexOf("\n", a); i >= 0 && i < b; i = this.text().indexOf("\n", i + 1)) count++;
+      this.move(a);
+      this.mode = "normal";
+      this.anchor = 0;
+      this.visualScroll = 0;
+      this.join(count);
+      this.cursorShape();
+      return;
+    }
     if ("dcy".includes(data)) {
-      if (this.op === data) {
-        let b = this.pos();
-        for (
-          let i = 0;
-          i < Math.min(10000, n * this.opCount) && b < this.text().length;
-          i++
-        )
-          b = Math.min(this.text().length, this.lineEnd(b) + 1);
-        this.apply(data, this.lineStart(), b, true, data === "c");
-      } else {
+      if (this.op === data) this.lines(data, n * this.opCount);
+      else {
         this.op = data;
         this.opCount = n;
       }
+      return;
+    }
+    if (data === "%") {
+      this.preferredColumn = undefined;
+      const p = this.matchBracket();
+      if (p === undefined) this.cancel();
+      else this.target(p, true);
+      return;
+    }
+    if (data === ";" || data === ",") {
+      const last = this.lastFind;
+      const reverse = (c: string) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase());
+      const command = last ? (data === ";" ? last.command : reverse(last.command)) : "";
+      this.preferredColumn = undefined;
+      const p = last && this.find(command, last.char, n * (this.op ? this.opCount : 1), true);
+      if (p === undefined) this.cancel();
+      else this.target(p, command === "f" || command === "t");
       return;
     }
     let p: number | undefined;
     if (data === "g" || data === "G") this.preferredColumn = undefined;
     if (this.prefix === "g") {
       this.prefix = "";
-      p = this.lineTarget(this.prefixCount);
+      if (data === "e" || data === "E") {
+        this.preferredColumn = undefined;
+        p = this.pos();
+        for (let i = 0; i < Math.min(10000, this.prefixCount * (this.op ? this.opCount : 1)); i++) {
+          const before: number = p;
+          p = this.wordEndBack(p, data === "E");
+          if (p === before) break;
+        }
+      } else p = this.lineTarget(this.prefixCount);
     } else if (data === "g") {
       this.prefix = "g";
       this.prefixCount = n;
@@ -836,47 +1184,23 @@ class ViMode {
       p = this.lineTarget(hasCount ? n : this.starts().length);
     else
       p = this.motion(data, Math.min(10000, n * (this.op ? this.opCount : 1)));
+    const wide = data === "W";
     const changeWord =
-      this.op === "c" && data === "w" && this.wordClass(this.pos()) !== 0;
+      this.op === "c" && (data === "w" || wide) && this.wordClass(this.pos()) !== 0;
     if (changeWord) {
       p = this.pos();
       for (let i = 0; i < Math.min(10000, n * this.opCount); i++) {
         const before: number = p;
-        p = this.wordEnd(i === 0 ? p : this.wordNext(p));
+        p = this.wordEnd(i === 0 ? p : this.wordNext(p, wide), wide);
         if (p >= this.text().length || (i > 0 && p === before)) break;
       }
     }
     if (p !== undefined) {
-      if (this.op) {
-        if ((data === "j" || data === "k") && this.lineStart(p) === this.lineStart()) {
-          this.resetPending();
-          this.register = '"';
-          return;
-        }
-        if (data === "G" || data === "g" || data === "j" || data === "k") {
-          this.apply(
-            this.op,
-            this.lineStart(Math.min(this.pos(), p)),
-            Math.min(
-              this.text().length,
-              this.lineEnd(Math.max(this.pos(), p)) + 1,
-            ),
-            true,
-          );
-          return;
-        }
-        const inclusive = data === "$" || data === "e" || changeWord;
-        this.apply(
-          this.op,
-          Math.min(this.pos(), p),
-          Math.min(
-            this.text().length,
-            inclusive
-              ? this.next(Math.max(this.pos(), p))
-              : Math.max(this.pos(), p),
-          ),
-        );
-      } else this.move(this.mode === "normal" ? this.onGrapheme(p) : p);
+      if (this.op && (data === "j" || data === "k") && this.lineStart(p) === this.lineStart()) {
+        this.cancel();
+        return;
+      }
+      this.target(p, data === "$" || data === "e" || data === "E" || changeWord, "Ggjk".includes(data));
       return;
     }
     if (data === "v" || data === "V") {
@@ -901,8 +1225,33 @@ class ViMode {
       this.apply("d", this.pos(), this.deleteEnd(n));
       return;
     }
-    if (data === "D" || data === "C") {
-      this.apply(data === "D" ? "d" : "c", this.pos(), this.lineEnd(), false, data === "C");
+    if (data === "J") {
+      this.join(n);
+      return;
+    }
+    if (data === "~") {
+      const b = this.deleteEnd(n);
+      this.apply("g~", this.pos(), b, false, false, b);
+      return;
+    }
+    if (data === "X") {
+      let a = this.pos();
+      const start = this.lineStart();
+      for (let i = 0; i < n && a > start; i++) a = this.previous(a);
+      this.apply("d", a, this.pos());
+      return;
+    }
+    if (data === "s") {
+      this.apply("c", this.pos(), this.deleteEnd(n), false, true);
+      return;
+    }
+    if (data === "S") {
+      this.lines("c", n);
+      return;
+    }
+    if (data === "D" || data === "C" || data === "Y") {
+      const op = data === "D" ? "d" : data === "C" ? "c" : "y";
+      this.apply(op, this.pos(), this.countedLineEnd(n), false, op === "c");
       return;
     }
     if (data === "p" || data === "P") {
@@ -938,7 +1287,7 @@ class ViMode {
     this.tui.requestRender();
   }
   private renderBottomBorder(width: number, hidden: number): string {
-    const pending = `${this.count}${this.op}${this.prefix}`;
+    const pending = this.search ?? `${this.count}${this.op}${this.prefix}${this.argument}`;
     const label = truncateToWidth(
       ` ${this.mode.toUpperCase()}${pending ? ` ${pending}` : ""} `,
       width,

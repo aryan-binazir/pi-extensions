@@ -713,13 +713,14 @@ test("restoring another draft cancels visual and line selections", () => {
     assert.equal(e.getExpandedText(), "short");
   }
 });
-test("r, m and q name registers, and their unsupported command swallows its argument", () => {
+test("r, m and q name registers, and unsupported m and q swallow their argument", () => {
   for (const name of ["r", "m", "q"]) {
     const e = editor();
     e.setText("keep me\nsecond");
     e.handleInput("\x1b");
     keys(e, 'gg"' + name + 'yyG"' + name + 'p');
     assert.equal(e.getExpandedText(), "keep me\nsecond\nkeep me");
+    if (name === "r") continue;
     for (const argument of ["x", "a"]) {
       e.setText("alpha beta");
       keys(e, "0" + name + argument);
@@ -734,8 +735,8 @@ test("r, m and q name registers, and their unsupported command swallows its argu
     assert.equal(e.getExpandedText(), "lpha", "Escape cancels the pending argument");
   }
 });
-test("unsupported r, m and q consume Unicode arguments without inserting or swallowing the next command", () => {
-  for (const command of ["r", "m", "q"]) {
+test("unsupported m and q consume Unicode arguments without inserting or swallowing the next command", () => {
+  for (const command of ["m", "q"]) {
     for (const argument of ["é", "😀", "e\u0301", "👩‍💻", "\x1b[128512u", "\x1b[769u"]) {
       const e = editor();
       e.setText("abc");
@@ -748,7 +749,7 @@ test("unsupported r, m and q consume Unicode arguments without inserting or swal
     }
   }
 });
-test("unsupported r, m and q consume DEL and C1 arguments without inserting or swallowing the next command", () => {
+test("r, m and q consume DEL and C1 arguments without inserting or swallowing the next command", () => {
   for (const command of ["r", "m", "q"]) {
     for (const argument of ["\x7f", "\x80", "\x85", "\x9b", "\x9f", "\x1b[133u", "\x1b[155u"]) {
       const e = editor();
@@ -762,19 +763,26 @@ test("unsupported r, m and q consume DEL and C1 arguments without inserting or s
     }
   }
 });
-test("unsupported f, F, t, T, r, m and q swallow one argument, even u or Ctrl+R, and cancel operators", () => {
-  for (const command of ["f", "F", "t", "T", "df", "ct", "2f", "d2T", "yF", "vt", "r", "m", "q", "dr"]) {
-    for (const argument of ["x", "D", "p", "u", "o", "a", "\x12", "\x1b[27;5;114~", "\x1b[27;2;68~", "\x1b[68;2u"]) {
-      const e = editor();
-      e.setText("alpha beta");
-      keys(e, "\x1b0yiwxxu" + command);
-      e.handleInput(argument);
-      const label = JSON.stringify(command + argument);
-      assert.equal(e.getExpandedText(), "lpha beta", label);
-      assert.ok(!e.render(40).at(-1)!.endsWith(" INSERT "), label);
-      keys(e, "x");
-      assert.equal(e.getExpandedText(), "pha beta", label + " leaves no pending count or operator");
-      e.dispose();
+test("pending arguments swallow one argument, even u or Ctrl+R, and a missing find cancels operators", () => {
+  const all = ["x", "D", "p", "u", "o", "a", "\x12", "\x1b[27;5;114~", "\x1b[27;2;68~", "\x1b[68;2u"];
+  const absent = all.filter((argument) => !["p", "a"].includes(argument));
+  for (const [commands, argumentList] of [
+    [["m", "q", "dr", "vr"], all],
+    [["f", "F", "t", "T", "df", "ct", "2f", "d2T", "yF", "vt"], absent],
+  ] as const) {
+    for (const command of commands) {
+      for (const argument of argumentList) {
+        const e = editor();
+        e.setText("alpha beta");
+        keys(e, "\x1b0yiwxxu" + command);
+        e.handleInput(argument);
+        const label = JSON.stringify(command + argument);
+        assert.equal(e.getExpandedText(), "lpha beta", label);
+        assert.ok(!e.render(40).at(-1)!.endsWith(" INSERT "), label);
+        keys(e, "x");
+        assert.equal(e.getExpandedText(), "pha beta", label + " leaves no pending count or operator");
+        e.dispose();
+      }
     }
   }
 });
@@ -810,13 +818,14 @@ test("insert mode still accepts Unicode printable events", () => {
     e.dispose();
   }
 });
-test("arrow keys retain priority over unsupported pending arguments", () => {
+test("arrow keys retain priority over pending arguments", () => {
   const e = editor();
   e.setText("abc");
   keys(e, "\x1b0r");
   e.handleInput("\x1b[C");
   assert.deepEqual(e.getCursor(), { line: 0, col: 1 });
   e.handleInput("😀");
+  assert.equal(e.getExpandedText(), "a😀c");
   e.handleInput("x");
   assert.equal(e.getExpandedText(), "ac");
   e.dispose();
@@ -831,7 +840,7 @@ test("refused oversized put preserves the redo history", () => {
   assert.equal(e.getExpandedText().length, 0);
 });
 test("normal mode and pending vi arguments forward save and stash shortcuts to core and extensions", () => {
-  for (const prefix of ["", "di", '"', "r", "m", "q", "vi"]) {
+  for (const prefix of ["", "di", '"', "r", "f", "m", "q", "vi"]) {
     for (const chord of ["\x13", "\x1b[115;5u", "\x1b[115;6u"]) {
       const e = editor();
       e.setText("keep draft");
@@ -842,7 +851,7 @@ test("normal mode and pending vi arguments forward save and stash shortcuts to c
       e.handleInput(chord);
       assert.equal(forwarded, chord);
       assert.equal(e.getExpandedText(), "keep draft");
-      if (["r", "m", "q"].includes(prefix)) {
+      if (["r", "f", "m", "q"].includes(prefix)) {
         e.handleInput("😀");
         e.handleInput("x");
         assert.equal(e.getExpandedText(), "keep draf");
@@ -1005,6 +1014,7 @@ test("native editing in normal and pending modes participates in vi undo and red
       if (input === "\x17") e.handleInput("\x1b[F");
       e.handleInput(input);
       assert.equal(e.getExpandedText(), "", `${pending} native edit`);
+      if (pending === "v" || pending === "V") e.handleInput("\x1b");
       e.handleInput("u");
       assert.equal(e.getExpandedText(), payload, `${pending} native undo`);
       e.handleInput("\x12");
@@ -1196,17 +1206,24 @@ for (const [command, after, expanded] of [
 });
 
 for (const visual of ["v", "V"]) {
-  for (const redo of [false, true]) test(`history returns ${visual} to normal on ${redo ? "redo" : "undo"}`, () => {
-    const e = editor(); e.setText("abc\ndef"); keys(e, "\x1b0x");
-    if (redo) keys(e, "u");
-    keys(e, "gg" + visual + "G" + (redo ? "\x12" : "u"));
-    const restored = redo ? "abc\nef" : "abc\ndef";
-    assert.equal(e.getText(), restored);
+  test(`history returns ${visual} to normal on redo`, () => {
+    const e = editor(); e.setText("abc\ndef"); keys(e, "\x1b0xu");
+    keys(e, "gg" + visual + "G\x12");
+    assert.equal(e.getText(), "abc\nef");
     assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
-    keys(e, "d"); assert.equal(e.getText(), restored, "d waits for a motion");
+    keys(e, "d"); assert.equal(e.getText(), "abc\nef", "d waits for a motion");
     keys(e, "d"); assert.equal(e.getText(), "abc");
   });
-  for (const history of ["u", "\x12"]) test(`empty history cancels ${visual} selection for ${JSON.stringify(history)}`, () => {
+  test(`u lowercases a ${visual} selection instead of undoing and returns to normal`, () => {
+    const e = editor(); e.setText("ABC\nDEF"); keys(e, "\x1bgg0x");
+    keys(e, "gg" + visual + "Gu");
+    const lowered = visual === "v" ? "bc\ndEF" : "bc\ndef";
+    assert.equal(e.getText(), lowered);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+    keys(e, "d"); assert.equal(e.getText(), lowered, "d waits for a motion");
+    keys(e, "u"); assert.equal(e.getText(), "BC\nDEF");
+  });
+  for (const history of ["\x12"]) test(`empty history cancels ${visual} selection for ${JSON.stringify(history)}`, () => {
     const e = editor(); e.setText("abc"); keys(e, "\x1b0" + visual + "l" + history);
     assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
     keys(e, "d"); assert.equal(e.getText(), "abc");
@@ -1214,7 +1231,7 @@ for (const visual of ["v", "V"]) {
 }
 
 test("undo cancels pending operators and counts", () => {
-  for (const pending of ["2d", "di", "g"]) {
+  for (const pending of ["2d", "di", '"a']) {
     const e = editor(); e.setText("one two three"); keys(e, "\x1b0x" + pending + "u");
     assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
     keys(e, "w"); assert.equal(e.getText(), "one two three");
@@ -1715,5 +1732,465 @@ test("same-width visual renders invalidate cached rows after edits and replaceme
   const e = editor(); e.insertTextAtCursor("abc\ndef"); keys(e, "\x1bggv"); e.render(20);
   keys(e, "\x1bggddv");
   assert.deepEqual(e.render(20).slice(1, -1), ["\x1b[7md\x1b[0mef"]);
+  e.dispose();
+});
+
+test("f, F, t and T move to the counted character on the current line", () => {
+  for (const [draft, input, expected] of [
+    ["foo(bar) baz", "0fbx", "foo(ar) baz"],
+    ["foo(bar) baz", "$Fbx", "foo(bar) az"],
+    ["a.b.c", "02f.x", "a.bc"],
+    ["a.b.c", "0t.x", ".b.c"],
+    ["a.b.c", "$T.x", "a.b."],
+    ["ab\ncd", "0fcx", "b\ncd"],
+    ["a😀b😀c", "02f😀x", "a😀bc"],
+    ["ae\u0301e", "0fex", "ae"],
+  ]) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${draft} ${input}`);
+    e.dispose();
+  }
+});
+test("f and t are inclusive and F and T exclusive for operators, and extend visual selections", () => {
+  for (const [draft, input, expected] of [
+    ["axbxc", "dtx", "xbxc"],
+    ["a(b)c", "dt)", ")c"],
+    ["abc", "dfc", ""],
+    ["abc", "cfcZ\x1b", "Z"],
+    ["foo(bar) baz", "$dFb", "foo(bar) z"],
+    ["ab-cd", "yf-P", "ab-ab-cd"],
+    ["a.b.c.d", "d2f.", "c.d"],
+    ["a.b.c.d.e", "2d2f.", "e"],
+    ["a.b.c.d", "2d2f.", "a.b.c.d"],
+    ["abc", "dfzx", "bc"],
+    ["abc", '"adfz"ap', "abc"],
+    ["a(b)c", "vf)d", "c"],
+    ["abc", "lvFad", "c"],
+    ["abc", "vtcd", "c"],
+  ]) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${draft} ${JSON.stringify(input)}`);
+    e.dispose();
+  }
+});
+test("find arguments are whole graphemes from one event, decoded printables, and never marker text", () => {
+  for (const [argument, expected] of [["e\u0301", "ab"], ["\x1b[128512u", "a😀b"], ["\x1b[27;1;98~", "a😀"]]) {
+    const e = editor(); e.setText("a😀e\u0301b"); keys(e, "\x1b0");
+    e.handleInput("d"); e.handleInput("t"); e.handleInput(argument);
+    assert.equal(e.getText(), expected === "ab" ? "e\u0301b" : expected === "a😀b" ? "😀e\u0301b" : "b", JSON.stringify(argument));
+    e.dispose();
+  }
+  const payload = "payload [x] p\n".repeat(20);
+  const e = editor();
+  e.handleInput("[ ");
+  e.handleInput(`\x1b[200~${payload}\x1b[201~`);
+  const marker = e.getText().slice(2);
+  e.handleInput(" p]");
+  keys(e, "\x1b0fpx");
+  assert.equal(e.getText(), "[ " + marker + " ]", "f skips the marker's own letters");
+  keys(e, "$F[x");
+  assert.equal(e.getText(), " " + marker + " ]", "F[ skips the marker opener");
+  assert.equal(e.getExpandedText(), " " + payload + " ]");
+  e.dispose();
+});
+test("; repeats and , reverses the last find, with counts, operators and repeated t skipping its match", () => {
+  for (const [draft, input, expected] of [
+    ["a-b-c-d", "f-;x", "a-bc-d"],
+    ["a-b-c-d", "f-;,x", "ab-c-d"],
+    ["a-b-c-d", "f-2;x", "a-b-cd"],
+    ["a.b.c", "t.;x", "a..c"],
+    ["a.b.c", "$T.;x", "a..c"],
+    ["a.b.c", "lt.;x", "a..c"],
+    ["a.b.c", "t.2;x", "a..c"],
+    ["a.b.c.d", "f.d;", "ac.d"],
+    ["a.b.c.d", "$F.d;", "a.b.d"],
+    ["a.b.c.d", "$F.d,", "a.b.c.d"],
+    ["a.b.c.d", "f.v;d", "ac.d"],
+    ["a-b-c", "f-fz;x", "ab-c"],
+    ["abc", ";x", "bc"],
+    ["abc", ",x", "bc"],
+  ]) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${draft} ${JSON.stringify(input)}`);
+    e.dispose();
+  }
+});
+test("r replaces counted graphemes in one undo step and leaves registers alone", () => {
+  for (const [draft, input, expected, col] of [
+    ["a-b-c", "3rx", "xxx-c", 2],
+    ["ab", "2rx", "xx", 1],
+    ["abc", "5rxx", "bc", 0],
+    ["", "rx", "", 0],
+    ["a😀b", "lrx", "axb", 1],
+    ["abc\ndef", "$rx", "abx\ndef", 2],
+    ["abc\ndef", "$2rxx", "ab\ndef", 1],
+    ["alpha beta", "yiw$rxP", "alpha betalphax", 9],
+  ] as const) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${draft} ${JSON.stringify(input)}`);
+    assert.equal(e.getCursor().col, col, `${draft} ${JSON.stringify(input)} cursor`);
+    e.dispose();
+  }
+  const e = editor(); e.setText("abc"); keys(e, "\x1b03rx");
+  keys(e, "u"); assert.equal(e.getText(), "abc");
+  e.handleInput("\x12"); assert.equal(e.getText(), "xxx");
+  e.dispose();
+});
+test("r takes a whole grapheme or decoded printable from one event and replaces a marker as one atom", () => {
+  for (const [argument, expected] of [["😀", "😀bc"], ["e\u0301", "e\u0301bc"], ["\x1b[128512u", "😀bc"], ["\x1b[27;2;68~", "Dbc"]]) {
+    const e = editor(); e.setText("abc"); keys(e, "\x1b0r");
+    e.handleInput(argument);
+    assert.equal(e.getText(), expected, JSON.stringify(argument));
+    e.dispose();
+  }
+  const payload = "payload\n".repeat(20);
+  const e = editor();
+  e.handleInput(`\x1b[200~${payload}\x1b[201~`);
+  e.handleInput("z");
+  keys(e, "\x1b0rx");
+  assert.equal(e.getText(), "xz");
+  keys(e, "u");
+  assert.equal(e.getExpandedText(), payload + "z");
+  e.handleInput("\x12");
+  assert.equal(e.getExpandedText(), "xz");
+  e.dispose();
+});
+test("r refuses a replacement that would exceed the draft limit", () => {
+  const e = editor(); e.setText("abc"); keys(e, "\x1b0r");
+  e.handleInput("a" + "\u0301".repeat(1024 * 1024));
+  assert.equal(e.getText(), "abc");
+  e.dispose();
+});
+test("W, B and E move by blank-separated WORDs, and cW changes only to the WORD end", () => {
+  for (const [draft, input, expected] of [
+    ["a.b c.d", "Wx", "a.b .d"],
+    ["a.b c.d", "$Bx", "a.b .d"],
+    ["a.b c.d", "Ex", "a. c.d"],
+    ["a.b c.d", "dW", "c.d"],
+    ["a.b c.d", "cWX\x1b", "X c.d"],
+    ["abc   def", "lllcWX\x1b", "abcXdef"],
+    ["a b\nc", "$Wx", "a b\n"],
+    ["ab\ncd", "jBx", "b\ncd"],
+  ]) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${draft} ${JSON.stringify(input)}`);
+    e.dispose();
+  }
+});
+test("word motions stop on empty lines and operators stop the last word at the end of its line", () => {
+  for (const [draft, input, expected, cursor] of [
+    ["one\ntwo", "dw", "\ntwo", [0, 0]],
+    ["one\ntwo", "dW", "\ntwo", [0, 0]],
+    ["one\ntwo", "ywP", "oneone\ntwo", [0, 0]],
+    ["one two\nx", "wdw", "one \nx", [0, 3]],
+    ["one\n\ntwo", "w", "one\n\ntwo", [1, 0]],
+    ["one\n\ntwo", "ww", "one\n\ntwo", [2, 0]],
+    ["a b\n\nc", "$W", "a b\n\nc", [1, 0]],
+    ["one\n\ntwo", "jdw", "one\ntwo", [1, 0]],
+    ["one\n\ntwo", "d2w", "two", [0, 0]],
+    ["one two\nthree", "d2w", "\nthree", [0, 0]],
+    ["a\nb", "$dw", "\nb", [0, 0]],
+    ["ab  \ncd", "ldw", "a\ncd", [0, 0]],
+    ["ab  \ncd", "lllldw", "ab \ncd", [0, 2]],
+  ] as const) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${draft} ${JSON.stringify(input)}`);
+    assert.deepEqual(e.getCursor(), { line: cursor[0], col: cursor[1] }, `${draft} ${JSON.stringify(input)} cursor`);
+    e.dispose();
+  }
+});
+test("ge and gE move back to the previous word end, stop on empty lines and are inclusive", () => {
+  for (const [draft, input, expected, cursor] of [
+    ["abc def", "$gex", "ab def", [0, 2]],
+    ["a.b c.d", "$gEx", "a. c.d", [0, 2]],
+    ["a b c", "$2gex", " b c", [0, 0]],
+    ["abc\n\ndef", "Gge", "abc\n\ndef", [1, 0]],
+    ["ab\ncd", "jgex", "a\ncd", [0, 0]],
+    ["abc def", "$dge", "ab", [0, 1]],
+    ["ab cd", "gex", "b cd", [0, 0]],
+    ["one two three four", "2yl$gex", "one two thre four", [0, 12]],
+  ] as const) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${draft} ${JSON.stringify(input)}`);
+    assert.deepEqual(e.getCursor(), { line: cursor[0], col: cursor[1] }, `${draft} ${JSON.stringify(input)} cursor`);
+    e.dispose();
+  }
+});
+test("X, s, S and Y act like dh, cl, cc and y$, and counted $ reaches later line ends", () => {
+  for (const [draft, input, expected, cursor] of [
+    ["abc", "$3X", "c", [0, 0]],
+    ["abc", "X", "abc", [0, 0]],
+    ["x\ny", "jX", "x\ny", [1, 0]],
+    ["abcd", "2sZ\x1b$p", "Zcdab", [0, 3]],
+    ["", "sZ\x1b", "Z", [0, 0]],
+    ["abc", "sZ\x1bu", "abc", [0, 0]],
+    ["abc\ndef", "SZ\x1b", "Z\ndef", [0, 0]],
+    ["abc\ndef\nghi", "j2SZ\x1b", "abc\nZ", [1, 0]],
+    ["abc def", "wYP", "abc defdef", [0, 4]],
+    ["abc\ndef\nghi", "2Yjjp", "abc\ndef\ngabc\ndefhi", [2, 1]],
+    ["abc\ndef", "9YG$p", "abc\ndefabc\ndef", [1, 3]],
+    ["abc\ndef\nghi", "l2D", "a\nghi", [0, 0]],
+    ["abc\ndef\nghi", "l2CX\x1b", "aX\nghi", [0, 1]],
+    ["abc\ndef", "2$x", "abc\nde", [1, 1]],
+    ["abc\ndef", "d9$", "", [0, 0]],
+  ] as const) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${draft} ${JSON.stringify(input)}`);
+    assert.deepEqual(e.getCursor(), { line: cursor[0], col: cursor[1] }, `${draft} ${JSON.stringify(input)} cursor`);
+    e.dispose();
+  }
+});
+test("J joins counted lines with Vim spacing and leaves the cursor at the last join", () => {
+  for (const [draft, input, expected, cursor] of [
+    ["abc\n  def", "J", "abc def", [0, 3]],
+    ["abc \ndef", "J", "abc def", [0, 4]],
+    ["abc\n", "J", "abc", [0, 2]],
+    ["abc\n   ", "J", "abc", [0, 2]],
+    ["abc\n)x", "J", "abc)x", [0, 3]],
+    ["\ndef", "J", "def", [0, 0]],
+    ["abc\t\ndef", "J", "abc\tdef", [0, 4]],
+    ["a\nb\nc\nd", "3J", "a b c\nd", [0, 3]],
+    ["a\nb\nc\nd", "1J", "a b\nc\nd", [0, 1]],
+    ["a\nb", "j5J", "a\nb", [1, 0]],
+    ["a\nb\nc", "j2J", "a\nb c", [1, 1]],
+    ["a\nb\nc", "5J", "a b c", [0, 3]],
+    ["a\nb", "Ju", "a\nb", [0, 0]],
+    ["a\nb\nc\nd", "jVjJ", "a\nb c\nd", [1, 1]],
+    ["a\nb\nc\nd", "jvJ", "a\nb c\nd", [1, 1]],
+    ["a\nb\nc\nd", "jjVkJ", "a\nb c\nd", [1, 1]],
+  ] as const) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${JSON.stringify(draft)} ${JSON.stringify(input)}`);
+    assert.deepEqual(e.getCursor(), { line: cursor[0], col: cursor[1] }, `${JSON.stringify(draft)} ${JSON.stringify(input)} cursor`);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+    e.dispose();
+  }
+});
+test("~, visual ~/u/U and gu/gU/g~ change case per code point and place the cursor like Neovim", () => {
+  for (const [draft, input, expected, cursor] of [
+    ["abc", "~", "Abc", [0, 1]],
+    ["ab", "3~", "AB", [0, 1]],
+    ["ab", "$~", "aB", [0, 1]],
+    ["Hello World", "w~~", "Hello wOrld", [0, 8]],
+    ["", "~", "", [0, 0]],
+    ["aéb", "~~~", "AÉB", [0, 3]],
+    ["ßa", "~~", "ßA", [0, 1]],
+    ["Hello World", "wvlu", "Hello world", [0, 6]],
+    ["Hello World", "wvlU", "Hello WOrld", [0, 6]],
+    ["hello world", "lVU", "HELLO WORLD", [0, 0]],
+    ["Hello", "v~", "hello", [0, 0]],
+    ["abc", "lv$~", "aBC", [0, 1]],
+    ["abcd", "$vhhU", "aBCD", [0, 1]],
+    ["ab\ncd\nef", "jlvjU", "ab\ncD\nEF", [1, 1]],
+    ["ab\ncd\nef", "jlVU", "ab\nCD\nef", [1, 0]],
+    ["ab cd", "x$vu", "b cd", [0, 3]],
+    ["Hello World", "wvlgU", "Hello WOrld", [0, 6]],
+    ["Hello World", "wguu", "hello world", [0, 0]],
+    ["  Hello World", "wwguu", "  hello world", [0, 2]],
+    ["Hello World", "wg~~", "hELLO wORLD", [0, 0]],
+    ["Hello World", "wg~g~", "hELLO wORLD", [0, 0]],
+    ["Hello World", "wgUiw", "Hello WORLD", [0, 6]],
+    ["Hello World", "wg~iw", "Hello wORLD", [0, 6]],
+    ["Hello World", "guaw", "hello World", [0, 0]],
+    ["Hello World", "$gub", "Hello world", [0, 6]],
+    ["ABC def", "guiw", "abc def", [0, 0]],
+    ["ab\ncd", "lgUgU", "AB\ncd", [0, 0]],
+    ["ab\ncd", "jlgUU", "ab\nCD", [1, 0]],
+    ["ab\ncd\nef", "2gUU", "AB\nCD\nef", [0, 0]],
+    ["Hello\nWorld", "lgUj", "HELLO\nWORLD", [0, 1]],
+    ["Hello\nWorld", "jlgUk", "HELLO\nWORLD", [0, 1]],
+    ["ab\ncd", "lgUG", "AB\nCD", [0, 1]],
+    ["abc", "dgux", "bc", [0, 0]],
+    ["abc def", "yiwwgUiwP", "abc abcDEF", [0, 4]],
+  ] as const) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${JSON.stringify(draft)} ${JSON.stringify(input)}`);
+    assert.deepEqual(e.getCursor(), { line: cursor[0], col: cursor[1] }, `${JSON.stringify(draft)} ${JSON.stringify(input)} cursor`);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), `${JSON.stringify(input)} mode`);
+    e.dispose();
+  }
+});
+test("a case change is one undo step, skips collapsed markers and records nothing when unchanged", () => {
+  const e = editor(); e.setText("abc"); keys(e, "\x1b0gUiw");
+  assert.equal(e.getText(), "ABC");
+  keys(e, "u"); assert.equal(e.getText(), "abc");
+  e.handleInput("\x12"); assert.equal(e.getText(), "ABC");
+  keys(e, "gUiwu");
+  assert.equal(e.getText(), "abc", "an unchanged case change adds no undo step");
+  e.dispose();
+  const payload = "lower payload\n".repeat(20);
+  const m = editor();
+  m.handleInput(`\x1b[200~${payload}\x1b[201~`);
+  const marker = m.getText();
+  m.handleInput("z");
+  keys(m, "\x1bgUU");
+  assert.equal(m.getText(), marker + "Z");
+  assert.equal(m.getExpandedText(), payload + "Z");
+  keys(m, "0v$~");
+  assert.equal(m.getExpandedText(), payload + "z");
+  m.dispose();
+});
+test("% jumps from the next bracket on the line to its match and is inclusive", () => {
+  for (const [draft, input, expected, cursor] of [
+    ["(a [b] c)", "%", "(a [b] c)", [0, 8]],
+    ["(a [b] c)", "$%", "(a [b] c)", [0, 0]],
+    ["x (a [b] c)", "%", "x (a [b] c)", [0, 10]],
+    ["x (a [b] c)", "d%", "", [0, 0]],
+    ["{a}", "v%d", "", [0, 0]],
+    ["(a\nb)", "j%", "(a\nb)", [0, 0]],
+    ["abc", "%x", "bc", [0, 0]],
+    ["a)b(c", "%x", ")b(c", [0, 0]],
+    ["a(b", "d%x", "(b", [0, 0]],
+  ] as const) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${JSON.stringify(draft)} ${JSON.stringify(input)}`);
+    assert.deepEqual(e.getCursor(), { line: cursor[0], col: cursor[1] }, `${JSON.stringify(draft)} ${JSON.stringify(input)} cursor`);
+    e.dispose();
+  }
+  const e = editor();
+  e.handleInput("( ");
+  e.handleInput(`\x1b[200~${"[x] (y)\n".repeat(20)}\x1b[201~`);
+  const marker = e.getText().slice(2);
+  e.handleInput(" )");
+  keys(e, "\x1b0%");
+  assert.equal(e.getCursor().col, marker.length + 3, "brackets inside a marker are not counted");
+  keys(e, "0w%");
+  assert.equal(e.getCursor().col, 0, "the scan skips a marker under the cursor");
+  e.dispose();
+});
+test("b and B name the parenthesis and brace objects", () => {
+  for (const [draft, input, expected] of [
+    ["f(abc)", "$dib", "f()"],
+    ["f{abc}", "$daB", "f"],
+    ["f{abc}", "$ciBX\x1b", "f{X}"],
+    ["f(abc)", "$vabd", "f"],
+  ]) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${draft} ${JSON.stringify(input)}`);
+    e.dispose();
+  }
+});
+test("visual o and O move the cursor to the other end of the selection", () => {
+  for (const [draft, input, expected] of [
+    ["abcdef", "llvlohd", "aef"],
+    ["abcdef", "llvlOhd", "aef"],
+    ["ab\ncd\nef", "jVjokd", ""],
+    ["ab\ncd\nef", "Vjoyjp", "ab\ncd\nab\ncd\nef"],
+  ]) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${JSON.stringify(draft)} ${JSON.stringify(input)}`);
+    e.dispose();
+  }
+});
+test("visual X, D, Y, C and S act on whole selected lines and visual s changes the selection", () => {
+  for (const [draft, input, expected] of [
+    ["ab\ncd\nef", "lvjX", "ef"],
+    ["ab\ncd\nef", "lvjD", "ef"],
+    ["ab\ncd\nef", "lvjYGp", "ab\ncd\nef\nab\ncd"],
+    ["ab\ncd\nef", "lvjCZ\x1b", "Z\nef"],
+    ["ab\ncd\nef", "lvjSZ\x1b", "Z\nef"],
+    ["ab\ncd\nef", "lvjsZ\x1b", "aZ\nef"],
+    ["ab\ncd\nef", "jVD", "ab\nef"],
+  ]) {
+    const e = editor(); e.setText(draft); keys(e, "\x1bgg" + input);
+    assert.equal(e.getText(), expected, `${JSON.stringify(draft)} ${JSON.stringify(input)}`);
+    e.dispose();
+  }
+});
+test("/ and ? absorb a search line without editing or submitting the draft", () => {
+  for (const search of ["/", "?"]) {
+    const e = editor();
+    const submitted: string[] = [];
+    e.onSubmit = (text) => { submitted.push(text); };
+    e.setText("abc def");
+    keys(e, "\x1b0d" + search + "de");
+    assert.ok(e.render(40).at(-1)!.endsWith(` NORMAL ${search}de `));
+    e.handleInput("\r");
+    assert.deepEqual(submitted, [], "Enter ends the search without submitting");
+    assert.equal(e.getText(), "abc def");
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+    keys(e, "x");
+    assert.equal(e.getText(), "bc def", "the pending operator was cancelled");
+    e.dispose();
+  }
+});
+test("search input takes decoded Unicode printables, edits whole graphemes and is bounded", () => {
+  const e = editor(); e.setText("abc"); keys(e, "\x1b0/a");
+  e.handleInput("😀"); e.handleInput("\x1b[128512u"); e.handleInput("é");
+  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /a😀😀é "));
+  e.handleInput("\x7f"); e.handleInput("\x7f");
+  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /a😀 "));
+  e.handleInput("\x7f"); e.handleInput("\x7f");
+  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL / "));
+  e.handleInput("\x7f");
+  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), "Backspace on an empty search cancels it");
+  keys(e, "/");
+  e.handleInput("a".repeat(300));
+  assert.ok(e.render(400).at(-1)!.endsWith(` NORMAL /${"a".repeat(256)} `));
+  for (const width of [3, 8, 20]) assert.equal(visibleWidth(e.render(width).at(-1)!), width);
+  assert.equal(e.getText(), "abc");
+  e.dispose();
+});
+test("Escape cancels a search or pending argument without reaching Pi, then interrupts as usual", () => {
+  for (const pending of ["/x", "f", "r", "2d"]) {
+    const e = editor(); let interrupts = 0;
+    e.onEscape = () => { interrupts++; };
+    e.setText("abc"); keys(e, "\x1b0" + pending);
+    e.handleInput("\x1b");
+    assert.equal(interrupts, 0, pending);
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), pending);
+    e.handleInput("\x1b");
+    assert.equal(interrupts, 1, pending);
+    e.dispose();
+  }
+  for (const end of ["\x1b", "\r", "\n"]) {
+    const e = editor(); e.setText("abc"); keys(e, "\x1b0vl/x" + end);
+    assert.ok(e.render(40).at(-1)!.endsWith(" VISUAL "), JSON.stringify(end));
+    keys(e, "d");
+    assert.equal(e.getText(), "c", "the selection survives the search");
+    e.dispose();
+  }
+});
+test("search absorbs native editing keys and forwards app actions and extension shortcuts", () => {
+  const native = ["\x1b[C", "\x1b[D", "\x1b[A", "\x1b[B", "\x17", "\x15", "\x0b", "\x1b[3~", "\t", "\x1b[13;2u", "\x03", "\x1b[H", "\x1b[F"];
+  for (const key of native) {
+    const e = editor(); const submitted: string[] = [];
+    e.onSubmit = (text) => { submitted.push(text); };
+    e.setText("one two\nthree"); keys(e, "\x1bgg0w/ab");
+    e.handleInput(key);
+    assert.equal(e.getText(), "one two\nthree", JSON.stringify(key));
+    assert.deepEqual(e.getCursor(), { line: 0, col: 4 }, JSON.stringify(key));
+    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /ab "), JSON.stringify(key));
+    e.handleInput("\r");
+    assert.deepEqual(submitted, [], JSON.stringify(key));
+    e.dispose();
+  }
+  const e = editor(); e.setText("keep"); keys(e, "\x1b/x");
+  let forwarded = "", selected = 0;
+  e.onExtensionShortcut = (data) => {
+    if (data !== "\x13") return false;
+    forwarded = data;
+    return true;
+  };
+  e.onAction("app.model.select", () => { selected++; });
+  e.handleInput("\x13");
+  assert.equal(forwarded, "\x13");
+  e.handleInput("\x0c");
+  assert.equal(selected, 1, "registered app actions still run");
+  assert.equal(e.getText(), "keep");
+  e.dispose();
+});
+test("a bracketed paste during search joins the search instead of the draft", () => {
+  const e = editor(); const submitted: string[] = [];
+  e.onSubmit = (text) => { submitted.push(text); };
+  e.setText("abc"); keys(e, "\x1b0/");
+  e.handleInput("\x1b[20"); e.handleInput("0~x\ty\nz\x1b[2"); e.handleInput("01~\r");
+  assert.equal(e.getText(), "abc");
+  assert.deepEqual(submitted, []);
+  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
+  keys(e, "/"); e.handleInput("\x1b[200~xyz\x1b[201~");
+  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /xyz "));
+  e.setText("replaced");
+  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), "draft replacement clears the search");
   e.dispose();
 });

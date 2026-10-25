@@ -16,21 +16,21 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    and installed manifests to verify the repository package or intended local
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
-   skipped, not missing setup. Escape Continue, Regen, Guardian, Hooks, the footer
-   with PR links, and Claude bridge are required;
+   skipped, not missing setup. Escape Continue, Regen, Guardian, Hooks, Thread
+   Header, the footer with PR links, and Claude bridge are required;
    a missing or disabled component
    is setup drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
    this repository's tracked file in a stable checkout. With Subagents selected,
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
-   Escape Continue, Regen, Guardian, Hooks, the footer with PR links, Claude bridge,
-   and each configured or requested optional feature. For Escape Continue, compare
-   selected entrypoints with [its configuration requirements](#escape-continue),
-   read-only. For [Regen](#regen), verify its entrypoint is selected and its
-   configured model (Luna 6 by default) resolves in the offline registry;
-   no live naming request is needed for this audit.
-   Check external package pins and their documented config;
+   Escape Continue, Regen, Guardian, Hooks, Thread Header, the footer with PR
+   links, Claude bridge, and each configured or requested optional feature. For
+   Escape Continue, compare selected entrypoints with
+   [its configuration requirements](#escape-continue), read-only. For
+   [Regen](#regen), verify its entrypoint is selected and its configured model
+   (Luna 6 by default) resolves in the offline registry; no live naming request
+   is needed for this audit. Check external package pins and their documented config;
    for [Guardian](#guardian), check it is selected from the footer's stable
    checkout, `bwrap --help` lists `--as-pid-1` and `--perms` on Linux, any
    `guardian/config.json` parses and keeps the required reviewer, and the retired
@@ -226,6 +226,26 @@ load, commands are reviewed twice and Guardian warns at session start.
 Completion: Guardian is selected from the footer's stable checkout, bubblewrap is
 usable on Linux, the reviewer is the required one, no other approval package is
 installed, and Ar has run `/reload`. The footer then shows `Auto: on · Luna low`.
+
+## Thread Header
+
+Thread Header is required. Enable `thread-header` with `pi config` after
+installing or updating this repository package. For a local installation, add a
+stable checkout's absolute `extensions/thread-header/index.ts` path to
+`extensions` in user-scoped `settings.json`. Preserve unrelated selections and
+load it only once, through either the package or the local path.
+
+It replaces Pi's startup header with a single line showing the thread name.
+`/name` updates it immediately; unnamed threads show a fallback label. Names are
+sanitized and clipped to the terminal width. It uses the header slot, leaving
+editors and footers alone; another custom-header extension would compete for
+that slot. The header is above the conversation and scrolls with the transcript,
+not a fixed terminal row. Non-TUI modes are unchanged. Pi's native thread-name
+labels elsewhere are unchanged.
+
+Completion: verify the selected entrypoint exists in a stable checkout, then ask
+Ar to run `/reload`. In Pi, `/name hey` should show `hey` in the header above the
+conversation. Selection on disk does not verify loaded behavior.
 
 ## Footer
 

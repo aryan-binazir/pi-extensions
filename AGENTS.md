@@ -10,6 +10,8 @@ Regen is required. During setup, [install and enable it](docs/agent-setup.md#reg
 
 Guardian is the required approval engine. During setup, [enable it](docs/agent-setup.md#guardian) from the same stable checkout as the footer. Its shared reviewer policy and rules load from that checkout's `personal-settings/guardian/`; keep shared policy there, not in a machine-local fork.
 
+Thread Header is required. During setup, [install and enable it](docs/agent-setup.md#thread-header) from a stable checkout, preserving other extension selections.
+
 # MCP configuration
 
 Use Pi's built-in MCP support. Keep personal servers and credentials in the user-scoped `~/.pi/agent/mcp.json`, preserve unrelated server entries when editing it, and ask Ar to run `/reload` afterward.

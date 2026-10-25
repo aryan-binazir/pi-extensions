@@ -39,10 +39,25 @@ stashing. It strips unsafe terminal controls at insertion, and normal submission
 additionally strips carriage returns. Large pastes use Pi-style collapsed
 markers; motions, selections and edits treat each marker atomically, and undo,
 registers, stash and editor replacement retain its payload. Counts apply to
-motions, operators, doubled line operators, `x`, `p/P` and `nG/ngg`; counts on
+motions, operators, doubled line operators, `x/X`, `r/s/S/D/C/Y/J/~`, `p/P` and `nG/ngg`; counts on
 insert entry, visual toggles, text objects and undo/redo are unsupported.
-Registers are lowercase `a-z` and the unnamed register. Unsupported `f`, `F`,
-`t`, `T`, `r`, `m` and `q` cancel pending commands and consume their argument.
+Registers are lowercase `a-z` and the unnamed register. Character finds
+`f/F/t/T` stay on the current line; `;` repeats and `,` reverses the find.
+`W/B/E/ge/gE`, bracket matching with `%`, `ib/ab/iB/aB`, replacement with `r`,
+joins with `J`, and `gu/gU/g~` case operators are supported. `Y` yanks to the
+end of the line. Visual `o/O` swaps selection ends and `u/U/~` changes case.
+Unsupported `m/q`, and `r` outside normal mode or with a pending operator,
+cancel pending commands and consume their argument.
+
+`/` and `?` capture up to 256 UTF-16 code units in the mode label without
+searching. Enter ends capture without submitting; Escape cancels. Backspace
+removes a grapheme, or cancels an empty query. Native editor actions are
+absorbed, app actions and extension shortcuts keep their normal priority, and
+bracketed paste appends control-stripped text to the query. The draft and
+selection stay unchanged unless a forwarded handler changes them. Capture also
+starts after pending `g` or text-object prefixes. Enter while awaiting a find
+or replace argument cancels that command without submitting. Real search and
+repeat-dot remain unsupported.
 Escape from insert mode also closes the completion popup. The exact supported vi
 command set is documented in [ADR 001](adr/001-editor.md).
 

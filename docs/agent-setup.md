@@ -97,12 +97,12 @@ mode. It needs no additional keybinding setup.
 
 ## Default thinking
 
-Set `"defaultThinkingLevel": "medium"` in user-scoped `settings.json` under the
+Set `"defaultThinkingLevel": "high"` in user-scoped `settings.json` under the
 resolved agent directory. Preserve the startup provider/model, explicit per-model
 thinking overrides, and unrelated settings. Report a missing or different value
 as drift during the read-only audit; obtain Ar's approval before editing.
 
-Completion: the saved local default is `medium`. Ask Ar to run `/reload` after
+Completion: the saved local default is `high`. Ask Ar to run `/reload` after
 changes; this startup default does not change the current session's effort or
 subagent profile thinking.
 

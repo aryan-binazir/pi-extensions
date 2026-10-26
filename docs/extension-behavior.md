@@ -48,15 +48,10 @@ end of the line. Visual `o/O` swaps selection ends and `u/U/~` changes case.
 Unsupported `m/q`, and `r` outside normal mode or with a pending operator,
 cancel pending commands and consume their argument.
 
-`/` and `?` capture up to 256 UTF-16 code units in the mode label without
-searching. Enter ends capture without submitting; Escape cancels. Backspace
-removes a grapheme, or cancels an empty query. Native editor actions are
-absorbed, app actions and extension shortcuts keep their normal priority, and
-bracketed paste appends control-stripped text to the query. The draft and
-selection stay unchanged unless a forwarded handler changes them. Capture also
-starts after pending `g` or text-object prefixes. Enter while awaiting a find
-or replace argument cancels that command without submitting. Real search and
-repeat-dot remain unsupported.
+`/` and `?` are unmapped commands; they cancel a pending count, operator or
+prefix and do not search. Enter while awaiting a find or replace argument
+cancels that command without submitting. Search and repeat-dot remain
+unsupported.
 Escape from insert mode also closes the completion popup. The exact supported vi
 command set is documented in [ADR 001](adr/001-editor.md).
 

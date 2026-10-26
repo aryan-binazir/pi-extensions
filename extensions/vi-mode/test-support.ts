@@ -42,7 +42,6 @@ export function editor(EditorClass: EditorConstructor<CustomEditor> = ViEditor):
 export function keys(e: { handleInput(data: string): void }, input: string): void {
   for (const key of input) e.handleInput(key);
 }
-/** A Vi editor focused inside Pi's real fullscreen TUI, fed through its terminal input path. */
 export function fullscreenEditor(): { tui: TuiAltScreen; editor: ViEditor; input(data: string): void } {
   let onInput: ((data: string) => void) | undefined;
   const terminal = {

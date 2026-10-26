@@ -34,12 +34,10 @@ type Block = {
   revision: unknown;
   lines: () => string[];
 };
-// The frame draws the divider above the input, so the editor's bottom rule
-// appears only when it carries a scroll indicator.
 class FramedEditor extends Editor {
-  bottomHidden = 0;
+  linesBelowView = 0;
   protected override renderBottomBorder(width: number, hiddenLineCount: number) {
-    this.bottomHidden = hiddenLineCount;
+    this.linesBelowView = hiddenLineCount;
     return super.renderBottomBorder(width, hiddenLineCount);
   }
 }
@@ -325,8 +323,8 @@ export default function btw(pi: ExtensionAPI) {
                 ...new Markdown(terminalText(reply), padding, 0, markdownTheme).render(w),
                 "",
               ];
-              const [editorTop, ...editorRest] = editor.render(w);
-              const input = editor.bottomHidden ? editorRest : editorRest.slice(0, -1);
+              const [editorTop, ...editorBelowTop] = editor.render(w);
+              const input = editor.linesBelowView ? editorBelowTop : editorBelowTop.slice(0, -1);
               const footer = [
                 ...wrapTextWithAnsi(terminalText(status), w),
                 editorTop,

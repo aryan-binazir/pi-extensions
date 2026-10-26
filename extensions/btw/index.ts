@@ -34,6 +34,16 @@ type Block = {
   revision: unknown;
   lines: () => string[];
 };
+// The frame draws the divider above the input, so the editor's bottom rule
+// appears only when it carries a scroll indicator.
+class FramedEditor extends Editor {
+  bottomHidden = 0;
+  protected override renderBottomBorder(width: number, hiddenLineCount: number) {
+    this.bottomHidden = hiddenLineCount;
+    return super.renderBottomBorder(width, hiddenLineCount);
+  }
+}
+
 type PaintedBlock = Omit<Block, "lines"> & {
   w: number;
   palette: string;
@@ -135,8 +145,8 @@ export default function btw(pi: ExtensionAPI) {
           const turns: { question: string; answer: string; error?: string }[] = [];
           let painted = new Map<number, PaintedBlock>();
           let questionCache: { w: number; palette: string; question: string; lines: string[] } | undefined;
-          const editor = new Editor(tui, {
-            borderColor: (s) => theme.fg("accent", s),
+          const editor = new FramedEditor(tui, {
+            borderColor: (s) => theme.fg("border", s),
             selectList: {
               selectedPrefix: (s) => s,
               selectedText: (s) => s,
@@ -312,19 +322,17 @@ export default function btw(pi: ExtensionAPI) {
               const turnLines = (question: string, reply: string) => [
                 ...userLines(question),
                 "",
-                ...new Markdown("Agent:", padding, 0, markdownTheme).render(w),
                 ...new Markdown(terminalText(reply), padding, 0, markdownTheme).render(w),
                 "",
               ];
+              const [editorTop, ...editorRest] = editor.render(w);
+              const input = editor.bottomHidden ? editorRest : editorRest.slice(0, -1);
               const footer = [
                 ...wrapTextWithAnsi(terminalText(status), w),
-                ...editor.render(w),
+                editorTop,
+                ...input,
               ].slice(-(Math.max(1, innerHeight - 2)));
-              const header = wrapTextWithAnsi(
-                "Side conversation · disposable · Esc closes and discards · PgUp/PgDn scroll",
-                w,
-              ).slice(0, Math.max(0, innerHeight - footer.length - 1));
-              const height = Math.max(0, innerHeight - header.length - footer.length);
+              const height = Math.max(0, innerHeight - footer.length);
               const blocks = turns.length + (busy ? 1 : 0) + pending.length;
               const blockAt = (index: number): Block => {
                 const turn = turns[index];
@@ -389,17 +397,28 @@ export default function btw(pi: ExtensionAPI) {
               const end = lines.length - scroll;
               const visible = lines.slice(Math.max(0, end - height), end);
               const content = [
-                ...header,
                 ...visible,
                 ...Array<string>(height - visible.length).fill(""),
                 ...footer,
               ];
               if (!framed) return content;
-              const border = (text: string) => theme.fg("borderAccent", text);
+              const border = (text: string) => theme.fg("border", text);
+              const edge = (left: string, right: string, title: string, note = "") => {
+                const labelled = (label: string, end: string) => {
+                  const fill = w - 2 - visibleWidth(label) - visibleWidth(end);
+                  return fill < 0 ? undefined : border(`${left}─`) + label + border("─".repeat(fill)) + end + border(`─${right}`);
+                };
+                const end = note && theme.fg("dim", ` ${note} `);
+                return labelled(title, end) ?? labelled(title, "") ?? border(`${left}${"─".repeat(w)}${right}`);
+              };
+              const divider = footer.length > input.length ? content.length - input.length - 1 : -1;
+              const row = (line: string, index: number) => index === divider
+                ? border("├") + line + border("┤")
+                : `${border("│")}${line}${" ".repeat(Math.max(0, w - visibleWidth(line)))}${border("│")}`;
               return [
-                border(`╭${"─".repeat(w)}╮`),
-                ...content.map((line) => `${border("│")}${line}${" ".repeat(Math.max(0, w - visibleWidth(line)))}${border("│")}`),
-                border(`╰${"─".repeat(w)}╯`),
+                edge("╭", "╮", theme.fg("accent", theme.bold(" btw ")) + theme.fg("dim", "side conversation "), "discarded on close"),
+                ...content.map(row),
+                edge("╰", "╯", theme.fg("dim", " Enter ask · PgUp/PgDn scroll · Esc close ")),
               ];
             },
           };

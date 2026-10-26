@@ -12,6 +12,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
   const hooks: Record<string, any> = {};
   const requests: any[] = [];
   const bgColors: string[] = [];
+  const fgColors: string[] = [];
   let renderRequests = 0;
   let component: any;
   let uiOptions: any;
@@ -42,7 +43,11 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
           component = factory(
             { requestRender() { renderRequests++; }, terminal },
             {
-              fg: (_: string, value: string) => value,
+              fg: (color: string, value: string) => {
+                fgColors.push(color);
+                return value;
+              },
+              bold: (value: string) => value,
               bg: (color: string, value: string) => {
                 bgColors.push(color);
                 return `\x1b[48;5;236m${value}\x1b[49m`;
@@ -69,6 +74,7 @@ function host(chunks: any[] = [{ type: "text_delta", delta: "Side answer" }]) {
     hooks,
     requests,
     bgColors,
+    fgColors,
     options: () => uiOptions,
     get renderRequests() { return renderRequests; },
     terminal,
@@ -181,9 +187,9 @@ test("BTW fills its overlay from opening through the first answer and resize", a
     overlayOptions: { width: "90%", maxHeight: "90%", offsetY: -1 },
   });
   assert.equal(h.lines().length, 36);
-  assert.match(h.lines()[0], /^╭─+╮$/);
-  assert.match(h.render(), /Side conversation · disposable/);
-  assert.match(h.lines().at(-1)!, /^╰─+╯$/);
+  assert.match(h.lines()[0], /^╭─ btw side conversation ─+ discarded on close ─╮$/);
+  assert.match(h.lines().at(-1)!, /^╰─ Enter ask · PgUp\/PgDn scroll · Esc close ─+╯$/);
+  assert.doesNotMatch(h.render(), /Side conversation · disposable/);
   assert.ok(h.lines().every((line) => visibleWidth(line) === 80));
   h.key("First question");h.key("\r");
   assert.equal(h.lines().length, 36);
@@ -194,6 +200,55 @@ test("BTW fills its overlay from opening through the first answer and resize", a
   for (const [rows, height] of [[60, 54], [20, 18], [5, 4], [1, 1]]) {
     h.terminal.rows = rows;
     assert.equal(h.lines(20).length, height, `${rows} terminal rows`);
+  }
+  h.key("\u001b");await result;
+});
+
+test("BTW frames the transcript and input with one blue divider and no doubled rules", async () => {
+  const h = host();
+  const result = h.commands.btw.handler("Question", h.ctx);
+  await tick();
+  for (const width of [80, 24]) {
+    const lines = h.lines(width).map((line) => stripTerminalSequences(line));
+    assert.ok(lines.every((line) => visibleWidth(line) === width), `${width} columns`);
+    const dividers = lines.flatMap((line, i) => /^├─+┤$/.test(line) ? [i] : []);
+    assert.deepEqual(dividers, [lines.length - 3], `${width} columns`);
+    assert.match(lines.at(-2)!, /^│ *│$/);
+    assert.deepEqual(lines.slice(-3).filter((line) => /^[│├]─+[│┤]$/.test(line)).length, 1);
+  }
+  assert.ok(h.fgColors.includes("border"));
+  assert.ok(!h.fgColors.includes("borderAccent"));
+  h.key("\u001b");await result;
+});
+
+test("BTW keeps the input's scroll indicators inside the frame", async () => {
+  const h = host();
+  const result = h.commands.btw.handler("", h.ctx);
+  for (let i = 1; i <= 20; i++) {
+    h.key(`line ${i}`);
+    if (i < 20) h.key("\n");
+  }
+  let lines = h.lines().map((line) => stripTerminalSequences(line));
+  assert.ok(lines.every((line) => visibleWidth(line) === 80));
+  assert.match(lines.find((line) => line.startsWith("├"))!, /^├─+ ↑ 8 more ─+┤$/);
+  assert.match(lines.at(-2)!, /line 20/);
+  for (let i = 0; i < 19; i++) h.key("\x1b[A");
+  lines = h.lines().map((line) => stripTerminalSequences(line));
+  assert.match(lines.find((line) => line.startsWith("├"))!, /^├─+┤$/);
+  assert.match(lines.at(-2)!, /^│─+ ↓ 8 more ─+│$/);
+  assert.ok(lines.every((line) => visibleWidth(line) === 80));
+  h.key("\u001b");await result;
+});
+
+test("BTW keeps every frame row at the overlay width when the title cannot fit", async () => {
+  const h = host();
+  const result = h.commands.btw.handler("Question", h.ctx);
+  await tick();
+  for (const width of [3, 4, 8, 12, 20, 30]) {
+    const lines = h.lines(width);
+    assert.ok(lines.every((line) => visibleWidth(line) === width), `${width} columns`);
+    assert.match(stripTerminalSequences(lines[0]), /^╭.*╮$/);
+    assert.match(stripTerminalSequences(lines.at(-1)!), /^╰.*╯$/);
   }
   h.key("\u001b");await result;
 });
@@ -356,7 +411,7 @@ for (const failure of ["auth", "stream", "partial stream"]) {
   });
 }
 
-test("side chat uses normal user backgrounds and Agent labels while streaming and completed", async () => {
+test("side chat uses normal user backgrounds and unlabeled replies while streaming and completed", async () => {
   const h = host();
   let finish!: () => void;
   const waiting = new Promise<void>((resolve) => { finish = resolve; });
@@ -381,10 +436,7 @@ test("side chat uses normal user backgrounds and Agent labels while streaming an
       const reply = lines.find((line) => stripTerminalSequences(line).includes("Assistant reply"));
       assert.ok(reply);
       assert.ok(!reply.includes("\x1b[48;5;236m"));
-      const label = lines.find((line) => stripTerminalSequences(line).includes("Agent:"));
-      assert.ok(label, "assistant reply is labeled Agent:");
-      assert.ok(!label.includes("\x1b[48;5;236m"));
-      assert.doesNotMatch(stripTerminalSequences(lines.join("\n")), /You:|\bBTW\b|Assistant:|\*\*/);
+      assert.doesNotMatch(stripTerminalSequences(lines.join("\n")), /Agent:|You:|\bBTW\b|Assistant:|\*\*/);
     }
     assert.deepEqual([...new Set(h.bgColors)], ["userMessageBg"]);
   };

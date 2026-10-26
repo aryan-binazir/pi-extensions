@@ -16,6 +16,7 @@ import {
   clearBaseUndo,
   cancelAutocomplete,
   clampOffset,
+  openTranscriptSearch,
   readPastes, writePastes, pasteMarkers, expandPastes, collapsePaste,
   type PasteState, markViEditor, invalidateTextCache, NEEDS_PROJECTION,
 } from "./adapter.ts";
@@ -51,7 +52,6 @@ const CLOSING: Record<string, string> = {
 const OPENING: Record<string, string> = { ")": "(", "]": "[", "}": "{", ">": "<" };
 const BRACKETS = "()[]{}";
 const MAX_DRAFT = 1024 * 1024;
-const MAX_SEARCH = 256;
 const CONTROLS_EXCEPT_TAB_LF_CR = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
 const CONTROLS_EXCEPT_TAB_LF = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 function safeDraft(text: string): string {
@@ -114,7 +114,6 @@ class ViMode {
   private argumentSurrogate = "";
   private argumentCount = 1;
   private lastFind: { command: string; char: string } | undefined;
-  private search: string | undefined;
   private preferredColumn: number | undefined;
   private visualScroll = 0;
   private boundaryText = "";
@@ -186,7 +185,6 @@ class ViMode {
     this.registerPending = false;
     this.argument = "";
     this.argumentSurrogate = "";
-    this.search = undefined;
   }
   private cancel(): void {
     this.resetPending();
@@ -894,10 +892,6 @@ class ViMode {
   }
   private consumePaste(data: string): void {
     this.clearGhost();
-    if (this.search !== undefined) {
-      this.appendSearch(data.replace(/[\x00-\x1f\x7f-\x9f]/g, ""));
-      return;
-    }
     const payload = safeDraft(data.replace(/\x1b\[(\d+);5u/g, (sequence, code: string) => {
       const cp = Number(code);
       return cp >= 97 && cp <= 122 ? String.fromCharCode(cp - 96)
@@ -920,59 +914,8 @@ class ViMode {
     this.insertion = undefined;
     this.move(p + visible.length);
   }
-  private appendSearch(text: string): void {
-    for (const { segment } of segmenter().segment(text)) {
-      if (this.search!.length - 1 + segment.length > MAX_SEARCH) return;
-      this.search += segment;
-    }
-  }
-  private searchKey(data: string): void {
-    const keybindings = this.base.keybindings;
-    if (matchesKey(data, "escape") || matchesKey(data, "enter") || keybindings?.matches(data, "tui.input.submit")) {
-      this.search = undefined;
-      return;
-    }
-    if (matchesKey(data, "backspace")) {
-      const body = this.search!.slice(1);
-      let last = 0;
-      for (const { index } of segmenter().segment(body)) last = index;
-      this.search = body ? this.search![0] + body.slice(0, last) : undefined;
-      return;
-    }
-    if (matchesKey(data, "ctrl+r")) return;
-    if (this.editor.onExtensionShortcut?.(data)) return;
-    let application = !!keybindings?.matches(data, "app.clipboard.pasteImage");
-    if (keybindings?.matches(data, "app.interrupt") && !this.editor.isShowingAutocomplete() &&
-        (this.editor.onEscape || this.editor.actionHandlers.has("app.interrupt"))) application = true;
-    if (keybindings?.matches(data, "app.exit") && !this.text()) application = true;
-    if (!application && (keybindings?.matches(data, "tui.editor.historyPrevious") || keybindings?.matches(data, "tui.editor.historyNext"))) return;
-    if (!application) {
-      for (const action of this.editor.actionHandlers.keys()) {
-        if (action !== "app.interrupt" && action !== "app.exit" && keybindings?.matches(data, action)) {
-          application = true;
-          break;
-        }
-      }
-    }
-    if (!application) {
-      const key = decodePrintable(data) ?? data;
-      if (!/[\x00-\x1f\x7f-\x9f]/.test(key)) {
-        this.appendSearch(key);
-        return;
-      }
-      if (Object.keys(keybindings?.getResolvedBindings() ?? {}).some(id => id.startsWith("tui.") && keybindings!.matches(data, id))) return;
-    }
-    const shortcut = this.editor.onExtensionShortcut;
-    this.editor.onExtensionShortcut = undefined;
-    try { this.baseInput(data); }
-    finally { this.editor.onExtensionShortcut ??= shortcut; }
-  }
   private handleKey(data: string): void {
     if (this.mode !== "insert" || matchesKey(data, "escape")) this.clearGhost();
-    if (this.search !== undefined) {
-      this.searchKey(data);
-      return;
-    }
     if (matchesKey(data, "escape")) {
       const discarded = this.discardArgument;
       this.discardArgument = false;
@@ -1039,7 +982,7 @@ class ViMode {
     }
     if (data === "/" || data === "?") {
       this.cancel();
-      this.search = data;
+      openTranscriptSearch(this.tui);
       return;
     }
     const visual = this.mode === "visual" || this.mode === "line";
@@ -1328,7 +1271,7 @@ class ViMode {
     this.tui.requestRender();
   }
   private renderBottomBorder(width: number, hidden: number): string {
-    const pending = this.search ?? `${this.count}${this.op}${this.prefix}${this.argument}`;
+    const pending = `${this.count}${this.op}${this.prefix}${this.argument}`;
     const label = truncateToWidth(
       ` ${this.mode.toUpperCase()}${pending ? ` ${pending}` : ""} `,
       width,

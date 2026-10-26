@@ -1,10 +1,9 @@
 import { visibleWidth, CURSOR_MARKER, CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { editor, keys } from "./test-support.ts";
+import { editor, fullscreenEditor, keys } from "./test-support.ts";
 import type { ViEditor } from "./editor.ts";
 import { restoreRawDraft, placeCursor } from "./adapter.ts";
-import { KeybindingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 function undoRedoRestoresPut(e: ViEditor, before: string) {
   const visible = e.getText(),
     expanded = e.getExpandedText();
@@ -2098,42 +2097,50 @@ test("visual X, D, Y, C and S act on whole selected lines and visual s changes t
     e.dispose();
   }
 });
-test("/ and ? absorb a search line without editing or submitting the draft", () => {
-  for (const search of ["/", "?"]) {
-    const e = editor();
-    const submitted: string[] = [];
-    e.onSubmit = (text) => { submitted.push(text); };
-    e.setText("abc def");
-    keys(e, "\x1b0d" + search + "de");
-    assert.ok(e.render(40).at(-1)!.endsWith(` NORMAL ${search}de `));
-    e.handleInput("\r");
-    assert.deepEqual(submitted, [], "Enter ends the search without submitting");
-    assert.equal(e.getText(), "abc def");
-    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
-    keys(e, "x");
-    assert.equal(e.getText(), "bc def", "the pending operator was cancelled");
+test("/ and ? open Pi's fullscreen transcript search, which takes the following keys", () => {
+  for (const start of ["\x1b0", "\x1b0vl", "\x1b03d"]) {
+    for (const key of ["/", "?", "\x1b[47u", "\x1b[63;2u"]) {
+      const { tui, editor: e, input } = fullscreenEditor();
+      e.setText("abc def");
+      for (const k of start) input(k);
+      input(key);
+      for (const k of "d/e\r") input(k);
+      assert.ok(tui.hasOverlay(), start + key);
+      assert.equal(e.getText(), "abc def", start + key + " leaves the draft alone");
+      input("\x1b");
+      assert.ok(!tui.hasOverlay(), start + key + " Escape closes the search");
+      input("x");
+      assert.equal(e.getText(), start === "\x1b0vl" ? "c def" : "bc def", start + key + " returns to the editor");
+      tui.stop();
+    }
+  }
+});
+test("/ and ? outside fullscreen cancel pending commands and capture nothing", () => {
+  for (const key of ["/", "?"]) {
+    for (const pending of ["", "3", "d", "di", "g", '"a']) {
+      const e = editor(); e.setText("abc def"); keys(e, "\x1b0" + pending + key);
+      assert.equal(e.getText(), "abc def", pending + key);
+      assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), pending + key);
+      keys(e, "de");
+      assert.equal(e.getText(), " def", pending + key + " leaves later keys as commands");
+      e.dispose();
+    }
+    for (const [visual, label, left] of [["vl", "VISUAL", "c def\nxyz"], ["V", "LINE", "xyz"]]) {
+      const e = editor(); e.setText("abc def\nxyz"); keys(e, "\x1bgg0" + visual + key);
+      assert.ok(e.render(40).at(-1)!.endsWith(` ${label} `), visual + key);
+      keys(e, "d");
+      assert.equal(e.getText(), left, visual + key + " keeps the selection");
+      e.dispose();
+    }
+    const e = editor(); const submitted: string[] = [];
+    e.onSubmit = text => { submitted.push(text); };
+    e.setText("abc"); keys(e, "\x1b" + key); e.handleInput("\r");
+    assert.deepEqual(submitted, ["abc"], key + " leaves Enter submitting");
     e.dispose();
   }
 });
-test("search input takes decoded Unicode printables, edits whole graphemes and is bounded", () => {
-  const e = editor(); e.setText("abc"); keys(e, "\x1b0/a");
-  e.handleInput("😀"); e.handleInput("\x1b[128512u"); e.handleInput("é");
-  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /a😀😀é "));
-  e.handleInput("\x7f"); e.handleInput("\x7f");
-  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /a😀 "));
-  e.handleInput("\x7f"); e.handleInput("\x7f");
-  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL / "));
-  e.handleInput("\x7f");
-  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), "Backspace on an empty search cancels it");
-  keys(e, "/");
-  e.handleInput("a".repeat(300));
-  assert.ok(e.render(400).at(-1)!.endsWith(` NORMAL /${"a".repeat(256)} `));
-  for (const width of [3, 8, 20]) assert.equal(visibleWidth(e.render(width).at(-1)!), width);
-  assert.equal(e.getText(), "abc");
-  e.dispose();
-});
-test("Escape cancels a search or pending argument without reaching Pi, then interrupts as usual", () => {
-  for (const pending of ["/x", "f", "r", "2d"]) {
+test("Escape cancels a pending argument without reaching Pi, then interrupts as usual", () => {
+  for (const pending of ["f", "r", "2d"]) {
     const e = editor(); let interrupts = 0;
     e.onEscape = () => { interrupts++; };
     e.setText("abc"); keys(e, "\x1b0" + pending);
@@ -2144,70 +2151,10 @@ test("Escape cancels a search or pending argument without reaching Pi, then inte
     assert.equal(interrupts, 1, pending);
     e.dispose();
   }
-  for (const end of ["\x1b", "\r", "\n"]) {
-    const e = editor(); e.setText("abc"); keys(e, "\x1b0vl/x" + end);
-    assert.ok(e.render(40).at(-1)!.endsWith(" VISUAL "), JSON.stringify(end));
-    keys(e, "d");
-    assert.equal(e.getText(), "c", "the selection survives the search");
-    e.dispose();
-  }
 });
-test("search absorbs native editing keys and forwards app actions and extension shortcuts", () => {
-  const native = ["\x1b[C", "\x1b[D", "\x1b[A", "\x1b[B", "\x17", "\x15", "\x0b", "\x1b[3~", "\t", "\x1b[13;2u", "\x03", "\x1b[H", "\x1b[F"];
-  for (const key of native) {
-    const e = editor(); const submitted: string[] = [];
-    e.onSubmit = (text) => { submitted.push(text); };
-    e.setText("one two\nthree"); keys(e, "\x1bgg0w/ab");
-    e.handleInput(key);
-    assert.equal(e.getText(), "one two\nthree", JSON.stringify(key));
-    assert.deepEqual(e.getCursor(), { line: 0, col: 4 }, JSON.stringify(key));
-    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /ab "), JSON.stringify(key));
-    e.handleInput("\r");
-    assert.deepEqual(submitted, [], JSON.stringify(key));
-    e.dispose();
-  }
-  const e = editor(); e.setText("keep"); keys(e, "\x1b/x");
-  let forwarded = "", selected = 0;
-  e.onExtensionShortcut = (data) => {
-    if (data !== "\x13") return false;
-    forwarded = data;
-    return true;
-  };
-  e.onAction("app.model.select", () => { selected++; });
-  e.handleInput("\x13");
-  assert.equal(forwarded, "\x13");
-  e.handleInput("\x0c");
-  assert.equal(selected, 1, "registered app actions still run");
-  assert.equal(e.getText(), "keep");
-  e.dispose();
-});
-test("a bracketed paste during search joins the search instead of the draft", () => {
-  const e = editor(); const submitted: string[] = [];
-  e.onSubmit = (text) => { submitted.push(text); };
-  e.setText("abc"); keys(e, "\x1b0/");
-  e.handleInput("\x1b[20"); e.handleInput("0~x\ty\nz\x1b[2"); e.handleInput("01~\r");
-  assert.equal(e.getText(), "abc");
-  assert.deepEqual(submitted, []);
-  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "));
-  keys(e, "/"); e.handleInput("\x1b[200~xyz\x1b[201~");
-  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /xyz "));
-  e.setText("replaced");
-  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL "), "draft replacement clears the search");
-  e.dispose();
-});
-test("search captures queries after pending text-object and g prefixes", () => {
-  for (const prefix of ["di", "da", "g", "gUi", "gUa", "vi", "va"]) {
-    for (const search of ["/", "?"]) {
-      const e = editor(); const submitted: string[] = [];
-      e.onSubmit = text => { submitted.push(text); };
-      e.setText("abc def"); keys(e, "\x1bgg0" + prefix + search + "de\r");
-      assert.equal(e.getText(), "abc def", prefix + search);
-      assert.deepEqual(submitted, [], prefix + search);
-      e.dispose();
-    }
-  }
+test("find and replace still take / as their argument", () => {
   const e = editor(); e.setText("a/b"); keys(e, "\x1b0f/x");
-  assert.equal(e.getText(), "ab", "a find still consumes its slash argument");
+  assert.equal(e.getText(), "ab");
   keys(e, "0r/"); assert.equal(e.getText(), "/b");
   e.dispose();
 });
@@ -2224,55 +2171,6 @@ test("submit keys cancel find and replace arguments without submitting", () => {
       e.dispose();
     }
   }
-});
-test("search absorbs history bindings even when an app action shares the key", () => {
-  const e = editor();
-  const bindings = (e as unknown as { keybindings: KeybindingsManager }).keybindings;
-  bindings.setUserBindings({ "tui.editor.historyPrevious": "up", "app.model.cycleForward": "up" });
-  e.addToHistory("old history");
-  let cycled = 0;
-  e.onAction("app.model.cycleForward", () => { cycled++; });
-  e.setText("keep"); keys(e, "\x1b0/ab"); e.handleInput("\x1b[A");
-  assert.equal(e.getText(), "keep");
-  assert.equal(cycled, 0);
-  assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /ab "));
-  e.dispose();
-});
-test("search preserves extension, image-paste and app handlers before native editing", () => {
-  for (const kind of ["extension", "image", "app", "interrupt", "exit"]) {
-    const e = editor();
-    const bindings = (e as unknown as { keybindings: KeybindingsManager }).keybindings;
-    e.setText(kind === "exit" ? "" : "keep"); keys(e, "\x1b0/ab");
-    let handled = 0;
-    const input = kind === "app" ? "z" : kind === "exit" ? "\x04" : "\x15";
-    if (kind === "extension") e.onExtensionShortcut = () => { handled++; return true; };
-    if (kind === "image") {
-      bindings.setUserBindings({ "app.clipboard.pasteImage": "ctrl+u", "tui.editor.historyPrevious": "ctrl+u" });
-      e.onPasteImage = () => { handled++; };
-    }
-    if (kind === "app") {
-      bindings.setUserBindings({ "app.model.select": "z" });
-      e.onAction("app.model.select", () => { handled++; });
-    }
-    if (kind === "interrupt") {
-      bindings.setUserBindings({ "app.interrupt": "ctrl+u", "tui.editor.historyPrevious": "ctrl+u" });
-      e.onEscape = () => { handled++; };
-    }
-    if (kind === "exit") e.onCtrlD = () => { handled++; };
-    e.handleInput(input);
-    assert.equal(handled, 1, kind);
-    assert.equal(e.getText(), kind === "exit" ? "" : "keep", kind);
-    assert.ok(e.render(40).at(-1)!.endsWith(" NORMAL /ab "), kind);
-    e.dispose();
-  }
-  const e = editor(); e.setText("keep"); keys(e, "\x1b0/ab");
-  let checked = 0;
-  e.onExtensionShortcut = () => { checked++; return false; };
-  e.handleInput("\x13");
-  assert.equal(checked, 1, "unhandled forwarded keys check the extension once");
-  e.handleInput("\x12");
-  assert.equal(checked, 1, "Ctrl+R remains absorbed before extension handlers");
-  e.dispose();
 });
 test("case operators and visual mode retain undo after pending text-object prefixes", () => {
   for (const input of ["xguiu", "xguau", "xgUiu", "xviu", "xvau"]) {

@@ -61,7 +61,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | [Regen](docs/regen.md) | Names new threads automatically; `/regen-name` regenerates a short title. Defaults to Luna 6 / low, with a project-local model override. |
 | Vi mode | Modal editor with motions, operators, registers, and undo. |
 | Prompt stash | `Ctrl+S` stashes or swaps the main editor draft. |
-| [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape or Ctrl-X, Ctrl-S stops the active run and starts the next queued user message; no queued message means stop. The chord preserves Vi insert mode. |
+| [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape or Ctrl+Enter stops the active run and starts the next queued user message; no queued message means stop. Ctrl+Enter preserves Vi insert mode. |
 | [Subagents](docs/subagents.md) | Background workers, model profiles, approved TypeScript workflows; `alt+r` toggles the compact/full panel. |
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |

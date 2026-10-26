@@ -159,8 +159,7 @@ test('version adapters promote consecutive queued messages without claiming thei
     await h.session.followUp('Second');
     await h.session.followUp('Third');
     h.app.editor.setText('draft');
-    h.app.editor.handleInput('\x18');
-    h.app.editor.handleInput('\x13');
+    h.app.editor.handleInput('\x1b[13;5u');
     await running;
     await new Promise(resolve => setImmediate(resolve));
     if (version.startsWith('foreign')) {
@@ -173,13 +172,11 @@ test('version adapters promote consecutive queued messages without claiming thei
     assert.deepEqual(h.users(), ['Original', 'Second']);
     await second.promise;
     assert.deepEqual(h.session.getFollowUpMessages(), ['Third']);
-    h.app.editor.handleInput('\x18');
-    h.app.editor.handleInput('\x13');
+    h.app.editor.handleInput('\x1b[13;5u');
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(h.users(), ['Original', 'Second', 'Third']);
     await third.promise;
-    h.app.editor.handleInput('\x18');
-    h.app.editor.handleInput('\x13');
+    h.app.editor.handleInput('\x1b[13;5u');
     await h.session.waitForIdle();
     await running;
     assert.equal(h.app.editor.getText(), 'draft');
@@ -387,11 +384,12 @@ test('an unselected extension leaves stock Escape queue-to-editor behavior intac
 });
 
 for (const configuration of [
-  { name: 'vi first', extra: [viMode, stash], before: [], x: '\x18', s: '\x13', kitty: false },
-  { name: 'stash first', extra: [stash, viMode], before: [], x: '\x18', s: '\x13', kitty: false },
-  { name: 'Escape last, Kitty', extra: [], before: [viMode, stash], x: '\x1b[120;5u', s: '\x1b[115;5u', kitty: true },
-  { name: 'Escape last, modifyOtherKeys', extra: [], before: [viMode, stash], x: '\x1b[27;5;120~', s: '\x1b[27;5;115~', kitty: false },
-]) test(`Ctrl-X Ctrl-S promotes the next queued message while Vi stays in insert mode, ${configuration.name}`, async t => {
+  { name: 'vi first, CSI-u', extra: [viMode, stash], before: [], key: '\x1b[13;5u', kitty: false },
+  { name: 'stash first, CSI-u', extra: [stash, viMode], before: [], key: '\x1b[13;5u', kitty: false },
+  { name: 'Escape last, Kitty', extra: [], before: [viMode, stash], key: '\x1b[13;5u', kitty: true },
+  { name: 'Escape last, Kitty numpad Return', extra: [], before: [viMode, stash], key: '\x1b[57414;5u', kitty: true },
+  { name: 'Escape last, modifyOtherKeys', extra: [], before: [viMode, stash], key: '\x1b[27;5;13~', kitty: false },
+]) test(`Ctrl+Enter promotes the next queued message while Vi stays in insert mode, ${configuration.name}`, async t => {
   const h = await fixture(t, configuration.extra, true, configuration.before);
   setKittyProtocolActive(configuration.kitty);
   t.after(() => setKittyProtocolActive(false));
@@ -404,36 +402,34 @@ for (const configuration of [
   h.app.editor.onAction('app.message.copy', () => { copies++; });
   h.app.editor.handleInput('a');
   h.app.editor.handleInput('b');
-  h.app.editor.handleInput(configuration.x);
-  h.app.editor.handleInput(configuration.s);
+  h.app.editor.handleInput(configuration.key);
   assert.equal(h.session.agent.signal?.aborted, true);
   await promoted.promise;
   h.app.editor.handleInput('c');
   assert.equal(h.app.editor.getText(), 'abc');
   assert.equal(copies, 0);
   assert.deepEqual(h.users(), ['Original', 'Next']);
-  h.app.editor.handleInput(configuration.x);
-  h.app.editor.handleInput(configuration.s);
+  h.app.editor.handleInput(configuration.key);
   await h.session.waitForIdle();
   await running;
 });
 
-test('fragmented bracketed paste containing Ctrl-X Ctrl-S cannot interrupt the run', async t => {
+test('fragmented bracketed paste containing Ctrl+Enter cannot interrupt the run', async t => {
   const h = await fixture(t, [viMode, stash]);
   const first = deferred();
   h.provider.setResponses([h.blocked(first)]);
   const running = h.session.prompt('Original');
   await first.promise;
   h.app.editor.onAction('app.message.copy', () => assert.fail('paste must not copy'));
-  for (const chunk of ['\x1b[200~before', '\x18', '\x13', 'after\x1b[201~'])
+  for (const chunk of ['\x1b[200~before', '\x1b[13;5u', 'after\x1b[201~'])
     h.app.editor.handleInput(chunk);
   assert.equal(h.session.agent.signal?.aborted, false);
-  assert.equal(h.app.editor.getText(), 'beforeafter');
+  assert.equal(h.app.editor.getText(), 'before[13;5uafter');
   await h.session.abort();
   await running;
 });
 
-for (const extensions of [[], [viMode, stash], [stash, viMode]]) test(`Ctrl-X Ctrl-S works after a real reload, ${extensions.length === 0 ? 'stock' : extensions[0] === viMode ? 'vi first' : 'stash first'}`, async t => {
+for (const extensions of [[], [viMode, stash], [stash, viMode]]) test(`Ctrl+Enter works after a real reload, ${extensions.length === 0 ? 'stock' : extensions[0] === viMode ? 'vi first' : 'stash first'}`, async t => {
   const h = await fixture(t, extensions);
   await h.session.reload();
   const first = deferred(), promoted = deferred();
@@ -443,13 +439,11 @@ for (const extensions of [[], [viMode, stash], [stash, viMode]]) test(`Ctrl-X Ct
   await h.session.followUp('Next');
   h.app.editor.onAction('app.message.copy', () => {});
   h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.editor.handleInput('\x1b[13;5u');
   assert.equal(h.session.agent.signal?.aborted, true);
   await promoted.promise;
   assert.equal(h.app.editor.getText(), 'draft');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.editor.handleInput('\x1b[13;5u');
   await h.session.waitForIdle();
   await running;
 });
@@ -463,73 +457,62 @@ test('standalone Ctrl-S still stashes and restores the draft immediately', async
   assert.equal(h.app.editor.getText(), 'draft');
 });
 
-for (const [encoding, ctrlX] of [['legacy', '\x18'], ['Kitty', '\x1b[120;5u'], ['modifyOtherKeys', '\x1b[27;5;120~']]) test(`standalone ${encoding} Ctrl-X still copies after the prefix timeout`, async t => {
+test('Enter still submits the draft and Shift+Enter inserts a newline', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  const submitted: string[] = [];
+  h.app.editor.onSubmit = (text: string) => { submitted.push(text); };
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput('\r');
+  assert.deepEqual(submitted, ['draft']);
+  h.app.editor.setText('next');
+  h.app.editor.handleInput('\x1b[13;2u');
+  assert.equal(h.app.editor.getText(), 'next\n');
+  assert.deepEqual(submitted, ['draft']);
+});
+
+for (const [encoding, ctrlX] of [['legacy', '\x18'], ['Kitty', '\x1b[120;5u'], ['modifyOtherKeys', '\x1b[27;5;120~']]) test(`standalone ${encoding} Ctrl-X still copies immediately`, async t => {
   const h = await fixture(t, [viMode, stash]);
   setKittyProtocolActive(encoding === 'Kitty');
   t.after(() => setKittyProtocolActive(false));
-  t.mock.timers.enable({ apis: ['setTimeout'] });
   let copied: string | undefined;
   h.app.editor.onAction('app.message.copy', () => { copied = h.app.editor.getText(); });
   h.app.editor.setText('draft');
   h.app.editor.handleInput(ctrlX);
-  t.mock.timers.tick(749);
-  assert.equal(copied, undefined);
-  t.mock.timers.tick(1);
-  await new Promise(resolve => setImmediate(resolve));
   assert.equal(copied, 'draft');
   assert.equal(h.app.editor.getText(), 'draft');
 });
 
-test('an unrelated next key copies first and then remains available to Vi insertion', async t => {
+test('Ctrl-X copies immediately and leaves the next key available to Vi insertion', async t => {
   const h = await fixture(t, [viMode, stash]);
   const copies: string[] = [];
   h.app.editor.onAction('app.message.copy', () => { copies.push(h.app.editor.getText()); });
   h.app.editor.handleInput('a');
   h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('b');
   assert.deepEqual(copies, ['a']);
+  h.app.editor.handleInput('b');
   assert.equal(h.app.editor.getText(), 'ab');
 });
 
-test('a repeated Ctrl-X copies the first prefix and allows Ctrl-S to complete the second', async t => {
+test('the former Ctrl-X Ctrl-S chord copies and stashes without interrupting', async t => {
   const h = await fixture(t, [viMode, stash]);
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
   let copies = 0;
   h.app.editor.onAction('app.message.copy', () => { copies++; });
   h.app.editor.setText('draft');
   h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
   assert.equal(copies, 1);
-  assert.equal(h.app.editor.getText(), 'draft');
-});
-
-test('Ctrl-S waiting at prefix expiry completes the chord before delayed copy', async t => {
-  const h = await fixture(t, [viMode, stash]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  let copies = 0;
-  h.app.editor.onAction('app.message.copy', () => { copies++; });
-  h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x18');
-  t.mock.timers.tick(750);
   h.app.editor.handleInput('\x13');
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(copies, 0);
-  assert.equal(h.app.editor.getText(), 'draft');
-});
-
-test('a late Ctrl-S cannot complete a prefix whose timer was delayed by a busy event loop', async t => {
-  const h = await fixture(t, [viMode, stash]);
-  let now = 0, copies = 0;
-  t.mock.method(performance, 'now', () => now);
-  h.app.editor.onAction('app.message.copy', () => { copies++; });
-  h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x18');
-  now = 1000;
-  h.app.editor.handleInput('\x13');
-  assert.equal(copies, 1);
   assert.equal(h.app.editor.getText(), '');
+  assert.equal(h.session.agent.signal?.aborted, false);
+  assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
   h.app.editor.handleInput('\x13');
   assert.equal(h.app.editor.getText(), 'draft');
+  await h.session.abort();
+  await running;
 });
 
 test('the key after a forwarded Ctrl-X action reaches the newly focused component', async t => {
@@ -545,100 +528,63 @@ test('the key after a forwarded Ctrl-X action reaches the newly focused componen
   assert.equal(h.app.editor.getText(), 'draft');
 });
 
-test('direct reload retires a pending copy before an earlier shutdown handler yields', async t => {
-  const shuttingDown = deferred(), release = deferred();
-  t.after(() => release.resolve());
-  const h = await fixture(t, [], true, [pi => pi.on('session_shutdown', async event => {
-    if (event.reason === 'reload') { shuttingDown.resolve(); await release.promise; }
-  })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  let copies = 0;
-  h.app.editor.onAction('app.message.copy', () => { copies++; });
-  h.app.editor.handleInput('\x18');
-  const reloading = h.session.reload();
-  await shuttingDown.promise;
-  t.mock.timers.tick(750);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(copies, 0);
-  release.resolve();
-  await reloading;
-});
-
-test('an idle chord preserves the Bash draft and never triggers double-Escape navigation', async t => {
+test('idle Ctrl+Enter preserves the Bash draft and never triggers double-Escape navigation', async t => {
   const h = await fixture(t, [viMode, stash]);
   h.settingsManager.setDoubleEscapeAction('tree');
   h.app.lastEscapeTime = Date.now();
-  h.app.showTreeSelector = () => assert.fail('idle chord must not open the tree');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.showTreeSelector = () => assert.fail('idle Ctrl+Enter must not open the tree');
+  h.app.editor.handleInput('\x1b[13;5u');
   assert.equal(h.app.editor.getText(), '');
   h.app.isBashMode = true;
   h.app.editor.setText('!echo synthetic');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.editor.handleInput('\x1b[13;5u');
   assert.equal(h.app.editor.getText(), '!echo synthetic');
 });
 
-test('a pending copy is discarded when editor focus moves to a dialog', async t => {
+test('Ctrl+Enter reaches a focused dialog without changing the main draft', async t => {
   const h = await fixture(t, [viMode, stash]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  h.app.editor.onAction('app.message.copy', () => assert.fail('dialog focus must discard pending copy'));
-  h.app.editor.handleInput('\x18');
-  h.app.ui.getFocusedComponent = () => new Container();
-  t.mock.timers.tick(750);
-  h.app.ui.getFocusedComponent = () => h.app.editor;
+  const received: string[] = [];
+  const dialog = new Input();
+  dialog.handleInput = data => { received.push(data); };
   h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x13');
-  assert.equal(h.app.editor.getText(), '');
-});
-
-test('replacing the editor discards a pending copy and preserves the chord on the new editor', async t => {
-  const h = await fixture(t, [viMode, stash]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const previous = h.app.editor;
-  previous.onAction('app.message.copy', () => assert.fail('retired editor must not copy'));
-  previous.handleInput('\x18');
-  h.app.setCustomEditorComponent(undefined);
-  t.mock.timers.tick(750);
-  h.app.editor.onAction('app.message.copy', () => assert.fail('chord must not copy'));
-  h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
-  t.mock.timers.tick(750);
+  h.app.ui.getFocusedComponent = () => dialog;
+  h.app.editor.handleInput('\x1b[13;5u');
+  assert.deepEqual(received, ['\x1b[13;5u']);
   assert.equal(h.app.editor.getText(), 'draft');
 });
 
-test('disabling Escape Continue drops the prefix and restores immediate standalone copy', async t => {
+test('Ctrl+Enter promotes queued input after editor replacement', async t => {
+  const h = await fixture(t, [viMode, stash]);
+  const first = deferred(), promoted = deferred();
+  h.provider.setResponses([h.blocked(first), h.blocked(promoted)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.setCustomEditorComponent(undefined);
+  h.app.editor.setText('draft');
+  h.app.editor.handleInput('\x1b[13;5u');
+  await promoted.promise;
+  assert.deepEqual(h.users(), ['Original', 'Next']);
+  assert.equal(h.app.editor.getText(), 'draft');
+  h.app.editor.handleInput('\x1b[13;5u');
+  await h.session.waitForIdle();
+  await running;
+});
+
+test('disabling Escape Continue removes the Ctrl+Enter binding', async t => {
   const h = await fixture(t);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  let copies = 0;
-  h.app.editor.onAction('app.message.copy', () => { copies++; });
-  h.app.editor.handleInput('\x18');
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
   await h.session.extensionRunner!.emit({ type: 'session_shutdown', reason: 'reload' });
-  t.mock.timers.tick(750);
-  assert.equal(copies, 0);
-  h.app.editor.handleInput('\x18');
-  assert.equal(copies, 1);
+  h.app.editor.handleInput('\x1b[13;5u');
+  assert.equal(h.session.agent.signal?.aborted, false);
+  await h.session.abort();
+  await running;
 });
 
-test('interactive quit drops a pending copy before terminal drain', async t => {
-  const h = await fixture(t);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  let copies = 0;
-  h.app.editor.onAction('app.message.copy', () => { copies++; });
-  h.app.editor.handleInput('\x18');
-  h.app.themeController = { disableAutoSync() {} };
-  h.app.stop = () => {};
-  h.app.ui.terminal.drainInput = async () => { t.mock.timers.tick(750); };
-  h.app.runtimeHost = { dispose: async () => {} };
-  const exit = process.exit, expectedExit = new Error('Expected interactive quit');
-  process.exit = () => { throw expectedExit; };
-  try { await assert.rejects(h.app.shutdown(), error => error === expectedExit); }
-  finally { process.exit = exit; }
-  assert.equal(copies, 0);
-});
-
-test('the chord aborts a running Bash command without changing the insert draft', { timeout: 5000 }, async t => {
+test('Ctrl+Enter aborts a running Bash command without changing the insert draft', { timeout: 5000 }, async t => {
   const h = await fixture(t, [viMode, stash]);
   const started = deferred();
   const running = h.session.executeBash("printf 'ready\\n'; sleep 30", chunk => {
@@ -648,14 +594,13 @@ test('the chord aborts a running Bash command without changing the insert draft'
   assert.equal(h.session.isStreaming, false);
   assert.equal(h.session.isBashRunning, true);
   h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.editor.handleInput('\x1b[13;5u');
   assert.equal((await running).cancelled, true);
   h.app.editor.handleInput('i');
   assert.equal(h.app.editor.getText(), 'drafti');
 });
 
-test('the chord reaches manual compaction cancellation while no agent run is streaming', { timeout: 5000 }, async t => {
+test('Ctrl+Enter reaches manual compaction cancellation while no agent run is streaming', { timeout: 5000 }, async t => {
   const h = await fixture(t, [viMode, stash]);
   const started = deferred();
   h.provider.setResponses([fauxAssistantMessage('A completed seed response'), h.blocked(started)]);
@@ -667,14 +612,13 @@ test('the chord reaches manual compaction cancellation while no agent run is str
   assert.equal(h.session.isStreaming, false);
   assert.equal(h.session.isCompacting, true);
   h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.editor.handleInput('\x1b[13;5u');
   await cancelled;
   assert.equal(h.session.isCompacting, false);
   assert.equal(h.app.editor.getText(), 'draft');
 });
 
-test('the chord reaches the retry cancellation callback during actual backoff', { timeout: 5000 }, async t => {
+test('Ctrl+Enter reaches the retry cancellation callback during actual backoff', { timeout: 5000 }, async t => {
   const h = await fixture(t, [viMode, stash]);
   h.settingsManager.setRetryEnabled(true);
   const retrying = deferred();
@@ -689,15 +633,14 @@ test('the chord reaches the retry cancellation callback during actual backoff', 
   await retrying.promise;
   assert.equal(h.session.isRetrying, true);
   h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.editor.handleInput('\x1b[13;5u');
   await running;
   assert.equal(h.session.isRetrying, false);
   assert.equal(h.provider.state.callCount, 1);
   assert.equal(h.app.editor.getText(), 'draft');
 });
 
-test('a second chord during slow cancellation holds the queued image and draft', async t => {
+test('a second Ctrl+Enter during slow cancellation holds the queued image and draft', async t => {
   const release = deferred();
   t.after(() => release.resolve());
   const h = await fixture(t, [viMode, stash]);
@@ -709,8 +652,7 @@ test('a second chord during slow cancellation holds the queued image and draft',
   await h.session.followUp('Next', [image]);
   h.app.editor.setText('draft');
   for (let press = 0; press < 2; press++) {
-    h.app.editor.handleInput('\x18');
-    h.app.editor.handleInput('\x13');
+    h.app.editor.handleInput('\x1b[13;5u');
   }
   assert.ok(h.notices.some(message => /stopped; queued messages and attachments kept waiting/.test(message)));
   release.resolve();
@@ -723,7 +665,7 @@ test('a second chord during slow cancellation holds the queued image and draft',
   assert.equal(h.app.editor.getText(), 'draft');
 });
 
-test('the chord uses the live Escape callback without leaving Vi insert mode', async t => {
+test('Ctrl+Enter uses the live Escape callback without leaving Vi insert mode', async t => {
   const h = await fixture(t, [viMode, stash]);
   const first = deferred();
   h.provider.setResponses([h.blocked(first)]);
@@ -731,8 +673,7 @@ test('the chord uses the live Escape callback without leaving Vi insert mode', a
   await first.promise;
   let stopped = false;
   h.app.defaultEditor.onEscape = () => { stopped = true; };
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.editor.handleInput('\x1b[13;5u');
   assert.equal(stopped, true);
   h.app.editor.handleInput('i');
   assert.equal(h.app.editor.getText(), 'i');
@@ -740,7 +681,7 @@ test('the chord uses the live Escape callback without leaving Vi insert mode', a
   await running;
 });
 
-test('the chord interrupts immediately with autocomplete open and retains the insert draft', async t => {
+test('Ctrl+Enter interrupts immediately with autocomplete open and retains the insert draft', async t => {
   const h = await fixture(t, [viMode, stash]);
   const first = deferred();
   h.provider.setResponses([h.blocked(first)]);
@@ -751,15 +692,14 @@ test('the chord interrupts immediately with autocomplete open and retains the in
   h.app.editor.handleInput('\t');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.app.editor.isShowingAutocomplete(), true);
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.editor.handleInput('\x1b[13;5u');
   assert.equal(h.session.agent.signal?.aborted, true);
   assert.equal(h.app.editor.isShowingAutocomplete(), true);
   assert.equal(h.app.editor.getText(), '/he');
   await running;
 });
 
-test('a second chord during prompt preparation stops the promotion and keeps the queued message', async t => {
+test('a second Ctrl+Enter during prompt preparation stops the promotion and keeps the queued message', async t => {
   const preparing = deferred(), release = deferred();
   t.after(() => release.resolve());
   const h = await fixture(t, [pi => pi.on('before_agent_start', async event => {
@@ -770,11 +710,9 @@ test('a second chord during prompt preparation stops the promotion and keeps the
   const running = h.session.prompt('Original');
   await first.promise;
   await h.session.followUp('Next');
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.editor.handleInput('\x1b[13;5u');
   await preparing.promise;
-  h.app.editor.handleInput('\x18');
-  h.app.editor.handleInput('\x13');
+  h.app.editor.handleInput('\x1b[13;5u');
   assert.ok(h.notices.some(message => /stopped; queued messages and attachments kept waiting/.test(message)));
   release.resolve();
   await running;

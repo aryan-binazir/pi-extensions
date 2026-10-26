@@ -788,10 +788,10 @@ for (const order of inputOrders) test(`input/replacement/reload: ${order.map(ext
         app.editor.handleInput('\x1b[200~paste\x18\x13\x1b[201~');
         assert.equal(calls, 1, 'one framer for the complete raw paste');
         assert.equal(app.editor.getExpandedText(), 'draftpaste', 'paste controls never reach bindings');
-        app.editor.onAction('app.message.copy', () => assert.fail('paste and chord cannot copy'));
+        app.editor.onAction('app.message.copy', () => assert.fail('paste and Ctrl+Enter cannot copy'));
         if (hasEC) {
-          app.editor.handleInput('\x18'); app.editor.handleInput('\x13');
-          assert.equal(app.editor.getExpandedText(), 'draftpaste', 'chord consumes Ctrl-S before stash');
+          app.editor.handleInput('\x1b[13;5u');
+          assert.equal(app.editor.getExpandedText(), 'draftpaste', 'idle Ctrl+Enter preserves the draft');
         }
         if (hasStash) {
           app.editor.handleInput('\x13'); assert.equal(app.editor.getExpandedText(), '');
@@ -916,9 +916,9 @@ test('a fresh paste recovers a discarded stream whose closer was lost', async ()
   });
 });
 
-test('background paste clears the chord prefix before main-editor delivery', async () => {
+test('background paste preserves the draft for the next stash', async () => {
   await withInputEditors([viMode, stash, escapeContinue], async app => {
-    app.editor.setText('draft'); app.editor.handleInput('\x18');
+    app.editor.setText('draft');
     app.ui.getFocusedComponent = () => new Container();
     app.editor.handleInput('\x1b[200~paste\x1b[201~');
     app.ui.getFocusedComponent = () => app.editor;

@@ -132,47 +132,14 @@ function decorate(host: Host, state: Adapter): void {
   registration.input?.reset();
   const unregister = registerMainEditorBinding(registration.ctx, {
     id: 'escape-continue', priority: 200,
-    create(editor, forward, ready) {
-      let prefix: string | undefined;
-      let deadline = 0;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let flushTimer: ReturnType<typeof setImmediate> | undefined;
-      const resetPrefix = () => {
-        clearTimeout(timer);
-        clearImmediate(flushTimer);
-        timer = undefined;
-        flushTimer = undefined;
-        prefix = undefined;
-        deadline = 0;
-      };
+    create(editor) {
       const current = () => host.session === session && state.active.get(session.sessionManager) === registration;
-      const flush = () => {
-        const data = prefix;
-        resetPrefix();
-        if (data !== undefined && current()) forward(data);
-      };
-      registration.input = { editor, reset: () => { resetPrefix(); unregister(); } };
+      registration.input = { editor, reset: () => unregister() };
       return {
-        reset: resetPrefix,
-        beforePaste: flush,
         key(data) {
-          if (!current()) return false;
-          if (prefix !== undefined && performance.now() <= deadline && matchesKey(data, 'ctrl+s')) {
-            resetPrefix();
-            if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
-              (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
-            return true;
-          }
-          flush();
-          if (!matchesKey(data, 'ctrl+x')) return false;
-          prefix = data;
-          deadline = performance.now() + 750;
-          timer = setTimeout(() => {
-            if (!ready()) return resetPrefix();
-            flushTimer = setImmediate(() => { flush(); host.ui?.requestRender(); });
-            flushTimer.unref();
-          }, 750);
-          timer.unref();
+          if (!current() || !matchesKey(data, 'ctrl+enter')) return false;
+          if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
+            (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
           return true;
         },
       };

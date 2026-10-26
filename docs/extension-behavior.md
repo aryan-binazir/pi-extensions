@@ -27,9 +27,8 @@ their prompts, display and scheduling remain caller-owned.
 
 The prompt stash is memory-only and clears on session start, switch and reload.
 Vi, prompt stash and Escape Continue share one [main-editor input pipeline](adr/021-editor-input.md).
-It frames each raw input once. Escape Continue declares priority 200 and stash
-100, so the chord consumes Ctrl-S before stash. Paste payloads never reach key
-bindings. Editor replacement transfers the visible draft and paste registry,
+It frames each raw input once. Ctrl+Enter invokes Escape Continue; Ctrl+S stashes the draft. Paste payloads
+never reach key bindings. Editor replacement transfers the visible draft and paste registry,
 reattaches bindings and releases the outgoing Vi cursor before creating its
 replacement. Pi can independently reapply its stock cursor setting after reload;
 Vi still repairs that setting when the focused editor renders.
@@ -71,25 +70,22 @@ and then follow Pi's normal queue modes. Custom-only entries are not promoted as
 user input; they stay queued for subsequent normal boundaries. The unsubmitted editor draft is untouched.
 With no queued user message, normal Escape behavior applies.
 
-Ctrl-X followed by Ctrl-S within 750 ms invokes the live interrupt handler
+Ctrl+Enter invokes the live interrupt handler
 directly in the main editor without leaving Vi insert mode. Agent-run
 interruptions preserve the cursor and draft.
 It interrupts immediately even when autocomplete is open, leaving the popup
 alone. Bash commands, retry backoff and compaction use Pi's current Escape
 handling. With no active run, promotion, Bash command, retry or compaction, the
-chord does nothing; it does not open the session tree or clear a Bash draft.
-A second chord stops a pending promotion just as a second Escape does.
+shortcut does nothing; it does not open the session tree or clear a Bash draft.
+A second Ctrl+Enter stops a pending promotion just as a second Escape does.
 
-Standalone Ctrl-S still stashes the draft. Standalone Ctrl-X is forwarded to Pi
-after the 750 ms wait, or immediately before another key. With default bindings,
-this copies; rebinding Ctrl-X changes the forwarded action but keeps the wait.
-Control bytes inside well-formed bracketed paste never form the chord. Pi treats
-anything after the first paste-end marker as ordinary input.
-Pending prefixes are discarded on
-editor replacement, session shutdown and reload, and a delayed copy is skipped
-if the main editor has lost focus. Selectors and dialogs keep their own keys.
-Legacy, Kitty and modifyOtherKeys encodings are supported without keybinding
-configuration.
+Ctrl+S still stashes the draft. Ctrl+X reaches Pi immediately, so the former
+Ctrl+X, Ctrl+S chord now copies and then stashes with default bindings.
+The terminal must distinguish Ctrl+Enter from Enter through Kitty keyboard
+protocol or xterm modifyOtherKeys. Plain Enter retains its normal behavior.
+Key sequences inside bracketed paste never invoke the shortcut. Pi treats
+anything after the first paste-end marker as ordinary input. Selectors and
+dialogs keep their own keys.
 
 A second Escape while cancellation or prompt preparation is pending stops the
 promotion. A held-queue count is visible during cancellation, and stopping shows

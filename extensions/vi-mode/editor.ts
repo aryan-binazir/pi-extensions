@@ -16,6 +16,7 @@ import {
   clearBaseUndo,
   cancelAutocomplete,
   clampOffset,
+  openTranscriptSearch,
   readPastes, writePastes, pasteMarkers, expandPastes, collapsePaste,
   type PasteState, markViEditor, invalidateTextCache, NEEDS_PROJECTION,
 } from "./adapter.ts";
@@ -977,6 +978,11 @@ class ViMode {
         this.resetPending();
         this.register = '"';
       }
+      return;
+    }
+    if (data === "/" || data === "?") {
+      this.cancel();
+      openTranscriptSearch(this.tui);
       return;
     }
     const visual = this.mode === "visual" || this.mode === "line";

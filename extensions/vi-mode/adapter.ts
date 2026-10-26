@@ -1,4 +1,4 @@
-import type { Editor } from "@earendil-works/pi-tui";
+import type { Editor, TUI } from "@earendil-works/pi-tui";
 export const invalidateTextCache = Symbol.for("pi-interactive:vi-text-cache");
 
 export function setCursorPosition(editor: Editor, line: number, col: number): void {
@@ -16,6 +16,13 @@ export function setCursorPosition(editor: Editor, line: number, col: number): vo
   internal.state.cursorCol = col;
   internal.preferredVisualCol = null;
   internal.snappedFromCursorCol = null;
+}
+export function openTranscriptSearch(tui: TUI): void {
+  if (tui.mode !== "fullscreen") return;
+  const internal = tui as unknown as { activeSearch?: unknown; toggleSearch?: () => void };
+  if (typeof internal.toggleSearch !== "function")
+    throw new Error("Unsupported Pi transcript search layout (tested with Pi 0.99.1 and 1.4.0)");
+  if (!internal.activeSearch) internal.toggleSearch();
 }
 export function clampOffset(offset: number, length: number): number {
   const offsetOrZero = Number.isNaN(offset) ? 0 : offset;

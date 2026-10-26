@@ -48,10 +48,12 @@ end of the line. Visual `o/O` swaps selection ends and `u/U/~` changes case.
 Unsupported `m/q`, and `r` outside normal mode or with a pending operator,
 cancel pending commands and consume their argument.
 
-`/` and `?` are unmapped commands; they cancel a pending count, operator or
-prefix and do not search. Enter while awaiting a find or replace argument
-cancels that command without submitting. Search and repeat-dot remain
-unsupported.
+`/` and `?` cancel pending commands and, in fullscreen mode, open Pi's
+transcript search, the same overlay as Ctrl+Shift+F. Typing, Enter and
+Shift+Enter go to the search; Escape closes it and returns to the draft. In
+regular mode they do nothing else. Enter while awaiting a find or replace
+argument cancels that command without submitting. Draft search and repeat-dot
+remain unsupported.
 Escape from insert mode also closes the completion popup. The exact supported vi
 command set is documented in [ADR 001](adr/001-editor.md).
 

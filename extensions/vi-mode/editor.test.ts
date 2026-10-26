@@ -1,7 +1,7 @@
 import { visibleWidth, CURSOR_MARKER, CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { editor, keys } from "./test-support.ts";
+import { editor, fullscreenEditor, keys } from "./test-support.ts";
 import type { ViEditor } from "./editor.ts";
 import { restoreRawDraft, placeCursor } from "./adapter.ts";
 function undoRedoRestoresPut(e: ViEditor, before: string) {
@@ -2097,7 +2097,25 @@ test("visual X, D, Y, C and S act on whole selected lines and visual s changes t
     e.dispose();
   }
 });
-test("/ and ? are unmapped commands that capture nothing", () => {
+test("/ and ? open Pi's fullscreen transcript search, which takes the following keys", () => {
+  for (const start of ["\x1b0", "\x1b0vl", "\x1b03d"]) {
+    for (const key of ["/", "?", "\x1b[47u", "\x1b[63;2u"]) {
+      const { tui, editor: e, input } = fullscreenEditor();
+      e.setText("abc def");
+      for (const k of start) input(k);
+      input(key);
+      for (const k of "d/e\r") input(k);
+      assert.ok(tui.hasOverlay(), start + key);
+      assert.equal(e.getText(), "abc def", start + key + " leaves the draft alone");
+      input("\x1b");
+      assert.ok(!tui.hasOverlay(), start + key + " Escape closes the search");
+      input("x");
+      assert.equal(e.getText(), start === "\x1b0vl" ? "c def" : "bc def", start + key + " returns to the editor");
+      tui.stop();
+    }
+  }
+});
+test("/ and ? outside fullscreen cancel pending commands and capture nothing", () => {
   for (const key of ["/", "?"]) {
     for (const pending of ["", "3", "d", "di", "g", '"a']) {
       const e = editor(); e.setText("abc def"); keys(e, "\x1b0" + pending + key);

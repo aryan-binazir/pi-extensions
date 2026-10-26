@@ -250,6 +250,7 @@ test("BTW keeps every frame row at the overlay width when the title cannot fit",
     assert.match(stripTerminalSequences(lines[0]), /^╭.*╮$/);
     assert.match(stripTerminalSequences(lines.at(-1)!), /^╰.*╯$/);
   }
+  assert.match(stripTerminalSequences(h.lines(40).at(-1)!), /^╰─ Enter ask · Esc close ─+╯$/);
   h.key("\u001b");await result;
 });
 

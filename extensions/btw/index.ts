@@ -403,22 +403,25 @@ export default function btw(pi: ExtensionAPI) {
               ];
               if (!framed) return content;
               const border = (text: string) => theme.fg("border", text);
-              const edge = (left: string, right: string, title: string, note = "") => {
-                const labelled = (label: string, end: string) => {
+              const edge = (left: string, right: string, labels: [string, string][]) => {
+                for (const [label, end] of labels) {
                   const fill = w - 2 - visibleWidth(label) - visibleWidth(end);
-                  return fill < 0 ? undefined : border(`${left}─`) + label + border("─".repeat(fill)) + end + border(`─${right}`);
-                };
-                const end = note && theme.fg("dim", ` ${note} `);
-                return labelled(title, end) ?? labelled(title, "") ?? border(`${left}${"─".repeat(w)}${right}`);
+                  if (fill >= 0) return border(`${left}─`) + label + border("─".repeat(fill)) + end + border(`─${right}`);
+                }
+                return border(`${left}${"─".repeat(w)}${right}`);
               };
+              const title = theme.fg("accent", theme.bold(" btw ")) + theme.fg("dim", "side conversation ");
               const divider = footer.length > input.length ? content.length - input.length - 1 : -1;
               const row = (line: string, index: number) => index === divider
                 ? border("├") + line + border("┤")
                 : `${border("│")}${line}${" ".repeat(Math.max(0, w - visibleWidth(line)))}${border("│")}`;
               return [
-                edge("╭", "╮", theme.fg("accent", theme.bold(" btw ")) + theme.fg("dim", "side conversation "), "discarded on close"),
+                edge("╭", "╮", [[title, theme.fg("dim", " discarded on close ")], [title, ""]]),
                 ...content.map(row),
-                edge("╰", "╯", theme.fg("dim", " Enter ask · PgUp/PgDn scroll · Esc close ")),
+                edge("╰", "╯", [
+                  [theme.fg("dim", " Enter ask · PgUp/PgDn scroll · Esc close "), ""],
+                  [theme.fg("dim", " Enter ask · Esc close "), ""],
+                ]),
               ];
             },
           };

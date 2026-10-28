@@ -3,12 +3,11 @@
 // Codex prefers the first bubblewrap on PATH that the sandboxed process cannot replace, and falls back to the copy
 // bundled with Codex. Guardian finds that copy in the Codex install on PATH; Codex additionally checks it against a
 // SHA-256 digest compiled into its build, which Guardian cannot know, so it relies on the same replaceability checks.
-import { spawn } from 'node:child_process';
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
-import { killProcessGroup, raceAbort, runBounded } from './review/process.ts';
+import { raceAbort, runBounded } from './review/process.ts';
 import { pathStartsWith, type WritableRoot } from './seatbelt.ts';
 
 export const MISSING_BWRAP_WARNING = 'Guardian could not find bubblewrap 0.8 or newer on PATH. Install bubblewrap with your OS package manager. '
@@ -226,32 +225,13 @@ export async function findBwrapLauncher(cwd: string, writableRoots: readonly Wri
 }
 
 /** False only when bubblewrap reports that it cannot create the namespaces the sandbox needs. */
-export function bwrapHasUserNamespaceAccess(program: string, timeoutMs = SYSTEM_BWRAP_PROBE_TIMEOUT_MS): Promise<boolean> {
-  return new Promise(resolvePromise => {
-    let child;
-    try {
-      child = spawn(program, ['--unshare-user', '--unshare-net', '--ro-bind', '/', '/', '/bin/true'], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
-    } catch {
-      return resolvePromise(true);
-    }
-    let stderr = '';
-    let settled = false;
-    const settle = (value: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.stderr.destroy();
-      resolvePromise(value);
-    };
-    // A probe that hangs is not a namespace failure; descendants holding stderr open must not delay the answer.
-    const timer = setTimeout(() => {
-      killProcessGroup(child);
-      settle(true);
-    }, timeoutMs);
-    child.stderr.on('data', (chunk: Buffer) => { if (stderr.length < SYSTEM_BWRAP_PROBE_STDERR_LIMIT_BYTES) stderr += chunk.toString(); });
-    child.on('error', () => settle(true));
-    child.on('exit', code => setImmediate(() => settle(code === 0 || !USER_NAMESPACE_FAILURES.some(failure => stderr.includes(failure)))));
+export async function bwrapHasUserNamespaceAccess(program: string, timeoutMs = SYSTEM_BWRAP_PROBE_TIMEOUT_MS): Promise<boolean> {
+  let stderr = '';
+  const result = await runBounded(program, ['--unshare-user', '--unshare-net', '--ro-bind', '/', '/', '/bin/true'], {
+    cwd: process.cwd(), timeoutMs, maxBytes: 0,
+    onData: (chunk, stream) => { if (stream === 'stderr' && stderr.length < SYSTEM_BWRAP_PROBE_STDERR_LIMIT_BYTES) stderr += chunk.toString(); },
   });
+  return result.timedOut || result.exitCode === 0 || !USER_NAMESPACE_FAILURES.some(failure => stderr.includes(failure));
 }
 
 export function launcherSummary(launcher: BwrapLauncher): string {

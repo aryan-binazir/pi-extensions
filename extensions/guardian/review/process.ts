@@ -56,7 +56,7 @@ export interface BoundedRunOptions {
   timeoutMs: number;
   /** Bytes kept per stream: half from the start, half from the end. */
   maxBytes: number;
-  onData?: (chunk: Buffer) => void;
+  onData?: (chunk: Buffer, stream: 'stdout' | 'stderr') => void;
 }
 
 class HeadTail {
@@ -150,8 +150,8 @@ export async function runStarted(start: (signal: AbortSignal) => Promise<Sandbox
     const { child, finished } = started;
     const onExit = () => { completed = !stopped; signal.removeEventListener('abort', stop); };
     child.once('exit', onExit);
-    child.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); options.onData?.(chunk); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); options.onData?.(chunk); });
+    child.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); options.onData?.(chunk, 'stdout'); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); options.onData?.(chunk, 'stderr'); });
     child.stdin?.on('error', () => {});
     child.stdin?.end(options.stdin ?? '');
     const reaped = waitForChildProcess(child);

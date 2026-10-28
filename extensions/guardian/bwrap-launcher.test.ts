@@ -45,6 +45,31 @@ test('the probe ignores unrelated bubblewrap failures', async t => {
   assert.equal(await bwrapHasUserNamespaceAccess(bwrap), true);
 });
 
+test('namespace classification preserves stderr, exit status, prefix capture and timeout precedence', async t => {
+  const dir = tempDir(t), denial = 'setting up uid map: Permission denied';
+  for (const [name, script, expected] of [
+    ['success', `echo '${denial}' >&2; exit 0`, true],
+    ['exit126', `echo '${denial}' >&2; exit 126`, false],
+    ['exit127', `echo '${denial}' >&2; exit 127`, false],
+    ['signal', `echo '${denial}' >&2; kill -TERM $$`, false],
+    ['stdout', `echo '${denial}'; exit 1`, true],
+    ['timeout', `echo '${denial}' >&2; exec /bin/sleep 30`, true],
+  ] as const) {
+    const bwrap = writeFakeBwrap(join(dir, name), `#!/bin/sh\n${script}\n`);
+    assert.equal(await bwrapHasUserNamespaceAccess(bwrap, 100), expected, name);
+  }
+  for (const early of [true, false]) {
+    const bwrap = writeFakeBwrap(join(dir, String(early)), `#!${process.execPath}
+const fs = require('node:fs');
+fs.writeSync(2, ${JSON.stringify(early ? denial : '')} + 'x'.repeat(256 * 1024));
+setTimeout(() => { fs.writeSync(2, ${JSON.stringify(denial)}); process.exit(1); }, 50);
+`);
+    assert.equal(await bwrapHasUserNamespaceAccess(bwrap, 1000), !early, 'only the original stderr prefix contributes');
+  }
+  assert.equal(await bwrapHasUserNamespaceAccess(join(dir, 'missing')), true);
+  assert.equal(await bwrapHasUserNamespaceAccess('\0'), true);
+});
+
 test('a probe that times out does not report a failure', async t => {
   const bwrap = writeFakeBwrap(tempDir(t), '#!/bin/sh\nsleep 1\nexit 0\n');
   const started = Date.now();
@@ -52,11 +77,23 @@ test('a probe that times out does not report a failure', async t => {
   assert.ok(Date.now() - started < 900);
 });
 
-test('the probe does not wait for descendants holding stderr open', async t => {
-  const bwrap = writeFakeBwrap(tempDir(t), "#!/bin/sh\nsleep 2 >&2 &\necho 'setting up uid map: Permission denied' >&2\nexit 1\n");
+test('the probe reaps descendants holding stderr open without losing the namespace denial', async t => {
+  const dir = tempDir(t), pidFile = join(dir, 'descendant.pid');
+  let descendant = 0;
+  t.after(() => { if (descendant) { try { process.kill(descendant, 'SIGKILL'); } catch {} } });
+  const bwrap = writeFakeBwrap(dir, `#!/bin/sh
+/bin/sleep 30 >&2 &
+echo $! > '${pidFile}'
+echo 'setting up uid map: Permission denied' >&2
+exit 1
+`);
   const started = Date.now();
-  assert.equal(await bwrapHasUserNamespaceAccess(bwrap), false);
+  const supported = await bwrapHasUserNamespaceAccess(bwrap);
+  descendant = Number(readFileSync(pidFile, 'utf8'));
+  assert.equal(supported, false);
   assert.ok(Date.now() - started < 500);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.throws(() => process.kill(descendant, 0), /ESRCH/, 'the completed probe owns its remaining process group');
 });
 
 test('WSL1 kernels are detected', () => {

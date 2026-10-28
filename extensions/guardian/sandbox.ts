@@ -131,7 +131,7 @@ export function bubblewrapSandbox(detected: BwrapLauncher): PlatformSandbox {
       const environment = { ...env, ...sandboxEnv('bubblewrap', policy) };
       const roots = policy.mode === 'workspace-write' ? workspaceWriteRoots(policy, cwd, environment) : [];
       // Resolved per command, as Codex does: a bubblewrap the command's writable roots could replace is never used.
-      const launcher = findBwrapLauncher(cwd, roots);
+      const launcher = await findBwrapLauncher(cwd, roots, process.env, signal);
       if (!launcher) throw new SandboxPreparationError(`bubblewrap is unavailable for ${cwd}: no trusted bwrap was found on PATH or in a Codex install`);
       const networkMode = policy.networkAccess ? 'full-access' : 'isolated';
       const registryRoot = syntheticMountRegistryRoot();
@@ -172,7 +172,7 @@ async function detect(cwd: string, writableRoots: readonly WritableRoot[]): Prom
   if (process.platform !== 'linux') return {};
   if (isWsl1()) return { warning: WSL1_BWRAP_WARNING };
   if (!seccompSupported()) return { warning: `Guardian has no seccomp filter for ${process.arch}, so nothing is sandboxed and every command needs approval.` };
-  const launcher = findBwrapLauncher(cwd, writableRoots);
+  const launcher = await findBwrapLauncher(cwd, writableRoots);
   if (!launcher) return { warning: NO_BWRAP_WARNING };
   if (!(await bwrapHasUserNamespaceAccess(launcher.program))) return { warning: USER_NAMESPACE_WARNING };
   return { sandbox: bubblewrapSandbox(launcher), ...(launcher.source === 'codex' ? { warning: MISSING_BWRAP_WARNING } : {}) };

@@ -2,7 +2,7 @@
 // codex-rs/linux-sandbox/tests/suite/bundled_bwrap.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md. Fake
 // bubblewrap scripts stand in for the real one, so these run on every Unix platform.
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -132,21 +132,23 @@ test('a read-only system installation stays usable', t => {
   assert.equal(findExecutableInSearchPaths('bwrap', [dir], '/', [{ root: dir, readOnlySubpaths: [] }]), canModify ? undefined : systemBinary);
 });
 
-test('system bwrap needs --as-pid-1 and --perms', t => {
+test('system bwrap needs --as-pid-1 and --perms', async t => {
   const dir = tempDir(t);
   const modern = writeFakeBwrap(join(dir, 'modern'));
   const noPidOne = writeFakeBwrap(join(dir, 'no-pid-one'), "#!/bin/sh\nprintf '%s\\n' '--perms' '--argv0'\n");
   const noPerms = writeFakeBwrap(join(dir, 'no-perms'), "#!/bin/sh\nprintf '%s\\n' '--as-pid-1'\n");
   const noArgv0 = writeFakeBwrap(join(dir, 'no-argv0'), "#!/bin/sh\nprintf '%s\\n' '--as-pid-1' '--perms' >&2\nexit 1\n");
 
-  assert.deepEqual(bwrapCapabilities(modern), { supportsArgv0: true, supportsPerms: true });
-  assert.equal(bwrapCapabilities(noPidOne), undefined);
-  assert.deepEqual(bwrapCapabilities(noArgv0), { supportsArgv0: false, supportsPerms: true }, 'stderr help counts, and --argv0 is optional');
-  assert.equal(findSystemBwrap([join(dir, 'no-perms'), join(dir, 'no-pid-one'), join(dir, 'modern')], '/', []), undefined,
+  assert.deepEqual(await bwrapCapabilities(modern), { supportsArgv0: true, supportsPerms: true });
+  assert.equal(await bwrapCapabilities(noPidOne), undefined);
+  assert.deepEqual(await bwrapCapabilities(noArgv0), { supportsArgv0: false, supportsPerms: true }, 'stderr help counts, and --argv0 is optional');
+  assert.equal(await findSystemBwrap([join(dir, 'no-perms'), join(dir, 'no-pid-one'), join(dir, 'modern')], '/', []), undefined,
     'only the first bwrap on PATH is considered, as in Codex');
-  assert.equal(findSystemBwrap([join(dir, 'no-perms')], '/', []), undefined);
-  assert.equal(findSystemBwrap([join(dir, 'no-argv0')], '/', []), noArgv0);
+  assert.equal(await findSystemBwrap([join(dir, 'no-perms')], '/', []), undefined);
+  assert.equal(await findSystemBwrap([join(dir, 'no-argv0')], '/', []), noArgv0);
   assert.equal(noPerms.endsWith('bwrap'), true);
+  writeExecutable(modern, "#!/bin/sh\nprintf '%s\\n' '--as-pid-1'\n");
+  assert.equal(await findSystemBwrap([join(dir, 'modern')], '/', []), undefined, 'changed executable invalidates the positive cache');
 });
 
 /** An npm global install: `bin/codex -> lib/node_modules/@openai/codex/bin/codex.js`, with the platform package. */
@@ -200,16 +202,82 @@ test('standalone and legacy layouts are searched like Codex', t => {
   ]);
 });
 
-test('system bubblewrap is preferred over the bundled one', t => {
+test('system bubblewrap is preferred over the bundled one', async t => {
   const dir = tempDir(t);
   const { bin, bundled } = npmCodexInstall(join(dir, 'prefix'), process.arch === 'arm64' ? 'aarch64-unknown-linux-musl' : 'x86_64-unknown-linux-musl',
     process.arch === 'arm64' ? '@openai/codex-linux-arm64' : '@openai/codex-linux-x64');
   const system = writeFakeBwrap(join(dir, 'system'));
   const cwd = join(dir, 'workspace');
   mkdirSync(cwd);
-  assert.deepEqual(findBwrapLauncher(cwd, [], { PATH: `${join(dir, 'system')}:${bin}` }), { program: system, source: 'system' });
-  assert.deepEqual(findBwrapLauncher(cwd, [], { PATH: bin }), { program: bundled, source: 'codex' });
-  assert.equal(findBwrapLauncher(cwd, [], { PATH: join(dir, 'empty') }), undefined);
+  assert.deepEqual(await findBwrapLauncher(cwd, [], { PATH: `${join(dir, 'system')}:${bin}` }), { program: system, source: 'system' });
+  assert.deepEqual(await findBwrapLauncher(cwd, [], { PATH: bin }), { program: bundled, source: 'codex' });
+  writeExecutable(system, "#!/bin/sh\nprintf '%s\\n' '--as-pid-1'\n");
+  assert.deepEqual(await findBwrapLauncher(cwd, [], { PATH: `${join(dir, 'system')}:${bin}` }), { program: bundled, source: 'codex' });
+  assert.equal(await findBwrapLauncher(cwd, [], { PATH: join(dir, 'empty') }), undefined);
+});
+
+test('concurrent resolver callers share a probe without sharing cancellation', async t => {
+  const dir = tempDir(t), count = join(dir, 'count'), pidFile = join(dir, 'pid');
+  const system = writeFakeBwrap(join(dir, 'system'), `#!/bin/sh
+printf 'probe\\n' >> '${count}'
+echo $$ > '${pidFile}'
+printf '%s\\n' --as-pid-1 --perms
+exec /bin/sleep 0.2
+`);
+  const env = { PATH: join(dir, 'system') };
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const cancelled = findBwrapLauncher('/', [], env, controller.signal);
+  const successful = findBwrapLauncher('/', [], env);
+  const rejection = assert.rejects(cancelled, /owned cancellation/);
+  let pid: number | undefined;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { pid = Number(readFileSync(pidFile, 'utf8')); if (pid > 1) break; } catch {}
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  controller.abort(new Error('owned cancellation'));
+  await rejection;
+  assert.ok(pid && pid > 1, 'the shared probe started before cancellation');
+  assert.deepEqual(await successful, { program: system, source: 'system' });
+  assert.deepEqual(await findBwrapLauncher('/', [], env), { program: system, source: 'system' });
+  assert.equal(readFileSync(count, 'utf8'), 'probe\n');
+});
+
+test('an abandoned probe is reaped without caching failure before a later resolver call', async t => {
+  const dir = tempDir(t), pidFile = join(dir, 'pid'), count = join(dir, 'count');
+  const program = writeFakeBwrap(join(dir, 'system'), `#!/bin/sh
+printf '%s\\n' --as-pid-1 --perms
+if [ ! -e '${count}' ]; then
+  printf 'probe\\n' >> '${count}'
+  echo $$ > '${pidFile}'
+  exec /bin/sleep 30
+fi
+printf 'probe\\n' >> '${count}'
+`);
+  const env = { PATH: join(dir, 'system') };
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const resolving = findBwrapLauncher('/', [], env, controller.signal);
+  const rejection = assert.rejects(resolving, /owned cancellation/);
+  let pid: number | undefined;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { pid = Number(readFileSync(pidFile, 'utf8')); if (pid > 1) break; } catch {}
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  controller.abort(new Error('owned cancellation'));
+  await rejection;
+  assert.ok(pid && pid > 1, 'the capability probe started');
+  let reaped = false;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try { process.kill(pid, 0); } catch { reaped = true; break; }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(reaped, true, 'cancelled probe was reaped');
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.deepEqual(await findBwrapLauncher('/', [], env), { program, source: 'system' });
+  assert.deepEqual(await findBwrapLauncher('/', [], env), { program, source: 'system' });
+  await assert.rejects(findBwrapLauncher('/', [], env, AbortSignal.abort(new Error('already cancelled'))), /already cancelled/);
+  assert.equal(readFileSync(count, 'utf8'), 'probe\nprobe\n');
 });
 
 function dirname(path: string): string {

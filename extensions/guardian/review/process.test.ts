@@ -39,6 +39,11 @@ test('executable names stay external, including builtins, assignments and leadin
       assert.deepEqual(JSON.parse(result.stdout), { argv0: command, args, stdin: 'unaltered\n' });
     }
   }
+  const handled = await runBounded('-bin/-a', ['-e', "process.on('SIGTERM',()=>setTimeout(()=>{process.stdout.write('SURVIVED');process.exit(7)},50));setInterval(()=>{},1000);process.kill(0,'SIGTERM');"], {
+    cwd, timeoutMs: 2000, maxBytes: 100,
+  });
+  assert.equal(handled.exitCode, 7, 'a handled group signal must wait for a hyphen-leading command');
+  assert.equal(handled.stdout, 'SURVIVED');
   const missing = await runBounded('-'.repeat(2000), [], { cwd, env: { ...process.env, PATH: '-bin' }, timeoutMs: 2000, maxBytes: 100 });
   assert.ok(missing.spawnError && missing.spawnError.length < 600, 'failed executable lookup must keep diagnostics bounded');
 });

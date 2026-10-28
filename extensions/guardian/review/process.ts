@@ -100,8 +100,8 @@ export async function runBounded(command: string, args: readonly string[], optio
   const run = await runStarted(async () => {
     // A live group leader can kill its own group after the command is reaped without looking up a stale PID.
     // Ignored signals survive exec; ignore SIGPIPE only after the command exits so its disposition is preserved.
-    // Dash has no exec option separator; command -- preserves hyphen-leading executable names and argv[0].
-    const child = spawn('/bin/sh', ['-c', 'set +mx; unset -f kill printf command; trap : TERM INT HUP; s=0; (case "$1" in -*) command -- "$@" ;; *) exec "$@" ;; esac) 3>&- || s=$?; trap "" PIPE; printf "%s\\n" "$s" >&3 || :; kill -s KILL 0', 'sh', command, ...args], {
+    // Dash lacks exec --; command -- preserves hyphen-leading argv[0] but may fork, so its shell also catches signals.
+    const child = spawn('/bin/sh', ['-c', 'set +mx; unset -f kill printf command; trap : TERM INT HUP; s=0; (case "$1" in -*) trap : TERM INT HUP; command -- "$@" ;; *) exec "$@" ;; esac) 3>&- || s=$?; trap "" PIPE; printf "%s\\n" "$s" >&3 || :; kill -s KILL 0', 'sh', command, ...args], {
       cwd: options.cwd, env: options.env ?? process.env, detached: true, stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
     });
     const reportPipe = child.stdio[3]!;

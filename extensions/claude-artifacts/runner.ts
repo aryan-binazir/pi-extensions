@@ -83,8 +83,8 @@ export async function publishPage(path: string, { approve, signal, title, update
     }
     const problem = typeof response?.url !== 'string' || typeof response.version !== 'string' ? 'its result has no URL or version.'
       : await staged.verify(response.path).then(() => undefined, (error: Error) => error.message);
-    if (problem) throw new Error(`Claude Code reported a publish${response?.url ? ` at ${response.url}` : ''}, so the page may be live, but ${problem} Check claude_artifact_list before retrying.`);
-    return { published: true, response: response! };
+    if (!response || problem) throw new Error(`Claude Code reported a publish${response?.url ? ` at ${response.url}` : ''}, so the page may be live, but ${problem} Check claude_artifact_list before retrying.`);
+    return { published: true, response };
   } finally { await staged.dispose(); }
 }
 

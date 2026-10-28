@@ -12,4 +12,4 @@ Before merging, `npm run check` must pass locally on the final PR revision. Keep
 
 # Maintaining instructions
 
-Prune before adding. Prefer existing docs with conditional pointers; avoid duplicating global rules, code, lint or tests. Keep this file under 1,000 `o200k_base` tokens.
+Prune before adding. Code-golf additions: shortest unambiguous wording. Prefer existing docs with conditional pointers; avoid duplicating global rules, code, lint or tests. Keep this file under 1,000 `o200k_base` tokens.

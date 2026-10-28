@@ -58,7 +58,7 @@ Both lists default to empty and accept up to 1024 exact names each, without patt
 wins over `readOnly` and annotations. Otherwise an MCP call bypasses review only with
 `readOnlyHint: true` and no `destructiveHint: true`, or an exact `readOnly` override. Unknown or
 non-read-only calls require approval. Core tools and Guardian's shell/file tools keep their existing
-gates; ordinary namespaces and tool-name verbs do not identify connectors. A replacement MCP
+gates even when listed in `alwaysReview`; ordinary namespaces and tool-name verbs do not identify connectors. A replacement MCP
 extension needs explicit names. Check registered names after server changes: collision suffixes can
 change which name identifies a tool. Invalid config retains the last valid declarations; on the first
 invalid load, custom declarations are unavailable and only built-in MCP identity is recognized.
@@ -67,13 +67,15 @@ The configured reviewer receives the exact arguments, parent transcript and a bo
 description, which is untrusted evidence. An interactive approval shows the full action JSON. Actions
 over 256 KiB are rejected before review, including human review. `never` rejects review-required
 connector calls; disabled Guardian bypasses the gate. Model failure uses the existing human fallback,
-and no available approval means rejection. Audit write failure also blocks execution.
+and no available approval means rejection. Audit write failure also blocks execution. Preflight blocks (identity lookup, `never`, cancellation
+before review and size limits) return tool errors without an approval audit entry. Recognized
+review-required connector calls clear older replayable shell/file denials before these checks.
 
 A delegation grant grants capability only. The child bridge proxy forwards to one approval at the
 actual parent leaf, without reviewing twice. Independent child cancellation prevents execution after
 the hook settles, but Pi exposes only the parent operation signal to the hook: an idle-parent review
-may continue until completion or timeout. Rejecting an interactive background approval can interrupt
-the current parent turn.
+may continue until completion or timeout. Rejecting an interactive background approval can abort the current parent operation, including
+a turn, retry, compaction or branch summary. Child denials count toward the parent turn's denial breaker.
 
 Each mutation adds review latency (up to the review timeout, including retries). In a parallel tool
 batch Pi prepares hooks serially before executing approved calls; a later model denial can precede an
@@ -82,7 +84,8 @@ Calls are not transactional: denying call 3 does not roll back calls 1–2, and 
 and continue. Existing MCP results and `isError` flags pass through unchanged.
 
 Guardian's connector audit stores tool/call identity, argument byte count, verdict and timing, without
-arguments, argument hashes, reviewer free text or context hashes. `/guardian approve` cannot replay
+arguments, argument hashes, reviewer free text or context hashes. Safe failure categories distinguish
+review timeouts, model/configuration failures and an unavailable interactive user. `/guardian approve` cannot replay
 connector payloads; approve in chat and retry, or use a fresh interactive review. Pi's ordinary
 transcript and nested-call records can still contain arguments, and the reviewer provider receives
 them. Annotations are unverified server claims. This gate cannot contain a malicious server or
@@ -127,15 +130,16 @@ what the parent would review, and a child refuses to start if Guardian is missin
 Guardian starts children without it.
 
 If Guardian itself cannot start, for example because a bundled file is unreadable, it still replaces
-`bash`, `write` and `edit` with tools that refuse every call and says why at session start, so Pi never
-falls back to its unguarded tools.
+`bash`, `write` and `edit` with tools that refuse every call, and blocks review-required built-in MCP
+calls. Startup failure cannot load custom connector declarations. It reports the failure at session start.
 
 ## Preferences
 
 Guardian reads `~/.pi/agent/guardian/config.json` (under `$PI_CODING_AGENT_DIR` when set) and
 rereads it when it changes. A missing file means the defaults below. An invalid file keeps the last
-valid settings, or, when there are none yet, falls back to read-only with approval for everything,
-so a typo never widens permissions. Unknown settings are errors.
+valid settings. With no valid settings yet, built-in shell/file protections use strict defaults and
+built-in MCP mutations require approval, but custom connector declarations are unavailable. Unknown
+settings are errors.
 
 ```json
 {
@@ -284,8 +288,10 @@ still sits after Fast mode in `package.json` so the alias resolves when both are
   `/fork` and restarting Pi return to `config.json`, which it never changes. Other Pi sessions and
   subagent children keep following `config.json`.
 - `/guardian status` shows the effective settings and file locations.
-- `/guardian approve` approves the most recently denied shell/file action. Connector denials clear replayable approvals and require chat approval or a fresh interactive review. For shell/file actions it records Codex's trusted manual
-  approval message in the session, so the reviewer can allow that exact action when the agent retries.
+- `/guardian approve` approves the most recently denied shell/file action. Recognized review-required
+  connector calls clear replayable approvals, even when allowed or blocked before review. Connector
+  approval requires chat authorization or a fresh interactive review. For shell/file actions the command
+  records Codex's trusted manual approval message, so the reviewer can allow that exact action on retry.
 - `/guardian reload` rereads the rules and config.
 - `/guardian audit` shows the current session branch's recent approval decisions.
 

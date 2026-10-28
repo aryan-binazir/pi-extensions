@@ -8,7 +8,7 @@ import type { GuardianConfig } from './config.ts';
 import type { GuardianAssessment } from './review/assessment.ts';
 import { ReviewDenials } from './review/circuit-breaker.ts';
 import { MANUAL_APPROVAL_DEVELOPER_PREFIX, truncateText } from './review/context.ts';
-import { completeReview, type ReviewContextHashes, type ReviewOutcome } from './review/outcome.ts';
+import { completeReview, type ReviewContextHashes, type ReviewError, type ReviewOutcome } from './review/outcome.ts';
 
 const MAX_APPROVAL_REASON_TOKENS = 512;
 export const MAX_REVIEWED_ACTION_BYTES = 256 * 1024;
@@ -22,7 +22,7 @@ export const APPROVAL_AUDIT_ENTRY_TYPE = 'guardian-approval-decision';
 export interface ApprovalRequest {
   /** The planned action exactly as the reviewer sees it. */
   action: Record<string, unknown>;
-  /** Persist only this metadata, omitting reviewer text and manual replay of sensitive actions. */
+  /** Use safe persisted metadata, omit free text/hashes, clear manual replay, and display the complete action to human reviewers. */
   audit?: { action: Record<string, unknown>; summary: string };
   /** One line shown to you when you are asked. */
   summary: string;
@@ -64,7 +64,7 @@ export interface ApprovalAuditEntry {
   requestedRule?: string[];
 }
 
-type AuditDecision = Pick<ApprovalAuditEntry, 'decider' | 'verdict' | 'rationale' | 'assessment' | 'contextHashes' | 'userChoice' | 'requestedRule'>;
+type AuditDecision = Pick<ApprovalAuditEntry, 'decider' | 'verdict' | 'rationale' | 'assessment' | 'contextHashes' | 'userChoice' | 'requestedRule'> & { failureKind?: ReviewError['type'] | 'no_interactive_user' };
 type AuditRequest = Omit<ApprovalAuditEntry, keyof AuditDecision | 'version' | 'timestamp' | 'durationMs' | 'reviewer' | 'sessionId' | 'sessionLeafId'>;
 
 export interface ReviewInput {
@@ -123,13 +123,17 @@ export class Approvals {
     return denied.action;
   }
 
+  clearDenied(): void {
+    this.denied = undefined;
+  }
+
   clearTurn(turnId: string): void {
     this.denials.clearTurn(turnId);
   }
 
   async request(request: ApprovalRequest, ctx: ApprovalContext, signal?: AbortSignal): Promise<ApprovalDecision> {
     const config = this.deps.config();
-    if (request.audit) this.denied = undefined;
+    if (request.audit) this.clearDenied();
     const actionJson = formatActionPretty(request.action);
     const actionBytes = Buffer.byteLength(actionJson);
     const audit: AuditRequest = {
@@ -142,10 +146,11 @@ export class Approvals {
     let started = performance.now();
     const record = (decision: AuditDecision) => {
       const now = performance.now();
+      const { failureKind, ...persistedDecision } = decision;
       this.record(audit, request.audit ? {
-        decider: decision.decider, verdict: decision.verdict, rationale: `Connector action ${decision.verdict}.`,
+        decider: decision.decider, verdict: decision.verdict, rationale: `Connector action ${decision.verdict}${failureKind ? ` (${failureKind})` : ''}.`,
         ...(decision.userChoice ? { userChoice: decision.userChoice } : {}),
-      } : decision, ctx, now - started, config);
+      } : persistedDecision, ctx, now - started, config);
       started = now;
     };
     if (config.approvalsReviewer !== 'auto_review' || config.approvalPolicy !== 'on-request') return this.askUser(request, ctx, record);
@@ -166,7 +171,7 @@ export class Approvals {
     const completion = completeReview(outcome);
     const automatic: AuditDecision = outcome.type === 'completed'
       ? { decider: 'auto_review', verdict: outcome.assessment.outcome === 'allow' ? 'approved' : 'rejected', rationale: outcome.assessment.rationale, assessment: outcome.assessment }
-      : { decider: 'auto_review', verdict: outcome.error.type === 'cancelled' ? 'aborted' : 'error', rationale: completion.warning ?? REVIEW_CANCELLED };
+      : { decider: 'auto_review', verdict: outcome.error.type === 'cancelled' ? 'aborted' : 'error', rationale: completion.warning ?? REVIEW_CANCELLED, failureKind: outcome.error.type };
     if (outcome.contextHashes) automatic.contextHashes = outcome.contextHashes;
     const turnId = this.deps.turnId();
     if (completion.assessmentOutcome === 'deny') {
@@ -191,7 +196,7 @@ export class Approvals {
           ctx.ui.notify(`${completion.warning}; asking you instead.`, 'warning');
           return this.askUser(request, ctx, record);
         }
-        record({ decider: 'policy', verdict: 'rejected', rationale: decision.message });
+        record({ decider: 'policy', verdict: 'rejected', rationale: decision.message, ...(automatic.failureKind ? { failureKind: automatic.failureKind } : {}) });
         return { type: 'rejected', message: decision.message };
       }
     }
@@ -207,13 +212,18 @@ export class Approvals {
 
   private async askUser(request: ApprovalRequest, ctx: ApprovalContext, record: (decision: AuditDecision) => void): Promise<ApprovalDecision> {
     if (!ctx.hasUI) {
-      record({ decider: 'policy', verdict: 'rejected', rationale: NO_INTERACTIVE_USER });
+      record({ decider: 'policy', verdict: 'rejected', rationale: NO_INTERACTIVE_USER, failureKind: 'no_interactive_user' });
       return { type: 'rejected', message: NO_INTERACTIVE_USER };
     }
     const always = request.amendment && `Yes, and don't ask again for commands that start with \`${request.amendment.join(' ')}\``;
     const options = always ? [YES, always, NO] : [YES, NO];
-    const actionDisplay = request.audit && formatActionPretty(request.action).replace(/[\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
-    const title = [request.justification ?? 'Allow this action?', actionDisplay, request.summary, request.reason].filter(Boolean).join('\n');
+    const actionJson = request.audit && formatActionPretty(request.action);
+    const actionDisplay = actionJson && actionJson.replace(/(?!\n)[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, char => {
+      const code = char.codePointAt(0)!.toString(16);
+      return code.length > 4 ? `\\u{${code}}` : `\\u${code.padStart(4, '0')}`;
+    });
+    const title = [request.justification ?? 'Allow this action?', request.summary,
+      ...(actionJson ? [`Complete action (${Buffer.byteLength(actionJson)} bytes):`, actionDisplay, request.summary] : []), request.reason].filter(Boolean).join('\n');
     const choice = await ctx.ui.select(title, options);
     const approved = choice === YES || Boolean(always && choice === always);
     try {

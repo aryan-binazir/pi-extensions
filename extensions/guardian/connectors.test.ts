@@ -70,13 +70,15 @@ const cases = [
   { label: 'declared custom connector', custom: true, connectors: { alwaysReview: ['fixture_update'] }, review: true },
   { label: 'unrelated built-in', builtin: 'codemode', connectors: { alwaysReview: ['fixture_update'] }, review: false },
   { label: 'disabled Guardian', config: { enabled: false }, review: false },
+  { label: 'runtime Guardian off', toggleOff: true, review: false },
+  { label: 'failed model falls back to a human', config: { reviewer: { provider: 'missing', model: 'missing' } }, human: true, review: false },
   { label: 'never approves mutations', config: { approvalPolicy: 'never' }, review: false, blocked: true },
   { label: 'human reviewer without UI', config: { approvalsReviewer: 'user' }, review: false, blocked: true },
   { label: 'missing reviewer fails closed', config: { reviewer: { provider: 'missing', model: 'missing' } }, review: false, blocked: true },
 ];
 
 for (const scenario of cases) test(`connector gate: ${scenario.label}`, async () => {
-  let effects = 0, reviews = 0;
+  let effects = 0, reviews = 0, humanPrompts = 0;
   const name = 'fixture_update';
   const fixture: ExtensionFactory = pi => pi.registerTool({ name, label: name, description: 'Synthetic connector',
     namespace: { name: 'mcp__fixture' }, annotations: scenario.annotations,
@@ -89,6 +91,7 @@ for (const scenario of cases) test(`connector gate: ${scenario.label}`, async ()
     responses: [fauxAssistantMessage(fauxToolCall(name, { value: 7 })),
       ...(scenario.review ? [() => { reviews++; return fauxAssistantMessage('{"outcome":"allow"}'); }] : []),
       fauxAssistantMessage('Done.')],
+    bind: scenario.human ? () => ({ uiContext: { select: async (title: string, choices: string[]) => { humanPrompts++; assert.match(title, /\"value\": 7/); return choices[0]; }, notify() {}, setStatus() {} } as any }) : undefined,
     configure: ({ agentDir }, provider) => {
       mkdirSync(join(agentDir, 'guardian'), { recursive: true });
       writeFileSync(join(agentDir, 'guardian', 'config.json'), JSON.stringify({
@@ -98,11 +101,13 @@ for (const scenario of cases) test(`connector gate: ${scenario.label}`, async ()
       return { model: provider.getModel() };
     },
   }, async ({ session }) => {
+    if (scenario.toggleOff) await session.prompt('/guardian off');
     await session.prompt('Run the synthetic fixture.');
     assert.equal(effects, scenario.blocked ? 0 : 1);
     assert.equal(session.messages.filter(m => m.role === 'toolResult').at(-1)?.isError ?? false, Boolean(scenario.blocked || scenario.resultError));
   });
   assert.equal(reviews, scenario.review ? 1 : 0);
+  assert.equal(humanPrompts, scenario.human ? 1 : 0);
 });
 
 test('real codemode reviews each mutation once, preserves arguments, and keeps prior effects after a later denial', async () => {

@@ -3,7 +3,7 @@ import { type Approvals, formatActionPretty, MAX_REVIEWED_ACTION_BYTES } from '.
 import type { GuardianConfig } from './config.ts';
 import { truncateText } from './review/context.ts';
 
-export function createConnectorGate(deps: { config(): GuardianConfig; tools: ExtensionAPI['getAllTools']; approvals: Pick<Approvals, 'request'> }) {
+export function createConnectorGate(deps: { config(): GuardianConfig; tools: ExtensionAPI['getAllTools']; approvals: Pick<Approvals, 'request' | 'clearDenied'> }) {
   return async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | undefined> => {
     try {
       const settings = deps.config();
@@ -15,8 +15,8 @@ export function createConnectorGate(deps: { config(): GuardianConfig; tools: Ext
       const parentForwardingProxy = process.env.PI_SUBAGENT_TOOL_BRIDGE === '1' && /(^|[/\\])subagents[/\\]connector-bridge\.ts$/.test(source);
       if (parentForwardingProxy) return;
       const force = settings.connectors.alwaysReview.includes(tool.name);
-      if (source !== 'builtin:mcp' && !force && !settings.connectors.readOnly.includes(tool.name)) return;
-      if (!force && (settings.connectors.readOnly.includes(tool.name) || tool.annotations?.readOnlyHint === true && tool.annotations.destructiveHint !== true)) return;
+      if (!force && (source !== 'builtin:mcp' || settings.connectors.readOnly.includes(tool.name) || tool.annotations?.readOnlyHint === true && tool.annotations.destructiveHint !== true)) return;
+      deps.approvals.clearDenied();
       if (settings.approvalPolicy === 'never') return { block: true, reason: 'Guardian approvalPolicy never forbids review-required connector calls.' };
       const signal = ctx.signal;
       if (signal?.aborted) return { block: true, reason: 'Connector approval cancelled.' };

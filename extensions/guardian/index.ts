@@ -33,7 +33,7 @@ export function registerFailClosed(pi: Pick<ExtensionAPI, 'registerTool' | 'on' 
     pi.registerTool({ ...tool, execute: refuse } as unknown as ToolDefinition);
   }
   pi.on('tool_call', createConnectorGate({ config: () => FAIL_CLOSED_CONFIG, tools: () => pi.getAllTools(),
-    approvals: { request: async () => ({ type: 'rejected', message }) } }));
+    approvals: { clearDenied: () => {}, request: async () => ({ type: 'rejected', message }) } }));
   pi.on('session_start', (_event, ctx) => { if (ctx.hasUI) ctx.ui.notify(message, 'error'); });
 }
 
@@ -66,10 +66,6 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   /** Set by `/guardian on|off|toggle`. Pi builds a new Guardian for each session, so it never outlives this one. */
   let sessionEnabled: boolean | undefined;
 
-  /**
-   * Reads config.json when it changes. An invalid file keeps the last valid settings, so a typo never relaxes
-   * permissions; with no valid settings yet, every reviewable action is sent to review or to you.
-   */
   const fileConfig = (): GuardianConfig => {
     const path = guardianConfigPath();
     let stamp = 'missing';
@@ -82,7 +78,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
         const message = `Guardian config error: ${(error as Error).message}`;
         cached = lastValid
           ? { stamp, config: lastValid, error: `${message}; keeping the last valid settings` }
-          : { stamp, config: FAIL_CLOSED_CONFIG, error: `${message}; every reviewable action needs approval until it is fixed` };
+          : { stamp, config: FAIL_CLOSED_CONFIG, error: `${message}; built-in protections remain; custom connector declarations are unavailable until it is fixed` };
       }
     }
     return cached.config;

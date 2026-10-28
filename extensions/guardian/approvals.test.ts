@@ -2,6 +2,8 @@
 // codex-rs/core/src/tools/approvals.rs and codex-rs/core/src/context/guardian_approved_action.rs @ ce0323f (Apache-2.0).
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { Type } from 'typebox';
+import { createConnectorGate } from './connectors.ts';
 import { Approvals, type ApprovalAuditEntry, type ApprovalContext, formatActionPretty, manualApprovalMessage } from './approvals.ts';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import type { ReviewOutcome } from './review/outcome.ts';
@@ -261,4 +263,47 @@ test('human connector rejection clears a prior automatic shell denial', async ()
     audit: { action: { tool: 'connector' }, summary: 'Connector call' },
   }, h.ctx);
   assert.equal(h.approvals.takeDenied(h.ctx), undefined);
+});
+
+test('connector human approval makes invisible Unicode visible and puts identity before the complete action', async () => {
+  const h = harness([], { approvalsReviewer: 'user' }, { choice: 'Yes, proceed' });
+  const invisible = 'adm\u200bin\u200d\u2060\u061c\ufeff\u00ad\u2028\u2029\u{e0061}';
+  await h.approvals.request({ action: { arguments: { value: invisible }, tool: 'connector' }, summary: 'Connector call: fixture_update',
+    audit: { action: { tool: 'connector' }, summary: 'Connector call: fixture_update' },
+  }, h.ctx);
+  const title = h.prompts[0][0];
+  for (const char of ['\u200b', '\u200d', '\u2060', '\u061c', '\ufeff', '\u00ad', '\u2028', '\u2029', '\u{e0061}']) assert.ok(!title.includes(char));
+  assert.match(title, /\\u200b/);
+  assert.match(title, /\\u\{e0061\}/);
+  assert.ok(title.indexOf('fixture_update') < title.indexOf('"arguments"'));
+  assert.match(title, /bytes/);
+});
+
+for (const early of ['never', 'oversize', 'cancelled'] as const) test(`connector ${early} preflight clears stale manual approval without recording a review`, async () => {
+  const h = harness([deny]);
+  await h.approvals.request(request, h.ctx);
+  const cancellation = new AbortController();
+  if (early === 'cancelled') cancellation.abort();
+  const gate = createConnectorGate({
+    config: () => ({ ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: early === 'never' ? 'never' : 'on-request' }),
+    tools: () => [{ name: 'fixture_update', description: 'Synthetic connector', parameters: Type.Object({}), exposure: 'direct',
+      sourceInfo: { path: 'builtin:mcp', source: 'builtin', scope: 'temporary', origin: 'top-level' } }],
+    approvals: h.approvals,
+  });
+  const result = await gate({ type: 'tool_call', toolName: 'fixture_update', toolCallId: 'call',
+    input: early === 'oversize' ? { payload: '界'.repeat(90_000) } : {},
+  }, { ...h.ctx, cwd: '/repo', signal: cancellation.signal } as any);
+  assert.equal(result?.block, true);
+  assert.equal(h.records.length, 1, 'preflight blocks produce tool errors rather than review audit entries');
+  assert.equal(h.approvals.takeDenied(h.ctx), undefined);
+});
+
+test('connector metadata audits retain safe failure categories without model error text', async () => {
+  const h = harness([{ type: 'error', error: { type: 'prompt_build', message: 'synthetic-private-model-error' } }], {}, { hasUI: false });
+  await h.approvals.request({ action: { tool: 'connector' }, summary: 'Connector call', audit: { action: { tool: 'connector' }, summary: 'Connector call' } }, h.ctx);
+  assert.ok(h.records.every(r => r.rationale.includes('prompt_build')));
+  assert.ok(!JSON.stringify(h.records).includes('synthetic-private-model-error'));
+  const human = harness([], { approvalsReviewer: 'user' }, { hasUI: false });
+  await human.approvals.request({ action: { tool: 'connector' }, summary: 'Connector call', audit: { action: { tool: 'connector' }, summary: 'Connector call' } }, human.ctx);
+  assert.match(human.records[0].rationale, /no_interactive_user/);
 });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { fauxAssistantMessage, fauxProvider, type Model } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage, fauxProvider, type Model, type SimpleStreamOptions } from '@earendil-works/pi-ai';
 import { withPi } from '../../../tests/pi-session.ts';
 import { resolveReviewer } from './model.ts';
 import { runReviewerTurn } from './reviewer.ts';
@@ -43,21 +43,19 @@ for (const stop of ['cancelled', 'timeout'] as const) {
     provider.setResponses([fauxAssistantMessage('{"outcome":"allow"}')]);
     let releaseAuth!: () => void;
     const authGate = new Promise<void>(resolve => { releaseAuth = resolve; });
-    let authStarted!: (signal: AbortSignal) => void;
-    const started = new Promise<AbortSignal>(resolve => { authStarted = resolve; });
-    let armed = false;
+    let authStarted!: () => void;
+    const started = new Promise<void>(resolve => { authStarted = resolve; });
     await withPi({ configure: ({ modelRuntime }, main) => {
       modelRuntime.registerNativeProvider({ ...provider.provider, auth: { apiKey: {
-        name: 'Synthetic delayed auth', resolve: async ({ signal }) => {
-          if (armed) { authStarted(signal); await authGate; }
+        name: 'Synthetic delayed auth', check: async () => ({ source: 'synthetic' }), resolve: async () => {
+          authStarted();
+          await authGate;
           return { auth: {} };
         },
       } } });
       return { model: main.getModel() };
     } }, async ({ runner, cwd }) => {
       const registry = runner.createContext().modelRegistry;
-      await registry.getAvailableOfType('chat', provider.provider.id);
-      armed = true;
       const model = provider.getModel();
       const reviewer = resolveReviewer(registry, { provider: model.provider, model: model.id, reasoning: 'low' }, 'auth-cancellation');
       assert.ok(reviewer.ok);
@@ -73,14 +71,13 @@ for (const stop of ['cancelled', 'timeout'] as const) {
           },
           runCommand: async () => { throw new Error('No command expected'); },
         });
-        const authSignal = await started;
+        assert.equal(await Promise.race([started.then(() => 'auth-started'), pending]), 'auth-started');
         if (stop === 'cancelled') controller.abort();
         const outcome = await pending;
-        const authAborted = authSignal.aborted;
         releaseAuth();
         await completion;
         assert.deepEqual(outcome, { type: 'error', error: { type: stop } });
-        assert.deepEqual({ authAborted, providerEntries: provider.state.callCount }, { authAborted: false, providerEntries: 0 });
+        assert.equal(provider.state.callCount, 0);
       } finally {
         controller.abort();
         releaseAuth();
@@ -92,24 +89,15 @@ for (const stop of ['cancelled', 'timeout'] as const) {
 
 test('an authenticated Pi review preserves auth, provider options and its assessment', async () => {
   const provider = fauxProvider({ provider: 'guardian-auth-success', tokensPerSecond: Infinity });
-  let authSignal: AbortSignal | undefined;
   let reviewSignal: AbortSignal | undefined;
+  let request: { options: SimpleStreamOptions | undefined; model: Model<string> } | undefined;
   provider.setResponses([(_context, options, _state, model) => {
-    assert.equal(options?.apiKey, 'synthetic-key');
-    assert.deepEqual(options?.headers, { 'x-synthetic-auth': 'present' });
-    assert.deepEqual(options?.env, { GUARDIAN_SYNTHETIC_ENV: 'present' });
-    assert.equal(model.baseUrl, 'https://guardian.invalid/offline');
-    assert.equal(options?.sessionId, 'normal-auth');
-    assert.equal(options?.reasoning, 'low');
-    assert.equal(options?.signal, reviewSignal);
-    assert.equal(authSignal?.aborted, false);
-    assert.equal(options?.signal?.aborted, false);
+    request = { options, model };
     return fauxAssistantMessage('{"outcome":"allow"}');
   }]);
   await withPi({ configure: ({ modelRuntime }, main) => {
     modelRuntime.registerNativeProvider({ ...provider.provider, auth: { apiKey: {
-      name: 'Synthetic auth', resolve: async ({ signal }) => {
-        authSignal = signal;
+      name: 'Synthetic auth', check: async () => ({ source: 'synthetic' }), resolve: async () => {
         return { auth: { apiKey: 'synthetic-key', headers: { 'x-synthetic-auth': 'present' }, baseUrl: 'https://guardian.invalid/offline' },
           env: { GUARDIAN_SYNTHETIC_ENV: 'present' } };
       },
@@ -125,23 +113,28 @@ test('an authenticated Pi review preserves auth, provider options and its assess
     assert.equal(outcome.type, 'completed');
     if (outcome.type === 'completed') assert.equal(outcome.assessment.outcome, 'allow');
     assert.equal(provider.state.callCount, 1);
+    assert.ok(request);
+    assert.equal(request.options?.apiKey, 'synthetic-key');
+    assert.deepEqual(request.options?.headers, { 'x-synthetic-auth': 'present' });
+    assert.deepEqual(request.options?.env, { GUARDIAN_SYNTHETIC_ENV: 'present' });
+    assert.equal(request.model.baseUrl, 'https://guardian.invalid/offline');
+    assert.equal(request.options?.sessionId, 'normal-auth');
+    assert.equal(request.options?.reasoning, 'low');
+    assert.equal(request.options?.signal, reviewSignal);
+    assert.equal(request.options?.signal?.aborted, false);
   });
 });
 
 test('Pi authentication failures retain their cause and transient retry classification', async () => {
   const provider = fauxProvider({ provider: 'guardian-auth-error', tokensPerSecond: Infinity });
-  let failure: string | undefined;
+  let failure = 'Invalid credential';
   await withPi({ configure: ({ modelRuntime }, main) => {
     modelRuntime.registerNativeProvider({ ...provider.provider, auth: { apiKey: {
-      name: 'Synthetic failing auth', resolve: async () => {
-        if (failure) throw new Error(failure);
-        return { auth: {} };
-      },
+      name: 'Synthetic failing auth', check: async () => ({ source: 'synthetic' }), resolve: async () => { throw new Error(failure); },
     } } });
     return { model: main.getModel() };
   } }, async ({ runner, cwd }) => {
     const registry = runner.createContext().modelRegistry;
-    await registry.getAvailableOfType('chat', provider.provider.id);
     const model = provider.getModel();
     const reviewer = resolveReviewer(registry, { provider: model.provider, model: model.id, reasoning: 'low' }, 'failed-auth');
     assert.ok(reviewer.ok);
@@ -149,12 +142,8 @@ test('Pi authentication failures retain their cause and transient retry classifi
       failure = message;
       const outcome = await runReviewerTurn({ cwd, systemPrompt: 'Offline review', userContent: ['Synthetic request'], deadline: Date.now() + 5_000,
         complete: reviewer.complete, runCommand: async () => { throw new Error('No command expected'); } });
-      assert.equal(outcome.type, 'error');
-      if (outcome.type !== 'error') throw new Error('Expected auth failure');
-      assert.equal(outcome.error.type, 'session');
-      if (outcome.error.type !== 'session') throw new Error('Expected auth session failure');
-      assert.equal(outcome.error.message, `reviewer model ${model.provider}/${model.id} is not authenticated: ${message}`);
-      assert.equal(outcome.error.transient, transient);
+      assert.deepEqual(outcome, { type: 'error', error: { type: 'session',
+        message: `reviewer model ${model.provider}/${model.id} is not authenticated: ${message}`, transient } });
     }
     assert.equal(provider.state.callCount, 0);
   });

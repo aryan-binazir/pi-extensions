@@ -1,15 +1,38 @@
 import { spawn } from 'node:child_process';
-import type { Duplex } from 'node:stream';
 import { isAbsolute, join } from 'node:path';
 import { WaylandPointer } from './wayland.ts';
 import { linuxSessionEnvironment } from './linux-session.ts';
 import type { DesktopAction, DesktopBackend, DesktopResult } from './desktop.ts';
 
 const maxBytes = 16 * 1024 * 1024;
-const commandOwner = `
-{ read -r _ <&3; kill -KILL 0; } </dev/null >/dev/null 2>&1 &
-if ! command -v "$1" >/dev/null 2>&1; then printf 'unavailable\\n' >&3; exit 127; fi
-exec "$@" 3>&-
+const commandOwner = String.raw`
+const { spawn } = require('node:child_process');
+const { writeSync } = require('node:fs');
+const stop = () => process.kill(-process.pid, 'SIGKILL');
+const report = value => writeSync(2, JSON.stringify(value) + '\n');
+process.on('uncaughtException', stop);
+process.on('SIGTERM', stop);
+process.on('SIGINT', stop);
+let request = '';
+const receive = chunk => {
+  request += chunk;
+  const end = request.indexOf('\n');
+  if (end < 0) return;
+  process.stdin.removeListener('data', receive);
+  const { command, args, input, bun } = JSON.parse(request.slice(0, end));
+  if (bun === null) delete process.env.BUN_BE_BUN;
+  else process.env.BUN_BE_BUN = bun;
+  const child = spawn(command, args, { stdio: 'pipe' });
+  let error;
+  child.on('error', failure => { error = { message: failure.message, code: failure.code, errno: failure.errno, syscall: failure.syscall, path: failure.path, spawnargs: failure.spawnargs }; });
+  child.stdout.on('data', chunk => { for (let offset = 0; offset < chunk.length;) offset += writeSync(1, chunk, offset, chunk.length - offset); });
+  child.stderr.resume(); child.stdin.on('error', () => {}); child.stdin.end(input);
+  child.once('close', code => { report({ code, error }); process.exit(0); });
+};
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', receive);
+process.stdin.on('end', stop);
+process.stdin.on('error', stop);
 `;
 export function pngResult(bytes: Buffer, output: string): DesktopResult {
   if (bytes.length < 24 || bytes.length > maxBytes || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || bytes.toString('ascii', 12, 16) !== 'IHDR') throw new Error('Desktop returned an invalid or oversized PNG');
@@ -31,38 +54,41 @@ export class LinuxDesktop implements DesktopBackend {
   private command(command: string, args: string[], signal: AbortSignal, input?: string): Promise<Buffer> {
     signal.throwIfAborted();
     return new Promise((resolve, reject) => {
-      const child = spawn('/bin/sh', ['-c', commandOwner, 'desktop-command', command, ...args], { env: this.environment(), detached: true, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
-      const lifetime = child.stdio[3] as Duplex;
+      const env = this.environment();
+      const child = spawn(process.execPath, ['-e', commandOwner], { env: { ...env, BUN_BE_BUN: '1' }, detached: true, stdio: 'pipe' });
       const chunks: Buffer[] = []; let size = 0; let failure: Error | undefined;
-      let status: number | null = null, exited = false, stopping = false, stdoutEnded = false, stderrEnded = false;
       let drain: NodeJS.Timeout | undefined;
-      let childClosed = false, lifetimeClosed = false;
       let reaped!: () => void;
-      const drainPipes = () => { drain ??= setTimeout(() => { child.stdout!.destroy(); child.stderr!.destroy(); lifetime.destroy(); }, 250); };
-      const owned = { stop: () => { if (stopping) return; stopping = true; lifetime.end(); if (exited) drainPipes(); }, settled: new Promise<void>(resolve => { reaped = resolve; }) };
-      this.children.add(owned);
-      const unavailable = (cause: unknown) => { failure = new Error(`Desktop runtime ${command} unavailable; install its documented prerequisite`, { cause }); };
-      const abort = () => { failure = new Error('Desktop command aborted'); owned.stop(); };
-      const complete = () => { if (exited && stdoutEnded && stderrEnded) { signal.removeEventListener('abort', abort); owned.stop(); } };
-      signal.addEventListener('abort', abort, { once: true });
-      child.stdout!.on('data', (chunk: Buffer) => { size += chunk.length; if (size > maxBytes) { failure = new Error('Desktop command output exceeded limit'); owned.stop(); } else chunks.push(chunk); });
-      child.stdout!.on('end', () => { stdoutEnded = true; complete(); });
-      child.stderr!.on('end', () => { stderrEnded = true; complete(); });
-      child.stderr!.resume(); child.stdin!.on('error', () => {});
-      lifetime.on('error', () => {});
-      lifetime.once('data', () => unavailable(new Error('Command unavailable')));
-      child.on('error', error => unavailable(error));
-      child.on('exit', code => { status = code; exited = true; if (stopping) drainPipes(); complete(); });
-      const settle = () => {
-        if (!childClosed || !lifetimeClosed) return;
-        clearTimeout(drain); this.children.delete(owned); signal.removeEventListener('abort', abort); reaped();
-        if (failure) reject(failure);
-        else if (status !== 0) reject(new Error(`Desktop runtime ${command} failed (${status}); check compositor support and session permissions`));
-        else resolve(Buffer.concat(chunks));
+      const owned = {
+        stop: () => {
+          child.stdin.end();
+          if (child.pid && child.exitCode === null && child.signalCode === null) {
+            try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+          }
+        },
+        settled: new Promise<void>(resolve => { reaped = resolve; }),
       };
-      lifetime.once('close', () => { lifetimeClosed = true; settle(); });
-      child.once('close', () => { childClosed = true; lifetime.destroy(); settle(); });
-      child.stdin!.end(input); if (signal.aborted) abort();
+      this.children.add(owned);
+      const unavailable = (cause: unknown) => new Error(`Desktop runtime ${command} unavailable; install its documented prerequisite`, { cause });
+      const abort = () => { failure = new Error('Desktop command aborted'); owned.stop(); };
+      signal.addEventListener('abort', abort, { once: true });
+      child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > maxBytes) { failure = new Error('Desktop command output exceeded limit'); owned.stop(); } else chunks.push(chunk); });
+      child.stdin.on('error', () => {});
+      let report = '';
+      child.stderr.on('data', (chunk: Buffer) => { report += chunk.subarray(0, Math.max(0, 16384 - report.length)).toString(); });
+      child.on('error', error => { failure = unavailable(error); });
+      child.on('exit', () => { drain = setTimeout(() => { child.stdout.destroy(); child.stderr.destroy(); }, 250); });
+      child.once('close', () => {
+        clearTimeout(drain); this.children.delete(owned); signal.removeEventListener('abort', abort); reaped();
+        let result: { code: number | null; error?: { message: string; code?: string; errno?: number; syscall?: string; path?: string; spawnargs?: string[] } } | undefined;
+        try { result = JSON.parse(report) as typeof result; } catch {}
+        if (failure) reject(failure);
+        else if (result?.error) reject(unavailable(Object.assign(new Error(result.error.message), result.error)));
+        else if (!result || result.code !== 0) reject(new Error(`Desktop runtime ${command} failed (${result?.code ?? null}); check compositor support and session permissions`));
+        else resolve(Buffer.concat(chunks));
+      });
+      child.stdin.write(JSON.stringify({ command, args, input, bun: env.BUN_BE_BUN ?? null }) + '\n');
+      if (signal.aborted) abort();
     });
   }
   async run(action: DesktopAction, signal: AbortSignal): Promise<DesktopResult> {
@@ -80,7 +106,6 @@ export class LinuxDesktop implements DesktopBackend {
   async close() {
     this.pointer?.close(); this.pointer = undefined;
     await Promise.all([...this.children].map(child => { child.stop(); return child.settled; }));
-    this.children.clear();
   }
 }
 

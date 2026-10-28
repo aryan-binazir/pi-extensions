@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getImageDimensions } from '@earendil-works/pi-tui';
 import computerUse from './index.ts';
-import { pngResult } from './native.ts';
+import { LinuxDesktop, pngResult } from './native.ts';
+import { DesktopSession } from './desktop.ts';
 import { png } from '../../tests/fixtures/png.ts';
 import { ints, msg, string } from '../../tests/fixtures/wayland.ts';
 
@@ -68,7 +69,8 @@ test('Linux screenshots reach Pi bounded to the active model image limits', { sk
     });
   });
   await new Promise<void>(resolve => compositor.listen(socket, resolve));
-  await writeFile(join(dir, 'screen.png'), png(3000, 1500));
+  const source = png(3000, 1500, { noise: true });
+  await writeFile(join(dir, 'screen.png'), source);
   await writeFile(join(dir, 'grim'), `#!/bin/sh\ncat '${join(dir, 'screen.png')}'\n`, { mode: 0o755 });
   const saved = { WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY, PATH: process.env.PATH };
   process.env.WAYLAND_DISPLAY = socket; process.env.PATH = `${dir}:${process.env.PATH}`;
@@ -78,6 +80,11 @@ test('Linux screenshots reach Pi bounded to the active model image limits', { sk
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     await new Promise(resolve => compositor.close(resolve)); await rm(dir, { recursive: true, force: true });
   });
+  const native = new DesktopSession(() => new LinuxDesktop(), 5000);
+  try {
+    const result = await native.run({ action: 'screenshot' });
+    assert.deepEqual(Buffer.from(result.image!, 'base64'), source);
+  } finally { await native.close(); }
   const model = { inputLimits: { images: { resize: { maxWidth: 1000, maxHeight: 1000 } } } };
   const { content, details } = await tools.find(tool => tool.name === 'computer_screenshot').execute('shot', {}, undefined, undefined, { model });
   const image = content.find((block: any) => block.type === 'image');

@@ -1,11 +1,47 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { runBounded, runStarted } from './process.ts';
 
 const node = (script: string) => [process.execPath, ['-e', script]] as const;
+
+test('bounded external commands preserve argv and stdin through the POSIX shell owner', async () => {
+  const echo = await runBounded('/bin/echo', ['ACTUAL_OK'], { cwd: tmpdir(), timeoutMs: 2000, maxBytes: 100 });
+  assert.equal(echo.exitCode, 0);
+  assert.equal(echo.stdout, 'ACTUAL_OK\n');
+  assert.equal(echo.spawnError, undefined);
+  const args = ['space here', '', '"quoted"', '$(printf REINTERPRETED)', 'A=B', '--', '\n'];
+  const result = await runBounded(process.execPath, ['-e', "let stdin='';process.stdin.on('data',chunk=>stdin+=chunk).on('end',()=>console.log(JSON.stringify({args:process.argv.slice(1),stdin})))", '--', ...args], {
+    cwd: tmpdir(), stdin: 'exact stdin\nsecond line', timeoutMs: 2000, maxBytes: 2000,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), { args, stdin: 'exact stdin\nsecond line' });
+});
+
+test('executable names stay external, including builtins, assignments and leading hyphens', async t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'guardian-dispatch-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const bin = join(cwd, '-bin');
+  mkdirSync(bin);
+  const args = ['-a', 'space here', '', 'A=B', '$(printf REINTERPRETED)'];
+  const invocation = ['-e', "let stdin='';process.stdin.on('data',chunk=>stdin+=chunk).on('end',()=>console.log(JSON.stringify({args:process.argv.slice(1),stdin})))", '--', ...args];
+  for (const name of ['-a', 'cd', 'A=B']) {
+    const executable = join(bin, name);
+    symlinkSync(process.execPath, executable);
+    for (const command of [name, `-bin/${name}`]) {
+      const result = await runBounded(command, invocation, {
+        cwd, env: { ...process.env, PATH: '-bin', 'BASH_FUNC_cd%%': '() { echo REINTERPRETED; }' }, stdin: 'unaltered\n', timeoutMs: 2000, maxBytes: 2000,
+      });
+      assert.equal(result.exitCode, 0, `${command}: ${result.stderr}`);
+      assert.deepEqual(JSON.parse(result.stdout), { args, stdin: 'unaltered\n' });
+    }
+  }
+  const missing = await runBounded('-'.repeat(2000), [], { cwd, env: { ...process.env, PATH: '-bin' }, timeoutMs: 2000, maxBytes: 100 });
+  assert.ok(missing.spawnError && missing.spawnError.length < 600, 'failed executable lookup must keep diagnostics bounded');
+});
 
 test('output beyond the cap keeps its head and tail', async () => {
   const [command, args] = node("process.stdout.write('A'.repeat(1000) + 'B'.repeat(5_000_000) + 'Z'.repeat(1000))");

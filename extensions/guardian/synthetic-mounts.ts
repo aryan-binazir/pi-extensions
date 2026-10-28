@@ -208,7 +208,6 @@ export async function registerSyntheticMountTargets(targets: readonly SyntheticM
         for (const original of targets) {
           const markerDir = join(registryRoot, hashPath(original.path));
           mkdirSync(markerDir, { recursive: true });
-          // An empty path that another live sandbox created is that sandbox's placeholder, not a real pre-existing path.
           const target = original.preExisting && markerDirHasActiveSyntheticOwner(markerDir) ? missingTarget(original.path, original.kind) : original;
           const markerFile = join(markerDir, String(process.pid));
           const owners = ownMarkers.get(markerFile) ?? { synthetic: 0, existing: 0 };

@@ -157,12 +157,6 @@ test('a hidden session that ignores the hangup is killed before its files are de
   assert.deepEqual(await readdir(join(root, 'claude', 'projects')), []);
 });
 
-test('a publish that fails without a refusal may still have gone through, so its outcome is unknown', { skip: noTmux }, async t => {
-  const { run, cwd } = await setup(t, { failures: { publish: 'Request failed: socket hang up' } });
-  await writeFile(join(cwd, 'q3.html'), page);
-  await assert.rejects(run('claude_artifact_publish', { path: 'q3.html' }), /socket hang up[\s\S]*outcome is unknown/);
-});
-
 test('an update whose read has no version is an error, not a conflict', { skip: noTmux }, async t => {
   const { run, cwd } = await setup(t, { responses: { read: { read: { code: 401, codeText: 'Unauthorized' } } } });
   await writeFile(join(cwd, 'q3.html'), page);
@@ -178,16 +172,6 @@ test('cleanup leaves files alone that the session did not create under its own i
   await run('claude_artifact_list', {});
   assert.deepEqual((await readdir(keep)).sort(), ['notes.jsonl', 'scratchpad']);
   assert.deepEqual(await readdir(busy), ['work.txt']);
-});
-
-test('a cancelled publish that Claude Code may already have sent says its outcome is unknown', { skip: noTmux }, async t => {
-  const { run, cwd, fakeLog } = await setup(t, { stall: 'publish' });
-  await writeFile(join(cwd, 'q3.html'), page);
-  const controller = new AbortController();
-  const job = run('claude_artifact_publish', { path: 'q3.html' }, undefined, controller.signal);
-  while (!(await fakeLog().catch(() => [])).some(entry => entry.event === 'PreToolUse')) await delay(50);
-  controller.abort();
-  await assert.rejects(job, /outcome is unknown[\s\S]*claude_artifact_list/);
 });
 
 test('cancelling before any upload is allowed simply cancels', { skip: noTmux }, async t => {
@@ -308,15 +292,6 @@ test('an update publishes only after the read result shows base_version, even wh
   assert.deepEqual(decisions, [['read', 'allow'], ['publish', 'deny']]);
 });
 
-test('cancelling while the approval dialog is open is a cancellation, not a decline', async t => {
-  const { run, cwd, ctx } = await setup(t);
-  await writeFile(join(cwd, 'q3.html'), page);
-  const controller = new AbortController();
-  const confirm = (_title: string, _message: string, options: { signal: AbortSignal }) => new Promise<boolean>(resolve => options.signal.addEventListener('abort', () => resolve(false)));
-  const job = run('claude_artifact_publish', { path: 'q3.html' }, { ...ctx, ui: { confirm } }, controller.signal);
-  await delay(50); controller.abort();
-  await assert.rejects(job, (error: Error) => !/declined/.test(error.message));
-});
 
 test('a refusal that names no live version points the model to claude_artifact_read', { skip: noTmux }, async t => {
   const refusal = "You hadn't viewed the live version of this artifact, so the publish was refused.";
@@ -330,12 +305,6 @@ test('a refusal that names no live version points the model to claude_artifact_r
 test('a result missing the fields the tool reports is an error, not an empty success', { skip: noTmux }, async t => {
   const { run } = await setup(t, { responses: { list: { items: [] } } });
   await assert.rejects(run('claude_artifact_list', {}), /unexpected/);
-});
-
-test('a publish that went through but fails verification says it may be live and where', { skip: noTmux }, async t => {
-  const { run, cwd } = await setup(t, { responses: { publish: { ...published, path: '/home/ar/.ssh/config' } } });
-  await writeFile(join(cwd, 'q3.html'), page);
-  await assert.rejects(run('claude_artifact_publish', { path: 'q3.html' }), new RegExp(`${published.url}[\\s\\S]*not the approved file`));
 });
 
 test('Claude Code dying after the job started fails it without waiting for the timeout', { skip: noTmux }, async t => {
@@ -384,3 +353,103 @@ test('publish accepts only an HTML page', async t => {
   await writeFile(join(cwd, 'notes.txt'), 'notes');
   await assert.rejects(run('claude_artifact_publish', { path: 'notes.txt' }), /\.html/);
 });
+
+for (const mutation of ['publish', 'update'] as const) {
+  const tool = `claude_artifact_${mutation}`;
+  const params = { path: 'q3.html', ...(mutation === 'update' ? { url: published.url, base_version: published.version } : {}) };
+  const responses = { read: read(published.version), publish: published };
+
+  test(`${mutation}: cancelling during approval starts no Claude session and removes the approved copy`, { timeout: 5_000 }, async t => {
+    const { run, cwd, root, ctx, fakeLog } = await setup(t);
+    await writeFile(join(cwd, 'q3.html'), page);
+    const controller = new AbortController();
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const confirm = async (_title: string, _message: string, options: { signal: AbortSignal }) => {
+      entered();
+      return new Promise<boolean>(resolve => options.signal.addEventListener('abort', () => resolve(false), { once: true }));
+    };
+    const job = run(tool, params, { ...ctx, ui: { confirm } }, controller.signal);
+    await ready; controller.abort();
+    await assert.rejects(job, /cancelled before approval/);
+    await assert.rejects(fakeLog(), /ENOENT/);
+    assert.deepEqual(await readdir(join(root, 'agent', 'claude-artifacts', 'helper')), []);
+    assert.equal(await readFile(join(cwd, 'q3.html'), 'utf8'), page);
+  });
+
+  test(`${mutation}: changing the original during approval still uploads the approved bytes`, { skip: noTmux }, async t => {
+    const { run, cwd, ctx, fakeLog } = await setup(t, { responses, captureUpload: true });
+    await writeFile(join(cwd, 'q3.html'), page);
+    await run(tool, params, { ...ctx, ui: { confirm: async () => { await writeFile(join(cwd, 'q3.html'), '<html>edited later</html>'); return true; } } });
+    assert.deepEqual((await fakeLog()).filter(entry => entry.event === 'upload').map(entry => entry.content), [page]);
+    assert.equal(await readFile(join(cwd, 'q3.html'), 'utf8'), '<html>edited later</html>');
+  });
+
+  test(`${mutation}: a service failure after authorization is uncertain and never retried`, { skip: noTmux }, async t => {
+    const { run, cwd, fakeLog } = await setup(t, { responses, failures: { publish: 'Request failed: socket hang up' } });
+    await writeFile(join(cwd, 'q3.html'), page);
+    await assert.rejects(run(tool, params), /socket hang up[\s\S]*outcome is unknown[\s\S]*claude_artifact_list before retrying/);
+    assert.equal((await fakeLog()).filter(entry => entry.event === 'PreToolUse' && entry.body.tool_input.action === 'publish').length, 1);
+  });
+
+  test(`${mutation}: tampering with the staged copy reports possible publication and preserves the source`, { skip: noTmux }, async t => {
+    const { run, cwd, root, fakeLog } = await setup(t, { responses, tamperOnPublish: true });
+    await writeFile(join(cwd, 'q3.html'), page);
+    await assert.rejects(run(tool, params), /may be live[\s\S]*approved copy changed[\s\S]*claude_artifact_list before retrying/);
+    assert.equal((await fakeLog()).filter(entry => entry.event === 'PreToolUse' && entry.body.tool_input.action === 'publish').length, 1);
+    assert.equal(await readFile(join(cwd, 'q3.html'), 'utf8'), page);
+    assert.deepEqual(await readdir(join(root, 'agent', 'claude-artifacts', 'helper')), []);
+  });
+
+  for (const [field, value] of [['path', '/unapproved.html'], ['url', null], ['version', null]] as const) {
+    test(`${mutation}: invalid upload ${field} reports possible publication, never a conflict or retry`, { skip: noTmux }, async t => {
+      const { run, cwd, root, fakeLog } = await setup(t, { responses: { ...responses, publish: { ...published, [field]: value } } });
+      await writeFile(join(cwd, 'q3.html'), page);
+      await assert.rejects(run(tool, params), /may be live[\s\S]*claude_artifact_list before retrying/);
+      assert.equal((await fakeLog()).filter(entry => entry.event === 'PreToolUse' && entry.body.tool_input.action === 'publish').length, 1);
+      assert.deepEqual(await readdir(join(root, 'agent', 'claude-artifacts', 'helper')), []);
+    });
+  }
+
+  test(`${mutation}: cancellation after publish authorization reports uncertainty and stops the session before cleanup`, { skip: noTmux, timeout: 10_000 }, async t => {
+    const { run, cwd, root, fakeLog } = await setup(t, { responses, stall: 'publish', ignoreHangup: true, observeStagedCleanup: true });
+    await writeFile(join(cwd, 'q3.html'), page);
+    const controller = new AbortController();
+    const job = run(tool, params, undefined, controller.signal);
+    const deadline = Date.now() + 5_000;
+    while (!(await fakeLog().catch(() => [])).some(entry => entry.event === 'PreToolUse' && entry.body.tool_input.action === 'publish' && entry.output?.hookSpecificOutput?.permissionDecision === 'allow')) {
+      if (Date.now() > deadline) { controller.abort(); await job.catch(() => {}); assert.fail('Publish was never authorized'); }
+      await delay(25);
+    }
+    controller.abort();
+    await assert.rejects(job, /outcome is unknown[\s\S]*claude_artifact_list before retrying/);
+    const log = await fakeLog(), sessions = log.filter(entry => entry.argv && entry.argv[0] !== '--version');
+    assert.equal(sessions.length, 1);
+    assert.equal(log.filter(entry => entry.event === 'UserPromptSubmit').length, 1);
+    const [session] = sessions;
+    assert.throws(() => process.kill(session.pid, 0), /ESRCH/);
+    assert.equal(log.filter(entry => entry.event === 'PreToolUse' && entry.body.tool_input.action === 'publish').length, 1);
+    assert.ok(log.some(entry => entry.event === 'staged-at-hangup' && entry.exists === true));
+    assert.ok(!log.some(entry => entry.event === 'staged-deleted-while-running'));
+    await delay(100);
+    for (const dir of [join(root, 'agent', 'claude-artifacts', 'helper'), join(root, 'claude', 'projects'), join(root, 'claude', 'scratch')]) assert.deepEqual(await readdir(dir), []);
+    assert.equal(await readFile(join(cwd, 'q3.html'), 'utf8'), page);
+  });
+
+  test(`${mutation}: successful publication stops the writer before removing its staged copy and session files`, { skip: noTmux, timeout: 10_000 }, async t => {
+    const { run, cwd, root, fakeLog } = await setup(t, { responses, ignoreHangup: true, observeStagedCleanup: true });
+    await writeFile(join(cwd, 'q3.html'), page);
+    const result = await run(tool, params);
+    assert.equal(result.details.version, published.version);
+    const log = await fakeLog(), sessions = log.filter(entry => entry.argv && entry.argv[0] !== '--version');
+    assert.equal(sessions.length, 1);
+    assert.equal(log.filter(entry => entry.event === 'UserPromptSubmit').length, 1);
+    const [session] = sessions;
+    assert.throws(() => process.kill(session.pid, 0), /ESRCH/);
+    assert.ok(log.some(entry => entry.event === 'staged-at-hangup' && entry.exists === true));
+    assert.ok(!log.some(entry => entry.event === 'staged-deleted-while-running'));
+    await delay(100);
+    for (const dir of [join(root, 'agent', 'claude-artifacts', 'helper'), join(root, 'claude', 'projects'), join(root, 'claude', 'scratch')]) assert.deepEqual(await readdir(dir), []);
+    assert.equal(await readFile(join(cwd, 'q3.html'), 'utf8'), page);
+  });
+}

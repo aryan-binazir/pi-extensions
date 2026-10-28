@@ -22,12 +22,12 @@ interface HookInput {
   tool_name?: unknown; tool_input?: unknown; tool_use_id?: unknown; tool_response?: unknown; error?: unknown; last_assistant_message?: unknown;
 }
 type Settle = { ok: true; responses: unknown[] } | { ok: false; error: Error };
-interface ConverseOptions { signal?: AbortSignal; jobDir?: string; stopAfter?: (step: number, response: unknown) => boolean }
+interface ConverseOptions { signal?: AbortSignal; stopAfter?: (step: number, response: unknown) => boolean }
 
 const helperRoot = () => join(getAgentDir(), 'claude-artifacts', 'helper');
 const verifiedPaths = new Set<string>();
 
-export class ArtifactToolError extends Error {
+class ArtifactToolError extends Error {
   readonly refused: boolean;
   constructor(readonly step: number, readonly detail: string) {
     super(`Claude Code's Artifact tool failed: ${detail}`);
@@ -43,13 +43,52 @@ export async function saveSource(name: string, text: string) {
   return file;
 }
 
-export interface Staged {
-  source: string; dir: string; file: string; name: string; sha256: string; bytes: number; text: string;
+export interface ApprovalPage { source: string; sha256: string; bytes: number; text: string }
+export interface ArtifactRead { read?: { result?: string; title?: string }; artifactRead?: { slug?: string; ver?: string }; owned?: boolean }
+interface Published { url?: string; path?: string; artifact_id?: string; title?: string; version?: string; audience?: string; warnings?: string[] }
+interface PublicationOptions {
+  signal?: AbortSignal; approve(page: ApprovalPage): Promise<void>; title?: string; update?: { url: string; baseVersion: string };
+}
+type Publication = { published: true; response: Published } | { published: false; liveVersion?: string; sourceFile: string };
+interface Staged extends ApprovalPage {
+  dir: string; file: string; name: string;
   verify(reportedPath: unknown): Promise<void>;
   dispose(): Promise<void>;
 }
 
-export async function stage(path: string): Promise<Staged> {
+export function publishPage(path: string, options: PublicationOptions & { update: NonNullable<PublicationOptions['update']> }): Promise<Publication>;
+export function publishPage(path: string, options: PublicationOptions & { update?: never }): Promise<Extract<Publication, { published: true }>>;
+export async function publishPage(path: string, { approve, signal, title, update }: PublicationOptions): Promise<Publication> {
+  const staged = await stage(path);
+  try {
+    const { source, sha256, bytes, text } = staged;
+    await approve({ source, sha256, bytes, text });
+    const input = { action: 'publish', file_path: staged.name, ...(update ? { url: update.url } : title ? { title } : {}) };
+    const plan: Plan = { steps: update ? [{ input: { action: 'read', url: update.url } }, { input }] : [{ input, allowIcon: true }], readableFile: staged.file };
+    const conflict = async (liveVersion: string | undefined, source: string): Promise<Publication> => ({
+      published: false, liveVersion, sourceFile: await saveSource(`update-conflict-${liveVersion ?? Date.now()}`, source),
+    });
+    let responses: unknown[];
+    try {
+      responses = await runSession(plan, staged.dir, { signal, stopAfter: (step, response) => !!update && step === 0 && (response as ArtifactRead | undefined)?.artifactRead?.ver !== update.baseVersion });
+    } catch (error) {
+      if (!(update && error instanceof ArtifactToolError && error.step === 1 && error.refused)) throw error;
+      return conflict(/newer version \(([^)\s]+)\)/.exec(error.detail)?.[1], error.detail);
+    }
+    const [live, response] = (update ? responses : [undefined, responses[0]]) as [ArtifactRead | undefined, Published | undefined];
+    if (update && !response) {
+      const version = live?.artifactRead?.ver, source = live?.read?.result;
+      if (typeof version !== 'string' || typeof source !== 'string') throw new Error(`Claude Code returned an unexpected read result: ${JSON.stringify(live)?.slice(0, 300)}`);
+      return conflict(version, source);
+    }
+    const problem = typeof response?.url !== 'string' || typeof response.version !== 'string' ? 'its result has no URL or version.'
+      : await staged.verify(response.path).then(() => undefined, (error: Error) => error.message);
+    if (problem) throw new Error(`Claude Code reported a publish${response?.url ? ` at ${response.url}` : ''}, so the page may be live, but ${problem} Check claude_artifact_list before retrying.`);
+    return { published: true, response: response! };
+  } finally { await staged.dispose(); }
+}
+
+async function stage(path: string): Promise<Staged> {
   if (!/\.html?$/i.test(path)) throw new Error(`Only an .html or .htm page can be published: ${path}`);
   const source = await realpath(path);
   const content = await readPage(source);
@@ -83,15 +122,20 @@ async function readPage(source: string) {
 
 const hash = (content: Buffer) => createHash('sha256').update(content).digest('hex');
 
-export async function converse(plan: Plan, { signal, jobDir: given, stopAfter }: ConverseOptions = {}): Promise<unknown[]> {
+export async function converse(plan: Plan, { signal }: { signal?: AbortSignal } = {}): Promise<unknown[]> {
+  await mkdir(helperRoot(), { recursive: true, mode: 0o700 });
+  const jobDir = await mkdtemp(join(helperRoot(), 'job-'));
+  try { return await runSession(plan, jobDir, { signal }); }
+  finally { await rm(jobDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+async function runSession(plan: Plan, jobDir: string, { signal, stopAfter }: ConverseOptions): Promise<unknown[]> {
   const { steps } = plan;
   const env = claudeEnv();
   signal?.throwIfAborted();
   await requireVersion(env, signal);
   signal?.throwIfAborted();
   const sessionId = randomUUID(), token = randomBytes(24).toString('hex');
-  await mkdir(helperRoot(), { recursive: true, mode: 0o700 });
-  const jobDir = given ?? await mkdtemp(join(helperRoot(), 'job-'));
   const handshake = `PIJOB ${randomBytes(16).toString('hex')}: carry out the Pi artifact job instruction supplied in the hook context for this prompt. If no such instruction is present, do nothing and reply "no job".`;
   const policy = policyState(), responses: unknown[] = [], resolved = new Set<number>(), written: { transcript?: unknown; scratchpad?: unknown } = {};
   let started = false, settled = false, settle!: (outcome: Settle) => void;
@@ -189,7 +233,6 @@ export async function converse(plan: Plan, { signal, jobDir: given, stopAfter }:
     await hooks?.close();
     await removeSessionFiles(sessionId, written, jobDir);
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
-    if (!given) await rm(jobDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 

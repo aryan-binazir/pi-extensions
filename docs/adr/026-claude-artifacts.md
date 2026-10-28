@@ -13,7 +13,9 @@ description Ar shared of an equivalent extension in another repository; that cod
 ## Decision
 
 `extensions/claude-artifacts/` registers publish, update, read and list tools. Each call runs one hidden interactive
-`claude` in a private tmux server and steers it only through HTTP hooks served by Pi:
+`claude` in a private tmux server and steers it only through HTTP hooks served by Pi. The runner owns publication
+staging, approval invocation, read/publish plans, conflict detection, upload verification and cleanup; registration
+handles Pi parameters, approval UI and result presentation:
 
 - **The instruction travels through a proven hook.** The initial prompt carries a token and no instruction. The
   `UserPromptSubmit` hook answers that exact prompt with the instruction as `additionalContext`. A spike showed that

@@ -27,16 +27,16 @@ test('executable names stay external, including builtins, assignments and leadin
   const bin = join(cwd, '-bin');
   mkdirSync(bin);
   const args = ['-a', 'space here', '', 'A=B', '$(printf REINTERPRETED)'];
-  const invocation = ['-e', "let stdin='';process.stdin.on('data',chunk=>stdin+=chunk).on('end',()=>console.log(JSON.stringify({args:process.argv.slice(1),stdin})))", '--', ...args];
-  for (const name of ['-a', 'cd', 'A=B']) {
+  const invocation = ['-e', "let stdin='';process.stdin.on('data',chunk=>stdin+=chunk).on('end',()=>console.log(JSON.stringify({argv0:process.argv0,args:process.argv.slice(1),stdin})))", '--', ...args];
+  for (const name of ['-a', '--', '-', 'cd', 'A=B']) {
     const executable = join(bin, name);
     symlinkSync(process.execPath, executable);
     for (const command of [name, `-bin/${name}`]) {
       const result = await runBounded(command, invocation, {
-        cwd, env: { ...process.env, PATH: '-bin', 'BASH_FUNC_cd%%': '() { echo REINTERPRETED; }' }, stdin: 'unaltered\n', timeoutMs: 2000, maxBytes: 2000,
+        cwd, env: { ...process.env, PATH: '-bin', 'BASH_FUNC_cd%%': '() { echo REINTERPRETED; }', 'BASH_FUNC_command%%': '() { echo REINTERPRETED; }' }, stdin: 'unaltered\n', timeoutMs: 2000, maxBytes: 2000,
       });
       assert.equal(result.exitCode, 0, `${command}: ${result.stderr}`);
-      assert.deepEqual(JSON.parse(result.stdout), { args, stdin: 'unaltered\n' });
+      assert.deepEqual(JSON.parse(result.stdout), { argv0: command, args, stdin: 'unaltered\n' });
     }
   }
   const missing = await runBounded('-'.repeat(2000), [], { cwd, env: { ...process.env, PATH: '-bin' }, timeoutMs: 2000, maxBytes: 100 });

@@ -1,7 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { accessSync, constants, statSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
-import { isAbsolute } from 'node:path';
 import type { SandboxedProcess } from '../sandbox.ts';
 
 const EXIT_STDIO_GRACE_MS = 100;
@@ -100,22 +98,11 @@ class HeadTail {
 export async function runBounded(command: string, args: readonly string[], options: BoundedRunOptions): Promise<BoundedRun> {
   let report = '', reported = Promise.resolve();
   const run = await runStarted(async () => {
-    const env = options.env ?? process.env;
-    if (command.startsWith('-')) {
-      if (command.includes('/')) command = `./${command}`;
-      else {
-        const cwd = isAbsolute(options.cwd) ? options.cwd : `${process.cwd()}/${options.cwd}`;
-        const executable = (env.PATH ?? '/usr/bin:/bin').split(':')
-          .map(directory => `${isAbsolute(directory) ? directory : `${cwd}/${directory}`}/${command}`)
-          .find(candidate => { try { accessSync(candidate, constants.X_OK); return statSync(candidate).isFile(); } catch { return false; } });
-        if (!executable) throw new Error(`executable not found on PATH: ${command.slice(0, 400)}`);
-        command = executable;
-      }
-    }
     // A live group leader can kill its own group after the command is reaped without looking up a stale PID.
     // Ignored signals survive exec; ignore SIGPIPE only after the command exits so its disposition is preserved.
-    const child = spawn('/bin/sh', ['-c', 'set +mx; unset -f kill printf; trap : TERM INT HUP; s=0; (exec "$@") 3>&- || s=$?; trap "" PIPE; printf "%s\\n" "$s" >&3 || :; kill -s KILL 0', 'sh', command, ...args], {
-      cwd: options.cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+    // Dash has no exec option separator; command -- preserves hyphen-leading executable names and argv[0].
+    const child = spawn('/bin/sh', ['-c', 'set +mx; unset -f kill printf command; trap : TERM INT HUP; s=0; (case "$1" in -*) command -- "$@" ;; *) exec "$@" ;; esac) 3>&- || s=$?; trap "" PIPE; printf "%s\\n" "$s" >&3 || :; kill -s KILL 0', 'sh', command, ...args], {
+      cwd: options.cwd, env: options.env ?? process.env, detached: true, stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
     });
     const reportPipe = child.stdio[3]!;
     reportPipe.on('error', () => {});

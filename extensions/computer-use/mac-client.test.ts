@@ -5,6 +5,11 @@ import { approve, boundedText, macLaunch, macResult, MacSession } from './mac-cl
 import { registerMacTools } from './mac-tools.ts';
 import { getImageDimensions } from '@earendil-works/pi-tui';
 import { png } from '../../tests/fixtures/png.ts';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import { withPi } from '../../tests/pi-session.ts';
 
 const fixture = () => ({ command: process.execPath, args: [fileURLToPath(new URL('../../tests/fixtures/computer-mcp.mjs', import.meta.url))], stderr: 'pipe' as const });
 const ctx = (hasUI = false, answer = false): any => ({ hasUI, ui: { confirm: async () => answer } });
@@ -169,4 +174,66 @@ test('Mac screenshot tools bound service images to the active model limits; acce
     assert.match(note.text, /original 3000x1500, displayed at 1000x500/);
     assert.deepEqual((await run('computer_accessibility')).content, [{ type: 'text', text: 'Fixture state' }]);
   } finally { await handlers.get('session_shutdown')!(); }
+});
+
+test('real Pi screenshot processes a valid noisy PNG larger than the default stdio frame cap', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mac-frame-'));
+  const path = join(root, 'result.json');
+  const data = png(1700, 1700, { noise: true });
+  assert.ok(data.length < 16 * 1024 * 1024);
+  assert.ok(data.toString('base64').length > 10 * 1024 * 1024);
+  await writeFile(path, JSON.stringify({ content: [{ type: 'image', mimeType: 'image/png', data: data.toString('base64') }] }));
+  try {
+    await withPi({
+      extensions: [pi => registerMacTools(pi, () => ({ ...fixture(), env: { COMPUTER_MCP_RESULT_FILE: path } }))],
+      responses: [fauxAssistantMessage(fauxToolCall('computer_screenshot', { app: 'image' })), fauxAssistantMessage('done')],
+      configure: (_services, provider) => ({ model: { ...provider.getModel(), inputLimits: { images: { resize: { maxWidth: 1000, maxHeight: 1000, maxBytes: 500_000 } } } } }),
+    }, async ({ session }) => {
+      await session.prompt('Inspect the synthetic fixture.');
+      const result = session.messages.find(message => message.role === 'toolResult');
+      assert.ok(result && result.role === 'toolResult');
+      assert.equal(result.isError, false, JSON.stringify(result.content));
+      const image = result.content.find(block => block.type === 'image');
+      assert.ok(image);
+      const dimensions = getImageDimensions(image.data, image.mimeType);
+      assert.ok(dimensions && dimensions.widthPx <= 1000 && dimensions.heightPx <= 1000);
+      assert.ok(image.data.length <= 500_000);
+      assert.match(JSON.stringify(result.content.filter(block => block.type === 'text')), /original 1700x1700/);
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('real stdio accepts the full image budget and escaped text, rejects invalid images and bounds oversized frames', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mac-frame-'));
+  const path = join(root, 'result.json');
+  let launches = 0;
+  const session = new MacSession(() => { launches++; return { ...fixture(), env: { COMPUTER_MCP_RESULT_FILE: path } }; }, 10_000);
+  const bytes = Buffer.alloc(16 * 1024 * 1024 + 1);
+  png(1, 1).copy(bytes);
+  const image = (size: number) => ({ type: 'image', mimeType: 'image/png', data: bytes.subarray(0, size).toString('base64') });
+  const respond = (content: unknown[]) => writeFile(path, JSON.stringify({ content }));
+  const inspect = () => session.run('get_app_state', { app: 'image' }, ctx());
+  try {
+    await respond([{ type: 'text', text: '\u0001'.repeat(65536) }, image(16 * 1024 * 1024)]);
+    const result = await inspect();
+    assert.equal(result.content[0].type === 'text' && Buffer.byteLength(result.content[0].text), 65536);
+    assert.equal(result.content[1].type === 'image' && Buffer.from(result.content[1].data, 'base64').length, 16 * 1024 * 1024);
+    await respond([image(16 * 1024 * 1024 + 1)]);
+    await assert.rejects(inspect(), /oversized aggregate images/);
+    await respond([image(8 * 1024 * 1024), image(8 * 1024 * 1024)]);
+    assert.equal((await inspect()).content.length, 2);
+    await respond([image(8 * 1024 * 1024), image(8 * 1024 * 1024 + 1)]);
+    await assert.rejects(inspect(), /oversized aggregate images/);
+    const malformed = image(12 * 1024 * 1024);
+    malformed.data = malformed.data.slice(0, -1) + '*';
+    await respond([malformed]);
+    await assert.rejects(inspect(), /Invalid Base64 string|Invalid image base64/);
+    await respond([{ ...image(12 * 1024 * 1024), mimeType: 'image/jpeg' }]);
+    await assert.rejects(inspect(), /Invalid image MIME or magic/);
+    await respond([{ type: 'text', text: 'x'.repeat(24 * 1024 * 1024) }]);
+    await assert.rejects(inspect(), /Connection closed/);
+    const before = launches;
+    assert.match(JSON.stringify(await session.run('list_apps', {}, ctx())), /Fixture apps/);
+    assert.equal(launches, before + 1);
+  } finally { await session.close(); await rm(root, { recursive: true, force: true }); }
 });

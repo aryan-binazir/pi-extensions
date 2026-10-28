@@ -8,6 +8,11 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { ElicitRequest, ElicitResult, CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 
+const maxImageBytes = 16 * 1024 * 1024;
+const maxImageBase64Bytes = Math.ceil(maxImageBytes / 3) * 4;
+// SDK stdio frames include base64 images, JSON-escaped text, metadata and a partial next message.
+const maxFrameBytes = maxImageBase64Bytes + 1024 * 1024;
+
 let sdk: Promise<{
   Client: typeof import('@modelcontextprotocol/sdk/client/index.js').Client;
   StdioClientTransport: typeof import('@modelcontextprotocol/sdk/client/stdio.js').StdioClientTransport;
@@ -86,11 +91,11 @@ export function macResult(result: CallToolResult, omitImages = false) {
   for (const item of result.content) {
     if (item.type === 'text') continue;
     if (item.type !== 'image') throw new Error('Invalid unsupported Codex computer-use content');
-    if (item.data.length > Math.ceil(16 * 1024 * 1024 / 3) * 4) throw new Error('Invalid oversized image');
+    if (item.data.length > maxImageBase64Bytes) throw new Error('Invalid oversized image');
     const image = Buffer.from(item.data, 'base64');
     if (!canonicalBase64(image, item.data)) throw new Error('Invalid image base64');
     bytes += image.length;
-    if (bytes > 16 * 1024 * 1024) throw new Error('Invalid oversized aggregate images');
+    if (bytes > maxImageBytes) throw new Error('Invalid oversized aggregate images');
     const valid = item.mimeType === 'image/png' ? image.length >= 24 && image.subarray(0, 8).equals(pngMagic) && image.toString('ascii', 12, 16) === 'IHDR'
       : item.mimeType === 'image/jpeg' ? image.length >= 4 && image[0] === 255 && image[1] === 216 && image[2] === 255 && image.at(-2) === 255 && image.at(-1) === 217
       : item.mimeType === 'image/webp' && image.length >= 16 && image.toString('ascii', 0, 4) === 'RIFF' && image.toString('ascii', 8, 12) === 'WEBP';
@@ -129,7 +134,7 @@ export class MacSession {
           client = new Client({ name: 'pi-computer-use', version: '1' }, { capabilities: { elicitation: { form: {} } } });
           this.client = client;
           client.setRequestHandler(ElicitRequestSchema, (request, extra) => this.current ? approve(request.params, this.current.ctx, AbortSignal.any([this.current.signal, extra.signal])) : Promise.resolve({ action: 'decline' as const }));
-          const transport = new StdioClientTransport(this.launch()); transport.stderr?.on('data', () => {});
+          const transport = new StdioClientTransport({ ...this.launch(), maxBufferSize: maxFrameBytes }); transport.stderr?.on('data', () => {});
           await client.connect(transport, { signal: control.signal });
           this.tools = (await client.listTools({}, { signal: control.signal })).tools;
         }

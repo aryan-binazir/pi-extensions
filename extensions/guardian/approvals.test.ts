@@ -231,3 +231,34 @@ test('failed audit writes preserve human rejection and the denial circuit breake
   assert.equal(approvals.takeDenied(h.ctx)?.summary, request.summary);
   assert.equal(approvals.takeDenied(h.ctx), undefined);
 });
+
+test('metadata-only connector requests show complete arguments but never retain echoes or stale manual approvals', async () => {
+  const sensitive = 'synthetic-private-connector-value';
+  const h = harness([deny, { type: 'completed', assessment: { riskLevel: 'high', userAuthorization: 'low', outcome: 'deny', rationale: sensitive } }]);
+  await h.approvals.request(request, h.ctx);
+  await h.approvals.request({ action: { tool: 'connector', arguments: { sensitive } }, summary: 'Connector call',
+    reason: sensitive, justification: sensitive, audit: { action: { tool: 'connector', name: 'fixture_update' }, summary: 'Connector call' },
+  }, h.ctx);
+  assert.equal(h.approvals.takeDenied(h.ctx), undefined, 'connector denial clears an older replayable shell denial');
+  assert.ok(!JSON.stringify(h.records[1]).includes(sensitive));
+  assert.equal(h.records[1].assessment, undefined);
+  assert.equal(h.records[1].contextHashes, undefined);
+  assert.equal(h.records[1].actionRedacted, true);
+  const human = harness([], { approvalsReviewer: 'user' }, { choice: 'Yes, proceed' });
+  await human.approvals.request({ action: { tool: 'connector', arguments: { sensitive } }, summary: 'Connector call',
+    audit: { action: { tool: 'connector' }, summary: 'Connector call' },
+  }, human.ctx);
+  assert.ok(human.prompts[0][0].includes(sensitive));
+  assert.ok(!JSON.stringify(human.records).includes(sensitive));
+});
+
+test('human connector rejection clears a prior automatic shell denial', async () => {
+  const config: Partial<GuardianConfig> = {};
+  const h = harness([deny], config);
+  await h.approvals.request(request, h.ctx);
+  config.approvalsReviewer = 'user';
+  await h.approvals.request({ action: { tool: 'connector' }, summary: 'Connector call',
+    audit: { action: { tool: 'connector' }, summary: 'Connector call' },
+  }, h.ctx);
+  assert.equal(h.approvals.takeDenied(h.ctx), undefined);
+});

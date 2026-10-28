@@ -66,7 +66,7 @@ test('Pi package discovers every declared entrypoint and independently loads eac
 });
 
 
-test('todo and questionnaire execute in a real headless session behind no tool gate', async () => {
+test('todo and questionnaire remain ungated in a real headless session', async () => {
   await withPi({ settings: { packages: [root] } }, async ({ session, runner }) => {
     for (const [toolName, input] of [
       ['todo_write', {todos: [{content: 'Synthetic task', status: 'pending'}]}],
@@ -78,7 +78,7 @@ test('todo and questionnaire execute in a real headless session behind no tool g
       await tool.execute(`managed-${toolName}`, input, undefined, undefined, runner.createToolContext(`managed-${toolName}`, undefined));
     }
     const unknown = await runner.emitToolCall({type: 'tool_call', toolName: 'untrusted_remote_tool', toolCallId: 'unknown', input: {}});
-    assert.equal(unknown, undefined, 'no global auto-mode tool gate is installed');
+    assert.equal(unknown?.block, true, 'Guardian fails closed when registered tool identity cannot be resolved');
   });
 });
 

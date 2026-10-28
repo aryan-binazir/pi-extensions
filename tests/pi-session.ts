@@ -6,7 +6,7 @@ import {
   createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices,
   ExtensionRunner, ModelRegistry, ModelRuntime, SessionManager, SettingsManager,
   type AgentSession, type AgentSessionRuntime, type AgentSessionServices,
-  type CreateAgentSessionFromServicesOptions, type ExtensionError, type ExtensionFactory, type SessionStartEvent,
+  type CreateAgentSessionFromServicesOptions, type ExtensionError, type InlineExtension, type SessionStartEvent,
 } from '@earendil-works/pi-coding-agent';
 import { fauxProvider, InMemoryCredentialStore, InMemoryModelsStore } from '@earendil-works/pi-ai';
 
@@ -14,7 +14,7 @@ type ExtensionBindings = Parameters<AgentSession['bindExtensions']>[0];
 type Provider = ReturnType<typeof fauxProvider>;
 type Selection = Pick<CreateAgentSessionFromServicesOptions, 'model' | 'thinkingLevel' | 'scopedModels'>;
 interface Options {
-  extensions?: ExtensionFactory[];
+  extensions?: InlineExtension[];
   settings?: Parameters<typeof SettingsManager.inMemory>[0];
   responses?: Parameters<Provider['setResponses']>[0];
   cwd?: string;

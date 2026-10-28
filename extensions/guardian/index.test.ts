@@ -356,7 +356,7 @@ test('the permission instructions describe how commands actually run', () => {
 test('a Guardian that cannot start still replaces bash, write and edit with tools that refuse', async () => {
   const tools: { name: string; execute: (...args: unknown[]) => Promise<unknown> }[] = [];
   const handlers: ((event: unknown, ctx: { hasUI: boolean; ui: { notify(message: string, type?: string): void } }) => void)[] = [];
-  registerFailClosed({ registerTool: tool => { tools.push(tool as never); }, on: ((_event: string, handler: never) => { handlers.push(handler); }) as never },
+  registerFailClosed({ getAllTools: () => [], registerTool: tool => { tools.push(tool as never); }, on: ((_event: string, handler: never) => { handlers.push(handler); }) as never },
     new Error('bundled rules are unreadable'), '/repo');
   assert.deepEqual(tools.map(tool => tool.name), ['bash', 'write', 'edit']);
   for (const tool of tools) await assert.rejects(tool.execute('call', { command: 'ls', path: 'x', content: '' }), /Guardian could not start[\s\S]*bundled rules are unreadable/);

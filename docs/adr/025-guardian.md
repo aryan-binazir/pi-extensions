@@ -74,7 +74,8 @@ registry rather than a catalog entry.
 - A timed-out or failed review asks you when a UI is available (`autoReview.failureFallback`).
   Codex rejects to the agent. A failed review never approves.
 - Under `approvalPolicy: never`, escalation requests are rejected outright.
-- Not ported: MCP tool review, network-access approvals, `with_additional_permissions`,
+- MCP/connector leaf review is implemented through Pi tool hooks; see [ADR 028](028-guardian-connector-approvals.md).
+- Not ported: network-access approvals, `with_additional_permissions`,
   `request_permissions`, async scoring, and the stale-authorization retry.
 - `.rules` files are parsed as the call-and-literal subset Codex's own rules files use. Codex evaluates
   them as Starlark, so rules built from variables or expressions are rejected rather than mis-evaluated.

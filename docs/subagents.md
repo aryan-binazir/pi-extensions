@@ -121,8 +121,11 @@ selected tools directly, preserving its connection settings and credentials:
 ```
 
 Run `/reload` after changing either file. This extension edits neither file.
-`delegatedTools` grants delegation only; it does not connect or authenticate a
-server. Settings from other subagent implementations do not apply here.
+`delegatedTools` grants delegation only; it does not connect or authenticate a server. Settings from
+other subagent implementations do not apply here. Guardian still reviews each mutating parent
+connector leaf. Built-in MCP tools are recognized automatically; declare other connector names in
+Guardian's `connectors.alwaysReview` or `connectors.readOnly` policy. A delegation `read` grant does
+not classify a tool as read-only for Guardian.
 
 The delegation contract is:
 

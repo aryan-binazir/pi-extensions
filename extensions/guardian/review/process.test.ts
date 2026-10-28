@@ -48,15 +48,16 @@ test('an inherited pipe writer is stopped when its command exits without signall
   const kills: number[] = [];
   t.mock.method(process, 'kill', ((pid: number, signal?: NodeJS.Signals | number) => { kills.push(pid); return originalKill(pid, signal); }) as typeof process.kill);
   const script = `
+    process.stdout.write('PARENT DONE');
     const { spawn } = require('node:child_process');
     const child = spawn(process.execPath, ['-e', "process.stdout.on('error',()=>{});setInterval(()=>process.stdout.write('x'.repeat(1000)),10);process.send('ready');"], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
     child.once('message', () => {
       require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
-      child.disconnect(); child.unref(); process.stdout.write('PARENT DONE');
+      child.disconnect(); child.unref();
     });
   `;
   const began = Date.now();
-  const result = await runBounded(process.execPath, ['-e', script], { cwd: tmpdir(), timeoutMs: 1500, maxBytes: 200 });
+  const result = await runBounded(process.execPath, ['-e', script], { cwd: tmpdir(), env: { ...process.env, SHELLOPTS: 'errexit:monitor' }, timeoutMs: 1500, maxBytes: 200 });
   descendant = Number(readFileSync(pidFile, 'utf8'));
   assert.ok(Date.now() - began < 1000, 'the pipe writer must not keep a completed command waiting for its deadline');
   assert.equal(result.exitCode, 0);
@@ -66,17 +67,39 @@ test('an inherited pipe writer is stopped when its command exits without signall
   assert.deepEqual(kills, [], 'the parent must not signal a completed group');
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.throws(() => originalKill(descendant, 0), /ESRCH/);
+  descendant = 0;
 });
 
 test('the command status survives group cleanup and its report pipe is private', async () => {
-  for (const [script, expected] of [['process.exit(3)', 3], ["process.kill(process.pid, 'SIGTERM')", 143]] as const) {
-    const result = await runBounded(process.execPath, ['-e', script], { cwd: tmpdir(), env: { ...process.env, SHELLOPTS: 'errexit' }, timeoutMs: 2000, maxBytes: 100 });
+  for (const [script, expected] of [['process.exit(3)', 3], ["process.kill(process.pid, 'SIGTERM')", 143], ["process.kill(0, 'SIGTERM')", 143]] as const) {
+    const result = await runBounded(process.execPath, ['-e', script], {
+      cwd: tmpdir(), env: { ...process.env, SHELLOPTS: 'errexit:monitor:xtrace', 'BASH_FUNC_printf%%': '() { echo 99; }', 'BASH_FUNC_kill%%': '() { return 0; }' }, timeoutMs: 2000, maxBytes: 100,
+    });
     assert.equal(result.exitCode, expected);
     assert.equal(result.spawnError, undefined);
+    assert.doesNotMatch(result.stderr, /process\.exit|process\.kill/, 'exported tracing cannot print the command arguments');
   }
   const forged = await runBounded('/bin/sh', ['-c', 'echo 99 >&3'], { cwd: tmpdir(), timeoutMs: 2000, maxBytes: 1000 });
   assert.ok(forged.exitCode === 1 || forged.exitCode === 2, 'the command reports its shell redirection error, not the forged status');
   assert.match(forged.stderr, /Bad file descriptor/);
+});
+
+test('exported shell job control cannot let the command escape its timeout', async t => {
+  const pidFile = `${tmpdir()}/guardian-monitor-${process.pid}-${Date.now()}`;
+  let pid = 0;
+  t.after(() => {
+    if (pid) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    rmSync(pidFile, { force: true });
+  });
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+  const result = await runBounded(process.execPath, ['-e', script], {
+    cwd: tmpdir(), env: { ...process.env, SHELLOPTS: 'errexit:monitor' }, timeoutMs: 500, maxBytes: 100,
+  });
+  pid = Number(readFileSync(pidFile, 'utf8'));
+  assert.equal(result.timedOut, true);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.throws(() => process.kill(pid, 0), /ESRCH/, 'the timeout must reach the command even with exported job control');
+  pid = 0;
 });
 
 test('completion leaves a descendant that created another process group alive', async t => {

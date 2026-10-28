@@ -99,19 +99,20 @@ export async function runBounded(command: string, args: readonly string[], optio
   let report = '', reported = Promise.resolve();
   const run = await runStarted(async () => {
     // A live group leader can kill its own group after the command is reaped without looking up a stale PID.
-    // Ignore SIGPIPE only after the command exits, so a closed report pipe cannot skip group cleanup.
-    const child = spawn('/bin/sh', ['-c', 's=0; (exec "$@") 3>&- || s=$?; trap "" PIPE; printf "%s\\n" "$s" >&3 || :; kill -s KILL 0', 'sh', command, ...args], {
+    // Ignored signals survive exec; ignore SIGPIPE only after the command exits so its disposition is preserved.
+    const child = spawn('/bin/sh', ['-c', 'set +mx; unset -f kill printf; trap : TERM INT HUP; s=0; (exec -- "$@") 3>&- || s=$?; trap "" PIPE; printf "%s\\n" "$s" >&3 || :; kill -s KILL 0', 'sh', command, ...args], {
       cwd: options.cwd, env: options.env ?? process.env, detached: true, stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
     });
-    const status = child.stdio[3]!;
-    status.on('data', (chunk: Buffer) => { report = (report + chunk.toString()).slice(0, 8); });
-    reported = new Promise<void>(resolve => { status.once('close', resolve); });
+    const reportPipe = child.stdio[3]!;
+    reportPipe.on('error', () => {});
+    reportPipe.on('data', (chunk: Buffer) => { report = (report + chunk.toString()).slice(0, 8); });
+    reported = new Promise<void>(resolve => { reportPipe.once('close', resolve); });
     return { child, finished: reported };
   }, options);
   if (run.timedOut || run.aborted || run.spawnError) return run;
   await reported;
   const exitCode = /^\d{1,3}\n$/.test(report) && Number(report) <= 255 ? Number(report) : null;
-  return { ...run, exitCode, ...(exitCode === 126 || exitCode === 127 ? { spawnError: run.stderr.trim() || `command could not start (exit ${exitCode})` } : {}) };
+  return { ...run, exitCode, ...(exitCode === 126 || exitCode === 127 ? { spawnError: run.stderr.trim().slice(0, 500) || `command could not start (exit ${exitCode})` } : {}) };
 }
 
 export function raceAbort<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {

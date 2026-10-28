@@ -72,6 +72,7 @@ test('a completed CLI review releases descendants in its process group', async t
   assert.equal(outcome.type, 'completed');
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.throws(() => process.kill(descendant, 0), /ESRCH/, 'completion must release the owned descendant');
+  descendant = 0;
 });
 
 test('API errors are session errors classified for retry; bad output is a parse error', async t => {
@@ -96,4 +97,14 @@ test('a missing claude executable is a clear session error', async () => {
   const outcome = await runClaudeCliReview(input('/nonexistent/claude'));
   assert.equal(outcome.type === 'error' && outcome.error.type, 'session');
   assert.match(outcome.type === 'error' && 'message' in outcome.error ? outcome.error.message : '', /claude -p could not start/);
+});
+
+test('CLI startup diagnostics remain bounded when stderr exceeds the capture cap', async t => {
+  const fixture = fakeClaude(t, "process.stderr.end('E'.repeat(2_000_000), () => process.exit(127));");
+  const outcome = await runClaudeCliReview(input(fixture.command));
+  assert.equal(outcome.type, 'error');
+  if (outcome.type !== 'error' || outcome.error.type !== 'session') throw new Error('expected a session error');
+  assert.match(outcome.error.message, /claude -p could not start: E/);
+  assert.ok(outcome.error.message.length < 600);
+  assert.equal(outcome.error.transient, false);
 });

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { runBounded } from './process.ts';
+import { runBounded, runStarted } from './process.ts';
 
 const node = (script: string) => [process.execPath, ['-e', script]] as const;
 
@@ -34,4 +35,97 @@ test('stdin is delivered and spawn failures are reported', async () => {
   const [command, args] = node("let s='';process.stdin.on('data',c=>s+=c).on('end',()=>process.stdout.write(s.toUpperCase()))");
   assert.equal((await runBounded(command, args, { cwd: tmpdir(), stdin: 'hello', timeoutMs: 10_000, maxBytes: 1_000 })).stdout, 'HELLO');
   assert.match((await runBounded('/nonexistent/binary', [], { cwd: tmpdir(), timeoutMs: 1_000, maxBytes: 1_000 })).spawnError ?? '', /ENOENT/);
+});
+
+test('the deadline includes preparation and prevents launch after cancellation', async () => {
+  let launched = false;
+  const started = Date.now();
+  const run = await runStarted(async signal => {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, 200);
+      signal?.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+    });
+    signal?.throwIfAborted();
+    launched = true;
+    return { child: spawn(process.execPath, ['-e', ''], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] }), finished: Promise.resolve() };
+  }, { cwd: tmpdir(), timeoutMs: 40, maxBytes: 100 });
+  assert.equal(run.timedOut, true);
+  assert.equal(run.spawnError, undefined);
+  assert.equal(launched, false);
+  assert.ok(Date.now() - started < 180);
+});
+
+test('cleanup waits honour cancellation without misreporting completed commands', async t => {
+  const originalKill = process.kill;
+  const kills: number[] = [];
+  t.mock.method(process, 'kill', ((pid: number, signal?: NodeJS.Signals | number) => { kills.push(pid); return originalKill(pid, signal); }) as typeof process.kill);
+  for (const abort of [true, false]) {
+    const controller = new AbortController();
+    const run = runStarted(async () => {
+      const child = spawn(process.execPath, ['-e', ''], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      if (abort) child.once('exit', () => setTimeout(() => controller.abort(), 20));
+      return { child, finished: new Promise<void>(() => {}) };
+    }, { cwd: tmpdir(), signal: controller.signal, timeoutMs: abort ? 2000 : 1000, maxBytes: 100 });
+    const outcome = await Promise.race([run, new Promise<undefined>(resolve => setTimeout(resolve, 2500))]);
+    assert.ok(outcome, 'completion cleanup cannot hold settlement beyond the budget');
+    assert.equal(outcome.exitCode, 0);
+    assert.equal(outcome.aborted, false);
+    assert.equal(outcome.timedOut, false);
+    assert.equal(outcome.spawnError, undefined);
+  }
+  assert.deepEqual(kills, [], 'completion cancellation must not kill a reaped process group');
+});
+
+test('cancellation after exit preserves the command result while buffered output drains', async t => {
+  const originalKill = process.kill;
+  const kills: number[] = [];
+  t.mock.method(process, 'kill', ((pid: number, signal?: NodeJS.Signals | number) => { kills.push(pid); return originalKill(pid, signal); }) as typeof process.kill);
+  const controller = new AbortController();
+  const result = await runStarted(async () => {
+    const child = spawn(process.execPath, ['-e', "process.stdout.write('tail')"], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stdout.pause();
+    child.once('exit', () => { controller.abort(); child.stdout.resume(); });
+    return { child, finished: new Promise<void>(() => {}) };
+  }, { cwd: tmpdir(), signal: controller.signal, timeoutMs: 10_000, maxBytes: 100 });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.aborted, false);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.stdout, 'tail');
+  assert.deepEqual(kills, [], 'an exited group must not be signalled while its output drains');
+});
+
+test('an abandoned start that resolves late is terminated and reaped', async () => {
+  let child: ReturnType<typeof spawn> | undefined;
+  const result = await runStarted(async () => {
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const started = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    child = started;
+    return { child: started, finished: Promise.resolve() };
+  }, { cwd: tmpdir(), timeoutMs: 20, maxBytes: 100 });
+  assert.equal(result.timedOut, true);
+  await new Promise(resolve => setTimeout(resolve, 160));
+  assert.ok(child?.pid);
+  assert.throws(() => process.kill(child!.pid!, 0), /ESRCH/);
+});
+
+
+test('cancellation drains pipe output written after the group exits within a bounded grace', async t => {
+  const pidFile = `${tmpdir()}/guardian-drain-${process.pid}-${Date.now()}`;
+  t.after(() => {
+    try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch {}
+    rmSync(pidFile, { force: true });
+  });
+  const controller = new AbortController();
+  const script = `
+const {spawn}=require('node:child_process');
+const watcher = "const fs=require('node:fs');process.stdout.on('error',()=>process.exit());fs.writeFileSync(" + JSON.stringify(${JSON.stringify(pidFile)}) + ",String(process.pid));const timer=setInterval(()=>{try{process.kill(" + process.pid + ",0)}catch{clearInterval(timer);process.stdout.write('TAIL',()=>process.exit())}},1);process.stdout.write('READY');setTimeout(()=>process.exit(),5000).unref();";
+spawn(process.execPath,['-e',watcher],{detached:true,stdio:['ignore','inherit','inherit']});
+setInterval(()=>{},1000);
+`;
+  const result = await runBounded(process.execPath, ['-e', script], {
+    cwd: tmpdir(), signal: controller.signal, timeoutMs: 3000, maxBytes: 1000,
+    onData: chunk => { if (chunk.toString().includes('READY')) controller.abort(); },
+  });
+  assert.equal(result.aborted, true);
+  assert.match(result.stdout, /READY.*TAIL/);
 });

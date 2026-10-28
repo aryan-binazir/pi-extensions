@@ -11,7 +11,7 @@ import type { SandboxPolicy } from '../seatbelt.ts';
 import { GUARDIAN_OUTPUT_CONTRACT_PROMPT, parseGuardianAssessment } from './assessment.ts';
 import { truncateText } from './context.ts';
 import { isTransientProviderError, type ReviewOutcome } from './outcome.ts';
-import { runStarted } from './process.ts';
+import { raceAbort, runStarted } from './process.ts';
 import { GUARDIAN_POLICY, GUARDIAN_POLICY_TEMPLATE, guardianPolicyInstructions } from './prompts.ts';
 
 const MAX_REVIEWER_TOOL_ROUNDS = 12;
@@ -102,19 +102,10 @@ async function executeTool(call: Extract<AssistantMessage['content'][number], { 
   }
 }
 
-function raceAbort<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise<T>((resolvePromise, reject) => {
-    const onAbort = () => reject(signal.reason ?? new DeadlineExceeded('aborted'));
-    if (signal.aborted) return onAbort();
-    signal.addEventListener('abort', onAbort, { once: true });
-    value.then(resolvePromise, reject).finally(() => signal.removeEventListener('abort', onAbort));
-  });
-}
-
 /** Runs `bash -c` in the read-only sandbox with no network; output is capped like a transcript tool entry. */
 export async function runReadOnlyCommand(command: string, workdir: string, signal: AbortSignal, sandbox: PlatformSandbox | undefined): Promise<string> {
   if (!sandbox) return 'Read-only command checks are unavailable: this platform has no usable sandbox.\nexit code: 1';
-  const run = await runStarted(() => sandbox.spawn(['/bin/bash', '-c', command], READ_ONLY, { cwd: workdir, env: process.env, stdin: 'pipe' }), {
+  const run = await runStarted(budget => sandbox.spawn(['/bin/bash', '-c', command], READ_ONLY, { cwd: workdir, env: process.env, stdin: 'pipe', signal: budget }), {
     cwd: workdir, signal, timeoutMs: MAX_COMMAND_MS, maxBytes: MAX_CAPTURED_BYTES,
   });
   if (run.aborted) throw new Error('aborted');

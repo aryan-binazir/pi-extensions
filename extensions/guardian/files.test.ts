@@ -3,14 +3,22 @@ import assert from 'node:assert/strict';
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import { assessFileChange, createGuardianFileTools, fileChangeAction, sandboxedWrite } from './files.ts';
 import { detectPlatformSandbox } from './sandbox.ts';
 
+const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-files-registry-')));
+const previousTmpdir = process.env.TMPDIR;
+process.env.TMPDIR = registryTemp;
+after(() => {
+  if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+  rmSync(registryTemp, { recursive: true, force: true });
+});
+
 const detected = (await detectPlatformSandbox()).sandbox;
-const sandboxed = { skip: !detected && 'this platform has no usable sandbox' };
+const sandboxed = { skip: (!detected || (detected.kind === 'bubblewrap' && !['/usr/bin/flock', '/bin/flock'].some(existsSync))) && 'sandbox/flock prerequisites are unavailable' };
 
 function workspace(t: test.TestContext) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-files-')));

@@ -9,13 +9,13 @@ import {
   USER_NAMESPACE_WARNING, WSL1_BWRAP_WARNING,
 } from './bwrap-launcher.ts';
 import { createBwrapCommandArgs, createProcPreflightArgs, FIRST_BIND_DATA_FD, isProcMountFailure, withAsPid1, withOptionsBeforeCommand } from './bwrap.ts';
-import { killProcessGroup } from './review/process.ts';
+import { killProcessGroup, raceAbort } from './review/process.ts';
 import { networkSeccompMode, seccompProgram, seccompSupported } from './seccomp.ts';
 import {
   createSeatbeltCommandArgs, MACOS_PATH_TO_SEATBELT_EXECUTABLE, SandboxPreparationError, type SandboxPolicy, sandboxEnv as seatbeltEnv,
   type WritableRoot, workspaceWriteRoots,
 } from './seatbelt.ts';
-import { cleanupSyntheticMountTargets, registerSyntheticMountTargets, syntheticMountRegistryRoot } from './synthetic-mounts.ts';
+import { cleanupSyntheticMountTargets, registerSyntheticMountTargets, type SyntheticMountRegistration, syntheticMountRegistryRoot } from './synthetic-mounts.ts';
 
 export type SandboxKind = 'seatbelt' | 'bubblewrap';
 
@@ -23,7 +23,7 @@ export type SandboxedChild = ChildProcessByStdio<Writable | null, Readable, Read
 
 export interface SandboxedProcess {
   child: SandboxedChild;
-  /** Settles once the process has exited and bubblewrap's mount placeholders are gone. */
+  /** Settles after exit and a bounded cleanup grace; pending lock acquisition retries while the process lives. */
   finished: Promise<void>;
 }
 
@@ -32,6 +32,8 @@ export interface SpawnSandboxedOptions {
   /** The command's environment, before the sandbox adds its own variables. */
   env: NodeJS.ProcessEnv;
   stdin: 'pipe' | 'ignore';
+  /** One caller budget, including preparation and launch. */
+  signal?: AbortSignal;
 }
 
 export interface PlatformSandbox {
@@ -50,6 +52,7 @@ export interface SandboxDetection {
 
 const SIGSYS_EXIT_CODE = 128 + 31;
 const PREFLIGHT_TIMEOUT_MS = 10_000;
+const CLEANUP_GRACE_MS = 2_000;
 
 /** Environment Codex sets for sandboxed commands: the backend on macOS, and whether the network is disabled. */
 export function sandboxEnv(kind: SandboxKind, policy: SandboxPolicy): Record<string, string> {
@@ -73,14 +76,15 @@ export function isLikelySandboxDenied(exitCode: number, output: string, kind: Sa
 function exited(child: SandboxedChild): Promise<void> {
   return new Promise(resolve => {
     child.once('exit', () => resolve());
-    child.once('error', () => resolve());
+    child.on('error', () => { if (!child.pid) resolve(); });
   });
 }
 
 export const seatbeltSandbox: PlatformSandbox = {
   kind: 'seatbelt',
   summary: 'Seatbelt',
-  async spawn(command, policy, { cwd, env, stdin }) {
+  async spawn(command, policy, { cwd, env, stdin, signal }) {
+    signal?.throwIfAborted();
     const environment = { ...env, ...sandboxEnv('seatbelt', policy) };
     const args = createSeatbeltCommandArgs(command, policy, cwd, environment);
     const child = spawn(MACOS_PATH_TO_SEATBELT_EXECUTABLE, args, { cwd, env: environment, detached: true, stdio: [stdin, 'pipe', 'pipe'] }) as SandboxedChild;
@@ -111,11 +115,19 @@ function procMountSupported(program: string, networkMode: 'full-access' | 'isola
   return supported;
 }
 
+function boundedCleanup(registrations: readonly SyntheticMountRegistration[], registryRoot: string): Promise<void> {
+  return new Promise(resolve => {
+    const timer = setTimeout(resolve, CLEANUP_GRACE_MS);
+    void cleanupSyntheticMountTargets(registrations, registryRoot).catch(() => {}).then(() => { clearTimeout(timer); resolve(); });
+  });
+}
+
 export function bubblewrapSandbox(detected: BwrapLauncher): PlatformSandbox {
   return {
     kind: 'bubblewrap',
     summary: launcherSummary(detected),
-    async spawn(command, policy, { cwd, env, stdin }) {
+    async spawn(command, policy, { cwd, env, stdin, signal }) {
+      signal?.throwIfAborted();
       const environment = { ...env, ...sandboxEnv('bubblewrap', policy) };
       const roots = policy.mode === 'workspace-write' ? workspaceWriteRoots(policy, cwd, environment) : [];
       // Resolved per command, as Codex does: a bubblewrap the command's writable roots could replace is never used.
@@ -123,19 +135,24 @@ export function bubblewrapSandbox(detected: BwrapLauncher): PlatformSandbox {
       if (!launcher) throw new SandboxPreparationError(`bubblewrap is unavailable for ${cwd}: no trusted bwrap was found on PATH or in a Codex install`);
       const networkMode = policy.networkAccess ? 'full-access' : 'isolated';
       const registryRoot = syntheticMountRegistryRoot();
-      const built = createBwrapCommandArgs(command, roots, cwd, { mountProc: await procMountSupported(launcher.program, networkMode), networkMode, registryRoot });
+      const preflight = procMountSupported(launcher.program, networkMode);
+      const mountProc = await (signal ? raceAbort(preflight, signal) : preflight);
+      signal?.throwIfAborted();
+      const built = createBwrapCommandArgs(command, roots, cwd, { mountProc, networkMode, registryRoot });
       const seccompFd = FIRST_BIND_DATA_FD + built.bindDataFds;
       const args = withAsPid1(withOptionsBeforeCommand(built.args, ['--seccomp', String(seccompFd)]));
       const filter = seccompProgram(networkSeccompMode(policy.networkAccess));
 
-      const registrations = await registerSyntheticMountTargets(built.syntheticMountTargets, registryRoot);
+      const registrations = await registerSyntheticMountTargets(built.syntheticMountTargets, registryRoot, { signal });
       const emptyFiles: number[] = [];
       let child: SandboxedChild;
       try {
+        signal?.throwIfAborted();
         for (let index = 0; index < built.bindDataFds; index++) emptyFiles.push(openSync('/dev/null', 'r'));
         child = spawn(launcher.program, args, { cwd, env: environment, detached: true, stdio: [stdin, 'pipe', 'pipe', ...emptyFiles, 'pipe'] }) as SandboxedChild;
       } catch (error) {
-        await cleanupSyntheticMountTargets(registrations, registryRoot);
+        const cleanup = boundedCleanup(registrations, registryRoot);
+        await (signal ? raceAbort(cleanup, signal) : cleanup);
         throw error;
       } finally {
         for (const fd of emptyFiles) closeSync(fd);
@@ -144,8 +161,7 @@ export function bubblewrapSandbox(detected: BwrapLauncher): PlatformSandbox {
       const seccomp = child.stdio[seccompFd] as Writable | null;
       seccomp?.on('error', () => {});
       seccomp?.end(filter);
-      // A placeholder left behind is harmless to the command's result, so cleanup failures do not fail the call.
-      const finished = exited(child).then(() => cleanupSyntheticMountTargets(registrations, registryRoot)).catch(() => {});
+      const finished = exited(child).then(() => boundedCleanup(registrations, registryRoot));
       return { child, finished };
     },
   };

@@ -47,7 +47,7 @@ for (const stop of ['cancelled', 'timeout'] as const) {
     const started = new Promise<void>(resolve => { authStarted = resolve; });
     await withPi({ configure: ({ modelRuntime }, main) => {
       modelRuntime.registerNativeProvider({ ...provider.provider, auth: { apiKey: {
-        name: 'Synthetic delayed auth', check: async () => ({ source: 'synthetic' }), resolve: async () => {
+        name: 'Synthetic delayed auth', check: async () => ({ type: 'api_key', source: 'synthetic' }), resolve: async () => {
           authStarted();
           await authGate;
           return { auth: {} };
@@ -97,7 +97,7 @@ test('an authenticated Pi review preserves auth, provider options and its assess
   }]);
   await withPi({ configure: ({ modelRuntime }, main) => {
     modelRuntime.registerNativeProvider({ ...provider.provider, auth: { apiKey: {
-      name: 'Synthetic auth', check: async () => ({ source: 'synthetic' }), resolve: async () => {
+      name: 'Synthetic auth', check: async () => ({ type: 'api_key', source: 'synthetic' }), resolve: async () => {
         return { auth: { apiKey: 'synthetic-key', headers: { 'x-synthetic-auth': 'present' }, baseUrl: 'https://guardian.invalid/offline' },
           env: { GUARDIAN_SYNTHETIC_ENV: 'present' } };
       },
@@ -130,7 +130,7 @@ test('Pi authentication failures retain their cause and transient retry classifi
   let failure = 'Invalid credential';
   await withPi({ configure: ({ modelRuntime }, main) => {
     modelRuntime.registerNativeProvider({ ...provider.provider, auth: { apiKey: {
-      name: 'Synthetic failing auth', check: async () => ({ source: 'synthetic' }), resolve: async () => { throw new Error(failure); },
+      name: 'Synthetic failing auth', check: async () => ({ type: 'api_key', source: 'synthetic' }), resolve: async () => { throw new Error(failure); },
     } } });
     return { model: main.getModel() };
   } }, async ({ runner, cwd }) => {

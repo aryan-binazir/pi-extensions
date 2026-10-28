@@ -317,37 +317,93 @@ test('asynchronous launch failure releases registrations even when launch races 
   }
 });
 
-test('a caller can cancel a shared proc preflight without launching its command', bubblewrap, async t => {
-  const cwd = tempDir(t), launcherDir = tempDir(t), registry = isolatedRegistry(t), pidFile = join(launcherDir, 'probe.pid');
+test('proc preflights reap pipe holders, preserve fallback and cache each network mode', async t => {
+  const cwd = tempDir(t), launcherDir = tempDir(t), pidFile = join(launcherDir, 'descendant.pids'), count = join(launcherDir, 'probes');
+  isolatedRegistry(t);
   const launcher = join(launcherDir, 'bwrap');
   writeFileSync(launcher, `#!/bin/sh
-if [ "$1" = "--help" ]; then printf '%s\n' --as-pid-1 --perms; exit 0; fi
-echo $$ > '${pidFile}'
-exec /bin/sleep 30
+if [ "$1" = "--help" ]; then printf '%s\\n' --as-pid-1 --perms; exit 0; fi
+for arg do
+  if [ "$arg" = "--seccomp" ]; then printf '%s\\n' "$@"; exit 0; fi
+done
+echo probe >> '${count}'
+/bin/sleep 30 >&2 &
+echo $! >> '${pidFile}'
+'${process.execPath}' <<'NODE'
+const fs = require('node:fs');
+fs.writeSync(2, 'x'.repeat(128 * 1024) + "bwrap: Can't mount pro");
+setTimeout(() => fs.writeSync(2, 'c on /newroot/proc: ' + 'x'.repeat(128 * 1024) + 'Operation not permitted' + 'x'.repeat(128 * 1024)), 10);
+NODE
+exit 0
 `);
   chmodSync(launcher, 0o755);
   const previousPath = process.env.PATH;
   process.env.PATH = launcherDir;
-  let probePid: number | undefined;
+  const descendants: number[] = [];
   t.after(() => {
     if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
-    if (probePid) { try { process.kill(-probePid, 'SIGKILL'); } catch {} }
+    for (const pid of descendants) { try { process.kill(pid, 'SIGKILL'); } catch {} }
   });
   const fixture = bubblewrapSandbox({ program: launcher, source: 'system' });
-  const startedAt = Date.now();
-  const result = await runStarted(signal => fixture.spawn(['/bin/sh', '-c', 'touch executed'], workspace(), {
+  for (const networkAccess of [false, false, true]) {
+    const result = await runStarted(signal => fixture.spawn(['/bin/true'], { mode: 'read-only', networkAccess }, {
+      cwd, env: process.env, stdin: 'ignore', signal,
+    }), { cwd, timeoutMs: 1000, maxBytes: 4096 });
+    descendants.splice(0, descendants.length, ...readFileSync(pidFile, 'utf8').trim().split('\n').map(Number));
+    assert.equal(result.timedOut, false, 'an exited probe cannot wait for its pipe-holding descendant');
+    assert.equal(result.exitCode, 0, result.stderr || result.spawnError);
+    assert.ok(!result.stdout.split('\n').includes('--proc'), 'the cached mount failure omits --proc');
+  }
+  assert.equal(readFileSync(count, 'utf8'), 'probe\nprobe\n');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  for (const pid of descendants) assert.throws(() => process.kill(pid, 0), /ESRCH/);
+});
+
+test('a caller deadline leaves a shared proc preflight alive for another caller and the cache', async t => {
+  const cwd = tempDir(t), launcherDir = tempDir(t), registry = isolatedRegistry(t), pidFile = join(launcherDir, 'probe.pid');
+  const count = join(launcherDir, 'probes'), release = join(launcherDir, 'release'), launches = join(launcherDir, 'launches');
+  const launcher = join(launcherDir, 'bwrap');
+  writeFileSync(launcher, `#!/bin/sh
+if [ "$1" = "--help" ]; then printf '%s\\n' --as-pid-1 --perms; exit 0; fi
+for arg do
+  if [ "$arg" = "--seccomp" ]; then printf '%s\\n' "$@" >> '${launches}'; printf launched; exit 0; fi
+done
+echo probe >> '${count}'
+echo $$ > '${pidFile}'
+while [ ! -e '${release}' ]; do /bin/sleep 0.01; done
+echo "bwrap: Can't mount proc on /newroot/proc: Operation not permitted"
+exit 0
+`);
+  chmodSync(launcher, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = launcherDir;
+  let probePid = 0;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (probePid) { try { process.kill(probePid, 'SIGKILL'); } catch {} }
+  });
+  const fixture = bubblewrapSandbox({ program: launcher, source: 'system' });
+  const launch = (marker: string, timeoutMs: number) => runStarted(signal => fixture.spawn(['/bin/echo', marker], { mode: 'read-only', networkAccess: false }, {
     cwd, env: process.env, stdin: 'pipe', signal,
-  }), { cwd, timeoutMs: 100, maxBytes: 1000 });
+  }), { cwd, timeoutMs, maxBytes: 1000 });
+  const startedAt = Date.now();
+  const cancelled = launch('cancelled', 100), surviving = launch('survivor', 2000);
+  const result = await cancelled;
+  probePid = Number(readFileSync(pidFile, 'utf8'));
   assert.equal(result.timedOut, true);
   assert.equal(result.spawnError, undefined);
   assert.ok(Date.now() - startedAt < 500);
-  assert.equal(existsSync(join(cwd, 'executed')), false);
+  assert.doesNotThrow(() => process.kill(probePid!, 0), 'another caller still owns a wait on the shared probe');
+  assert.equal(existsSync(launches), false);
   assert.equal(existsSync(registry), false, 'cancelled preflight does not enter registration');
-  probePid = Number(readFileSync(pidFile, 'utf8'));
-  process.kill(-probePid, 'SIGKILL');
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try { process.kill(probePid, 0); } catch { probePid = undefined; break; }
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  assert.equal(probePid, undefined, 'the fixture probe is reaped during teardown');
+  writeFileSync(release, '');
+  assert.equal((await surviving).stdout, 'launched');
+  assert.equal((await launch('cached', 1000)).stdout, 'launched');
+  assert.equal(readFileSync(count, 'utf8'), 'probe\n');
+  const executed = readFileSync(launches, 'utf8');
+  assert.match(executed, /survivor/);
+  assert.match(executed, /cached/);
+  assert.doesNotMatch(executed, /cancelled/);
+  assert.ok(executed.split('\n').includes('--proc'), 'stdout does not classify a proc mount failure');
+  assert.throws(() => process.kill(probePid!, 0), /ESRCH/, 'the fixture probe was reaped');
 });

@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import claudeArtifacts from './index.ts';
+import { withPi } from '../../tests/pi-session.ts';
 
 const fakeClaude = fileURLToPath(new URL('../../tests/fixtures/fake-claude.mjs', import.meta.url));
 const noTmux = spawnSync('tmux', ['-V']).status === 0 ? false : 'tmux is not installed';
@@ -205,10 +206,62 @@ test('Pi shutdown stops a running job', { skip: noTmux }, async t => {
   await assert.rejects(job, /cancelled/);
 });
 
+for (const action of ['cancellation', 'session replacement', 'shutdown', 'deadline'] as const) test(`${action} stops a version probe that ignores SIGTERM`, async t => {
+  const { root, fakeLog } = await setup(t);
+  const release = join(root, 'release-version');
+  process.env.FAKE_CLAUDE_SCENARIO = JSON.stringify({ versionHang: true, versionRelease: release });
+  await withPi({ extensions: [claudeArtifacts] }, async fixture => {
+    const tool = fixture.session.getToolDefinition('claude_artifact_list')!;
+    const controller = new AbortController();
+    const start = Date.now();
+    const job = tool.execute('version-hang', {}, controller.signal, undefined, fixture.runner!.createToolContext('version-hang', undefined))
+      .then(() => 'unexpected success', error => String(error));
+    let pid: number | undefined;
+    let replacement: Promise<unknown> | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const readyBy = Date.now() + 5_000;
+      while (!pid) {
+        pid = (await fakeLog().catch(() => [])).find(entry => entry.event === 'version-ready')?.pid;
+        if (Date.now() > readyBy) throw new Error('Version probe did not start');
+        if (!pid) await delay(25);
+      }
+      if (action === 'cancellation') controller.abort();
+      if (action === 'session replacement') replacement = fixture.runtime.newSession();
+      if (action === 'shutdown') replacement = fixture.runtime.dispose();
+      const [failure] = await Promise.race([
+        Promise.all([job, replacement]),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${action} hung on version probe`)), action === 'deadline' ? 18_000 : 3_000); }),
+      ]);
+      assert.match(failure, action === 'deadline' ? /timed out after 15 seconds[\s\S]*synthetic version warning/ : /cancelled/);
+      if (action === 'deadline') assert.ok(Date.now() - start >= 15_000);
+      assert.throws(() => process.kill(pid!, 0), /ESRCH/);
+      assert.ok((await fakeLog()).filter(entry => entry.argv).every(entry => entry.argv[0] === '--version'));
+    } finally {
+      clearTimeout(timer);
+      await writeFile(release, 'stop');
+      await job; await replacement;
+    }
+  });
+});
+
 test('an older Claude Code is refused before any session starts', { skip: noTmux }, async t => {
   const { run, fakeLog } = await setup(t, { version: '2.1.200' });
   await assert.rejects(run('claude_artifact_list', {}), /2\.1\.302/);
   assert.ok((await fakeLog()).every(entry => entry.argv?.[0] === '--version'));
+});
+
+test('version failures can be retried and only a supported version is cached', { skip: noTmux }, async t => {
+  const { run, fakeLog } = await setup(t, { versionFailure: true });
+  await assert.rejects(run('claude_artifact_list', {}), /synthetic version failure/);
+  process.env.FAKE_CLAUDE_SCENARIO = JSON.stringify({ version: '2.1.200' });
+  await assert.rejects(run('claude_artifact_list', {}), /older than 2\.1\.302/);
+  assert.ok((await fakeLog()).every(entry => entry.argv?.[0] === '--version'));
+  process.env.FAKE_CLAUDE_SCENARIO = JSON.stringify({ responses: { list: { artifacts: [], total: 0 } } });
+  await run('claude_artifact_list', {});
+  process.env.FAKE_CLAUDE_SCENARIO = JSON.stringify({ versionFailure: true, responses: { list: { artifacts: [], total: 0 } } });
+  await run('claude_artifact_list', {});
+  assert.equal((await fakeLog()).filter(entry => entry.argv?.[0] === '--version').length, 3);
 });
 
 test('the hidden session runs restricted, without API-key or provider overrides, on the user\'s login', { skip: noTmux }, async t => {

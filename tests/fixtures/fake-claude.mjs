@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 const scenario = JSON.parse(process.env.FAKE_CLAUDE_SCENARIO ?? '{}');
@@ -7,7 +7,17 @@ const log = entry => { if (process.env.FAKE_CLAUDE_LOG) appendFileSync(process.e
 const idle = () => setInterval(() => {}, 60_000);
 const argv = process.argv.slice(2);
 log({ pid: process.pid, argv, env: Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(ANTHROPIC_|CLAUDE|DISABLE_AUTOUPDATER)/.test(key))) });
-if (argv[0] === '--version') { console.log(`${scenario.version ?? '2.1.302'} (Claude Code)`); process.exit(0); }
+if (argv[0] === '--version') {
+  if (scenario.versionFailure) { console.error('synthetic version failure'); process.exit(23); }
+  if (scenario.versionHang) {
+    process.on('SIGTERM', () => log({ event: 'version-SIGTERM', pid: process.pid }));
+    console.error('synthetic version warning');
+    log({ event: 'version-ready', pid: process.pid });
+    setInterval(() => { if (scenario.versionRelease && existsSync(scenario.versionRelease)) process.exit(1); }, 50);
+    await new Promise(() => {});
+  }
+  console.log(`${scenario.version ?? '2.1.302'} (Claude Code)`); process.exit(0);
+}
 const option = name => argv[argv.indexOf(name) + 1];
 
 console.log('fake claude');

@@ -13,6 +13,7 @@ const HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolU
 const MIN_CLAUDE_VERSION = [2, 1, 302];
 const START_TIMEOUT_MS = 45_000;
 const JOB_TIMEOUT_MS = 150_000;
+const COMMAND_TIMEOUT_MS = 15_000;
 const MAX_HOOK_BODY = 32 * 1024 * 1024;
 const MAX_PAGE_BYTES = 10 * 1024 * 1024;
 
@@ -86,7 +87,8 @@ export async function converse(plan: Plan, { signal, jobDir: given, stopAfter }:
   const { steps } = plan;
   const env = claudeEnv();
   signal?.throwIfAborted();
-  await requireVersion(env);
+  await requireVersion(env, signal);
+  signal?.throwIfAborted();
   const sessionId = randomUUID(), token = randomBytes(24).toString('hex');
   await mkdir(helperRoot(), { recursive: true, mode: 0o700 });
   const jobDir = given ?? await mkdtemp(join(helperRoot(), 'job-'));
@@ -257,18 +259,31 @@ function claudeEnv(): NodeJS.ProcessEnv {
   return { ...Object.fromEntries(kept), DISABLE_AUTOUPDATER: '1' };
 }
 
-async function requireVersion(env: NodeJS.ProcessEnv) {
+async function requireVersion(env: NodeJS.ProcessEnv, signal?: AbortSignal) {
   const key = env.PATH ?? '';
   if (verifiedPaths.has(key)) return;
-  const output = await run('claude', ['--version'], env).catch(error => { throw new Error(`Could not run Claude Code (\`claude --version\`): ${error.message}`); });
+  const output = await run('claude', ['--version'], env, signal).catch(error => {
+    if (signal?.aborted) throw new Error('The Claude artifact job was cancelled.');
+    throw new Error(`Could not run Claude Code (\`claude --version\`): ${error.message}`);
+  });
+  if (signal?.aborted) throw new Error('The Claude artifact job was cancelled.');
   const found = /(\d+)\.(\d+)\.(\d+)/.exec(output)?.slice(1).map(Number);
   const first = found ? MIN_CLAUDE_VERSION.findIndex((part, index) => part !== found[index]) : 0;
   if (!found || first !== -1 && found[first] < MIN_CLAUDE_VERSION[first]) throw new Error(`Claude Code ${found?.join('.') ?? output.trim()} is older than ${MIN_CLAUDE_VERSION.join('.')}, the oldest version these tools were verified with. Update Claude Code and retry.`);
   verifiedPaths.add(key);
 }
 
-function run(command: string, args: string[], env: NodeJS.ProcessEnv) {
-  return new Promise<string>((resolve, reject) => execFile(command, args, { env, timeout: 15_000 }, (error, stdout, stderr) => error ? reject(new Error(`${command} failed: ${stderr || error.message}`)) : resolve(stdout)));
+function run(command: string, args: string[], env: NodeJS.ProcessEnv, signal?: AbortSignal) {
+  return new Promise<string>((resolve, reject) => {
+    signal?.throwIfAborted();
+    const child = execFile(command, args, { env, timeout: COMMAND_TIMEOUT_MS, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
+      signal?.removeEventListener('abort', stop);
+      if (error) reject(new Error(`${command} failed: ${error.killed && !signal?.aborted ? `timed out after ${COMMAND_TIMEOUT_MS / 1000} seconds. ` : ''}${stderr || error.message}`));
+      else resolve(stdout);
+    });
+    const stop = () => { child.stdout?.destroy(); child.stderr?.destroy(); child.kill('SIGKILL'); };
+    signal?.addEventListener('abort', stop, { once: true });
+  });
 }
 
 async function listen(token: string, respond: (input: HookInput) => Promise<object>) {

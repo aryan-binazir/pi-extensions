@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { resolve } from 'node:path';
+import { createReadStream, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadShell, type Shell } from './shell.ts';
 
@@ -12,7 +11,7 @@ type Decider = typeof DECIDERS[number];
 type Verdict = typeof VERDICTS[number];
 type Operation = typeof OPERATIONS[number];
 type Samples = { records: number; values: number[]; excluded: number };
-const DEFAULT_LIMITS = { maxLineBytes: 1024 * 1024, maxInputBytes: 64 * 1024 * 1024, maxRecords: 100_000, maxInputs: 128 };
+const DEFAULT_LIMITS = { maxLineBytes: 1024 * 1024, maxInputBytes: 64 * 1024 * 1024, maxRecords: 100_000, maxInputs: 128, maxScriptBytes: 32 * 1024 };
 
 function fingerprint(data: Record<string, unknown>): string {
   const hash = createHash('sha256');
@@ -57,24 +56,28 @@ function summarize<K extends string>(values: Record<K, Samples>) {
   return Object.fromEntries(Object.entries<Samples>(values).map(([key, value]) => [key, { records: value.records, durationMs: timing(value) }])) as Record<K, { records: number; durationMs: ReturnType<typeof timing> }>;
 }
 
-function operation(data: Record<string, unknown>, shell: Shell): Operation {
-  try {
-    if (data.actionTruncated === true || typeof data.actionJson !== 'string') return 'unknown';
-    const action = object(JSON.parse(data.actionJson));
-    if (action?.tool === 'write') return 'file_write';
-    if (action?.tool === 'edit') return 'file_edit';
-    if (action?.tool !== 'bash' || !Array.isArray(action.command) || !action.command.every(word => typeof word === 'string')) return 'unknown';
-    const commands = shell.parseShellLcPlainCommands(action.command);
-    if (!commands?.length) return 'unknown';
-    if (commands.length > 1) return 'compound';
-    const executable = commands[0][0];
-    if (executable === 'git') return 'git';
-    if (['npm', 'pnpm', 'yarn', 'npx'].includes(executable)) return 'package';
-    if (['node', 'tsx'].includes(executable)) return 'node';
-    if (['curl', 'wget', 'gh', 'ssh'].includes(executable)) return 'network';
-    if (['rm', 'mv', 'cp', 'mkdir', 'chmod', 'ln', 'touch'].includes(executable)) return 'filesystem';
-    return 'unknown';
-  } catch { return 'unknown'; }
+function operation(data: Record<string, unknown>, shell: Shell | undefined, maxScriptBytes: number): Operation | 'parserErrors' | 'parserUnavailable' | 'scriptLimit' {
+  if (data.actionTruncated === true || typeof data.actionJson !== 'string') return 'unknown';
+  let action: Record<string, unknown> | undefined;
+  try { action = object(JSON.parse(data.actionJson)); } catch { return 'unknown'; }
+  if (action?.tool === 'write') return 'file_write';
+  if (action?.tool === 'edit') return 'file_edit';
+  if (action?.tool !== 'bash' || !Array.isArray(action.command) || !action.command.every(word => typeof word === 'string')) return 'unknown';
+  if (!shell) return 'parserUnavailable';
+  const extracted = shell.extractBashCommand(action.command);
+  if (!extracted) return 'unknown';
+  if (Buffer.byteLength(extracted[1]) > maxScriptBytes) return 'scriptLimit';
+  let commands: string[][] | undefined;
+  try { commands = shell.parseShellScriptIntoCommands(extracted[1]); } catch { return 'parserErrors'; }
+  if (!commands?.length) return 'unknown';
+  if (commands.length > 1) return 'compound';
+  const executable = commands[0][0];
+  if (executable === 'git') return 'git';
+  if (['npm', 'pnpm', 'yarn', 'npx'].includes(executable)) return 'package';
+  if (['node', 'tsx'].includes(executable)) return 'node';
+  if (['curl', 'wget', 'gh', 'ssh'].includes(executable)) return 'network';
+  if (['rm', 'mv', 'cp', 'mkdir', 'chmod', 'ln', 'touch'].includes(executable)) return 'filesystem';
+  return 'unknown';
 }
 
 export async function auditStats(inputs: Iterable<AsyncIterable<Uint8Array>>, options: Partial<typeof DEFAULT_LIMITS> = {}) {
@@ -89,11 +92,13 @@ export async function auditStats(inputs: Iterable<AsyncIterable<Uint8Array>>, op
   const decisions = Object.fromEntries(DECIDERS.map(decider => [decider, Object.fromEntries(VERDICTS.map(verdict => [verdict, 0]))])) as Record<Decider, Record<Verdict, number>>;
   const requests = new Map<string, { decisions: number; outcomes: Set<Verdict>; automatic: boolean; promptUser: boolean; manual: boolean }>();
   const seen = new Set<string>();
-  let audit = 0, duplicates = 0, unkeyedRecords = 0;
+  let duplicates = 0, unkeyedRecords = 0;
   let truncatedActions = 0;
   const input = { sources: 0, bytes: 0, lines: 0, blankLines: 0, nonAuditLines: 0 };
   const exclusions = { malformedJsonLines: 0, invalidUtf8Lines: 0, oversizedLines: 0, invalidAuditData: 0, unsupportedVersion: 0 };
   const durationExclusions = { missing: 0, nonNumeric: 0, nonFinite: 0, negative: 0, notSafeInteger: 0 };
+  const classificationExclusions = { parserErrors: 0, parserUnavailable: 0, scriptLimit: 0 };
+  let parserFailed = false;
   let stoppedBy: 'input_bytes' | 'records' | 'inputs' | null = null;
   let ioErrors = 0;
   const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -107,7 +112,6 @@ export async function auditStats(inputs: Iterable<AsyncIterable<Uint8Array>>, op
     let value: Record<string, unknown> | undefined;
     try { value = object(JSON.parse(line)); } catch { exclusions.malformedJsonLines++; return; }
     if (value?.type !== 'custom' || value.customType !== 'guardian-approval-decision') { input.nonAuditLines++; return; }
-    audit++;
     const data = object(value.data);
     if (!data) { exclusions.invalidAuditData++; return; }
     if (data.version !== 1) { exclusions.unsupportedVersion++; return; }
@@ -129,7 +133,14 @@ export async function auditStats(inputs: Iterable<AsyncIterable<Uint8Array>>, op
     const invalid = duration === undefined ? 'missing' : typeof duration !== 'number' ? 'nonNumeric'
       : !Number.isFinite(duration) ? 'nonFinite' : duration < 0 ? 'negative' : !Number.isSafeInteger(duration) ? 'notSafeInteger' : undefined;
     if (invalid) durationExclusions[invalid]++;
-    for (const group of [all, byDecider[decider], byVerdict[verdict], byOperation[operation(data, shell)], byPhase[phase]]) {
+    const classified = operation(data, parserFailed ? undefined : shell, limits.maxScriptBytes);
+    let category: Operation;
+    if (classified === 'parserErrors' || classified === 'parserUnavailable' || classified === 'scriptLimit') {
+      classificationExclusions[classified]++;
+      parserFailed ||= classified === 'parserErrors';
+      category = 'unknown';
+    } else category = classified;
+    for (const group of [all, byDecider[decider], byVerdict[verdict], byOperation[category], byPhase[phase]]) {
       group.records++;
       if (!invalid) group.values.push(duration as number);
       else group.excluded++;
@@ -177,8 +188,8 @@ export async function auditStats(inputs: Iterable<AsyncIterable<Uint8Array>>, op
     } catch { ioErrors++; }
   }
   const keyed = [...requests.values()];
-  return { complete: !stoppedBy && !ioErrors && Object.values(exclusions).every(count => count === 0), stoppedBy, limits, input, exclusions, durationExclusions, ioErrors, truncatedActions, decisions,
-    records: { audit, distinct: all.records, duplicates },
+  return { complete: !stoppedBy && !ioErrors && [...Object.values(exclusions), ...Object.values(classificationExclusions)].every(count => count === 0), stoppedBy, limits, input, exclusions, durationExclusions, classificationExclusions, ioErrors, truncatedActions, decisions,
+    records: { audit: all.records + duplicates + exclusions.invalidAuditData + exclusions.unsupportedVersion, distinct: all.records, duplicates },
     requests: { unique: requests.size, unkeyedRecords,
       withMultipleDecisions: keyed.filter(request => request.decisions > 1).length,
       additionalDecisions: keyed.reduce((sum, request) => sum + request.decisions - 1, 0),
@@ -188,13 +199,15 @@ export async function auditStats(inputs: Iterable<AsyncIterable<Uint8Array>>, op
     durationMs: timing(all), byDecider: summarize(byDecider), byPhase: summarize(byPhase), byVerdict: summarize(byVerdict), byOperation: summarize(byOperation),
     method: [
       'Only version 1 guardian-approval-decision custom entries are aggregated; future extra fields are ignored in output.',
-      'Audit records include duplicates and excluded schemas. Distinct decisions exclude copied metadata with a nonempty requestId (SHA-256 of canonical data). Unkeyed records are never deduplicated.',
+      'Audit records include duplicates and excluded schemas within the retained scan prefix. Distinct decisions exclude copied metadata with a nonempty requestId (SHA-256 of canonical data). Unkeyed records are never deduplicated.',
       'Unique requests use nonempty recorded requestId. Outcome flags overlap and are independent of input order. Additional decisions are distinct records beyond the first per request.',
       'Timing samples are nonnegative safe integer milliseconds. Percentiles use exact nearest-rank ceil(p*n/100); empty percentiles are null. Totals above the safe integer range are decimal strings.',
       'Timings and breakdowns exclude duplicates and invalid durations. All-decider and operation timings mix phases; use byPhase.auto_review for review latency and byPhase.user_prompt for prompt handling.',
       'Manual approvals measure immediate command handling and are isolated in byPhase.manual_approval. Total recorded duration is a sum of handling intervals, not wall-clock elapsed time.',
       'User decisions with missing or unfamiliar userChoice are isolated in byPhase.user_unknown; their prompt or manual origin cannot be established.',
       'Operation classes use the recorded action tool and existing literal shell parser. Multiple plain commands are compound; unsupported syntax, wrappers, paths and truncated actions are unknown. No commands are executed.',
+      'All byOperation record counts and timings refer to distinct decisions, not requests. A fallback or manual approval can contribute another decision to the same class.',
+      'Scripts above maxScriptBytes are not parsed. A parser throw disables further shell parsing for this scan. Classification exclusions mark the report incomplete but preserve decision counts and timings.',
       'Input bytes count admitted chunks, including bytes following the last processed record within a chunk. Resource limits stop the scan; malformed, oversized and unsupported records are counted and excluded.',
     ],
     limitations: [
@@ -226,6 +239,7 @@ export function formatText(report: Awaited<ReturnType<typeof auditStats>>): stri
   }
   lines.push(`Input: ${JSON.stringify(report.input)}`, `Limits: ${JSON.stringify(report.limits)}`,
     `Exclusions: ${JSON.stringify(report.exclusions)}`, `Invalid durations: ${JSON.stringify(report.durationExclusions)}`,
+    `Classification exclusions: ${JSON.stringify(report.classificationExclusions)}`,
     `I/O errors: ${report.ioErrors}; truncated actions: ${report.truncatedActions}`, 'Method:', ...report.method, 'Limitations:', ...report.limitations);
   return lines.join('\n');
 }
@@ -251,7 +265,9 @@ async function main(args: string[]): Promise<void> {
   else if (!report.complete) process.exitCode = 2;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+let mainModule = false;
+try { mainModule = Boolean(process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)); } catch { mainModule = false; }
+if (mainModule) {
   process.stdout.on('error', () => { process.exitCode = 1; });
   process.stderr.on('error', () => { process.exitCode = 1; });
   void main(process.argv.slice(2)).catch(() => { console.error('Audit statistics failed.'); process.exitCode = 1; });

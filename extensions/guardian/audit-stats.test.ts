@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { auditStats, formatText } from './audit-stats.ts';
@@ -88,10 +91,15 @@ test('stops explicitly at input, distinct record and source bounds without parsi
   assert.equal(records.stoppedBy, 'records');
   assert.equal(records.complete, false);
   assert.equal(records.records.distinct, 1);
+  assert.equal(records.records.audit, 1);
   const bytes = await auditStats([source()], { maxInputBytes: 5 });
   assert.equal(bytes.stoppedBy, 'input_bytes');
   assert.equal(bytes.records.distinct, 0);
   assert.equal(bytes.input.bytes, 5);
+  const first = JSON.stringify(entry());
+  const torn = await auditStats([source()], { maxInputBytes: Buffer.byteLength(first) + 5 });
+  assert.equal(torn.records.distinct, 1);
+  assert.equal(torn.exclusions.malformedJsonLines, 0);
   const sources = await auditStats([source(), source()], { maxInputs: 1 });
   assert.equal(sources.stoppedBy, 'inputs');
   assert.equal(sources.input.sources, 1);
@@ -144,6 +152,10 @@ test('classifies actual recorded actions conservatively, including quoted operat
     git: 2, package: 1, node: 1, network: 1, filesystem: 1, file_write: 1, file_edit: 1, compound: 3, unknown: 9,
   });
   assert.equal(result.truncatedActions, 1);
+  const limited = await auditStats([jsonl([entry()])], { maxScriptBytes: 1 });
+  assert.equal(limited.classificationExclusions.scriptLimit, 1);
+  assert.equal(limited.byOperation.unknown.records, 1);
+  assert.equal(limited.complete, false);
 });
 
 test('CLI uses explicit files/stdin, reports method and limits, and never echoes sensitive inputs', async () => {
@@ -214,4 +226,49 @@ test('distinct invalid numeric representations are not mistaken for copied recor
   assert.equal(result.records.duplicates, 0);
   assert.equal(result.durationExclusions.nonFinite, 1);
   assert.equal(result.durationExclusions.nonNumeric, 1);
+});
+
+test('retains empty/missing IDs, checks record limits after duplicates, and renders every group', async () => {
+  const missing = entry({ requestId: undefined });
+  const empty = entry({ requestId: '' });
+  const result = await auditStats([jsonl([entry(), entry(), missing, missing, empty, empty,
+    entry({ requestId: 'not-approved', decider: 'user', userChoice: 'manual', verdict: 'rejected' })])]);
+  assert.equal(result.records.distinct, 6);
+  assert.equal(result.requests.unkeyedRecords, 4);
+  assert.equal(result.requests.manualApprovals, 0);
+  const bounded = await auditStats([jsonl([entry(), entry()])], { maxRecords: 1 });
+  assert.equal(bounded.complete, true);
+  assert.equal(bounded.records.duplicates, 1);
+  for (const name of ['byPhase', 'byDecider', 'byVerdict', 'byOperation']) assert.match(formatText(result), new RegExp(name + ' \\(duration ms'));
+});
+
+test('real file and symlink CLI invocations preserve counting and exit behavior', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'guardian-cli-'));
+  const cli = fileURLToPath(new URL('./audit-stats.ts', import.meta.url));
+  try {
+    const file = join(directory, 'one.jsonl'), other = join(directory, 'two.jsonl'), link = join(directory, 'stats.ts');
+    writeFileSync(file, JSON.stringify(entry()));
+    writeFileSync(other, JSON.stringify(entry({ requestId: 'second' })));
+    symlinkSync(cli, link);
+    for (const target of [cli, link]) {
+      const child = spawnSync(process.execPath, ['--import', 'tsx', target, '--json', file, other], { encoding: 'utf8', timeout: 10_000, cwd: process.cwd() });
+      assert.equal(child.status, 0, child.stderr);
+      assert.equal(JSON.parse(child.stdout).records.distinct, 2);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('parser resource failures make classification explicitly incomplete without losing counts', () => {
+  const cli = fileURLToPath(new URL('./audit-stats.ts', import.meta.url));
+  const canary = 'SYNTHETIC-PARSER-SECRET';
+  const input = [entry({ requestId: 'hostile', actionJson: JSON.stringify({ tool: 'bash', command: ['bash', '-lc', canary + ';' + 'a|'.repeat(12_000)] }) }), entry()];
+  const child = spawnSync(process.execPath, ['--import', 'tsx', cli, '--json', '-'], {
+    input: input.map(value => JSON.stringify(value)).join('\n'), encoding: 'utf8', timeout: 15_000,
+  });
+  assert.equal(child.status, 2, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.complete, false);
+  assert.equal(result.records.distinct, 2);
+  assert.equal(result.classificationExclusions.parserErrors + result.classificationExclusions.scriptLimit, 1);
+  assert.doesNotMatch(child.stdout + child.stderr, new RegExp(canary));
 });

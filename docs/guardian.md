@@ -285,8 +285,14 @@ Nothing is discovered automatically. The input is Pi's actual custom-entry envel
 `type: "custom"`, `customType: "guardian-approval-decision"`, and object `data` with `version: 1`.
 Bare payloads are not accepted. Extra fields are tolerated; unsupported or missing versions are
 excluded explicitly. Output contains aggregate counts and static labels only, including on errors.
+After establishing session provenance, preserve the envelope when filtering metadata locally:
 
-`records.audit` counts recognized envelopes, including schema exclusions and duplicates;
+```bash
+jq -c 'select(.type == "custom" and .customType == "guardian-approval-decision")' verified-session.jsonl |
+  node --import tsx extensions/guardian/audit-stats.ts --json -
+```
+
+`records.audit` counts recognized envelopes within the retained scan prefix, including schema exclusions and duplicates;
 `records.distinct` counts retained decisions. Identical canonical audit data with a request ID is
 deduplicated across inputs. Distinct decisions sharing an ID remain separate; missing IDs are
 unkeyed. Request outcome flags overlap, so their sum can exceed the unique-request count.
@@ -298,7 +304,8 @@ Timing summaries give valid sample count, exclusions, total and exact nearest-ra
 decimal strings. Missing, nonnumeric, nonfinite, negative and noninteger/unsafe durations are
 excluded from timing only. Use `byPhase.auto_review` for reviewer handling and `byPhase.user_prompt`
 for prompt handling; manual approvals and unknown user choices have separate groups. Other
-breakdowns mix phases. Duration sums are recorded handling intervals, not elapsed session time.
+breakdowns mix phases. Operation counts count distinct decisions, so a fallback or manual approval
+can add another record in the same class. Duration sums are handling intervals, not elapsed session time.
 
 Operation classes describe structured write/edit tools or literal command families: Git, package
 manager, Node, network client and filesystem utility. Multiple plain shell commands are `compound`;
@@ -307,7 +314,10 @@ script is classified, including any command prefix. These categories do not expl
 causes, prove execution or authorize changing permission rules.
 
 The scanner bounds each line to 1 MiB, total admitted input to 64 MiB, retained distinct records to
-100,000 and sources to 128. Module callers can lower these limits. Oversized or malformed lines are
+100,000 and sources to 128. Shell scripts above 32 KiB are not parsed. Parser throws disable further
+shell classification for that scan; both cases have explicit classification exclusions and mark the
+report incomplete while preserving decision counts/timings. Module callers can lower these limits.
+Oversized or malformed lines are
 discarded; exclusions and early stops mark `complete: false`. Exit codes: **0** complete scan,
 **1** usage/I/O/internal error, **2** report produced with exclusions or a resource stop. I/O failures
 also produce an incomplete aggregate when possible. Invalid timings alone do not stop the scan.

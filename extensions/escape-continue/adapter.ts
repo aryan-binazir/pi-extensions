@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { InteractiveMode, type AgentSession, type CustomEditor, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { AssistantMessageComponent, InteractiveMode, type AgentSession, type AgentSessionEvent, type CustomEditor, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { matchesKey, type Component } from '@earendil-works/pi-tui';
 import { isUser, startPromotion, SupersededPromotion, textParts, type Message, type Promotion, type SessionPort } from './promotion.ts';
 import { installEditorInput, registerMainEditorBinding } from '../editor-input.ts';
@@ -12,6 +12,8 @@ type Adapter = {
   hosts: WeakMap<ExtensionContext['sessionManager'], Host>;
   checkpoints: AsyncLocalStorage<Checkpoint>;
   rawAborts: WeakMap<AgentSession, () => Promise<void>>;
+  quietAborts: WeakMap<AgentSession, object>;
+  quietMessages: WeakSet<object>;
   warnedSessions: WeakSet<ExtensionContext['sessionManager']>;
   supported: boolean;
   attach(host: Host, state: Adapter): void;
@@ -28,7 +30,7 @@ const installed = Symbol.for('pi-interactive:escape-continue-adapter');
 const wrapped = Symbol.for('pi-interactive:escape-continue-handler');
 const checkpointed = Symbol.for('pi-interactive:escape-continue-preflight');
 const intercepted = Symbol.for('pi-interactive:escape-continue-queue');
-type Prototype = { bindCurrentSessionExtensions(this: Host): Promise<void>; setCustomEditorComponent(this: Host, factory: unknown): void; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; handleReloadCommand(this: Host): Promise<void>; [installed]?: Adapter };
+type Prototype = { handleEvent(this: Host, event: AgentSessionEvent): Promise<void>; bindCurrentSessionExtensions(this: Host): Promise<void>; setCustomEditorComponent(this: Host, factory: unknown): void; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; handleReloadCommand(this: Host): Promise<void>; [installed]?: Adapter };
 
 // Pi's extension context exposes neither prepared queue contents nor queue removal.
 function queueLayout(session: AgentSession): QueueLayout | undefined {
@@ -52,6 +54,13 @@ function warn(registration: Registration, state: Adapter): void {
 
 function abortRun(session: AgentSession, state: Adapter): Promise<void> {
   return state.rawAborts.get(session)?.() ?? session.abort();
+}
+
+async function abortForPromotion(session: AgentSession, state: Adapter): Promise<void> {
+  const scope = {};
+  state.quietAborts.set(session, scope);
+  try { await abortRun(session, state); }
+  finally { if (state.quietAborts.get(session) === scope) state.quietAborts.delete(session); }
 }
 
 function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter): void {
@@ -173,7 +182,7 @@ function sessionPort(session: AgentSession, state: Adapter): SessionPort | undef
     abort: () => abortRun(session, state),
     streaming: () => session.isStreaming,
     async prompt(message, check, events) {
-      await abortRun(session, state);
+      await abortForPromotion(session, state);
       check();
       // Pi 0.99 supplies activity flags; 7229077 removed reliance on a host's idle getter.
       if (session.isStreaming || session.isCompacting) throw new SupersededPromotion('Another prompt started during the promotion');
@@ -222,13 +231,41 @@ export function install(): Adapter {
   let state = prototype[installed];
   if (!state) {
     const bind = prototype.bindCurrentSessionExtensions;
-    state = { active: new WeakMap(), hosts: new WeakMap(), checkpoints: new AsyncLocalStorage(), rawAborts: new WeakMap(), warnedSessions: new WeakSet(), supported: typeof bind === 'function', attach, decorate, interrupt };
+    state = { active: new WeakMap(), hosts: new WeakMap(), checkpoints: new AsyncLocalStorage(), rawAborts: new WeakMap(), quietAborts: new WeakMap(), quietMessages: new WeakSet(), warnedSessions: new WeakSet(), supported: typeof bind === 'function', attach, decorate, interrupt };
     const shared = state;
     if (shared.supported) prototype.bindCurrentSessionExtensions = async function () {
       await bind.call(this);
       shared.attach(this, shared);
     };
     Object.defineProperty(prototype, installed, { value: shared });
+  }
+  state.quietAborts ??= new WeakMap();
+  state.quietMessages ??= new WeakSet();
+  const handleEvent = prototype.handleEvent;
+  const updateContent = AssistantMessageComponent.prototype.updateContent;
+  if (typeof handleEvent !== 'function' || typeof updateContent !== 'function') state.supported = false;
+  else {
+    const shared = state;
+    if (!marked(handleEvent, wrapped)) {
+      const handle = function (this: Host, event: AgentSessionEvent) {
+        if (event.type === 'agent_start' || event.type === 'agent_end') shared.quietAborts.delete(this.session);
+        if ((event.type === 'message_update' || event.type === 'message_end') && event.message.role === 'assistant' &&
+            event.message.stopReason === 'aborted' && shared.quietAborts.has(this.session))
+          shared.quietMessages.add(event.message);
+        return handleEvent.call(this, event);
+      };
+      Object.defineProperty(handle, wrapped, { value: true });
+      prototype.handleEvent = handle;
+    }
+    if (!marked(updateContent, wrapped)) {
+      // Pi has no assistant-notice renderer hook; change only the renderer's view, not session messages.
+      const update: AssistantMessageComponent['updateContent'] = function (this: AssistantMessageComponent, message, streaming) {
+        return updateContent.call(this, shared.quietMessages.has(message) && message.stopReason === 'aborted'
+          ? { ...message, stopReason: 'stop', errorMessage: undefined } : message, streaming);
+      };
+      Object.defineProperty(update, wrapped, { value: true });
+      AssistantMessageComponent.prototype.updateContent = update;
+    }
   }
   state.rawAborts ??= new WeakMap();
   state.warnedSessions ??= new WeakSet();

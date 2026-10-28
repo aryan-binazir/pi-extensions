@@ -67,6 +67,14 @@ and then follow Pi's normal queue modes. Custom-only entries are not promoted as
 user input; they stay queued for subsequent normal boundaries. The unsubmitted editor draft is untouched.
 With no queued user message, normal Escape behavior applies.
 
+The intentional abort used to promote queued input omits the assistant's generic
+“Operation aborted” notice. Partial assistant output remains visible. Ordinary
+aborts (including stopping the promoted run without another queued message),
+provider errors and tool-result errors keep Pi's normal display. Suppression is
+render-only and tracked in memory for that message: transcript stop reasons stay
+`aborted`, and reopening persisted history in a new process uses Pi's normal
+abort display.
+
 Ctrl+Enter invokes the live interrupt handler
 directly in the main editor without leaving Vi insert mode. Agent-run
 interruptions preserve the cursor and draft.
@@ -112,8 +120,10 @@ queue is kept waiting with a notice.
 The [session seam](adr/020-escape-continue.md) keeps Pi flags, prompt ownership,
 checkpoints and queue internals in `adapter.ts`; `promotion.ts` owns
 cancellation and queue retention through its session interface. The adapter uses
-guarded interactive-handler and prepared-queue internals, tested against Pi
-0.99.1 and through the Pi 0.87.1, 1.0.2 and 1.2.0 TUIs. Table-driven version
+guarded interactive-handler, assistant-renderer and prepared-queue internals, tested against Pi
+0.99.1 and through the Pi 0.87.1, 1.0.2 and 1.2.0 TUIs. Abort-notice suppression
+has automated assistant-rendering coverage on the pinned 0.99.1 SDK; it has not
+been reverified in those other version TUIs. Table-driven version
 fakes cover the 0.87 boolean preflight callback, the 0.99 baseline, a legacy
 missing idle getter and 1.2 early streaming. Scoped run-start events support the
 older boolean prompt-preflight callback. Foreign activity is checked after

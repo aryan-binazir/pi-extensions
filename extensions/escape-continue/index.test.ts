@@ -3,7 +3,7 @@ import { test, type TestContext } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type AgentSession, AgentSessionRuntime, createAgentSession, type CreateAgentSessionRuntimeFactory, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { AssistantMessageComponent, type AgentSession, AgentSessionRuntime, createAgentSession, type CreateAgentSessionRuntimeFactory, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type FauxResponseFactory } from '@earendil-works/pi-ai';
 import { CombinedAutocompleteProvider, Container, Input, setKittyProtocolActive } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
@@ -129,6 +129,98 @@ async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [
   const services = { cwd, agentDir, settingsManager, modelRuntime, resourceLoader, diagnostics: [] };
   return { session, provider, app, notices, users, blocked, settingsManager, services, retire: () => { retired = true; } };
 }
+
+function renderAssistantUI(t: TestContext, h: Awaited<ReturnType<typeof fixture>>) {
+  h.app.isInitialized = true;
+  h.app.chatContainer = new Container();
+  h.app.pendingTools = new Map();
+  h.app.footer = { invalidate() {} };
+  h.app.getMarkdownTransformers = () => [];
+  h.app.clearStatusIndicator = () => {};
+  h.app.ui.terminal.setProgress = () => {};
+  const renders: Promise<void>[] = [];
+  const unsubscribe = h.session.subscribe(event => {
+    if (event.type === 'agent_start' || event.type === 'agent_end' ||
+        ((event.type === 'message_start' || event.type === 'message_update' || event.type === 'message_end') && event.message.role === 'assistant'))
+      renders.push(h.app.handleEvent(event));
+  });
+  t.after(async () => { unsubscribe(); await Promise.all(renders); });
+  return () => h.app.chatContainer.render(100).join('\n') as string;
+}
+
+for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} promotion hides only its intentional assistant abort notice`, async t => {
+  const h = await fixture(t);
+  const rendered = renderAssistantUI(t, h);
+  const first = deferred(), promoted = deferred();
+  h.provider.setResponses([h.blocked(first), h.blocked(promoted)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput(key);
+  await promoted.promise;
+  assert.doesNotMatch(rendered(), /Operation aborted/);
+  const aborted = h.session.messages.find(message => message.role === 'assistant' && message.stopReason === 'aborted');
+  assert.ok(aborted?.role === 'assistant');
+  assert.equal(aborted.stopReason, 'aborted');
+  assert.equal(aborted.errorMessage, 'Operation aborted');
+  const rebuilt = new AssistantMessageComponent(aborted);
+  rebuilt.invalidate();
+  rebuilt.setHideThinkingBlock(true);
+  assert.doesNotMatch(rebuilt.render(100).join('\n'), /Operation aborted/);
+  h.app.editor.handleInput(key);
+  await h.session.waitForIdle();
+  await running;
+  assert.equal(rendered().match(/Operation aborted/g)?.length, 1, 'ordinary abort of the promoted run stays visible');
+  h.provider.setResponses([fauxAssistantMessage('Partial answer', { stopReason: 'error', errorMessage: 'Genuine failure' })]);
+  await h.session.prompt('Later');
+  assert.match(rendered(), /Partial answer/);
+  assert.match(rendered(), /Error: Genuine failure/);
+});
+
+for (const action of ['escape', 'programmatic', 'unselected'] as const) test(`${action} ordinary abort keeps the real assistant notice`, async t => {
+  const h = await fixture(t, [], action !== 'unselected');
+  const rendered = renderAssistantUI(t, h);
+  const first = deferred();
+  h.provider.setResponses([h.blocked(first)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  if (action === 'unselected') await h.session.followUp('Next');
+  if (action === 'programmatic') await h.session.abort();
+  else h.app.editor.handleInput('\x1b');
+  await running;
+  assert.match(rendered(), /Operation aborted/);
+});
+
+test('promotion abort scope preserves genuine errors and partial assistant content', async t => {
+  const h = await fixture(t);
+  const rendered = renderAssistantUI(t, h);
+  const first = deferred(), promoted = deferred();
+  h.provider.setResponses([h.blocked(first), h.blocked(promoted)]);
+  const running = h.session.prompt('Original');
+  await first.promise;
+  await h.session.followUp('Next');
+  const state = install(), abort = state.rawAborts.get(h.session)!;
+  state.rawAborts.set(h.session, async () => {
+    const message = fauxAssistantMessage('Partial answer', { stopReason: 'error', errorMessage: 'Operation aborted by failing provider' });
+    await h.app.handleEvent({ type: 'message_start', message });
+    await h.app.handleEvent({ type: 'message_end', message });
+    const partial = fauxAssistantMessage('Interrupted partial answer', { stopReason: 'aborted', errorMessage: 'The operation was aborted' });
+    await h.app.handleEvent({ type: 'message_start', message: { ...partial, stopReason: 'pending' } });
+    await h.app.handleEvent({ type: 'message_end', message: partial });
+    assert.equal(partial.stopReason, 'aborted');
+    assert.match(rendered(), /Interrupted partial answer/);
+    assert.equal(rendered().match(/Operation aborted/g)?.length, 1, 'only the genuine error contains the abort text');
+    await abort();
+  });
+  h.app.editor.handleInput('\x1b');
+  await promoted.promise;
+  state.rawAborts.set(h.session, abort);
+  assert.match(rendered(), /Error: Operation aborted by failing provider/);
+  h.app.editor.handleInput('\x1b');
+  await h.session.waitForIdle();
+  await running;
+  assert.match(rendered(), /Operation aborted/);
+});
 
 test('Escape aborts the current run and starts the queued follow-up without touching the draft', async t => {
   const h = await fixture(t);
@@ -316,6 +408,7 @@ test('Escape during a slow tool keeps steering out of the cancelled run', async 
   h.provider.setResponses([fauxAssistantMessage(fauxToolCall('slow', {}, { id: 'slow-call' })), h.blocked(promoted)]);
   const running = h.session.prompt('Original');
   await toolStarted.promise;
+  const rendered = renderAssistantUI(t, h);
   await h.session.steer('Steer next');
   h.app.editor.handleInput('\x1b');
   assert.deepEqual(h.users(), ['Original']);
@@ -325,9 +418,11 @@ test('Escape during a slow tool keeps steering out of the cancelled run', async 
   const toolIndex = h.session.messages.findIndex(message => message.role === 'toolResult');
   assert.ok(userIndex > toolIndex, 'queued steering belongs to the new run, after the cancelled tool result');
   assert.deepEqual(h.users(), ['Original', 'Steer next']);
+  assert.doesNotMatch(rendered(), /Operation aborted/);
   h.app.editor.handleInput('\x1b');
   await h.session.waitForIdle();
   await running;
+  assert.match(rendered(), /Operation aborted/, 'an abort during tool execution must not silence the next assistant abort');
 });
 
 test('custom queued messages survive promotion with their original contents and order', async t => {
@@ -431,6 +526,7 @@ test('fragmented bracketed paste containing Ctrl+Enter cannot interrupt the run'
 
 for (const extensions of [[], [viMode, stash], [stash, viMode]]) test(`Ctrl+Enter works after a real reload, ${extensions.length === 0 ? 'stock' : extensions[0] === viMode ? 'vi first' : 'stash first'}`, async t => {
   const h = await fixture(t, extensions);
+  const rendered = renderAssistantUI(t, h);
   await h.session.reload();
   const first = deferred(), promoted = deferred();
   h.provider.setResponses([h.blocked(first), h.blocked(promoted)]);
@@ -443,6 +539,7 @@ for (const extensions of [[], [viMode, stash], [stash, viMode]]) test(`Ctrl+Ente
   assert.equal(h.session.agent.signal?.aborted, true);
   await promoted.promise;
   assert.equal(h.app.editor.getText(), 'draft');
+  assert.doesNotMatch(rendered(), /Operation aborted/);
   h.app.editor.handleInput('\x1b[13;5u');
   await h.session.waitForIdle();
   await running;
@@ -957,13 +1054,22 @@ test('replacing the host with another real session prevents delayed promotion in
   await old.session.followUp('Next');
   old.app.editor.handleInput('\x1b');
   old.app.session = replacement.session;
+  assert.deepEqual(replacement.users(), []);
+  assert.equal(replacement.provider.state.callCount, 0);
+  const rendered = renderAssistantUI(t, replacement);
+  const next = deferred();
+  replacement.provider.setResponses([replacement.blocked(next)]);
+  const nextRun = replacement.session.prompt('Replacement');
+  await next.promise;
+  replacement.app.editor.handleInput('\x1b');
+  await nextRun;
+  assert.match(rendered(), /Operation aborted/);
   release.resolve();
   await running;
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(old.users(), ['Original']);
   assert.deepEqual(old.session.getFollowUpMessages(), ['Next']);
-  assert.deepEqual(replacement.users(), []);
-  assert.equal(replacement.provider.state.callCount, 0);
+  assert.deepEqual(replacement.users(), ['Replacement']);
 });
 
 test('manual input cancels a promoted preflight before either completion order can commit it', async t => {

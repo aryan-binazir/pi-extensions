@@ -72,7 +72,7 @@ test('discarded targets without lookups have bounded memory in offline and rapid
   for (const offline of ['1', '0']) {
     const { stdout } = await promisify(execFile)(process.execPath,
       ['--expose-gc', '--import', 'tsx', '--input-type=module', '--eval', source],
-      { env: { ...process.env, PI_OFFLINE: offline } });
+      { env: { ...process.env, PI_OFFLINE: offline }, timeout: 30000 });
     const { retained, calls } = JSON.parse(stdout);
     assert.equal(calls, 0, `PI_OFFLINE=${offline}`);
     assert.ok(retained < 8 * 1024 * 1024, `PI_OFFLINE=${offline} retained ${retained} bytes for unused targets`);
@@ -446,7 +446,7 @@ describe('PR lookup lifecycle', () => {
     assert.equal(pathRow(f), '/workspace/project (main) #42 merged • Task');
     f.footer.dispose();
   });
-  test('unused target pruning preserves orphaned pending work and another footer listener', async () => {
+  test('unused target pruning preserves orphaned pending work', async () => {
     const gh = fakeGh(), first = fixture(gh.exec);
     first.footer.render(140); await advance();
     for (const branch of ['feature', 'other', 'detached']) {
@@ -464,6 +464,25 @@ describe('PR lookup lifecycle', () => {
     assert.equal(pathRow(shared), '/workspace/project (main) #42 • Task');
     assert.equal(shared.renders(), 1, 'the remaining listener receives completion');
     shared.footer.dispose();
+  });
+  test('an idle shared target remains available for a replacement to join its refresh', async () => {
+    const gh = fakeGh(), first = fixture(gh.exec);
+    first.footer.render(140); await advance();
+    await gh.calls[0].answer({ code: 1, stderr: 'no pull requests found' });
+    const shared = fixture(gh.exec, true);
+    shared.footer.render(140);
+    await advance(60000);
+    for (const branch of ['feature', 'other', 'detached']) {
+      first.changeBranch(branch); first.footer.render(140);
+    }
+    shared.prs!.refresh(false);
+    const replacement = fixture(gh.exec, true);
+    replacement.footer.render(140); await advance();
+    assert.equal(gh.calls.length, 2, 'the live listener keeps the same cache entry for both refreshes');
+    await gh.calls[1].answer({ stdout: prJson() });
+    assert.equal(pathRow(shared), '/workspace/project (main) #42 • Task');
+    assert.equal(pathRow(replacement), '/workspace/project (main) #42 • Task');
+    first.footer.dispose(); shared.footer.dispose(); replacement.footer.dispose();
   });
 });
 

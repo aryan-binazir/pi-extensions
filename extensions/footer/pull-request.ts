@@ -125,7 +125,7 @@ export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): 
           if (!entry.pending && !entry.unavailable && (entry.dirty || stale(entry))) schedule();
         }
         for (const [cachedKey, entry] of cache.entries) {
-          if (cachedKey !== cache.lastKey && !entry.listeners.size && !entry.pending && !entry.pr && stale(entry)) cache.entries.delete(cachedKey);
+          if (!entry.listeners.size && !entry.pending && !entry.pr && stale(entry)) cache.entries.delete(cachedKey);
         }
       }
       cache.lastKey = next;

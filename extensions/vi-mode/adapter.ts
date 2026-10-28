@@ -130,9 +130,22 @@ function pasteInternal(editor: Editor) {
     throw new Error("Unsupported Pi paste registry (tested with Pi 0.85.1 and 0.99.1)");
   return internal;
 }
-export function readPastes(editor: Editor): PasteState {
+export function readPastes(editor: Editor, text?: string): PasteState {
   const internal = pasteInternal(editor);
-  return { pastes: new Map(internal.pastes), counter: internal.pasteCounter };
+  const pastes = new Map(internal.pastes);
+  if (text !== undefined && pastes.size) {
+    const ids = new Set(pasteMarkers(editor, text).map(match => Number(match[1])));
+    if (ids.size < pastes.size) {
+      const { killRing } = editor as unknown as { killRing: { ring: string[] } };
+      if (!Array.isArray(killRing?.ring)) throw new Error("Unsupported Pi kill ring layout");
+      for (const entry of killRing.ring) {
+        for (const match of pasteMarkers(editor, entry)) ids.add(Number(match[1]));
+        if (ids.size === pastes.size) break;
+      }
+      for (const id of pastes.keys()) if (!ids.has(id)) pastes.delete(id);
+    }
+  }
+  return { pastes, counter: internal.pasteCounter };
 }
 export function writePastes(editor: Editor, state: PasteState): void {
   const internal = pasteInternal(editor);

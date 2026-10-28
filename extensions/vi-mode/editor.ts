@@ -364,7 +364,7 @@ class ViMode {
     this.visualLayout = undefined;
     this.boundaryText = "";
     this.markerText = undefined;
-    const payloads = readPastes(this.editor);
+    const payloads = readPastes(this.editor, text);
     this.base.setText(text);
     this.draft = undefined;
     writePastes(this.editor, payloads);

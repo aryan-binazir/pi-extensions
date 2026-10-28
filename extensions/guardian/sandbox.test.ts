@@ -205,6 +205,24 @@ function isolatedRegistry(t: test.TestContext): string {
   return syntheticMountRegistryRoot();
 }
 
+test('failed partial registration leaves no phantom owners after successful commands', bubblewrap, async t => {
+  const cwd = tempDir(t), registry = isolatedRegistry(t);
+  const conflict = join(registry, hashPath(join(cwd, '.aws')));
+  mkdirSync(registry, { recursive: true });
+  writeFileSync(conflict, 'conflicting marker directory');
+  const failed = await runStarted(signal => sandbox!.spawn(['/bin/true'], workspace(), {
+    cwd, env: process.env, stdin: 'ignore', signal,
+  }), { cwd, timeoutMs: 2000, maxBytes: 1000 });
+  assert.match(failed.spawnError ?? '', /EEXIST/);
+
+  rmSync(conflict);
+  for (let cycle = 0; cycle < 3; cycle++) {
+    assert.equal((await run(['/bin/true'], workspace(), cwd)).exitCode, 0);
+    assert.deepEqual(readdirSync(cwd), []);
+    assert.deepEqual(readdirSync(registry), ['lock']);
+  }
+});
+
 async function holdLock(t: test.TestContext, registry: string) {
   mkdirSync(registry, { recursive: true });
   const child = spawn(flock!, ['--exclusive', join(registry, 'lock'), '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });

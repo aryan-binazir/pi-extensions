@@ -23,7 +23,7 @@ export type SandboxedChild = ChildProcessByStdio<Writable | null, Readable, Read
 
 export interface SandboxedProcess {
   child: SandboxedChild;
-  /** Settles after exit and a bounded cleanup grace; contended cleanup continues under the registry lock. */
+  /** Settles after exit and a bounded cleanup grace; pending lock acquisition retries while the process lives. */
   finished: Promise<void>;
 }
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
 import { withPi } from '../../tests/pi-session.ts';
 import { DEFAULT_GUARDIAN_CONFIG, GUARDIAN_ENABLED_EVENT } from './config.ts';
@@ -11,7 +11,16 @@ import guardian, { instructedPermissions, registerFailClosed } from './index.ts'
 import { MANUAL_APPROVAL_DEVELOPER_PREFIX } from './review/context.ts';
 import { detectPlatformSandbox } from './sandbox.ts';
 
-const sandboxed = { skip: !(await detectPlatformSandbox()).sandbox && 'this platform has no usable sandbox' };
+const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-index-registry-')));
+const previousTmpdir = process.env.TMPDIR;
+process.env.TMPDIR = registryTemp;
+after(() => {
+  if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+  rmSync(registryTemp, { recursive: true, force: true });
+});
+
+const detected = (await detectPlatformSandbox()).sandbox;
+const sandboxed = { skip: (!detected || (detected.kind === 'bubblewrap' && !['/usr/bin/flock', '/bin/flock'].some(existsSync))) && 'sandbox/flock prerequisites are unavailable' };
 
 function writeConfig(agentDir: string, config: Record<string, unknown>) {
   mkdirSync(join(agentDir, 'guardian'), { recursive: true });

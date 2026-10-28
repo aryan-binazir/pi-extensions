@@ -22,7 +22,7 @@ after(() => {
 });
 
 const detected = (await detectPlatformSandbox()).sandbox;
-const sandboxed = { skip: !detected && 'this platform has no usable sandbox' };
+const sandboxed = { skip: (!detected || (detected.kind === 'bubblewrap' && !['/usr/bin/flock', '/bin/flock'].some(existsSync))) && 'sandbox/flock prerequisites are unavailable' };
 /** The sandbox's message for a write outside the writable roots: Seatbelt's EPERM or the read-only bind's EROFS. */
 const WRITE_DENIED = /Operation not permitted|Read-only file system/;
 const shell = await loadShell();

@@ -76,6 +76,24 @@ test('cleanup waits honour cancellation without misreporting completed commands'
   assert.deepEqual(kills, [], 'completion cancellation must not kill a reaped process group');
 });
 
+test('cancellation after exit preserves the command result while buffered output drains', async t => {
+  const originalKill = process.kill;
+  const kills: number[] = [];
+  t.mock.method(process, 'kill', ((pid: number, signal?: NodeJS.Signals | number) => { kills.push(pid); return originalKill(pid, signal); }) as typeof process.kill);
+  const controller = new AbortController();
+  const result = await runStarted(async () => {
+    const child = spawn(process.execPath, ['-e', "process.stdout.write('tail')"], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stdout.pause();
+    child.once('exit', () => { controller.abort(); child.stdout.resume(); });
+    return { child, finished: new Promise<void>(() => {}) };
+  }, { cwd: tmpdir(), signal: controller.signal, timeoutMs: 10_000, maxBytes: 100 });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.aborted, false);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.stdout, 'tail');
+  assert.deepEqual(kills, [], 'an exited group must not be signalled while its output drains');
+});
+
 test('an abandoned start that resolves late is terminated and reaped', async () => {
   let child: ReturnType<typeof spawn> | undefined;
   const result = await runStarted(async () => {

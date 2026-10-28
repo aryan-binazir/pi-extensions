@@ -6,6 +6,7 @@ const EXIT_STDIO_GRACE_MS = 100;
 
 /** Kills a child started with `detached: true` together with everything in its process group. */
 export function killProcessGroup(child: ChildProcess): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
   try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
 }
 
@@ -117,13 +118,15 @@ export async function runStarted(start: (signal: AbortSignal) => Promise<Sandbox
   const stdout = new HeadTail(options.maxBytes / 2), stderr = new HeadTail(options.maxBytes / 2);
   let timedOut = false, spawnError: string | undefined, exitCode: number | null = null;
   let started: SandboxedProcess | undefined;
-  let completed = false;
+  let completed = false, stopped = false;
   const timer = Number.isFinite(options.timeoutMs)
     ? setTimeout(() => { timedOut = true; controller.abort(new Error('command deadline exceeded')); }, Math.max(0, options.timeoutMs))
     : undefined;
   const starting = Promise.resolve().then(() => { signal.throwIfAborted(); return start(signal); });
   const stop = () => {
-    if (!started) return;
+    if (!started || stopped) return;
+    if (started.child.exitCode !== null || started.child.signalCode !== null) { completed = true; return; }
+    stopped = true;
     killProcessGroup(started.child);
     started.child.stdin?.destroy();
   };
@@ -131,6 +134,8 @@ export async function runStarted(start: (signal: AbortSignal) => Promise<Sandbox
   try {
     started = await raceAbort(starting, signal);
     const { child, finished } = started;
+    const onExit = () => { completed = !stopped; signal.removeEventListener('abort', stop); };
+    child.once('exit', onExit);
     child.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); options.onData?.(chunk); });
     child.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); options.onData?.(chunk); });
     child.stdin?.on('error', () => {});
@@ -146,6 +151,7 @@ export async function runStarted(start: (signal: AbortSignal) => Promise<Sandbox
         const drain = setTimeout(() => { child.stdout.destroy(); child.stderr.destroy(); }, EXIT_STDIO_GRACE_MS);
         try { await reaped.catch(() => {}); } finally { clearTimeout(drain); }
       }
+      child.removeListener('exit', onExit);
       signal.removeEventListener('abort', stop);
       exitCode = child.exitCode ?? (child.signalCode ? 128 + (osConstants.signals[child.signalCode] ?? 0) : null);
     }

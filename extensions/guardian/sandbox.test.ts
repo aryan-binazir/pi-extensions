@@ -2,14 +2,15 @@
 // docs/licenses/README.md. These run commands under real bubblewrap, so they only run on Linux where it works;
 // tests/suite cases for WSL, split policies, deny-read globs and the managed proxy are omitted with those features.
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import childProcess, { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after } from 'node:test';
 import { runStarted } from './review/process.ts';
-import { bubblewrapSandbox, detectPlatformSandbox, sandboxEnv } from './sandbox.ts';
+import { bubblewrapSandbox, detectPlatformSandbox, sandboxEnv, type SandboxedProcess } from './sandbox.ts';
 import { hashPath, syntheticMountRegistryRoot } from './synthetic-mounts.ts';
 import { syscallNumber } from './seccomp.ts';
 import type { SandboxPolicy } from './seatbelt.ts';
@@ -265,6 +266,37 @@ test('synchronous launch failure releases registrations and every preparation de
   assert.deepEqual(readdirSync(registry), ['lock']);
   assert.ok(readdirSync('/proc/self/fd').length <= before);
   assert.equal((await run(['/bin/true'], workspace(), cwd)).exitCode, 0);
+});
+
+test('asynchronous launch failure releases registrations even when launch races cancellation', bubblewrap, async t => {
+  const cwd = tempDir(t), registry = isolatedRegistry(t);
+  const before = readdirSync('/proc/self/fd').length;
+  const originalSpawn = childProcess.spawn;
+  let controller: AbortController;
+  let abort = false;
+  t.mock.method(childProcess, 'spawn', ((...args: Parameters<typeof spawn>) => {
+    if (!args[1]?.includes('--seccomp')) return originalSpawn(...args);
+    const child = originalSpawn('/nonexistent/guardian-launcher', args[1], args[2]);
+    if (abort) controller.abort();
+    return child;
+  }) as typeof spawn);
+  syncBuiltinESMExports();
+  try {
+    for (abort of [false, true]) {
+      controller = new AbortController();
+      let launching: Promise<SandboxedProcess> | undefined;
+      const result = await runStarted(signal => launching = sandbox!.spawn(['/bin/true'], workspace(), { cwd, env: process.env, stdin: 'pipe', signal }),
+        { cwd, signal: controller.signal, timeoutMs: 10_000, maxBytes: 100 });
+      assert.equal(result.aborted, abort);
+      if (!abort) assert.match(result.spawnError ?? '', /ENOENT/);
+      await (await launching!).finished;
+      assert.deepEqual(readdirSync(registry), ['lock']);
+      assert.ok(readdirSync('/proc/self/fd').length <= before);
+    }
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
 });
 
 test('a caller can cancel a shared proc preflight without launching its command', bubblewrap, async t => {

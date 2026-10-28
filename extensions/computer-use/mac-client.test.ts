@@ -178,12 +178,12 @@ test('Mac screenshot tools bound service images to the active model limits; acce
 
 test('real Pi screenshot processes a valid noisy PNG larger than the default stdio frame cap', async () => {
   const root = await mkdtemp(join(tmpdir(), 'mac-frame-'));
-  const path = join(root, 'result.json');
-  const data = png(1700, 1700, { noise: true });
-  assert.ok(data.length < 16 * 1024 * 1024);
-  assert.ok(data.toString('base64').length > 10 * 1024 * 1024);
-  await writeFile(path, JSON.stringify({ content: [{ type: 'image', mimeType: 'image/png', data: data.toString('base64') }] }));
   try {
+    const path = join(root, 'result.json');
+    const data = png(1700, 1700, { noise: true });
+    assert.ok(data.length < 16 * 1024 * 1024);
+    assert.ok(data.toString('base64').length > 10 * 1024 * 1024);
+    await writeFile(path, JSON.stringify({ content: [{ type: 'image', mimeType: 'image/png', data: data.toString('base64') }] }));
     await withPi({
       extensions: [pi => registerMacTools(pi, () => ({ ...fixture(), env: { COMPUTER_MCP_RESULT_FILE: path } }))],
       responses: [fauxAssistantMessage(fauxToolCall('computer_screenshot', { app: 'image' })), fauxAssistantMessage('done')],
@@ -224,10 +224,10 @@ test('real stdio accepts the full image budget and escaped text, rejects invalid
     assert.equal((await inspect()).content.length, 2);
     await respond([image(8 * 1024 * 1024), image(8 * 1024 * 1024 + 1)]);
     await assert.rejects(inspect(), /oversized aggregate images/);
-    const malformed = image(12 * 1024 * 1024);
-    malformed.data = malformed.data.slice(0, -1) + '*';
+    const malformed = image(12 * 1024 * 1024 + 1);
+    malformed.data = malformed.data.slice(0, -4) + 'AB==';
     await respond([malformed]);
-    await assert.rejects(inspect(), /Invalid Base64 string|Invalid image base64/);
+    await assert.rejects(inspect(), /Invalid image base64/);
     await respond([{ ...image(12 * 1024 * 1024), mimeType: 'image/jpeg' }]);
     await assert.rejects(inspect(), /Invalid image MIME or magic/);
     await respond([{ type: 'text', text: 'x'.repeat(24 * 1024 * 1024) }]);

@@ -67,6 +67,7 @@ interface RequestCache { entries: Map<string, CachedRequest>; lastKey?: string; 
 const cacheKey = Symbol.for('pi-interactive:footer.pull-requests.v1');
 const unavailable = (message: string) => /ENOENT|command not found|not found in PATH|none of the git remotes|no git remotes found|known GitHub host|not a git repository|not a GitHub (?:host|repository)/i.test(message);
 const offline = () => /^(1|true|yes)$/i.test(process.env.PI_OFFLINE ?? '');
+const stale = (entry: CachedRequest) => entry.completed === undefined || Date.now() - entry.completed >= 60000;
 
 export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): PullRequests {
   const registry = globalThis as unknown as Record<symbol, RequestCache | undefined>;
@@ -121,7 +122,10 @@ export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): 
           if (cache.lastKey !== next && entry.unavailable) { entry.unavailable = false; entry.completed = undefined; }
           entry.listeners.add(updated);
           target = { cwd, branch: branch!, entry };
-          if (!entry.pending && !entry.unavailable && (entry.dirty || entry.completed === undefined || Date.now() - entry.completed >= 60000)) schedule();
+          if (!entry.pending && !entry.unavailable && (entry.dirty || stale(entry))) schedule();
+        }
+        for (const [cachedKey, entry] of cache.entries) {
+          if (!entry.listeners.size && !entry.pending && !entry.pr && stale(entry)) cache.entries.delete(cachedKey);
         }
       }
       cache.lastKey = next;
@@ -132,7 +136,7 @@ export function pullRequests(exec: ExtensionAPI['exec'], onChange: () => void): 
       if (!target) { cache.changed ||= changed; return; }
       const entry = target.entry;
       if (changed) { entry.unavailable = false; entry.dirty = true; schedule(); }
-      else if (!entry.unavailable && !entry.pending && !timer && (entry.dirty || entry.completed === undefined || Date.now() - entry.completed >= 60000)) schedule();
+      else if (!entry.unavailable && !entry.pending && !timer && (entry.dirty || stale(entry))) schedule();
     },
     dispose(quit = false) {
       disposed = true;

@@ -49,7 +49,7 @@ limits the network.
   masked with an empty read-only placeholder, so it cannot be created either. Bubblewrap has to create
   that placeholder on the host while the command runs, and Guardian removes it afterwards. Guardian
   shares Codex's placeholder registry under `$TMPDIR`, so Guardian and Codex running in the same
-  workspace keep each other's placeholders. Registration requires `flock` and waits at most 10 seconds,
+  workspace keep each other's placeholders. Registration requires `/usr/bin/flock` or `/bin/flock` (otherwise preparation fails closed) and waits at most 10 seconds,
   within the command's existing timeout and cancellation budget. Completion waits up to two seconds for
   contended cleanup, which then continues under the same lock while retaining its ownership markers.
 - Without network access, the network namespace is unshared and the filter denies every socket

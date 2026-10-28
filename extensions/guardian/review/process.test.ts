@@ -37,7 +37,6 @@ test('stdin is delivered and spawn failures are reported', async () => {
   assert.match((await runBounded('/nonexistent/binary', [], { cwd: tmpdir(), timeoutMs: 1_000, maxBytes: 1_000 })).spawnError ?? '', /ENOENT/);
 });
 
-
 test('the deadline includes preparation and prevents launch after cancellation', async () => {
   let launched = false;
   const started = Date.now();
@@ -56,21 +55,25 @@ test('the deadline includes preparation and prevents launch after cancellation',
   assert.ok(Date.now() - started < 180);
 });
 
-test('cancellation and deadlines remain active while completion cleanup is pending', async () => {
+test('cleanup waits honour cancellation without misreporting completed commands', async t => {
+  const originalKill = process.kill;
+  const kills: number[] = [];
+  t.mock.method(process, 'kill', ((pid: number, signal?: NodeJS.Signals | number) => { kills.push(pid); return originalKill(pid, signal); }) as typeof process.kill);
   for (const abort of [true, false]) {
     const controller = new AbortController();
     const run = runStarted(async () => {
       const child = spawn(process.execPath, ['-e', ''], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
       if (abort) child.once('exit', () => setTimeout(() => controller.abort(), 20));
       return { child, finished: new Promise<void>(() => {}) };
-    }, { cwd: tmpdir(), signal: controller.signal, timeoutMs: abort ? 1000 : 100, maxBytes: 100 });
-    const outcome = await Promise.race([run, new Promise<undefined>(resolve => setTimeout(resolve, 400))]);
+    }, { cwd: tmpdir(), signal: controller.signal, timeoutMs: abort ? 2000 : 1000, maxBytes: 100 });
+    const outcome = await Promise.race([run, new Promise<undefined>(resolve => setTimeout(resolve, 2500))]);
     assert.ok(outcome, 'completion cleanup cannot hold settlement beyond the budget');
     assert.equal(outcome.exitCode, 0);
-    assert.equal(outcome.aborted, abort);
-    assert.equal(outcome.timedOut, !abort);
+    assert.equal(outcome.aborted, false);
+    assert.equal(outcome.timedOut, false);
     assert.equal(outcome.spawnError, undefined);
   }
+  assert.deepEqual(kills, [], 'completion cancellation must not kill a reaped process group');
 });
 
 test('an abandoned start that resolves late is terminated and reaped', async () => {
@@ -85,4 +88,26 @@ test('an abandoned start that resolves late is terminated and reaped', async () 
   await new Promise(resolve => setTimeout(resolve, 160));
   assert.ok(child?.pid);
   assert.throws(() => process.kill(child!.pid!, 0), /ESRCH/);
+});
+
+
+test('cancellation drains pipe output written after the group exits within a bounded grace', async t => {
+  const pidFile = `${tmpdir()}/guardian-drain-${process.pid}-${Date.now()}`;
+  t.after(() => {
+    try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch {}
+    rmSync(pidFile, { force: true });
+  });
+  const controller = new AbortController();
+  const script = `
+const {spawn}=require('node:child_process');
+const watcher = "const fs=require('node:fs');process.stdout.on('error',()=>process.exit());fs.writeFileSync(" + JSON.stringify(${JSON.stringify(pidFile)}) + ",String(process.pid));const timer=setInterval(()=>{try{process.kill(" + process.pid + ",0)}catch{clearInterval(timer);process.stdout.write('TAIL',()=>process.exit())}},1);process.stdout.write('READY');setTimeout(()=>process.exit(),5000).unref();";
+spawn(process.execPath,['-e',watcher],{detached:true,stdio:['ignore','inherit','inherit']});
+setInterval(()=>{},1000);
+`;
+  const result = await runBounded(process.execPath, ['-e', script], {
+    cwd: tmpdir(), signal: controller.signal, timeoutMs: 3000, maxBytes: 1000,
+    onData: chunk => { if (chunk.toString().includes('READY')) controller.abort(); },
+  });
+  assert.equal(result.aborted, true);
+  assert.match(result.stdout, /READY.*TAIL/);
 });

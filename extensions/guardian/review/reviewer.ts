@@ -105,7 +105,7 @@ async function executeTool(call: Extract<AssistantMessage['content'][number], { 
 /** Runs `bash -c` in the read-only sandbox with no network; output is capped like a transcript tool entry. */
 export async function runReadOnlyCommand(command: string, workdir: string, signal: AbortSignal, sandbox: PlatformSandbox | undefined): Promise<string> {
   if (!sandbox) return 'Read-only command checks are unavailable: this platform has no usable sandbox.\nexit code: 1';
-  const run = await runStarted(signal => sandbox.spawn(['/bin/bash', '-c', command], READ_ONLY, { cwd: workdir, env: process.env, stdin: 'pipe', signal }), {
+  const run = await runStarted(budget => sandbox.spawn(['/bin/bash', '-c', command], READ_ONLY, { cwd: workdir, env: process.env, stdin: 'pipe', signal: budget }), {
     cwd: workdir, signal, timeoutMs: MAX_COMMAND_MS, maxBytes: MAX_CAPTURED_BYTES,
   });
   if (run.aborted) throw new Error('aborted');

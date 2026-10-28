@@ -56,7 +56,7 @@ function sandboxedOperations(sandbox: PlatformSandbox, policy: SandboxPolicy, sh
       const shell = getShellConfig(shellPath);
       const argv = [shell.shell, ...shell.args, command];
       if (argv.some(argument => argument.includes('\0'))) throw new Error('This command cannot be run in the sandbox: it contains a NUL byte.');
-      const result = await runStarted(signal => sandbox.spawn(argv, policy, { cwd, env: env ?? process.env, stdin: 'ignore', signal }), {
+      const result = await runStarted(budget => sandbox.spawn(argv, policy, { cwd, env: env ?? process.env, stdin: 'ignore', signal: budget }), {
         cwd, signal, timeoutMs: timeout !== undefined && timeout > 0 ? timeout * 1000 : Infinity, maxBytes: 0, onData,
       });
       if (result.aborted) throw new Error('aborted');

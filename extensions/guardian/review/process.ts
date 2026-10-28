@@ -117,6 +117,7 @@ export async function runStarted(start: (signal: AbortSignal) => Promise<Sandbox
   const stdout = new HeadTail(options.maxBytes / 2), stderr = new HeadTail(options.maxBytes / 2);
   let timedOut = false, spawnError: string | undefined, exitCode: number | null = null;
   let started: SandboxedProcess | undefined;
+  let completed = false;
   const timer = Number.isFinite(options.timeoutMs)
     ? setTimeout(() => { timedOut = true; controller.abort(new Error('command deadline exceeded')); }, Math.max(0, options.timeoutMs))
     : undefined;
@@ -125,8 +126,6 @@ export async function runStarted(start: (signal: AbortSignal) => Promise<Sandbox
     if (!started) return;
     killProcessGroup(started.child);
     started.child.stdin?.destroy();
-    started.child.stdout.destroy();
-    started.child.stderr.destroy();
   };
   signal.addEventListener('abort', stop, { once: true });
   try {
@@ -140,8 +139,14 @@ export async function runStarted(start: (signal: AbortSignal) => Promise<Sandbox
     try {
       if (signal.aborted) stop();
       await raceAbort(reaped, signal);
+      completed = true;
     } finally {
-      if (signal.aborted) { stop(); await reaped.catch(() => {}); }
+      if (signal.aborted) {
+        stop();
+        const drain = setTimeout(() => { child.stdout.destroy(); child.stderr.destroy(); }, EXIT_STDIO_GRACE_MS);
+        try { await reaped.catch(() => {}); } finally { clearTimeout(drain); }
+      }
+      signal.removeEventListener('abort', stop);
       exitCode = child.exitCode ?? (child.signalCode ? 128 + (osConstants.signals[child.signalCode] ?? 0) : null);
     }
     await raceAbort(finished, signal);
@@ -149,12 +154,11 @@ export async function runStarted(start: (signal: AbortSignal) => Promise<Sandbox
     if (!signal.aborted) spawnError = (error as Error).message;
     if (!started) {
       void starting.then(late => {
-        const reaped = waitForChildProcess(late.child).catch(() => {});
+        void waitForChildProcess(late.child).catch(() => {});
         killProcessGroup(late.child);
         late.child.stdin?.destroy();
         late.child.stdout.destroy();
         late.child.stderr.destroy();
-        void reaped;
         void late.finished.catch(() => {});
       }, () => {});
     }
@@ -162,5 +166,5 @@ export async function runStarted(start: (signal: AbortSignal) => Promise<Sandbox
     clearTimeout(timer);
     signal.removeEventListener('abort', stop);
   }
-  return { exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut, aborted: options.signal?.aborted ?? false, ...(spawnError ? { spawnError } : {}) };
+  return { exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut: timedOut && !completed, aborted: !completed && (options.signal?.aborted ?? false), ...(spawnError ? { spawnError } : {}) };
 }

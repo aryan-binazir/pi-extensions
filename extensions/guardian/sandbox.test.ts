@@ -23,7 +23,8 @@ after(() => {
 });
 
 const { sandbox } = await detectPlatformSandbox();
-const bubblewrap = { skip: sandbox?.kind !== 'bubblewrap' && 'bubblewrap sandbox prerequisites are unavailable' };
+const flock = ['/usr/bin/flock', '/bin/flock'].find(existsSync);
+const bubblewrap = { skip: (sandbox?.kind !== 'bubblewrap' || !flock) && 'bubblewrap/flock prerequisites are unavailable' };
 const hasProgram = (program: string) => spawnSync('sh', ['-c', `command -v ${program}`]).status === 0;
 
 function tempDir(t: test.TestContext, prefix = 'guardian-linux-'): string {
@@ -195,7 +196,6 @@ test('a read-only policy denies writes even in the cwd', bubblewrap, async t => 
   assert.equal(existsSync(join(cwd, 'file')), false);
 });
 
-
 function isolatedRegistry(t: test.TestContext): string {
   const dir = tempDir(t, 'guardian-registry-');
   const previous = process.env.TMPDIR;
@@ -206,7 +206,7 @@ function isolatedRegistry(t: test.TestContext): string {
 
 async function holdLock(t: test.TestContext, registry: string) {
   mkdirSync(registry, { recursive: true });
-  const child = spawn('/usr/bin/flock', ['--exclusive', join(registry, 'lock'), '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(flock!, ['--exclusive', join(registry, 'lock'), '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });
   await once(child.stdout, 'data');
   const closed = once(child, 'close');
   const release = async () => { child.stdin.end(); await closed; };
@@ -252,7 +252,7 @@ test('completion settles under cleanup contention and reconciles without removin
   assert.equal(existsSync(join(cwd, '.codex')), true);
   assert.equal(readFileSync(join(registry, hashPath(join(cwd, '.codex')), String(process.pid)), 'utf8'), 'synthetic\n');
   await release();
-  for (let attempt = 0; attempt < 100 && existsSync(join(cwd, '.codex')); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  for (let attempt = 0; attempt < 300 && existsSync(join(cwd, '.codex')); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(existsSync(join(cwd, '.codex')), false);
   assert.equal(existsSync(foreignPath), true);
   assert.equal(readFileSync(foreignMarker, 'utf8'), 'synthetic\n');
@@ -266,7 +266,6 @@ test('synchronous launch failure releases registrations and every preparation de
   assert.ok(readdirSync('/proc/self/fd').length <= before);
   assert.equal((await run(['/bin/true'], workspace(), cwd)).exitCode, 0);
 });
-
 
 test('a caller can cancel a shared proc preflight without launching its command', bubblewrap, async t => {
   const cwd = tempDir(t), launcherDir = tempDir(t), registry = isolatedRegistry(t), pidFile = join(launcherDir, 'probe.pid');

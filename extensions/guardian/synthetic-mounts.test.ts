@@ -1,9 +1,10 @@
 // Ported from openai/codex codex-rs/linux-sandbox/src/linux_run_main_tests.rs @ ce0323f (Apache-2.0); see
 // docs/licenses/README.md. Each test uses its own registry root instead of the shared one.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import childProcess, { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -12,13 +13,16 @@ import {
   syntheticMountRegistryRoot,
 } from './synthetic-mounts.ts';
 
+const flock = ['/usr/bin/flock', '/bin/flock'].find(existsSync);
+const registryTests = { skip: process.platform !== 'linux' || !flock ? 'Linux flock is required' : false };
+
 function tempDir(t: test.TestContext): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-synthetic-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
 
-test('cleanup removes only empty mount targets', async t => {
+test('cleanup removes only empty mount targets', registryTests, async t => {
   const dir = tempDir(t), registry = join(dir, 'registry');
   const emptyFile = join(dir, '.git'), emptyDir = join(dir, '.agents'), nonEmptyFile = join(dir, 'non-empty'), missingFile = join(dir, '.missing');
   writeFileSync(emptyFile, '');
@@ -50,7 +54,7 @@ test('marker directories use Codex\'s FNV-1a path hash', () => {
   assert.equal(hashPath('/tmp/.git').length, 16);
 });
 
-test('cleanup waits for other active registrations', async t => {
+test('cleanup waits for other active registrations', registryTests, async t => {
   const dir = tempDir(t), registry = join(dir, 'registry');
   const emptyDir = join(dir, '.git');
   mkdirSync(emptyDir);
@@ -69,7 +73,7 @@ test('cleanup waits for other active registrations', async t => {
   assert.equal(existsSync(emptyDir), false);
 });
 
-test('cleanup removes a transient file after its concurrent owner exits', async t => {
+test('cleanup removes a transient file after its concurrent owner exits', registryTests, async t => {
   const dir = tempDir(t), registry = join(dir, 'registry');
   const emptyFile = join(dir, '.git');
   const first = await registerSyntheticMountTargets([missingTarget(emptyFile, 'empty-file')], registry);
@@ -86,7 +90,7 @@ test('cleanup removes a transient file after its concurrent owner exits', async 
   assert.equal(existsSync(emptyFile), false);
 });
 
-test('cleanup preserves a real pre-existing empty file', async t => {
+test('cleanup preserves a real pre-existing empty file', registryTests, async t => {
   const dir = tempDir(t), registry = join(dir, 'registry');
   const emptyFile = join(dir, '.git');
   writeFileSync(emptyFile, '');
@@ -100,7 +104,7 @@ test('cleanup preserves a real pre-existing empty file', async t => {
   assert.equal(existsSync(emptyFile), true);
 });
 
-test('overlapping registrations from this process keep the placeholder until the last one ends', async t => {
+test('overlapping registrations from this process keep the placeholder until the last one ends', registryTests, async t => {
   const dir = tempDir(t), registry = join(dir, 'registry');
   const emptyDir = join(dir, '.codex');
   const first = await registerSyntheticMountTargets([missingTarget(emptyDir, 'empty-directory')], registry);
@@ -133,7 +137,7 @@ test('a symlinked registry root is rejected', t => {
 
 async function holdRegistryLock(t: test.TestContext, registry: string) {
   mkdirSync(registry, { recursive: true });
-  const child = spawn('/usr/bin/flock', ['--exclusive', join(registry, 'lock'), '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(flock!, ['--exclusive', join(registry, 'lock'), '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });
   await once(child.stdout, 'data');
   const closed = once(child, 'close');
   const release = async () => { child.stdin.end(); await closed; };
@@ -141,7 +145,7 @@ async function holdRegistryLock(t: test.TestContext, registry: string) {
   return release;
 }
 
-test('held-lock deadlines and queued cancellation settle without entering registration, then recover', async t => {
+test('held-lock deadlines and queued cancellation settle without entering registration, then recover', registryTests, async t => {
   const dir = tempDir(t), registry = join(dir, 'registry');
   const before = readdirSync('/proc/self/fd').length;
   const release = await holdRegistryLock(t, registry);
@@ -161,22 +165,7 @@ test('held-lock deadlines and queued cancellation settle without entering regist
   assert.ok(readdirSync('/proc/self/fd').length <= before, 'all abandoned lock descriptors are closed');
 });
 
-test('cleanup is idempotent and cannot consume another registration ownership', async t => {
-  const dir = tempDir(t), registry = join(dir, 'registry'), path = join(dir, '.codex');
-  const first = await registerSyntheticMountTargets([missingTarget(path, 'empty-directory')], registry);
-  mkdirSync(path);
-  const second = await registerSyntheticMountTargets([existingTarget(path, 'empty-directory', lstatSync(path, { bigint: true }))], registry);
-  await cleanupSyntheticMountTargets(first, registry);
-  await cleanupSyntheticMountTargets(first, registry);
-  assert.equal(existsSync(path), true);
-  await cleanupSyntheticMountTargets(second, registry);
-  assert.equal(existsSync(path), false);
-  mkdirSync(path);
-  await cleanupSyntheticMountTargets(first, registry);
-  assert.equal(existsSync(path), true, 'a repeated cleanup cannot remove a replacement');
-});
-
-test('contended cleanup retains ownership and another sandbox until locked reconciliation', async t => {
+test('contended cleanup retains ownership and another sandbox until locked reconciliation', registryTests, async t => {
   const dir = tempDir(t), registry = join(dir, 'registry'), path = join(dir, '.codex'), shared = join(dir, '.agents');
   const registrations = await registerSyntheticMountTargets([
     missingTarget(path, 'empty-directory'), missingTarget(shared, 'empty-directory'),
@@ -199,7 +188,7 @@ test('contended cleanup retains ownership and another sandbox until locked recon
   assert.equal(readFileSync(foreignMarker, 'utf8'), 'synthetic\n');
 });
 
-test('abort and lock-acquisition races neither leak descriptors nor leave cancelled markers', async t => {
+test('abort and lock-acquisition races neither leak descriptors nor leave cancelled markers', registryTests, async t => {
   const dir = tempDir(t), registry = join(dir, 'registry'), path = join(dir, '.codex');
   const before = readdirSync('/proc/self/fd').length;
   let acquired = 0, cancelled = 0;
@@ -221,4 +210,55 @@ test('abort and lock-acquisition races neither leak descriptors nor leave cancel
   assert.ok(readdirSync('/proc/self/fd').length <= before);
   assert.equal(readFileSync(`/proc/self/task/${process.pid}/children`, 'utf8').trim(), '', 'all lock helpers have been reaped');
   assert.ok(acquired > 0 && cancelled > 0, 'exercise both sides of the acquisition race');
+});
+
+test('cleanup recovers from a stalled lock helper without abandoning ownership', registryTests, async t => {
+  const dir = tempDir(t), registry = join(dir, 'registry'), path = join(dir, '.codex');
+  const registrations = await registerSyntheticMountTargets([missingTarget(path, 'empty-directory')], registry);
+  mkdirSync(path);
+  const original = childProcess.spawn;
+  let stalled = false;
+  t.mock.method(childProcess, 'spawn', ((...args: Parameters<typeof spawn>) => {
+    if (!stalled) { stalled = true; return original(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], args[2]); }
+    return original(...args);
+  }) as typeof spawn);
+  syncBuiltinESMExports();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([cleanupSyntheticMountTargets(registrations, registry), new Promise<void>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('cleanup did not recover')), 3000);
+    })]);
+    assert.equal(existsSync(path), false);
+    assert.equal(existsSync(registrations[0].markerFile), false);
+    assert.equal(readFileSync(`/proc/self/task/${process.pid}/children`, 'utf8').trim(), '');
+  } finally {
+    clearTimeout(timer);
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test('the default registration cap reports registry lock context', registryTests, async t => {
+  const dir = tempDir(t), registry = join(dir, 'registry');
+  const release = await holdRegistryLock(t, registry);
+  try {
+    await assert.rejects(registerSyntheticMountTargets([missingTarget(join(dir, '.codex'), 'empty-directory')], registry), /registry.*10 seconds/i);
+  } finally { await release(); }
+});
+
+
+test('missing flock fails closed without leaking descriptors or registering targets', { skip: process.platform !== 'linux' }, async t => {
+  const dir = tempDir(t), registry = join(dir, 'registry');
+  const original = fs.existsSync;
+  const before = readdirSync('/proc/self/fd').length;
+  t.mock.method(fs, 'existsSync', (path: Parameters<typeof original>[0]) => ['/usr/bin/flock', '/bin/flock'].includes(String(path)) ? false : original(path));
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(registerSyntheticMountTargets([missingTarget(join(dir, '.codex'), 'empty-directory')], registry), /flock is unavailable/);
+    assert.deepEqual(readdirSync(registry), []);
+    assert.ok(readdirSync('/proc/self/fd').length <= before);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
 });

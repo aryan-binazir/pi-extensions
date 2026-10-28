@@ -360,7 +360,6 @@ test('sandbox denial heuristic matches Codex keywords, and SIGSYS on Linux', () 
   assert.ok(!isLikelySandboxDenied(127, 'command not found', 'bubblewrap'));
 });
 
-
 test('bash timeout covers sandbox preparation before any command launches', async t => {
   let launched = false;
   const sandbox: PlatformSandbox = {

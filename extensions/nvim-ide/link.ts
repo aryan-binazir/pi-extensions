@@ -375,6 +375,7 @@ export class IdeLink {
   private receive(raw: string): void {
     let message: { id?: unknown; method?: unknown; params?: unknown; result?: unknown; error?: { message?: unknown } };
     try { message = JSON.parse(raw); } catch { return; }
+    if (!message || typeof message !== 'object') return;
     if (typeof message.method === 'string') {
       if (message.id === undefined || message.id === null) { this.handleNotification(message.method, message.params); return; }
       if (message.method === 'ping') this.send({ jsonrpc: '2.0', id: message.id, result: {} });

@@ -618,7 +618,7 @@ test('server-initiated requests: ping is answered, anything else gets method-not
     for (const client of ide.server.clients) {
       client.send(JSON.stringify({ jsonrpc: '2.0', id: 'srv-ping', method: 'ping' }));
       client.send(JSON.stringify({ jsonrpc: '2.0', id: 'srv-other', method: 'sampling/createMessage', params: {} }));
-      client.send('not json at all');
+      for (const raw of ['not json at all', 'null', 'false', '0', '"text"', '[]']) client.send(raw);
       client.send(JSON.stringify({ jsonrpc: '2.0', id: 999, result: {} }));
     }
     await until(() => seen.length === 2);
@@ -626,6 +626,7 @@ test('server-initiated requests: ping is answered, anything else gets method-not
     ide.broadcast('selection_changed', { text: 'y'.repeat(maxSelectionChars + 10), filePath: '/w/big.ts', selection: { start: { line: 0, character: 0 }, end: { line: 500, character: 0 }, isEmpty: false } });
     await until(() => link.state.selection?.filePath === '/w/big.ts');
     assert.equal(link.state.selection?.text.length, maxSelectionChars);
+    assert.equal(await link.call('getOpenEditors'), 'getOpenEditors({})');
     assert.equal(link.connected, true, 'junk from the server does not drop the link');
   } finally { await link.stop(); await ide.close(); await rm(dir, { recursive: true, force: true }); }
 });

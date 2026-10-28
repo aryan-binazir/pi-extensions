@@ -202,18 +202,28 @@ export async function registerSyntheticMountTargets(targets: readonly SyntheticM
   const cap = AbortSignal.timeout(REGISTRATION_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, cap]) : cap;
   try {
-    return await withRegistryLock(registryRoot, () => targets.map(original => {
-      const markerDir = join(registryRoot, hashPath(original.path));
-      mkdirSync(markerDir, { recursive: true });
-      // An empty path that another live sandbox created is that sandbox's placeholder, not a real pre-existing path.
-      const target = original.preExisting && markerDirHasActiveSyntheticOwner(markerDir) ? missingTarget(original.path, original.kind) : original;
-      const markerFile = join(markerDir, String(process.pid));
-      const owners = ownMarkers.get(markerFile) ?? { synthetic: 0, existing: 0 };
-      if (target.preExisting) owners.existing++; else owners.synthetic++;
-      ownMarkers.set(markerFile, owners);
-      writeOwnMarker(markerFile);
-      return { target, markerFile, markerDir };
-    }), signal);
+    return await withRegistryLock(registryRoot, () => {
+      const registrations: SyntheticMountRegistration[] = [];
+      try {
+        for (const original of targets) {
+          const markerDir = join(registryRoot, hashPath(original.path));
+          mkdirSync(markerDir, { recursive: true });
+          const target = original.preExisting && markerDirHasActiveSyntheticOwner(markerDir) ? missingTarget(original.path, original.kind) : original;
+          const markerFile = join(markerDir, String(process.pid));
+          const owners = ownMarkers.get(markerFile) ?? { synthetic: 0, existing: 0 };
+          if (target.preExisting) owners.existing++; else owners.synthetic++;
+          ownMarkers.set(markerFile, owners);
+          registrations.push({ target, markerFile, markerDir });
+          writeOwnMarker(markerFile);
+        }
+        return registrations;
+      } catch (error) {
+        for (const registration of registrations.reverse()) {
+          try { cleanupRegistrations([registration]); } catch {}
+        }
+        throw error;
+      }
+    }, signal);
   } catch (error) {
     if (cap.aborted && !options.signal?.aborted) throw new Error(`could not lock the synthetic mount registry ${registryRoot}: timed out after 10 seconds`);
     throw error;
@@ -222,26 +232,28 @@ export async function registerSyntheticMountTargets(targets: readonly SyntheticM
 
 export function cleanupSyntheticMountTargets(registrations: readonly SyntheticMountRegistration[], registryRoot = syntheticMountRegistryRoot()): Promise<void> {
   if (!registrations.length) return Promise.resolve();
-  return withRegistryLock(registryRoot, () => {
-    const pending = [...registrations].reverse();
-    for (const registration of pending) {
-      const { target, markerFile } = registration;
-      const owners = ownMarkers.get(markerFile);
-      if (owners) {
-        if (target.preExisting) owners.existing--; else owners.synthetic--;
-        writeOwnMarker(markerFile);
-      }
+  return withRegistryLock(registryRoot, () => cleanupRegistrations(registrations));
+}
+
+function cleanupRegistrations(registrations: readonly SyntheticMountRegistration[]): void {
+  const pending = [...registrations].reverse();
+  for (const registration of pending) {
+    const { target, markerFile } = registration;
+    const owners = ownMarkers.get(markerFile);
+    if (owners) {
+      if (target.preExisting) owners.existing--; else owners.synthetic--;
+      writeOwnMarker(markerFile);
     }
-    for (const { target, markerDir } of pending) {
-      if (markerDirHasActiveProcessMatching(markerDir, () => true)) continue;
-      removeSyntheticMountTarget(target);
-      try {
-        rmdirSync(markerDir);
-      } catch (error) {
-        if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-      }
+  }
+  for (const { target, markerDir } of pending) {
+    if (markerDirHasActiveProcessMatching(markerDir, () => true)) continue;
+    removeSyntheticMountTarget(target);
+    try {
+      rmdirSync(markerDir);
+    } catch (error) {
+      if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
     }
-  });
+  }
 }
 
 function removeSyntheticMountTarget(target: SyntheticMountTarget): void {

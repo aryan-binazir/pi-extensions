@@ -13,7 +13,7 @@ import { runStarted } from './review/process.ts';
 import { bubblewrapSandbox, detectPlatformSandbox, sandboxEnv, type SandboxedProcess } from './sandbox.ts';
 import { hashPath, syntheticMountRegistryRoot } from './synthetic-mounts.ts';
 import { syscallNumber } from './seccomp.ts';
-import type { SandboxPolicy } from './seatbelt.ts';
+import { PROTECTED_METADATA_PATH_NAMES, type SandboxPolicy } from './seatbelt.ts';
 
 const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-linux-registry-')));
 const previousTmpdir = process.env.TMPDIR;
@@ -204,6 +204,24 @@ function isolatedRegistry(t: test.TestContext): string {
   t.after(() => { if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous; });
   return syntheticMountRegistryRoot();
 }
+
+test('failed partial registration leaves no phantom owners after successful commands', bubblewrap, async t => {
+  const cwd = tempDir(t), registry = isolatedRegistry(t);
+  const conflict = join(registry, hashPath(join(cwd, PROTECTED_METADATA_PATH_NAMES.at(-1)!)));
+  mkdirSync(registry, { recursive: true });
+  writeFileSync(conflict, 'conflicting marker directory');
+  const failed = await runStarted(signal => sandbox!.spawn(['/bin/true'], workspace(), {
+    cwd, env: process.env, stdin: 'ignore', signal,
+  }), { cwd, timeoutMs: 2000, maxBytes: 1000 });
+  assert.match(failed.spawnError ?? '', /EEXIST/);
+
+  rmSync(conflict);
+  for (let cycle = 0; cycle < 3; cycle++) {
+    assert.equal((await run(['/bin/true'], workspace(), cwd)).exitCode, 0);
+    assert.deepEqual(readdirSync(cwd), []);
+    assert.deepEqual(readdirSync(registry), ['lock']);
+  }
+});
 
 async function holdLock(t: test.TestContext, registry: string) {
   mkdirSync(registry, { recursive: true });

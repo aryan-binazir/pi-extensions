@@ -118,6 +118,73 @@ test('overlapping registrations from this process keep the placeholder until the
   assert.equal(existsSync(emptyDir), false);
 });
 
+test('failed registration rolls back only its owners and a retry fully cleans up', registryTests, async t => {
+  const dir = tempDir(t), registry = join(dir, 'registry');
+  const shared = join(dir, '.codex'), real = join(dir, '.pi'), fresh = join(dir, '.agents'), broken = join(dir, '.aws');
+  const first = await registerSyntheticMountTargets([missingTarget(shared, 'empty-directory')], registry);
+  mkdirSync(shared);
+  const foreignMarker = join(first[0].markerDir, '1');
+  writeFileSync(foreignMarker, 'synthetic\n');
+  mkdirSync(real);
+  const realStats = lstatSync(real, { bigint: true });
+  const conflict = join(registry, hashPath(broken));
+  writeFileSync(conflict, 'keep');
+  const targets = [
+    existingTarget(shared, 'empty-directory', lstatSync(shared, { bigint: true })),
+    existingTarget(real, 'empty-directory', realStats), missingTarget(fresh, 'empty-directory'), missingTarget(broken, 'empty-directory'),
+  ];
+
+  await assert.rejects(registerSyntheticMountTargets(targets, registry), /EEXIST/);
+  assert.equal(readFileSync(first[0].markerFile, 'utf8'), 'synthetic\n');
+  assert.equal(readFileSync(foreignMarker, 'utf8'), 'synthetic\n');
+  assert.equal(existsSync(shared), true);
+  assert.equal(lstatSync(real, { bigint: true }).ino, realStats.ino);
+  assert.equal(existsSync(join(registry, hashPath(fresh))), false);
+  assert.equal(readFileSync(conflict, 'utf8'), 'keep');
+
+  unlinkSync(conflict);
+  const retry = await registerSyntheticMountTargets(targets, registry);
+  mkdirSync(fresh);
+  mkdirSync(broken);
+  await cleanupSyntheticMountTargets(retry, registry);
+  assert.equal(existsSync(shared), true);
+  unlinkSync(foreignMarker);
+  await cleanupSyntheticMountTargets(first, registry);
+  assert.equal(existsSync(shared), false);
+  assert.equal(existsSync(real), true);
+  assert.equal(existsSync(fresh), false);
+  assert.equal(existsSync(broken), false);
+  assert.deepEqual(readdirSync(registry), ['lock']);
+});
+
+for (const coOwned of [false, true]) test(`a failed ${coOwned ? 'co-owned' : 'new'} marker write rolls back current and earlier acquisitions despite cleanup failure`, registryTests, async t => {
+  const dir = tempDir(t), registry = join(dir, 'registry');
+  const earlier = missingTarget(join(dir, '.codex'), 'empty-directory');
+  const current = missingTarget(join(dir, '.pi'), 'empty-directory');
+  const markerDir = join(registry, hashPath(current.path));
+  const corruptMarker = join(markerDir, String(process.pid));
+  const held = coOwned ? await registerSyntheticMountTargets([current], registry) : [];
+  if (coOwned) unlinkSync(corruptMarker);
+  mkdirSync(corruptMarker, { recursive: true });
+  writeFileSync(join(corruptMarker, 'keep'), 'unrelated');
+  const targets = [earlier, earlier, current];
+
+  await assert.rejects(registerSyntheticMountTargets(targets, registry), { code: 'EISDIR' });
+  assert.equal(existsSync(join(registry, hashPath(earlier.path))), false);
+  assert.equal(readFileSync(join(corruptMarker, 'keep'), 'utf8'), 'unrelated');
+
+  rmSync(corruptMarker, { recursive: true });
+  const retry = await registerSyntheticMountTargets(targets, registry);
+  mkdirSync(earlier.path);
+  mkdirSync(current.path);
+  await cleanupSyntheticMountTargets(retry, registry);
+  assert.equal(existsSync(earlier.path), false);
+  assert.equal(existsSync(current.path), coOwned);
+  await cleanupSyntheticMountTargets(held, registry);
+  assert.equal(existsSync(current.path), false);
+  assert.deepEqual(readdirSync(registry), ['lock']);
+});
+
 test('a placeholder that was replaced or filled is not removed', t => {
   const dir = tempDir(t);
   const file = join(dir, 'file');

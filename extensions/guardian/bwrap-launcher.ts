@@ -3,12 +3,12 @@
 // Codex prefers the first bubblewrap on PATH that the sandboxed process cannot replace, and falls back to the copy
 // bundled with Codex. Guardian finds that copy in the Codex install on PATH; Codex additionally checks it against a
 // SHA-256 digest compiled into its build, which Guardian cannot know, so it relies on the same replaceability checks.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
-import { killProcessGroup } from './review/process.ts';
+import { killProcessGroup, raceAbort, runBounded } from './review/process.ts';
 import { pathStartsWith, type WritableRoot } from './seatbelt.ts';
 
 export const MISSING_BWRAP_WARNING = 'Guardian could not find bubblewrap 0.8 or newer on PATH. Install bubblewrap with your OS package manager. '
@@ -121,25 +121,45 @@ export interface BwrapCapabilities {
 }
 
 const capabilityCache = new Map<string, BwrapCapabilities | undefined>();
+const capabilityProbes = new Map<string, { controller: AbortController; result: Promise<BwrapCapabilities | undefined>; waiters: number }>();
 
 /**
  * What `bwrap --help` lists. Codex requires `--as-pid-1` (bubblewrap 0.8) and `--perms`; Guardian installs seccomp
  * with `--seccomp` instead of re-executing a helper, so it never needs `--argv0`.
  */
-export function bwrapCapabilities(path: string): BwrapCapabilities | undefined {
+export async function bwrapCapabilities(path: string, signal?: AbortSignal): Promise<BwrapCapabilities | undefined> {
+  signal?.throwIfAborted();
   let key: string;
-  try { const info = statSync(path); key = `${path}:${info.ino}:${info.mtimeMs}:${info.size}`; } catch { return undefined; }
+  try { const info = statSync(path); key = `${path}:${info.dev}:${info.ino}:${info.mtimeMs}:${info.ctimeMs}:${info.size}`; } catch { return undefined; }
   if (capabilityCache.has(key)) return capabilityCache.get(key);
-  const result = spawnSync(path, ['--help'], { encoding: 'utf8', timeout: 5_000 });
-  const help = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-  const capabilities = result.error || !help.includes('--as-pid-1') ? undefined : { supportsArgv0: help.includes('--argv0'), supportsPerms: help.includes('--perms') };
-  capabilityCache.set(key, capabilities);
-  return capabilities;
+  let probe = capabilityProbes.get(key);
+  if (!probe) {
+    const controller = new AbortController();
+    const result = runBounded(path, ['--help'], { cwd: '/', signal: controller.signal, timeoutMs: 5_000, maxBytes: 256 * 1024 }).then(result => {
+      const help = `${result.stdout}\n${result.stderr}`;
+      const capabilities = result.spawnError || result.timedOut || result.aborted || !help.includes('--as-pid-1')
+        ? undefined : { supportsArgv0: help.includes('--argv0'), supportsPerms: help.includes('--perms') };
+      if (!controller.signal.aborted) capabilityCache.set(key, capabilities);
+      return capabilities;
+    }).finally(() => { if (capabilityProbes.get(key)?.controller === controller) capabilityProbes.delete(key); });
+    probe = { controller, result, waiters: 0 };
+    capabilityProbes.set(key, probe);
+  }
+  probe.waiters++;
+  try {
+    return await (signal ? raceAbort(probe.result, signal) : probe.result);
+  } finally {
+    if (--probe.waiters === 0 && capabilityProbes.get(key) === probe) {
+      capabilityProbes.delete(key);
+      probe.controller.abort();
+    }
+  }
 }
 
-export function findSystemBwrap(searchPaths: readonly string[], cwd: string, writableRoots: readonly WritableRoot[], capabilities = bwrapCapabilities): string | undefined {
+export async function findSystemBwrap(searchPaths: readonly string[], cwd: string, writableRoots: readonly WritableRoot[], signal?: AbortSignal): Promise<string | undefined> {
+  signal?.throwIfAborted();
   const path = findExecutableInSearchPaths('bwrap', searchPaths, cwd, writableRoots);
-  return path && capabilities(path)?.supportsPerms ? path : undefined;
+  return path && (await bwrapCapabilities(path, signal))?.supportsPerms ? path : undefined;
 }
 
 const PLATFORM_PACKAGE_BY_TARGET: Record<string, string> = {
@@ -196,9 +216,10 @@ export function findCodexBundledBwrap(searchPaths: readonly string[], cwd: strin
  * System bubblewrap first, then the copy bundled with the Codex install on PATH. Codex's helper runs in the command's
  * cwd, so relative PATH entries and the cwd exclusion use the command's cwd here.
  */
-export function findBwrapLauncher(cwd: string, writableRoots: readonly WritableRoot[], env: NodeJS.ProcessEnv = process.env): BwrapLauncher | undefined {
+export async function findBwrapLauncher(cwd: string, writableRoots: readonly WritableRoot[], env: NodeJS.ProcessEnv = process.env, signal?: AbortSignal): Promise<BwrapLauncher | undefined> {
   const searchPaths = (env.PATH ?? '').split(delimiter);
-  const system = findSystemBwrap(searchPaths, cwd, writableRoots);
+  const system = await findSystemBwrap(searchPaths, cwd, writableRoots, signal);
+  signal?.throwIfAborted();
   if (system) return { program: system, source: 'system' };
   const bundled = findCodexBundledBwrap(searchPaths, cwd, writableRoots, env);
   return bundled ? { program: bundled, source: 'codex' } : undefined;

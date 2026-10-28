@@ -1,11 +1,52 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { runBounded, runStarted } from './process.ts';
 
 const node = (script: string) => [process.execPath, ['-e', script]] as const;
+
+test('bounded external commands preserve argv and stdin through the POSIX shell owner', async () => {
+  const echo = await runBounded('/bin/echo', ['ACTUAL_OK'], { cwd: tmpdir(), timeoutMs: 2000, maxBytes: 100 });
+  assert.equal(echo.exitCode, 0);
+  assert.equal(echo.stdout, 'ACTUAL_OK\n');
+  assert.equal(echo.spawnError, undefined);
+  const args = ['space here', '', '"quoted"', '$(printf REINTERPRETED)', 'A=B', '--', '\n'];
+  const result = await runBounded(process.execPath, ['-e', "let stdin='';process.stdin.on('data',chunk=>stdin+=chunk).on('end',()=>console.log(JSON.stringify({args:process.argv.slice(1),stdin})))", '--', ...args], {
+    cwd: tmpdir(), stdin: 'exact stdin\nsecond line', timeoutMs: 2000, maxBytes: 2000,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), { args, stdin: 'exact stdin\nsecond line' });
+});
+
+test('executable names stay external, including builtins, assignments and leading hyphens', async t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'guardian-dispatch-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const bin = join(cwd, '-bin');
+  mkdirSync(bin);
+  const args = ['-a', 'space here', '', 'A=B', '$(printf REINTERPRETED)'];
+  const invocation = ['-e', "let stdin='';process.stdin.on('data',chunk=>stdin+=chunk).on('end',()=>console.log(JSON.stringify({argv0:process.argv0,args:process.argv.slice(1),stdin})))", '--', ...args];
+  for (const name of ['-a', '--', '-', 'cd', 'A=B']) {
+    const executable = join(bin, name);
+    symlinkSync(process.execPath, executable);
+    for (const command of [name, `-bin/${name}`]) {
+      const result = await runBounded(command, invocation, {
+        cwd, env: { ...process.env, PATH: '-bin', 'BASH_FUNC_cd%%': '() { echo REINTERPRETED; }', 'BASH_FUNC_command%%': '() { echo REINTERPRETED; }' }, stdin: 'unaltered\n', timeoutMs: 2000, maxBytes: 2000,
+      });
+      assert.equal(result.exitCode, 0, `${command}: ${result.stderr}`);
+      assert.deepEqual(JSON.parse(result.stdout), { argv0: command, args, stdin: 'unaltered\n' });
+    }
+  }
+  const handled = await runBounded('-bin/-a', ['-e', "process.on('SIGTERM',()=>setTimeout(()=>{process.stdout.write('SURVIVED');process.exit(7)},50));setInterval(()=>{},1000);process.kill(0,'SIGTERM');"], {
+    cwd, timeoutMs: 2000, maxBytes: 100,
+  });
+  assert.equal(handled.exitCode, 7, 'a handled group signal must wait for a hyphen-leading command');
+  assert.equal(handled.stdout, 'SURVIVED');
+  const missing = await runBounded('-'.repeat(2000), [], { cwd, env: { ...process.env, PATH: '-bin' }, timeoutMs: 2000, maxBytes: 100 });
+  assert.ok(missing.spawnError && missing.spawnError.length < 600, 'failed executable lookup must keep diagnostics bounded');
+});
 
 test('output beyond the cap keeps its head and tail', async () => {
   const [command, args] = node("process.stdout.write('A'.repeat(1000) + 'B'.repeat(5_000_000) + 'Z'.repeat(1000))");
@@ -34,7 +75,91 @@ test('timeouts and cancellation kill the whole process group', async t => {
 test('stdin is delivered and spawn failures are reported', async () => {
   const [command, args] = node("let s='';process.stdin.on('data',c=>s+=c).on('end',()=>process.stdout.write(s.toUpperCase()))");
   assert.equal((await runBounded(command, args, { cwd: tmpdir(), stdin: 'hello', timeoutMs: 10_000, maxBytes: 1_000 })).stdout, 'HELLO');
-  assert.match((await runBounded('/nonexistent/binary', [], { cwd: tmpdir(), timeoutMs: 1_000, maxBytes: 1_000 })).spawnError ?? '', /ENOENT/);
+  assert.match((await runBounded('/nonexistent/binary', [], { cwd: tmpdir(), timeoutMs: 1_000, maxBytes: 1_000 })).spawnError ?? '', /No such file|not found/);
+});
+
+test('an inherited pipe writer is stopped when its command exits without signalling reaped groups', async t => {
+  const pidFile = `${tmpdir()}/guardian-writer-${process.pid}-${Date.now()}`;
+  let descendant = 0;
+  t.after(() => {
+    if (descendant) { try { process.kill(descendant, 'SIGKILL'); } catch {} }
+    rmSync(pidFile, { force: true });
+  });
+  const originalKill = process.kill;
+  const kills: number[] = [];
+  t.mock.method(process, 'kill', ((pid: number, signal?: NodeJS.Signals | number) => { kills.push(pid); return originalKill(pid, signal); }) as typeof process.kill);
+  const script = `
+    process.stdout.write('PARENT DONE');
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', "process.stdout.on('error',()=>{});setInterval(()=>process.stdout.write('x'.repeat(1000)),10);process.send('ready');"], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+    child.once('message', () => {
+      require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+      child.disconnect(); child.unref();
+    });
+  `;
+  const began = Date.now();
+  const result = await runBounded(process.execPath, ['-e', script], { cwd: tmpdir(), env: { ...process.env, SHELLOPTS: 'errexit:monitor' }, timeoutMs: 1500, maxBytes: 200 });
+  descendant = Number(readFileSync(pidFile, 'utf8'));
+  assert.ok(Date.now() - began < 1000, 'the pipe writer must not keep a completed command waiting for its deadline');
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.timedOut, false);
+  assert.match(result.stdout, /PARENT DONE/);
+  assert.ok(result.stdout.length < 300);
+  assert.deepEqual(kills, [], 'the parent must not signal a completed group');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.throws(() => originalKill(descendant, 0), /ESRCH/);
+  descendant = 0;
+});
+
+test('the command status survives group cleanup and its report pipe is private', async () => {
+  for (const [script, expected] of [['process.exit(3)', 3], ["process.kill(process.pid, 'SIGTERM')", 143], ["process.kill(0, 'SIGTERM')", 143]] as const) {
+    const result = await runBounded(process.execPath, ['-e', script], {
+      cwd: tmpdir(), env: { ...process.env, SHELLOPTS: 'errexit:monitor:xtrace', 'BASH_FUNC_printf%%': '() { echo 99; }', 'BASH_FUNC_kill%%': '() { return 0; }' }, timeoutMs: 2000, maxBytes: 100,
+    });
+    assert.equal(result.exitCode, expected);
+    assert.equal(result.spawnError, undefined);
+    assert.doesNotMatch(result.stderr, /process\.exit|process\.kill/, 'exported tracing cannot print the command arguments');
+  }
+  const forged = await runBounded('/bin/sh', ['-c', 'echo 99 >&3'], { cwd: tmpdir(), timeoutMs: 2000, maxBytes: 1000 });
+  assert.ok(forged.exitCode === 1 || forged.exitCode === 2, 'the command reports its shell redirection error, not the forged status');
+  assert.match(forged.stderr, /Bad file descriptor/);
+});
+
+test('exported shell job control cannot let the command escape its timeout', async t => {
+  const pidFile = `${tmpdir()}/guardian-monitor-${process.pid}-${Date.now()}`;
+  let pid = 0;
+  t.after(() => {
+    if (pid) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    rmSync(pidFile, { force: true });
+  });
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+  const result = await runBounded(process.execPath, ['-e', script], {
+    cwd: tmpdir(), env: { ...process.env, SHELLOPTS: 'errexit:monitor' }, timeoutMs: 500, maxBytes: 100,
+  });
+  pid = Number(readFileSync(pidFile, 'utf8'));
+  assert.equal(result.timedOut, true);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.throws(() => process.kill(pid, 0), /ESRCH/, 'the timeout must reach the command even with exported job control');
+  pid = 0;
+});
+
+test('completion leaves a descendant that created another process group alive', async t => {
+  const pidFile = `${tmpdir()}/guardian-outsider-${process.pid}-${Date.now()}`;
+  let outsider = 0;
+  t.after(() => {
+    if (outsider) { try { process.kill(outsider, 'SIGKILL'); } catch {} }
+    rmSync(pidFile, { force: true });
+  });
+  const script = `
+    const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+    require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+    child.unref(); process.stdout.write('DONE');
+  `;
+  const result = await runBounded(process.execPath, ['-e', script], { cwd: tmpdir(), timeoutMs: 2000, maxBytes: 100 });
+  outsider = Number(readFileSync(pidFile, 'utf8'));
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, 'DONE');
+  assert.doesNotThrow(() => process.kill(outsider, 0), 'the other group is outside command ownership');
 });
 
 test('the deadline includes preparation and prevents launch after cancellation', async () => {

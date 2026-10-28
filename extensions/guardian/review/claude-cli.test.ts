@@ -58,6 +58,23 @@ test('the assessment comes from the JSON result and the request goes on stdin', 
   assert.equal(recorded.argv[recorded.argv.indexOf('--effort') + 1], 'high');
 });
 
+test('a completed CLI review releases descendants in its process group', async t => {
+  const { command } = fakeClaude(t, `
+    const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    fs.writeFileSync(__filename + '.pid', String(child.pid));
+    child.unref();
+    process.stdout.write(JSON.stringify({ is_error: false, result: '{"outcome":"allow"}' }));
+  `);
+  let descendant = 0;
+  t.after(() => { if (descendant) { try { process.kill(descendant, 'SIGKILL'); } catch {} } });
+  const outcome = await runClaudeCliReview(input(command));
+  descendant = Number(readFileSync(command + '.pid', 'utf8'));
+  assert.equal(outcome.type, 'completed');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.throws(() => process.kill(descendant, 0), /ESRCH/, 'completion must release the owned descendant');
+  descendant = 0;
+});
+
 test('API errors are session errors classified for retry; bad output is a parse error', async t => {
   const overloaded = fakeClaude(t, `process.stdout.write(JSON.stringify({ type: 'result', is_error: true, api_error_status: 529, result: 'Overloaded' })); process.exit(1);`);
   assert.deepEqual(await runClaudeCliReview(input(overloaded.command)), { type: 'error', error: { type: 'session', message: 'claude -p failed (529): Overloaded', transient: true } });
@@ -80,4 +97,14 @@ test('a missing claude executable is a clear session error', async () => {
   const outcome = await runClaudeCliReview(input('/nonexistent/claude'));
   assert.equal(outcome.type === 'error' && outcome.error.type, 'session');
   assert.match(outcome.type === 'error' && 'message' in outcome.error ? outcome.error.message : '', /claude -p could not start/);
+});
+
+test('CLI startup diagnostics remain bounded when stderr exceeds the capture cap', async t => {
+  const fixture = fakeClaude(t, "process.stderr.end('E'.repeat(2_000_000), () => process.exit(127));");
+  const outcome = await runClaudeCliReview(input(fixture.command));
+  assert.equal(outcome.type, 'error');
+  if (outcome.type !== 'error' || outcome.error.type !== 'session') throw new Error('expected a session error');
+  assert.match(outcome.error.message, /claude -p could not start: E/);
+  assert.ok(outcome.error.message.length < 600);
+  assert.equal(outcome.error.transient, false);
 });

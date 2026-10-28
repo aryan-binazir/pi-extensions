@@ -119,7 +119,7 @@ function linkReason(path: string, resolved: string): string | undefined {
  */
 export async function sandboxedWrite(path: string, content: string, config: GuardianConfig, cwd: string, sandbox: PlatformSandbox, signal?: AbortSignal): Promise<void> {
   const script = 'mkdir -p "$1" && cat > "$2"';
-  const run = await runStarted(signal => sandbox.spawn(['/bin/sh', '-c', script, 'sh', dirname(path), path], sandboxPolicyFor(config), { cwd, env: process.env, stdin: 'pipe', signal }), {
+  const run = await runStarted(budget => sandbox.spawn(['/bin/sh', '-c', script, 'sh', dirname(path), path], sandboxPolicyFor(config), { cwd, env: process.env, stdin: 'pipe', signal: budget }), {
     cwd, signal, stdin: content, timeoutMs: SANDBOXED_WRITE_TIMEOUT_MS, maxBytes: 16 * 1024,
   });
   if (run.aborted) throw new Error('Operation aborted');

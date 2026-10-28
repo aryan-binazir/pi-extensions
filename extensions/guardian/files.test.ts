@@ -2,13 +2,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { setTimeout as delay } from 'node:timers/promises';
-import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
-import { withPi } from '../../tests/pi-session.ts';
-import { closeSync, constants, openSync, readSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test, { after } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import { withPi } from '../../tests/pi-session.ts';
+import { killProcessGroup } from './review/process.ts';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import { assessFileChange, createGuardianFileTools, fileChangeAction, sandboxedWrite } from './files.ts';
@@ -222,6 +223,7 @@ for (const tool of ['write', 'edit'] as const) test(`aborting a sandboxed ${tool
         cwd: options.cwd, env: options.env, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
       });
       const finished = once(child, 'exit').then(() => {});
+      void finished.catch(() => {});
       started();
       return { child, finished };
     },
@@ -229,8 +231,8 @@ for (const tool of ['write', 'edit'] as const) test(`aborting a sandboxed ${tool
   const cancelled = tool === 'write' ? fauxToolCall(tool, { path: target, content: 'cancelled payload' })
     : fauxToolCall(tool, { path: target, edits: [{ oldText: 'original', newText: 'cancelled payload' }] });
   await withPi({ cwd, extensions: [pi => {
-    for (const tool of createGuardianFileTools({ config: () => isolated(), sandbox,
-      approvals: { request: async () => { throw new Error('unexpected approval'); } } }, cwd)) pi.registerTool(tool);
+    for (const definition of createGuardianFileTools({ config: () => isolated(), sandbox,
+      approvals: { request: async () => { throw new Error('unexpected approval'); } } }, cwd)) pi.registerTool(definition);
   }], responses: [
     fauxAssistantMessage(cancelled),
     fauxAssistantMessage(fauxToolCall('write', { path: target, content: 'recovered' })),
@@ -244,14 +246,18 @@ for (const tool of ['write', 'edit'] as const) test(`aborting a sandboxed ${tool
       assert.equal(child!.exitCode, null);
       assert.equal(child!.signalCode, null);
       const aborting = session.abort();
-      assert.equal(await Promise.race([aborting.then(() => true), delay(1000, false)]), true,
+      assert.equal(await Promise.race([aborting.then(() => true), delay(1000, false, { ref: false })]), true,
         'session abort must settle without waiting for the write deadline');
       await prompting;
       const result = session.messages.find(message => message.role === 'toolResult');
       assert.ok(result && result.role === 'toolResult' && result.isError);
       assert.match(JSON.stringify(result.content), /Operation aborted/);
       assert.equal(child!.signalCode, 'SIGKILL');
-      assert.throws(() => process.kill(child!.pid!, 0), { code: 'ESRCH' }, 'the writer must already be reaped');
+      for (let attempt = 0; attempt < 20; attempt++) {
+        try { process.kill(-child!.pid!, 0); } catch { break; }
+        await delay(10);
+      }
+      assert.throws(() => process.kill(-child!.pid!, 0), { code: 'ESRCH' }, 'the writer process group must be gone');
       const reader = openSync(target, constants.O_RDONLY | constants.O_NONBLOCK);
       try { assert.equal(readSync(reader, Buffer.alloc(64), 0, 64, null), 0, 'cancelled bytes must not arrive later'); }
       finally { closeSync(reader); }
@@ -260,11 +266,13 @@ for (const tool of ['write', 'edit'] as const) test(`aborting a sandboxed ${tool
       await session.prompt('Write and edit on the next turn.');
       assert.equal(readFileSync(target, 'utf8'), 'edited');
     } finally {
-      if (child && child.exitCode === null && child.signalCode === null) {
+      const aborting = session.abort();
+      if (child?.pid && child.exitCode === null && child.signalCode === null) {
         const exited = once(child, 'exit');
-        process.kill(-child.pid!, 'SIGKILL');
+        killProcessGroup(child);
         await exited;
       }
+      await aborting;
       await prompting;
     }
   });

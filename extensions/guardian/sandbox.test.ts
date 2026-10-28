@@ -13,7 +13,7 @@ import { runStarted } from './review/process.ts';
 import { bubblewrapSandbox, detectPlatformSandbox, sandboxEnv, type SandboxedProcess } from './sandbox.ts';
 import { hashPath, syntheticMountRegistryRoot } from './synthetic-mounts.ts';
 import { syscallNumber } from './seccomp.ts';
-import type { SandboxPolicy } from './seatbelt.ts';
+import { PROTECTED_METADATA_PATH_NAMES, type SandboxPolicy } from './seatbelt.ts';
 
 const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-linux-registry-')));
 const previousTmpdir = process.env.TMPDIR;
@@ -207,7 +207,7 @@ function isolatedRegistry(t: test.TestContext): string {
 
 test('failed partial registration leaves no phantom owners after successful commands', bubblewrap, async t => {
   const cwd = tempDir(t), registry = isolatedRegistry(t);
-  const conflict = join(registry, hashPath(join(cwd, '.aws')));
+  const conflict = join(registry, hashPath(join(cwd, PROTECTED_METADATA_PATH_NAMES.at(-1)!)));
   mkdirSync(registry, { recursive: true });
   writeFileSync(conflict, 'conflicting marker directory');
   const failed = await runStarted(signal => sandbox!.spawn(['/bin/true'], workspace(), {

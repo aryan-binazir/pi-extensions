@@ -1,13 +1,18 @@
 // Ported from openai/codex codex-rs/core/src/safety.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md.
 import assert from 'node:assert/strict';
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
+import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import { withPi } from '../../tests/pi-session.ts';
+import { closeSync, constants, openSync, readSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test, { after } from 'node:test';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import { assessFileChange, createGuardianFileTools, fileChangeAction, sandboxedWrite } from './files.ts';
-import { detectPlatformSandbox } from './sandbox.ts';
+import { detectPlatformSandbox, type PlatformSandbox, type SandboxedChild } from './sandbox.ts';
 
 const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-files-registry-')));
 const previousTmpdir = process.env.TMPDIR;
@@ -196,4 +201,71 @@ test('auto-approved writes run inside the sandbox, so a link swapped in after th
   assert.equal(readFileSync(victim, 'utf8'), 'original');
   await sandboxedWrite(join(cwd, 'deep/ok.txt'), 'ok', isolated(), cwd, detected!);
   assert.equal(readFileSync(join(cwd, 'deep/ok.txt'), 'utf8'), 'ok');
+});
+
+for (const tool of ['write', 'edit'] as const) test(`aborting a sandboxed ${tool} reaps the writer and releases the Pi session`, { skip: process.platform === 'win32' }, async t => {
+  const { cwd } = workspace(t);
+  const target = join(cwd, 'blocked.txt');
+  writeFileSync(target, 'original');
+  let child: SandboxedChild | undefined;
+  let started!: () => void;
+  const launched = new Promise<void>(resolve => { started = resolve; });
+  let block = true;
+  const sandbox: PlatformSandbox = {
+    kind: 'bubblewrap', summary: 'real subprocess without platform confinement',
+    async spawn(command, _policy, options) {
+      if (block) {
+        rmSync(target);
+        execFileSync('mkfifo', [target]);
+      }
+      child = spawn(command[0], command.slice(1), {
+        cwd: options.cwd, env: options.env, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const finished = once(child, 'exit').then(() => {});
+      started();
+      return { child, finished };
+    },
+  };
+  const cancelled = tool === 'write' ? fauxToolCall(tool, { path: target, content: 'cancelled payload' })
+    : fauxToolCall(tool, { path: target, edits: [{ oldText: 'original', newText: 'cancelled payload' }] });
+  await withPi({ cwd, extensions: [pi => {
+    for (const tool of createGuardianFileTools({ config: () => isolated(), sandbox,
+      approvals: { request: async () => { throw new Error('unexpected approval'); } } }, cwd)) pi.registerTool(tool);
+  }], responses: [
+    fauxAssistantMessage(cancelled),
+    fauxAssistantMessage(fauxToolCall('write', { path: target, content: 'recovered' })),
+    fauxAssistantMessage(fauxToolCall('edit', { path: target, edits: [{ oldText: 'recovered', newText: 'edited' }] })),
+    fauxAssistantMessage('Done.'),
+  ] }, async ({ session }) => {
+    const prompting = session.prompt('Start the blocked mutation.');
+    try {
+      await Promise.race([launched, prompting.then(() => { throw new Error('mutation did not start'); })]);
+      await delay(100);
+      assert.equal(child!.exitCode, null);
+      assert.equal(child!.signalCode, null);
+      const aborting = session.abort();
+      assert.equal(await Promise.race([aborting.then(() => true), delay(1000, false)]), true,
+        'session abort must settle without waiting for the write deadline');
+      await prompting;
+      const result = session.messages.find(message => message.role === 'toolResult');
+      assert.ok(result && result.role === 'toolResult' && result.isError);
+      assert.match(JSON.stringify(result.content), /Operation aborted/);
+      assert.equal(child!.signalCode, 'SIGKILL');
+      assert.throws(() => process.kill(child!.pid!, 0), { code: 'ESRCH' }, 'the writer must already be reaped');
+      const reader = openSync(target, constants.O_RDONLY | constants.O_NONBLOCK);
+      try { assert.equal(readSync(reader, Buffer.alloc(64), 0, 64, null), 0, 'cancelled bytes must not arrive later'); }
+      finally { closeSync(reader); }
+      block = false;
+      rmSync(target);
+      await session.prompt('Write and edit on the next turn.');
+      assert.equal(readFileSync(target, 'utf8'), 'edited');
+    } finally {
+      if (child && child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, 'exit');
+        process.kill(-child.pid!, 'SIGKILL');
+        await exited;
+      }
+      await prompting;
+    }
+  });
 });

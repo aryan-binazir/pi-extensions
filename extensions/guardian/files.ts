@@ -117,11 +117,12 @@ function linkReason(path: string, resolved: string): string | undefined {
  * Writes a file from inside the workspace-write sandbox, as Codex applies patches. The sandbox checks the path
  * at write time, so a symlink or hard link swapped in after the writable-root check cannot redirect the write.
  */
-export async function sandboxedWrite(path: string, content: string, config: GuardianConfig, cwd: string, sandbox: PlatformSandbox): Promise<void> {
+export async function sandboxedWrite(path: string, content: string, config: GuardianConfig, cwd: string, sandbox: PlatformSandbox, signal?: AbortSignal): Promise<void> {
   const script = 'mkdir -p "$1" && cat > "$2"';
   const run = await runStarted(signal => sandbox.spawn(['/bin/sh', '-c', script, 'sh', dirname(path), path], sandboxPolicyFor(config), { cwd, env: process.env, stdin: 'pipe', signal }), {
-    cwd, stdin: content, timeoutMs: SANDBOXED_WRITE_TIMEOUT_MS, maxBytes: 16 * 1024,
+    cwd, signal, stdin: content, timeoutMs: SANDBOXED_WRITE_TIMEOUT_MS, maxBytes: 16 * 1024,
   });
+  if (run.aborted) throw new Error('Operation aborted');
   if (run.spawnError) throw new Error(`Could not write ${path} in the sandbox: ${run.spawnError}`);
   if (run.timedOut) throw new Error(`Writing ${path} in the sandbox timed out`);
   if (run.exitCode !== 0) throw new Error(`Writing ${path} was blocked by the sandbox: ${run.stderr.trim() || `exit ${run.exitCode}`}`);
@@ -159,7 +160,7 @@ function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, 
     if (signal?.aborted) throw new Error('Operation aborted');
     const sandbox = safety === 'auto_approve' && config.enabled && config.sandbox.mode !== 'danger-full-access' ? runtime.sandbox : undefined;
     return sandbox
-      ? { write: (target, content) => sandboxedWrite(target, content, config, cwd, sandbox) }
+      ? { write: (target, content) => sandboxedWrite(target, content, config, cwd, sandbox, signal) }
       : { write: async (_target, content) => { await mkdir(dirname(resolved), { recursive: true }); await writeFile(resolved, content, 'utf8'); } };
   };
 }

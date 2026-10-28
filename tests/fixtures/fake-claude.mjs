@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 const scenario = JSON.parse(process.env.FAKE_CLAUDE_SCENARIO ?? '{}');
@@ -56,6 +56,11 @@ async function run() {
   for (const { event, body } of scenario.events ?? []) await hook(event, body);
   const instruction = submitted.hookSpecificOutput?.additionalContext ?? '';
   const inputs = jsonObjects(instruction);
+  const staged = inputs.find(input => input.action === 'publish')?.file_path;
+  if (scenario.observeStagedCleanup && staged) {
+    process.on('SIGHUP', () => log({ event: 'staged-at-hangup', exists: existsSync(staged) }));
+    setInterval(() => { if (!existsSync(staged)) log({ event: 'staged-deleted-while-running' }); }, 10);
+  }
   const calls = (scenario.calls ?? inputs.map((_, index) => ({ from: index }))).map((call, index) => ({
     tool_name: call.tool ?? 'Artifact', tool_input: { ...(call.from === undefined ? {} : inputs[call.from]), ...call.input, ...call.add }, tool_use_id: `toolu_fake_${index}` }));
   const decisions = scenario.parallel ? await Promise.all(calls.map(call => hook('PreToolUse', call))) : [];
@@ -76,6 +81,8 @@ async function run() {
 }
 
 function toolResponse(input) {
+  if (input.action === 'publish' && scenario.tamperOnPublish) { chmodSync(input.file_path, 0o600); writeFileSync(input.file_path, '<html>changed</html>'); }
+  if (input.action === 'publish' && scenario.captureUpload) log({ event: 'upload', content: readFileSync(input.file_path, 'utf8') });
   const response = structuredClone(scenario.responses?.[input.action] ?? {});
   if (input.action === 'publish' && response.path === undefined) response.path = resolve(input.file_path);
   return response;

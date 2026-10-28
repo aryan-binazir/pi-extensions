@@ -207,7 +207,9 @@ test('Pi shutdown stops a running job', { skip: noTmux }, async t => {
 });
 
 for (const action of ['cancellation', 'session replacement', 'shutdown', 'deadline'] as const) test(`${action} stops a version probe that ignores SIGTERM`, async t => {
-  const { fakeLog } = await setup(t, { versionHang: true });
+  const { root, fakeLog } = await setup(t);
+  const release = join(root, 'release-version');
+  process.env.FAKE_CLAUDE_SCENARIO = JSON.stringify({ versionHang: true, versionRelease: release });
   await withPi({ extensions: [claudeArtifacts] }, async fixture => {
     const tool = fixture.session.getToolDefinition('claude_artifact_list')!;
     const controller = new AbortController();
@@ -217,7 +219,6 @@ for (const action of ['cancellation', 'session replacement', 'shutdown', 'deadli
     let pid: number | undefined;
     let replacement: Promise<unknown> | undefined;
     let timer: NodeJS.Timeout | undefined;
-    let reaped = false;
     try {
       const readyBy = Date.now() + 5_000;
       while (!pid) {
@@ -232,14 +233,13 @@ for (const action of ['cancellation', 'session replacement', 'shutdown', 'deadli
         Promise.all([job, replacement]),
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${action} hung on version probe`)), action === 'deadline' ? 18_000 : 3_000); }),
       ]);
-      assert.match(failure, action === 'deadline' ? /timed out/ : /cancelled/);
+      assert.match(failure, action === 'deadline' ? /timed out after 15 seconds[\s\S]*synthetic version warning/ : /cancelled/);
       if (action === 'deadline') assert.ok(Date.now() - start >= 15_000);
       assert.throws(() => process.kill(pid!, 0), /ESRCH/);
-      reaped = true;
-      assert.ok((await fakeLog()).every(entry => entry.argv?.[0] === '--version' || entry.event === 'version-ready'));
+      assert.ok((await fakeLog()).filter(entry => entry.argv).every(entry => entry.argv[0] === '--version'));
     } finally {
       clearTimeout(timer);
-      if (pid && !reaped) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+      await writeFile(release, 'stop');
       await job; await replacement;
     }
   });

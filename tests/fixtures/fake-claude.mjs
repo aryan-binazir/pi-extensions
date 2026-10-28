@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 const scenario = JSON.parse(process.env.FAKE_CLAUDE_SCENARIO ?? '{}');
@@ -11,8 +11,9 @@ if (argv[0] === '--version') {
   if (scenario.versionFailure) { console.error('synthetic version failure'); process.exit(23); }
   if (scenario.versionHang) {
     process.on('SIGTERM', () => log({ event: 'version-SIGTERM', pid: process.pid }));
+    console.error('synthetic version warning');
     log({ event: 'version-ready', pid: process.pid });
-    idle();
+    setInterval(() => { if (scenario.versionRelease && existsSync(scenario.versionRelease)) process.exit(1); }, 50);
     await new Promise(() => {});
   }
   console.log(`${scenario.version ?? '2.1.302'} (Claude Code)`); process.exit(0);

@@ -13,6 +13,7 @@ const HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolU
 const MIN_CLAUDE_VERSION = [2, 1, 302];
 const START_TIMEOUT_MS = 45_000;
 const JOB_TIMEOUT_MS = 150_000;
+const COMMAND_TIMEOUT_MS = 15_000;
 const MAX_HOOK_BODY = 32 * 1024 * 1024;
 const MAX_PAGE_BYTES = 10 * 1024 * 1024;
 
@@ -275,9 +276,9 @@ async function requireVersion(env: NodeJS.ProcessEnv, signal?: AbortSignal) {
 function run(command: string, args: string[], env: NodeJS.ProcessEnv, signal?: AbortSignal) {
   return new Promise<string>((resolve, reject) => {
     signal?.throwIfAborted();
-    const child = execFile(command, args, { env, timeout: 15_000, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
+    const child = execFile(command, args, { env, timeout: COMMAND_TIMEOUT_MS, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
       signal?.removeEventListener('abort', stop);
-      if (error) reject(new Error(`${command} failed: ${stderr || (error.killed && !signal?.aborted ? 'timed out after 15 seconds' : error.message)}`));
+      if (error) reject(new Error(`${command} failed: ${error.killed && !signal?.aborted ? `timed out after ${COMMAND_TIMEOUT_MS / 1000} seconds. ` : ''}${stderr || error.message}`));
       else resolve(stdout);
     });
     const stop = () => { child.stdout?.destroy(); child.stderr?.destroy(); child.kill('SIGKILL'); };

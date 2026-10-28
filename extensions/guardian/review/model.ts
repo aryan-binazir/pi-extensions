@@ -20,6 +20,7 @@ export function resolveReviewer(registry: ReviewerRegistry, reviewer: ReviewerMo
     ok: true,
     async complete(context, signal) {
       const auth = await registry.getApiKeyAndHeaders(model);
+      signal.throwIfAborted();
       if (!auth.ok) throw new Error(`reviewer model ${reviewer.provider}/${reviewer.model} is not authenticated: ${auth.error}`);
       const provider = registry.getProvider(model.provider);
       if (!provider) throw new Error(`reviewer provider ${model.provider} is not available`);

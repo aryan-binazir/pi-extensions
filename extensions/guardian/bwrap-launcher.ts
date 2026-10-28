@@ -130,7 +130,7 @@ const capabilityProbes = new Map<string, { controller: AbortController; result: 
 export async function bwrapCapabilities(path: string, signal?: AbortSignal): Promise<BwrapCapabilities | undefined> {
   signal?.throwIfAborted();
   let key: string;
-  try { const info = statSync(path); key = `${path}:${info.dev}:${info.ino}:${info.mtimeMs}:${info.ctimeMs}:${info.size}`; } catch { return undefined; }
+  try { const info = statSync(path); key = `${path}:${info.ino}:${info.mtimeMs}:${info.size}`; } catch { return undefined; }
   if (capabilityCache.has(key)) return capabilityCache.get(key);
   let probe = capabilityProbes.get(key);
   if (!probe) {

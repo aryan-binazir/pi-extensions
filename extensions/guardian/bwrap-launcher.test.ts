@@ -211,38 +211,14 @@ test('system bubblewrap is preferred over the bundled one', async t => {
   mkdirSync(cwd);
   assert.deepEqual(await findBwrapLauncher(cwd, [], { PATH: `${join(dir, 'system')}:${bin}` }), { program: system, source: 'system' });
   assert.deepEqual(await findBwrapLauncher(cwd, [], { PATH: bin }), { program: bundled, source: 'codex' });
+  writeExecutable(system, "#!/bin/sh\nprintf '%s\\n' '--as-pid-1'\n");
+  assert.deepEqual(await findBwrapLauncher(cwd, [], { PATH: `${join(dir, 'system')}:${bin}` }), { program: bundled, source: 'codex' });
   assert.equal(await findBwrapLauncher(cwd, [], { PATH: join(dir, 'empty') }), undefined);
 });
 
-function dirname(path: string): string {
-  return join(path, '..');
-}
-
-
 test('concurrent resolver callers share a probe without sharing cancellation', async t => {
-  const dir = tempDir(t), count = join(dir, 'count');
+  const dir = tempDir(t), count = join(dir, 'count'), pidFile = join(dir, 'pid');
   const system = writeFakeBwrap(join(dir, 'system'), `#!/bin/sh
-printf 'probe\\n' >> '${count}'
-printf '%s\\n' --as-pid-1 --perms
-exec /bin/sleep 0.2
-`);
-  const { bin } = npmCodexInstall(join(dir, 'prefix'), process.arch === 'arm64' ? 'aarch64-unknown-linux-musl' : 'x86_64-unknown-linux-musl',
-    process.arch === 'arm64' ? '@openai/codex-linux-arm64' : '@openai/codex-linux-x64');
-  const env = { PATH: `${join(dir, 'system')}:${bin}` };
-  const controller = new AbortController();
-  const cancelled = findBwrapLauncher('/', [], env, controller.signal);
-  const successful = findBwrapLauncher('/', [], env);
-  const rejection = assert.rejects(cancelled, /owned cancellation/);
-  controller.abort(new Error('owned cancellation'));
-  await rejection;
-  assert.deepEqual(await successful, { program: system, source: 'system' });
-  assert.deepEqual(await findBwrapLauncher('/', [], env), { program: system, source: 'system' });
-  assert.equal(readFileSync(count, 'utf8'), 'probe\n');
-});
-
-test('an abandoned probe is reaped and a later resolver call retries it', async t => {
-  const dir = tempDir(t), pidFile = join(dir, 'pid'), count = join(dir, 'count');
-  const program = writeFakeBwrap(join(dir, 'system'), `#!/bin/sh
 printf 'probe\\n' >> '${count}'
 echo $$ > '${pidFile}'
 printf '%s\\n' --as-pid-1 --perms
@@ -250,23 +226,60 @@ exec /bin/sleep 0.2
 `);
   const env = { PATH: join(dir, 'system') };
   const controller = new AbortController();
-  const resolving = findBwrapLauncher('/', [], env, controller.signal);
-  const rejection = assert.rejects(resolving, /owned cancellation/);
+  t.after(() => controller.abort());
+  const cancelled = findBwrapLauncher('/', [], env, controller.signal);
+  const successful = findBwrapLauncher('/', [], env);
+  const rejection = assert.rejects(cancelled, /owned cancellation/);
   let pid: number | undefined;
   for (let attempt = 0; attempt < 100; attempt++) {
-    try { pid = Number(readFileSync(pidFile, 'utf8')); break; } catch {}
+    try { pid = Number(readFileSync(pidFile, 'utf8')); if (pid > 1) break; } catch {}
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   controller.abort(new Error('owned cancellation'));
   await rejection;
-  assert.ok(pid, 'the capability probe started');
-  const retry = findBwrapLauncher('/', [], env);
-  let reaped = false;
+  assert.ok(pid && pid > 1, 'the shared probe started before cancellation');
+  assert.deepEqual(await successful, { program: system, source: 'system' });
+  assert.deepEqual(await findBwrapLauncher('/', [], env), { program: system, source: 'system' });
+  assert.equal(readFileSync(count, 'utf8'), 'probe\n');
+});
+
+test('an abandoned probe is reaped without caching failure before a later resolver call', async t => {
+  const dir = tempDir(t), pidFile = join(dir, 'pid'), count = join(dir, 'count');
+  const program = writeFakeBwrap(join(dir, 'system'), `#!/bin/sh
+printf '%s\\n' --as-pid-1 --perms
+if [ ! -e '${count}' ]; then
+  printf 'probe\\n' >> '${count}'
+  echo $$ > '${pidFile}'
+  exec /bin/sleep 30
+fi
+printf 'probe\\n' >> '${count}'
+`);
+  const env = { PATH: join(dir, 'system') };
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const resolving = findBwrapLauncher('/', [], env, controller.signal);
+  const rejection = assert.rejects(resolving, /owned cancellation/);
+  let pid: number | undefined;
   for (let attempt = 0; attempt < 100; attempt++) {
+    try { pid = Number(readFileSync(pidFile, 'utf8')); if (pid > 1) break; } catch {}
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  controller.abort(new Error('owned cancellation'));
+  await rejection;
+  assert.ok(pid && pid > 1, 'the capability probe started');
+  let reaped = false;
+  for (let attempt = 0; attempt < 20; attempt++) {
     try { process.kill(pid, 0); } catch { reaped = true; break; }
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.equal(reaped, true, 'cancelled probe was reaped');
-  assert.deepEqual(await retry, { program, source: 'system' });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.deepEqual(await findBwrapLauncher('/', [], env), { program, source: 'system' });
+  assert.deepEqual(await findBwrapLauncher('/', [], env), { program, source: 'system' });
+  await assert.rejects(findBwrapLauncher('/', [], env, AbortSignal.abort(new Error('already cancelled'))), /already cancelled/);
   assert.equal(readFileSync(count, 'utf8'), 'probe\nprobe\n');
 });
+
+function dirname(path: string): string {
+  return join(path, '..');
+}

@@ -21,7 +21,7 @@ async function fixture(run: (f: any) => Promise<void>, options: any = {}) {
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   let toolContext: any;
   const secret = 'synthetic-connector-auth-kept-in-parent';
-  const calls: any[] = [], hooks: any[] = [];
+  const calls: any[] = [], hooks: any[] = [], approvals: string[] = [];
   const connector = (pi: ExtensionAPI) => {
     for (const name of [read, write, 'ungranted_connector', 'model_only_connector', 'deferred_connector']) pi.registerTool({
       name, label: name, description: name === read ? options.description ?? 'Deterministic connector' : 'Deterministic connector', parameters: Type.Object({issueKey: Type.String()}),
@@ -41,6 +41,10 @@ async function fixture(run: (f: any) => Promise<void>, options: any = {}) {
   };
   try {
     await mkdir(agentDir);
+    if (options.guardian) {
+      await mkdir(join(agentDir, 'guardian'));
+      await writeFile(join(agentDir, 'guardian', 'config.json'), JSON.stringify({ approvalsReviewer: 'user', connectors: { alwaysReview: [write] } }));
+    }
     await writeFile(join(agentDir, 'settings.json'), JSON.stringify({retry: {enabled: true, maxRetries: 1, baseDelayMs: 1}, compaction: {enabled: false}}));
     await writeFile(join(cwd, 'pi'), options.binary
       ? `#!/bin/sh\nexec '${options.binary.replace(/'/g, "'\\''")}' "$@"\n`
@@ -53,14 +57,14 @@ async function fixture(run: (f: any) => Promise<void>, options: any = {}) {
     process.env.PATH = `${cwd}:${priorPath ?? ''}`;
     process.env.PI_CODING_AGENT_DIR = agentDir;
     const settingsManager = SettingsManager.inMemory({});
-    const resourceLoader = new DefaultResourceLoader({cwd, agentDir, settingsManager, extensionFactories: [subagents, connector], noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true});
+    const resourceLoader = new DefaultResourceLoader({cwd, agentDir, settingsManager, extensionFactories: [subagents, connector], additionalExtensionPaths: options.guardian ? [new URL('../extensions/guardian/index.ts', import.meta.url).pathname] : [], noSkills: true, noThemes: true, noPromptTemplates: true, noContextFiles: true});
     await resourceLoader.reload();
     const modelRuntime = await ModelRuntime.create({authPath: join(agentDir, 'auth.json'), modelsPath: join(agentDir, 'models.json'), refreshOnCreate: false, allowModelNetwork: false});
     const registry = new ModelRegistry(modelRuntime);
     await registry.refresh({allowNetwork: false});
     const model = registry.find('test', 'fixture');
     ({session} = await createAgentSession({cwd, agentDir, settingsManager, resourceLoader, modelRuntime, model, sessionManager: SessionManager.inMemory(cwd)}));
-    await session.bindExtensions({uiContext: {confirm: async () => true, editor: async (_title: string, source: string) => source, setWidget() {}, setStatus() {}, notify() {}} as any});
+    await session.bindExtensions({uiContext: {select: async (title: string, choices: string[]) => {approvals.push(title); return choices[options.guardianChoice === false ? 1 : 0];}, confirm: async () => true, editor: async (_title: string, source: string) => source, setWidget() {}, setStatus() {}, notify() {}} as any});
     const runner = session.extensionRunner!;
     const context = runner.createToolContext('fixture-parent', undefined);
     toolContext = Object.defineProperties(Object.create(context), {
@@ -90,7 +94,7 @@ async function fixture(run: (f: any) => Promise<void>, options: any = {}) {
     }, 'the delegated child to complete', 10000).catch(async error => {
       throw new Error(`${error.message}: ${JSON.stringify((await execute('subagent_status', {id})).details)}`);
     });
-    await run({cwd, agentDir, session, execute, calls, hooks, completed, parentTurn, secret, settings, settingsPath, reload: async () => {await runner.emit({type: 'session_shutdown', reason: 'reload'}); await runner.emit({type: 'session_start', reason: 'reload'});}});
+    await run({cwd, agentDir, session, execute, calls, hooks, approvals, completed, parentTurn, secret, settings, settingsPath, reload: async () => {await runner.emit({type: 'session_shutdown', reason: 'reload'}); await runner.emit({type: 'session_start', reason: 'reload'});}});
   } finally {
     await session?.extensionRunner?.emit({type: 'session_shutdown', reason: 'quit'});
     session?.dispose();
@@ -373,3 +377,23 @@ test('a rejected selection names unavailable and disallowed tools, returns a nor
   assert.equal(calls.length, 1);
   assert.equal(calls[0].args.issueKey, 'BBA-7');
 }));
+
+for (const [runtime, binary] of [['SDK', undefined], ['installed Pi', process.env.PI_SUBAGENT_TEST_BINARY]] as const) {
+  for (const approved of [true, false]) test(`Guardian reviews a delegated write grant once in the parent: ${runtime}, ${approved ? 'allow' : 'deny'}`, {skip: runtime === 'installed Pi' && !binary}, async () => fixture(async ({execute, completed, calls, approvals, session}) => {
+    const args = {issueKey: 'SYNTHETIC-42'};
+    const child = await execute('subagent', {task: request(write, args), tools: [write],
+      ...(binary ? {extensions: [new URL('./fixtures/delegated-provider.mjs', import.meta.url).pathname]} : {}),
+    });
+    const task = await completed(child.details.id);
+    assert.equal(task.status, 'succeeded', JSON.stringify(task));
+    const result = JSON.parse(task.output).results[0];
+    assert.equal(result.isError ?? false, !approved);
+    assert.equal(calls.length, approved ? 1 : 0);
+    if (approved) assert.deepEqual(calls[0].args, args);
+    assert.equal(approvals.length, 1, 'the child proxy forwards to the parent leaf approval');
+    assert.match(approvals[0], /SYNTHETIC-42/);
+    const audit = session.sessionManager.getBranch().filter((entry: any) => entry.type === 'custom' && entry.customType === 'guardian-approval-decision');
+    assert.equal(audit.length, 1);
+    assert.ok(!JSON.stringify(audit).includes('SYNTHETIC-42'));
+  }, {binary, guardian: true, guardianChoice: approved}));
+}

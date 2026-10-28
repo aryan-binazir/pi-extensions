@@ -8,6 +8,7 @@ import { APPROVAL_AUDIT_ENTRY_TYPE, type ApprovalAuditEntry, type ApprovalContex
 import { createGuardianBashTool, sandboxPolicyFor } from './bash.ts';
 import { CLAUDE_CLI_PROVIDER, FAIL_CLOSED_CONFIG, GUARDIAN_ENABLED_EVENT, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
 import { createGuardianFileTools } from './files.ts';
+import { createConnectorGate } from './connectors.ts';
 import { permissionsInstructions } from './permissions.ts';
 import { defaultRulesPath, extraPolicy, guardianConfigPath, type LoadedPolicies, loadPolicies, persistableAmendment, retainPolicies, userRulesDir } from './policies.ts';
 import { collectReviewEvidence, composeReviewRequest, MANUAL_APPROVAL_MESSAGE_TYPE, prepareTranscript, truncateText } from './review/context.ts';
@@ -25,12 +26,14 @@ const REVIEW_STATUS_KEY = 'guardian-review';
  * Tools that refuse every call. A Guardian that cannot start must still replace Pi's `bash`, `write` and `edit`;
  * otherwise Pi would run them unguarded.
  */
-export function registerFailClosed(pi: Pick<ExtensionAPI, 'registerTool' | 'on'>, error: unknown, cwd = process.cwd()): void {
-  const message = `Guardian could not start, so commands and file changes are blocked: ${error instanceof Error ? error.message : String(error)}. Fix it and run /reload.`;
+export function registerFailClosed(pi: Pick<ExtensionAPI, 'registerTool' | 'on' | 'getAllTools'>, error: unknown, cwd = process.cwd()): void {
+  const message = `Guardian could not start, so commands, file changes and review-required connector calls are blocked: ${error instanceof Error ? error.message : String(error)}. Fix it and run /reload.`;
   const refuse = async (): Promise<never> => { throw new Error(message); };
   for (const tool of [createBashToolDefinition(cwd), createWriteToolDefinition(cwd), createEditToolDefinition(cwd)]) {
     pi.registerTool({ ...tool, execute: refuse } as unknown as ToolDefinition);
   }
+  pi.on('tool_call', createConnectorGate({ config: () => FAIL_CLOSED_CONFIG, tools: () => pi.getAllTools(),
+    approvals: { clearDenied: () => {}, request: async () => ({ type: 'rejected', message }) } }));
   pi.on('session_start', (_event, ctx) => { if (ctx.hasUI) ctx.ui.notify(message, 'error'); });
 }
 
@@ -63,10 +66,6 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   /** Set by `/guardian on|off|toggle`. Pi builds a new Guardian for each session, so it never outlives this one. */
   let sessionEnabled: boolean | undefined;
 
-  /**
-   * Reads config.json when it changes. An invalid file keeps the last valid settings, so a typo never relaxes
-   * permissions; with no valid settings yet, every reviewable action is sent to review or to you.
-   */
   const fileConfig = (): GuardianConfig => {
     const path = guardianConfigPath();
     let stamp = 'missing';
@@ -79,7 +78,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
         const message = `Guardian config error: ${(error as Error).message}`;
         cached = lastValid
           ? { stamp, config: lastValid, error: `${message}; keeping the last valid settings` }
-          : { stamp, config: FAIL_CLOSED_CONFIG, error: `${message}; every reviewable action needs approval until it is fixed` };
+          : { stamp, config: FAIL_CLOSED_CONFIG, error: `${message}; built-in protections remain; custom connector declarations are unavailable until it is fixed` };
       }
     }
     return cached.config;
@@ -137,6 +136,8 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     record: entry => { pi.appendEntry(APPROVAL_AUDIT_ENTRY_TYPE, entry); },
   });
 
+  pi.on('tool_call', createConnectorGate({ config, approvals, tools: () => pi.getAllTools() }));
+
   const shellSettings = () => {
     const settings = pi.getSettings() as { shellPath?: string; shellCommandPrefix?: string };
     return {
@@ -192,7 +193,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
         pi.events.emit(GUARDIAN_ENABLED_EVENT, { enabled: sessionEnabled });
         return sessionEnabled
           ? ctx.ui.notify('Guardian is on for this session.', 'info')
-          : ctx.ui.notify('Guardian is off for this session: commands and file changes run without the sandbox or review. The Railway and database boundaries still apply. /guardian on turns it back on.', 'warning');
+          : ctx.ui.notify('Guardian is off for this session: commands and file changes run without the sandbox or review; connector calls run without review. The Railway and database boundaries still apply. /guardian on turns it back on.', 'warning');
       }
       if (action === 'audit') {
         const entries = ctx.sessionManager.getBranch().flatMap(entry => {
@@ -216,7 +217,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
       }
       if (action === 'approve') {
         const denied = approvals.takeDenied(ctx as unknown as ApprovalContext);
-        if (!denied) return ctx.ui.notify('No denied action to approve.', 'info');
+        if (!denied) return ctx.ui.notify('No replayable denied action to approve. Connector calls require approval in chat or a fresh interactive review.', 'info');
         pi.sendMessage({ customType: MANUAL_APPROVAL_MESSAGE_TYPE, content: manualApprovalMessage(denied.actionJson), display: true }, { triggerTurn: true });
         return ctx.ui.notify(`Approved: ${denied.summary}`, 'info');
       }

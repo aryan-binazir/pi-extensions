@@ -29,6 +29,7 @@ export interface GuardianConfig {
   /** Who reviews approval requests: the reviewer model, or you. */
   approvalsReviewer: ApprovalsReviewer;
   reviewer: ReviewerModel;
+  connectors: { readOnly: string[]; alwaysReview: string[] };
   autoReview: {
     /** Replaces Guardian's built-in tenant policy. */
     policy: string | undefined;
@@ -45,6 +46,7 @@ export const DEFAULT_GUARDIAN_CONFIG: GuardianConfig = {
   enabled: true,
   approvalPolicy: 'on-request',
   approvalsReviewer: 'auto_review',
+  connectors: { readOnly: [], alwaysReview: [] },
   reviewer: { provider: 'openai-codex', model: 'gpt-6-luna~fast', reasoning: 'low' },
   autoReview: { policy: undefined, extraPolicy: undefined, failureFallback: 'user' },
   sandbox: { mode: 'workspace-write', networkAccess: false, writableRoots: [], excludeTmpdirEnvVar: false, excludeSlashTmp: false },
@@ -62,7 +64,8 @@ export const FAIL_CLOSED_CONFIG: GuardianConfig = {
 
 const THINKING_LEVELS: readonly ThinkingLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const KNOWN_KEYS: Record<string, readonly string[]> = {
-  config: ['enabled', 'approvalPolicy', 'approvalsReviewer', 'reviewer', 'autoReview', 'sandbox'],
+  config: ['enabled', 'approvalPolicy', 'approvalsReviewer', 'reviewer', 'autoReview', 'sandbox', 'connectors'],
+  connectors: ['readOnly', 'alwaysReview'],
   reviewer: ['provider', 'model', 'reasoning'],
   autoReview: ['policy', 'policyFile', 'extraPolicy', 'extraPolicyFile', 'failureFallback'],
   sandbox: ['mode', 'networkAccess', 'writableRoots', 'excludeTmpdirEnvVar', 'excludeSlashTmp'],
@@ -123,6 +126,14 @@ export function loadGuardianConfig(path: string): GuardianConfig {
   const config = object(raw, 'config');
   const reviewer = object(config.reviewer, 'reviewer'), autoReview = object(config.autoReview, 'autoReview'), sandbox = object(config.sandbox, 'sandbox');
   const defaults = DEFAULT_GUARDIAN_CONFIG;
+  const connectors = object(config.connectors, 'connectors');
+  const connectorNames = (key: 'readOnly' | 'alwaysReview'): string[] => {
+    const value = connectors[key] ?? [];
+    if (!Array.isArray(value) || value.length > 1024 || value.some(name => typeof name !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(name))) {
+      throw new Error(`connectors.${key} must be a list of at most 1024 exact tool names`);
+    }
+    return value;
+  };
   const writableRoots = sandbox.writableRoots ?? [];
   if (!Array.isArray(writableRoots) || writableRoots.some(root => typeof root !== 'string' || !isAbsolute(root))) {
     throw new Error('sandbox.writableRoots must be a list of absolute paths');
@@ -134,6 +145,7 @@ export function loadGuardianConfig(path: string): GuardianConfig {
   return {
     enabled: boolean(config.enabled, 'enabled', defaults.enabled),
     approvalPolicy: approvalPolicy === 'untrusted' ? 'unless-trusted' : approvalPolicy,
+    connectors: { readOnly: connectorNames('readOnly'), alwaysReview: connectorNames('alwaysReview') },
     approvalsReviewer: oneOf(config.approvalsReviewer, ['auto_review', 'user'], 'approvalsReviewer', defaults.approvalsReviewer),
     reviewer: {
       provider: text(reviewer.provider, 'reviewer.provider', defaults.reviewer.provider),

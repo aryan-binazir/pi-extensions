@@ -18,6 +18,7 @@ test('defaults match Codex on-request auto review with the Luna reviewer', t => 
     enabled: true,
     approvalPolicy: 'on-request',
     approvalsReviewer: 'auto_review',
+    connectors: { readOnly: [], alwaysReview: [] },
     reviewer: { provider: 'openai-codex', model: 'gpt-6-luna~fast', reasoning: 'low' },
     autoReview: { policy: undefined, extraPolicy: undefined, failureFallback: 'user' },
     sandbox: { mode: 'workspace-write', networkAccess: false, writableRoots: [], excludeTmpdirEnvVar: false, excludeSlashTmp: false },
@@ -97,4 +98,13 @@ test('status text names the reviewer and flags network or a missing sandbox', ()
   assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: 'unless-trusted' }, true), 'Auto: on · you review', 'untrusted approvals go to you');
   assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: 'never' }, true), 'Auto: on · no approvals');
   assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } }, true), 'Auto: on · Opus high');
+});
+
+test('connector policy accepts exact names with force-review precedence and preserves old configs', t => {
+  const connectors = { readOnly: ['mcp__docs__lookup', 'custom_lookup'], alwaysReview: ['custom_lookup'] };
+  assert.deepEqual(loadGuardianConfig(join(configDir(t, { connectors }), 'config.json')).connectors, connectors);
+  assert.deepEqual(loadGuardianConfig(join(configDir(t, {}), 'config.json')).connectors, { readOnly: [], alwaysReview: [] });
+  for (const connectors of [{ readOnly: ['mcp__*'] }, { alwaysReview: [12] }, { other: [] }, { readOnly: Array(1025).fill('lookup') }]) {
+    assert.throws(() => loadGuardianConfig(join(configDir(t, { connectors }), 'config.json')), /connectors/);
+  }
 });

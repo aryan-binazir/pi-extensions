@@ -138,8 +138,8 @@ export function readPastes(editor: Editor, text?: string): PasteState {
     if (ids.size < pastes.size) {
       const { killRing } = editor as unknown as { killRing: { ring: string[] } };
       if (!Array.isArray(killRing?.ring)) throw new Error("Unsupported Pi kill ring layout");
-      for (const entry of killRing.ring) {
-        for (const match of pasteMarkers(editor, entry)) ids.add(Number(match[1]));
+      for (let i = killRing.ring.length - 1; i >= 0; i--) {
+        for (const match of pasteMarkers(editor, killRing.ring[i])) ids.add(Number(match[1]));
         if (ids.size === pastes.size) break;
       }
       for (const id of pastes.keys()) if (!ids.has(id)) pastes.delete(id);

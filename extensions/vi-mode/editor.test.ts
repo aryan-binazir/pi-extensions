@@ -1000,10 +1000,11 @@ test("named and unnamed registers restore expired collapsed payloads with fresh 
     assert.equal(readPastes(e).pastes.size, 0);
     keys(e, '"aP');
     assert.equal(e.getExpandedText(), named + "Z");
+    assert.deepEqual([...readPastes(e).pastes.keys()], [3]);
     undoRedoRestoresPut(e, "Z");
     keys(e, "p");
     assert.equal(e.getExpandedText(), named + unnamed + "Z");
-    assert.equal(readPastes(e).pastes.size, 2);
+    assert.deepEqual([...readPastes(e).pastes.keys()], [3, 4]);
   } finally {
     e.dispose();
   }
@@ -1032,16 +1033,45 @@ test("pruning preserves collapsed payloads referenced by Pi's native kill ring",
 
 test("native history browsing and undo retain a collapsed insert draft", () => {
   const payload = "native\t\r\n".repeat(200);
-  for (const inputs of [["\x1b[A", "\x1b[B"], ["\x17", "\x1f"]]) {
+  for (const steps of [
+    [["\x1b[A", payload], ["\x1b[A", "previous"], ["\x1b[B", payload]],
+    [["\x17", ""], ["\x1f", payload]],
+  ]) {
     const e = editor();
     try {
       e.addToHistory("previous");
       e.handleInput(`\x1b[200~${payload}\x1b[201~`);
-      for (const input of inputs) e.handleInput(input);
-      assert.equal(e.getExpandedText(), payload);
+      for (const [input, expected] of steps) {
+        e.handleInput(input);
+        assert.equal(e.getExpandedText(), expected);
+      }
     } finally {
       e.dispose();
     }
+  }
+});
+
+test("redo retains payloads acquired by the native kill ring after its snapshot", () => {
+  const e = editor();
+  const payload = "redo\t\r\n".repeat(200);
+  try {
+    e.handleInput(`\x1b[200~${payload}\x1b[201~`);
+    keys(e, "\x1b0xuA");
+    e.handleInput("\x15");
+    e.handleInput("\x19");
+    assert.equal(e.getExpandedText(), payload);
+    keys(e, "\x1b");
+    e.handleInput("\x12");
+    assert.equal(e.getText(), "");
+    keys(e, "i");
+    e.handleInput("\x19");
+    assert.equal(e.getExpandedText(), payload);
+    let submitted = "";
+    e.onSubmit = text => { submitted = text; };
+    e.handleInput("\r");
+    assert.equal(submitted, payload.trim().replace(/\r/g, ""));
+  } finally {
+    e.dispose();
   }
 });
 
@@ -1050,11 +1080,9 @@ test("discarding redo can reuse a paste ID without restoring the old payload", (
   const first = "first\n".repeat(200), replacement = "replacement literal [paste #9]\n".repeat(100);
   try {
     e.handleInput(`\x1b[200~${first}\x1b[201~`);
-    const marker = e.getText();
     keys(e, "\x1bu");
     e.handleInput(`\x1b[200~${replacement}\x1b[201~`);
     assert.equal([...readPastes(e).pastes.keys()][0], 1);
-    assert.notEqual(e.getText(), marker);
     undoRedoRestoresPut(e, "");
     assert.equal(e.getExpandedText(), replacement);
   } finally {

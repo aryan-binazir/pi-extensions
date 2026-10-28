@@ -430,7 +430,9 @@ class ViMode {
     this.redoHistory = [];
   }
   private restore(s: Snapshot): void {
-    writePastes(this.editor, s.payloads);
+    const { pastes } = readPastes(this.editor, "");
+    for (const [id, payload] of s.payloads.pastes) pastes.set(id, payload);
+    writePastes(this.editor, { pastes, counter: s.payloads.counter });
     this.writeText(s.text);
     this.cursorTo(s.pos);
   }

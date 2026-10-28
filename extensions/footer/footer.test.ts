@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { beforeEach, describe, test, type TestContext } from 'node:test';
-import { stripVTControlCharacters } from 'node:util';
+import { promisify, stripVTControlCharacters } from 'node:util';
 import { ModelRuntime, ModelRegistry, SessionManager, type ExecResult, type ExtensionAPI, type ExtensionContext, type ReadonlyFooterDataProvider, type Theme } from '@earendil-works/pi-coding-agent';
 import { InMemoryCredentialStore, InMemoryModelsStore, type OAuthCredential } from '@earendil-works/pi-ai';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
@@ -53,6 +54,30 @@ function fixture(exec?: ExtensionAPI['exec'], reuse = false) {
 }
 
 const pathRow = (f: ReturnType<typeof fixture>) => stripVTControlCharacters(f.footer.render(140)[0]).replace(/\s+Auto:.*$/, '');
+
+test('discarded targets without lookups have bounded memory in offline and rapid-switch sessions', async () => {
+  const source = `
+    import { writeSync } from 'node:fs';
+    import { pullRequests } from ${JSON.stringify(new URL('./pull-request.ts', import.meta.url).href)};
+    let calls = 0;
+    const requests = pullRequests(async () => { calls++; throw new Error('unexpected lookup'); }, () => {});
+    global.gc();
+    const initial = process.memoryUsage().heapUsed;
+    for (let i = 0; i < 100_000; i++) requests.get('/synthetic/footer', 'unused-' + i);
+    requests.dispose();
+    await new Promise(setImmediate);
+    global.gc();
+    writeSync(1, JSON.stringify({ retained: process.memoryUsage().heapUsed - initial, calls }));
+  `;
+  for (const offline of ['1', '0']) {
+    const { stdout } = await promisify(execFile)(process.execPath,
+      ['--expose-gc', '--import', 'tsx', '--input-type=module', '--eval', source],
+      { env: { ...process.env, PI_OFFLINE: offline } });
+    const { retained, calls } = JSON.parse(stdout);
+    assert.equal(calls, 0, `PI_OFFLINE=${offline}`);
+    assert.ok(retained < 8 * 1024 * 1024, `PI_OFFLINE=${offline} retained ${retained} bytes for unused targets`);
+  }
+});
 
 describe('PR links', () => {
 beforeEach(t => {
@@ -385,6 +410,60 @@ describe('PR lookup lifecycle', () => {
     await advance();
     assert.equal(gh.calls.length, 1, 'reload reuses the process registry');
     prs.dispose();
+  });
+  test('fresh no-PR answers throttle revisits, and stale ones refresh once', async () => {
+    const gh = fakeGh(), f = fixture(gh.exec);
+    f.footer.render(140); await advance();
+    await gh.calls[0].answer({ code: 1, stderr: 'no pull requests found' });
+    for (const branch of ['feature', 'other', 'main']) {
+      f.changeBranch(branch); f.footer.render(140);
+    }
+    await advance();
+    assert.equal(gh.calls.length, 1, 'a fresh negative answer is reusable');
+    await advance(60000);
+    for (const branch of ['feature', 'other', 'main']) {
+      f.changeBranch(branch); f.footer.render(140);
+    }
+    await advance();
+    assert.equal(gh.calls.length, 2, 'a stale negative answer gets one lookup');
+    assert.equal(gh.calls[1].args.at(-1), 'main');
+    await gh.calls[1].answer({ code: 1, stderr: 'no pull requests found' });
+    f.footer.dispose();
+  });
+  test('stale PR links remain visible immediately after unused target churn', async () => {
+    const gh = fakeGh(), f = fixture(gh.exec);
+    f.footer.render(140); await advance();
+    await gh.calls[0].answer({ stdout: prJson() });
+    f.changeBranch('feature'); f.footer.render(140);
+    await advance(60000);
+    await gh.calls[1].answer({ code: 1, stderr: 'no pull requests found' });
+    f.changeBranch('other'); f.footer.render(140);
+    f.changeBranch('main');
+    assert.equal(pathRow(f), '/workspace/project (main) #42 • Task');
+    await advance();
+    assert.equal(gh.calls.length, 3);
+    await gh.calls[2].answer({ stdout: prJson({ state: 'MERGED' }) });
+    assert.equal(pathRow(f), '/workspace/project (main) #42 merged • Task');
+    f.footer.dispose();
+  });
+  test('unused target pruning preserves orphaned pending work and another footer listener', async () => {
+    const gh = fakeGh(), first = fixture(gh.exec);
+    first.footer.render(140); await advance();
+    for (const branch of ['feature', 'other', 'detached']) {
+      first.changeBranch(branch); first.footer.render(140);
+    }
+    const shared = fixture(gh.exec, true);
+    shared.footer.render(140); await advance();
+    assert.equal(gh.calls.length, 1, 'an unobserved running lookup remains shared');
+    first.changeBranch('main'); first.footer.render(140);
+    for (const branch of ['feature', 'other', 'detached']) {
+      first.changeBranch(branch); first.footer.render(140);
+    }
+    first.footer.dispose();
+    await gh.calls[0].answer({ stdout: prJson() });
+    assert.equal(pathRow(shared), '/workspace/project (main) #42 • Task');
+    assert.equal(shared.renders(), 1, 'the remaining listener receives completion');
+    shared.footer.dispose();
   });
 });
 

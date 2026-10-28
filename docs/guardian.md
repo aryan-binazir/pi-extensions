@@ -271,6 +271,54 @@ can be compared across sessions. Later read-only tool results are not hashed. Id
 make model verdicts deterministic. Compare the recorded rationale and transcript before attributing
 a disagreement to inconsistent policy.
 
+### Offline approval statistics
+
+From the checkout, read explicit JSONL files or use `-` once for stdin:
+
+```bash
+node --import tsx extensions/guardian/audit-stats.ts approvals.jsonl
+node --import tsx extensions/guardian/audit-stats.ts --json approvals.jsonl other-approvals.jsonl
+node --import tsx extensions/guardian/audit-stats.ts --json - < approvals.jsonl
+```
+
+Nothing is discovered automatically. The input is Pi's actual custom-entry envelope:
+`type: "custom"`, `customType: "guardian-approval-decision"`, and object `data` with `version: 1`.
+Bare payloads are not accepted. Extra fields are tolerated; unsupported or missing versions are
+excluded explicitly. Output contains aggregate counts and static labels only, including on errors.
+
+`records.audit` counts recognized envelopes, including schema exclusions and duplicates;
+`records.distinct` counts retained decisions. Identical canonical audit data with a request ID is
+deduplicated across inputs. Distinct decisions sharing an ID remain separate; missing IDs are
+unkeyed. Request outcome flags overlap, so their sum can exceed the unique-request count.
+Additional decisions can be fallbacks or manual approvals. Runtime retries cannot be measured
+from this schema, and separate request IDs are never collapsed because their actions match.
+
+Timing summaries give valid sample count, exclusions, total and exact nearest-rank p50/p90/p95
+(`ceil(p*n/100)`). Empty percentiles are `null`; totals beyond JavaScript's safe integer range are
+decimal strings. Missing, nonnumeric, nonfinite, negative and noninteger/unsafe durations are
+excluded from timing only. Use `byPhase.auto_review` for reviewer handling and `byPhase.user_prompt`
+for prompt handling; manual approvals and unknown user choices have separate groups. Other
+breakdowns mix phases. Duration sums are recorded handling intervals, not elapsed session time.
+
+Operation classes describe structured write/edit tools or literal command families: Git, package
+manager, Node, network client and filesystem utility. Multiple plain shell commands are `compound`;
+unsupported syntax, wrappers, executable paths and truncated actions are `unknown`. The full recorded
+script is classified, including any command prefix. These categories do not explain escalation
+causes, prove execution or authorize changing permission rules.
+
+The scanner bounds each line to 1 MiB, total admitted input to 64 MiB, retained distinct records to
+100,000 and sources to 128. Module callers can lower these limits. Oversized or malformed lines are
+discarded; exclusions and early stops mark `complete: false`. Exit codes: **0** complete scan,
+**1** usage/I/O/internal error, **2** report produced with exclusions or a resource stop. I/O failures
+also produce an incomplete aggregate when possible. Invalid timings alone do not stop the scan.
+
+For real measurements, select only sessions whose header proves this repository/worktree's cwd;
+directory-name encoding alone is insufficient. Forks may contain inherited entries from another
+cwd, so verify audit provenance too. Extract approval custom-entry metadata locally and send only
+aggregate output to a model. Keep machine-specific results in ignored scratch. Explicit files can
+include abandoned branches, and missing/unsaved decisions or sessions without persistence are absent.
+Small populations limit percentile interpretation. See [ADR 027](adr/027-guardian-offline-audit-stats.md).
+
 ## Understanding sandbox failures
 
 Guardian preserves the original failure and exit status. Failed network requests, and authentication

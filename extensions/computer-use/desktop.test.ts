@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { openSync, fstatSync, closeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { LinuxDesktop } from './native.ts';
 import { DesktopSession, type DesktopBackend } from './desktop.ts';
+
+const fixtureNode = process.env.NATIVE_FIXTURE_NODE ?? process.execPath;
 
 test('desktop serializes operations and does not repeat mutations after transport failure', async () => {
   let active = 0, maximum = 0, calls = 0;
@@ -91,4 +98,170 @@ test('failed mutation retains its unknown-outcome warning when transport close r
       return true;
     });
   } finally { await session.close(); }
+});
+
+for (const ending of ['timeout', 'exited wrapper', 'abort', 'shutdown', 'escaped descendant', 'stderr descendant'] as const) test(`native ${ending} releases inherited pipes, queued work and close`, { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+  const runtime = await mkdtemp(join(tmpdir(), 'pi-native-timeout-'));
+  const pidFile = join(runtime, 'pids');
+  const descendant = join(runtime, 'descendant.cjs');
+  await writeFile(descendant, `
+require('node:fs').appendFileSync(${JSON.stringify(pidFile)}, process.pid + '\\n');
+setInterval(() => {}, 1000);
+setTimeout(() => process.exit(0), 5000);
+`);
+  const lifetime = ending === 'exited wrapper'
+    ? `setInterval(() => { if (require('node:fs').readFileSync(${JSON.stringify(pidFile)}, 'utf8').trim().split('\\n').length === 2) process.exit(0); }, 5);`
+    : 'setInterval(() => {}, 1000); setTimeout(() => process.exit(0), 5000);';
+  const stdio = ending === 'stderr descendant' ? ['ignore', 'ignore', 'inherit'] : 'inherit';
+  await writeFile(join(runtime, 'wtype'), `#!${fixtureNode}
+require('node:fs').appendFileSync(${JSON.stringify(pidFile)}, process.pid + '\\n');
+require('node:child_process').spawn(process.execPath, [${JSON.stringify(descendant)}], {stdio:${JSON.stringify(stdio)}, detached:${ending === 'escaped descendant'}});
+${lifetime}
+`, { mode: 0o755 });
+  const session = new DesktopSession(() => new LinuxDesktop({ PATH: runtime, WAYLAND_DISPLAY: '/synthetic-unused' }), 1000);
+  const pids: number[] = [];
+  const controller = new AbortController();
+  const operation = assert.rejects(session.run({ action: 'type', text: 'synthetic input' }, controller.signal), /outcome may be partial or unknown/);
+  const queued = session.run({ action: 'accessibility' }).then(value => value, error => error);
+  let closing: Promise<void> | undefined;
+  try {
+    await bounded((async () => {
+      for (let attempt = 0; attempt < 150 && pids.length < 2; attempt++) {
+        try { pids.splice(0, pids.length, ...(await readFile(pidFile, 'utf8')).trim().split('\n').map(Number)); } catch {}
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(pids.length, 2, 'owned wrapper and descendant started');
+    })());
+    if (ending === 'abort') controller.abort(new Error('synthetic cancellation'));
+    if (ending === 'shutdown') closing = session.close();
+    await bounded(operation);
+    const inspection = await bounded(queued);
+    if (ending === 'shutdown') assert.match(String(inspection), /session closed/);
+    else assert.equal(inspection.available, false);
+    if (closing) await bounded(closing);
+    await bounded(session.close());
+    for (const [index, pid] of pids.entries()) {
+      if (ending === 'escaped descendant' && index === 1) assert.equal(await ownedProcessAlive(pid), true);
+      else await bounded((async () => { while (await ownedProcessAlive(pid)) await new Promise(resolve => setTimeout(resolve, 10)); })());
+    }
+  } finally {
+    try { pids.splice(0, pids.length, ...(await readFile(pidFile, 'utf8')).trim().split('\n').map(Number)); } catch {}
+    for (const pid of pids) {
+      try { if ((await readFile(`/proc/${pid}/cmdline`, 'utf8')).includes(runtime)) process.kill(pid, 'SIGKILL'); } catch {}
+    }
+    try { await bounded(Promise.allSettled([operation, queued, session.close()])); }
+    finally { await rm(runtime, { recursive: true, force: true }); }
+  }
+});
+
+async function bounded<T>(operation: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try { return await Promise.race([operation, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Native operation did not settle within 2500ms')), 2500); })]); }
+  finally { clearTimeout(timer); }
+}
+
+async function ownedProcessAlive(pid: number): Promise<boolean> {
+  try { const stat = await readFile(`/proc/${pid}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2)[0] !== 'Z'; }
+  catch { return false; }
+}
+
+for (const scenario of ['stdin', 'nonzero', 'exit 127', 'signal', 'unavailable', 'missing interpreter', 'output cap'] as const) test(`native commands preserve ${scenario} behavior`, { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+  const runtime = await mkdtemp(join(tmpdir(), 'pi-native-result-'));
+  const inputFile = join(runtime, 'input');
+  const scripts = {
+    stdin: `const fs = require('node:fs'); const chunks = []; process.stdin.on('data', chunk => chunks.push(chunk)); process.stdin.on('end', () => fs.writeFileSync(${JSON.stringify(inputFile)}, Buffer.concat(chunks)));`,
+    nonzero: 'process.exit(7);',
+    'exit 127': 'process.exit(127);',
+    signal: "process.kill(process.pid, 'SIGKILL');",
+    unavailable: '',
+    'missing interpreter': '',
+    'output cap': `process.stdout.write(Buffer.alloc(17 * 1024 * 1024));`,
+  };
+  if (scenario !== 'unavailable') await writeFile(join(runtime, 'wtype'), scenario === 'missing interpreter' ? '#!/synthetic-missing-interpreter\n' : `#!${fixtureNode}\n${scripts[scenario]}`, { mode: 0o755 });
+  const session = new DesktopSession(() => new LinuxDesktop({ PATH: runtime, WAYLAND_DISPLAY: '/synthetic-unused' }), 5000);
+  const text = 'exact input: héllo\nquotes " $; -- 🏀\tend\n'.repeat(scenario === 'stdin' ? 200 : 1);
+  try {
+    const operation = session.run({ action: 'type', text });
+    if (scenario === 'stdin') {
+      assert.equal((await bounded(operation)).dispatched, true);
+      assert.deepEqual(await readFile(inputFile), Buffer.from(text));
+    } else {
+      const messages = { nonzero: /failed \(7\)/, 'exit 127': /failed \(127\)/, signal: /failed \(null\)/, unavailable: /wtype unavailable; install its documented prerequisite/, 'missing interpreter': /wtype unavailable; install its documented prerequisite/, 'output cap': /output exceeded limit/ };
+      await bounded(assert.rejects(operation, messages[scenario]));
+    }
+    assert.equal((await bounded(session.run({ action: 'accessibility' }))).available, false);
+    await bounded(session.close());
+  } finally {
+    try { await bounded(session.close()); }
+    finally { await rm(runtime, { recursive: true, force: true }); }
+  }
+});
+
+test('native consecutive commands preserve unrelated owned descriptors', { skip: process.platform !== 'linux', timeout: 15000 }, async () => {
+  const runtime = await mkdtemp(join(tmpdir(), 'pi-native-consecutive-'));
+  const descriptors: number[] = [];
+  const session = new DesktopSession(() => new LinuxDesktop({ PATH: runtime, WAYLAND_DISPLAY: '/synthetic-unused' }));
+  try {
+    await writeFile(join(runtime, 'wtype'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    for (let i = 0; i < 100; i++) {
+      assert.equal((await session.run({ action: 'type', text: 'owned input' })).dispatched, true);
+      descriptors.push(openSync('/dev/null', 'r'));
+    }
+    (globalThis as { Bun?: { gc(force: boolean): void } }).Bun?.gc(true);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    for (const descriptor of descriptors) assert.equal(fstatSync(descriptor).isCharacterDevice(), true);
+  } finally {
+    for (const descriptor of descriptors) try { closeSync(descriptor); } catch {}
+    try { await bounded(session.close()); }
+    finally { await rm(runtime, { recursive: true, force: true }); }
+  }
+});
+
+for (const noisy of [false, true]) test(`native commands preserve cwd and environment without loading ${noisy ? 'noisy' : 'silent'} project configuration`, { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+  const runtime = await mkdtemp(join(tmpdir(), 'pi-native-config-'));
+  const marker = join(runtime, 'preloaded'), resultFile = join(runtime, 'result');
+  const originalCwd = process.cwd();
+  const inherited = { SHELLOPTS: 'monitor:errexit:xtrace', TMOUT: '1', 'BASH_FUNC_read%%': '() { return 1; }', 'BASH_FUNC_kill%%': '() { return 0; }', 'BASH_FUNC_printf%%': '() { return 0; }' };
+  const session = new DesktopSession(() => new LinuxDesktop({ PATH: runtime, WAYLAND_DISPLAY: '/synthetic-unused', ...inherited }), 5000);
+  try {
+    await writeFile(join(runtime, 'bunfig.toml'), 'preload = ["./preload.cjs"]\n');
+    await writeFile(join(runtime, '.env'), 'PI_NATIVE_CONFIG_INJECTED=repo-controlled\n');
+    await writeFile(join(runtime, 'preload.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran'); ${noisy ? "process.stderr.write('repo preload\\n');" : ''}`);
+    await writeFile(join(runtime, 'wtype'), `#!${fixtureNode}
+require('node:fs').writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify({ cwd: process.cwd(), injected: process.env.PI_NATIVE_CONFIG_INJECTED, env: Object.fromEntries(${JSON.stringify(Object.keys(inherited))}.map(key => [key, process.env[key]])) }));
+process.stdin.resume();
+`, { mode: 0o755 });
+    process.chdir(runtime);
+    assert.equal((await bounded(session.run({ action: 'type', text: 'owned input' }))).dispatched, true);
+    assert.deepEqual(JSON.parse(await readFile(resultFile, 'utf8')), { cwd: runtime, env: inherited });
+    await assert.rejects(readFile(marker), { code: 'ENOENT' });
+  } finally {
+    process.chdir(originalCwd);
+    try { await bounded(session.close()); }
+    finally { await rm(runtime, { recursive: true, force: true }); }
+  }
+});
+
+test('native success preserves descendants that released command pipes', { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+  const runtime = await mkdtemp(join(tmpdir(), 'pi-native-success-'));
+  const pidFile = join(runtime, 'pid');
+  const descendant = join(runtime, 'descendant.cjs');
+  const session = new DesktopSession(() => new LinuxDesktop({ PATH: runtime, WAYLAND_DISPLAY: '/synthetic-unused' }), 5000);
+  let pid: number | undefined;
+  try {
+    await writeFile(descendant, `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000); setTimeout(() => process.exit(0), 5000);`);
+    await writeFile(join(runtime, 'wtype'), `#!${fixtureNode}
+require('node:child_process').spawn(process.execPath, [${JSON.stringify(descendant)}], { stdio: 'ignore' }).unref();
+setInterval(() => { if (require('node:fs').existsSync(${JSON.stringify(pidFile)})) process.exit(0); }, 5);
+`, { mode: 0o755 });
+    assert.equal((await bounded(session.run({ action: 'type', text: 'owned input' }))).dispatched, true);
+    pid = Number(await readFile(pidFile, 'utf8'));
+    await bounded(session.close());
+    assert.equal(await ownedProcessAlive(pid), true);
+  } finally {
+    try { pid = Number(await readFile(pidFile, 'utf8')); } catch {}
+    if (pid) try { if ((await readFile(`/proc/${pid}/cmdline`, 'utf8')).includes(runtime)) process.kill(pid, 'SIGKILL'); } catch {}
+    try { await bounded(session.close()); }
+    finally { await rm(runtime, { recursive: true, force: true }); }
+  }
 });

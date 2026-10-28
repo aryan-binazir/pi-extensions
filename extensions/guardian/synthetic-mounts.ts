@@ -3,7 +3,7 @@
 // empty `.codex` directory inside a writable workspace, and these are removed once no sandbox still masks them.
 // Guardian shares Codex's registry directory, marker format and lock file, so Guardian and Codex sandboxes running
 // at the same time see each other's placeholders. Codex takes the lock with flock(2); Node cannot, so Guardian has
-// util-linux's flock(1) lock a descriptor it opened, and serializes its own registrations in-process.
+// util-linux's flock(1) lock a descriptor it opened, and retains that descriptor until the critical section finishes.
 import { spawn } from 'node:child_process';
 import { type BigIntStats, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -123,53 +123,72 @@ function writeOwnMarker(markerFile: string): void {
   writeFileSync(markerFile, owners.synthetic > 0 ? SYNTHETIC_MOUNT_MARKER_SYNTHETIC : SYNTHETIC_MOUNT_MARKER_EXISTING);
 }
 
-let inProcess: Promise<unknown> = Promise.resolve();
+const REGISTRATION_TIMEOUT_MS = 10_000;
+const LOCK_RETRY_MS = 25;
 
-/** Runs `critical` under the registry lock: in-process first, then across processes when flock(1) is installed. */
-function withRegistryLock<T>(registryRoot: string, critical: () => T): Promise<T> {
-  const run = async () => {
-    mkdirSync(registryRoot, { recursive: true });
-    const release = await acquireFileLock(join(registryRoot, 'lock'));
-    try {
-      return critical();
-    } finally {
-      release();
-    }
-  };
-  const result = inProcess.then(run, run);
-  inProcess = result.catch(() => {});
-  return result;
+/** Critical sections are synchronous; separate open file descriptions serialize even within this process. */
+async function withRegistryLock<T>(registryRoot: string, critical: () => T, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted();
+  mkdirSync(registryRoot, { recursive: true });
+  const release = await acquireFileLock(join(registryRoot, 'lock'), signal);
+  try {
+    signal?.throwIfAborted();
+    return critical();
+  } finally {
+    release();
+  }
 }
 
 /**
- * Holds flock(2) on `lockPath` until the returned release function runs. flock(1) locks the descriptor it inherits
- * and exits; the lock belongs to the open file, which this process keeps until release closes it. Only that absolute
- * binary runs, with no shell and no PATH lookup, because this happens before any sandbox exists.
+ * flock(1) exits after locking inherited fd 3; the open file description retains the lock until we close it.
  */
-function acquireFileLock(lockPath: string): Promise<() => void> {
+async function acquireFileLock(lockPath: string, signal?: AbortSignal): Promise<() => void> {
   const flock = FLOCK_CANDIDATES.find(path => existsSync(path));
-  if (!flock) return Promise.resolve(() => {});
+  if (!flock) throw new Error('could not lock the synthetic mount registry: flock is unavailable');
   const fd = openSync(lockPath, 'a');
-  return new Promise((resolve, reject) => {
-    const child = spawn(flock, ['--exclusive', '3'], { env: {}, stdio: ['ignore', 'ignore', 'pipe', fd] });
-    let stderr = '', settled = false;
-    child.stderr?.on('data', chunk => { stderr += chunk; });
-    const fail = (message: string) => {
-      if (settled) return;
-      settled = true;
-      closeSync(fd);
-      reject(new Error(`could not lock the synthetic mount registry ${lockPath}: ${message}`));
-    };
-    child.on('error', error => fail(error.message));
-    child.on('close', code => {
-      if (code !== 0) return fail(stderr.trim() || `flock exited ${code}`);
-      settled = true;
-      resolve(() => closeSync(fd));
-    });
-  });
+  let closed = false;
+  const release = () => { if (!closed) { closed = true; closeSync(fd); } };
+  try {
+    for (;;) {
+      signal?.throwIfAborted();
+      const acquired = await new Promise<boolean>((resolve, reject) => {
+        const child = spawn(flock, ['--exclusive', '--nonblock', '3'], { env: {}, stdio: ['ignore', 'ignore', 'pipe', fd] });
+        let stderr = '', failure: Error | undefined;
+        const onAbort = () => { child.kill('SIGKILL'); };
+        const timer = setTimeout(() => { failure = new Error('flock helper timed out'); onAbort(); }, 1_000);
+        child.stderr?.on('data', chunk => { stderr = (stderr + chunk).slice(-4096); });
+        child.once('error', error => { failure = error; });
+        child.once('close', code => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          if (signal?.aborted) return reject(signal.reason);
+          if (failure || (code !== 0 && code !== 1)) {
+            return reject(new Error(`could not lock the synthetic mount registry ${lockPath}: ${failure?.message ?? (stderr.trim() || `flock exited ${code}`)}`));
+          }
+          resolve(code === 0);
+        });
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+      });
+      signal?.throwIfAborted();
+      if (acquired) return release;
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => { clearTimeout(timer); reject(signal?.reason); };
+        const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, LOCK_RETRY_MS);
+        if (!signal) timer.unref();
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+      });
+    }
+  } catch (error) {
+    release();
+    throw error;
+  }
 }
 
-export function registerSyntheticMountTargets(targets: readonly SyntheticMountTarget[], registryRoot = syntheticMountRegistryRoot()): Promise<SyntheticMountRegistration[]> {
+export async function registerSyntheticMountTargets(targets: readonly SyntheticMountTarget[], registryRoot = syntheticMountRegistryRoot(), options: { signal?: AbortSignal } = {}): Promise<SyntheticMountRegistration[]> {
+  const signal = AbortSignal.any([...(options.signal ? [options.signal] : []), AbortSignal.timeout(REGISTRATION_TIMEOUT_MS)]);
+  signal.throwIfAborted();
   if (!targets.length) return Promise.resolve([]);
   return withRegistryLock(registryRoot, () => targets.map(original => {
     const markerDir = join(registryRoot, hashPath(original.path));
@@ -182,20 +201,25 @@ export function registerSyntheticMountTargets(targets: readonly SyntheticMountTa
     ownMarkers.set(markerFile, owners);
     writeOwnMarker(markerFile);
     return { target, markerFile, markerDir };
-  }));
+  }), signal);
 }
+
+const releasedRegistrations = new WeakSet<SyntheticMountRegistration>();
 
 export function cleanupSyntheticMountTargets(registrations: readonly SyntheticMountRegistration[], registryRoot = syntheticMountRegistryRoot()): Promise<void> {
   if (!registrations.length) return Promise.resolve();
   return withRegistryLock(registryRoot, () => {
-    for (const { target, markerFile } of [...registrations].reverse()) {
+    const pending = [...registrations].reverse().filter(registration => !releasedRegistrations.has(registration));
+    for (const registration of pending) {
+      releasedRegistrations.add(registration);
+      const { target, markerFile } = registration;
       const owners = ownMarkers.get(markerFile);
       if (owners) {
         if (target.preExisting) owners.existing--; else owners.synthetic--;
         writeOwnMarker(markerFile);
       }
     }
-    for (const { target, markerDir } of [...registrations].reverse()) {
+    for (const { target, markerDir } of pending) {
       if (markerDirHasActiveProcessMatching(markerDir, () => true)) continue;
       removeSyntheticMountTarget(target);
       try {

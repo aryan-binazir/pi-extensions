@@ -1,17 +1,25 @@
 // Orchestration ported from openai/codex codex-rs/core/src/tools/{orchestrator,sandboxing}.rs and
 // codex-rs/sandboxing/src/denial.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
 import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import { type BashRuntime, createGuardianBashTool } from './bash.ts';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import { Policy, PolicyParser } from './rules.ts';
 import { detectPlatformSandbox, isLikelySandboxDenied, type PlatformSandbox } from './sandbox.ts';
 import { loadShell } from './shell.ts';
+
+const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bash-registry-')));
+const previousTmpdir = process.env.TMPDIR;
+process.env.TMPDIR = registryTemp;
+after(() => {
+  if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+  rmSync(registryTemp, { recursive: true, force: true });
+});
 
 const detected = (await detectPlatformSandbox()).sandbox;
 const sandboxed = { skip: !detected && 'this platform has no usable sandbox' };
@@ -350,4 +358,24 @@ test('sandbox denial heuristic matches Codex keywords, and SIGSYS on Linux', () 
   assert.ok(isLikelySandboxDenied(159, '', 'bubblewrap'));
   assert.ok(!isLikelySandboxDenied(159, '', 'seatbelt'));
   assert.ok(!isLikelySandboxDenied(127, 'command not found', 'bubblewrap'));
+});
+
+
+test('bash timeout covers sandbox preparation before any command launches', async t => {
+  let launched = false;
+  const sandbox: PlatformSandbox = {
+    kind: 'bubblewrap', summary: 'preparation fixture',
+    async spawn(_command, _policy, options) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 250);
+        options.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(options.signal?.reason); }, { once: true });
+      });
+      options.signal?.throwIfAborted();
+      launched = true;
+      return { child: spawn('/bin/true', [], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] }), finished: Promise.resolve() };
+    },
+  };
+  const { run } = setup(t, { sandbox });
+  await assert.rejects(run({ command: 'echo should-not-run', timeout: 0.04 }), /timed out after 0.04 seconds/);
+  assert.equal(launched, false);
 });

@@ -2,15 +2,25 @@
 // docs/licenses/README.md. These run commands under real bubblewrap, so they only run on Linux where it works;
 // tests/suite cases for WSL, split policies, deny-read globs and the managed proxy are omitted with those features.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { runStarted } from './review/process.ts';
-import { detectPlatformSandbox, sandboxEnv } from './sandbox.ts';
+import { bubblewrapSandbox, detectPlatformSandbox, sandboxEnv } from './sandbox.ts';
+import { hashPath, syntheticMountRegistryRoot } from './synthetic-mounts.ts';
 import { syscallNumber } from './seccomp.ts';
 import type { SandboxPolicy } from './seatbelt.ts';
+
+const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-linux-registry-')));
+const previousTmpdir = process.env.TMPDIR;
+process.env.TMPDIR = registryTemp;
+after(() => {
+  if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+  rmSync(registryTemp, { recursive: true, force: true });
+});
 
 const { sandbox } = await detectPlatformSandbox();
 const bubblewrap = { skip: sandbox?.kind !== 'bubblewrap' && 'bubblewrap sandbox prerequisites are unavailable' };
@@ -183,4 +193,112 @@ test('a read-only policy denies writes even in the cwd', bubblewrap, async t => 
   const result = await run(['bash', '-c', 'echo x > file'], { mode: 'read-only', networkAccess: false }, cwd);
   assert.notEqual(result.exitCode, 0);
   assert.equal(existsSync(join(cwd, 'file')), false);
+});
+
+
+function isolatedRegistry(t: test.TestContext): string {
+  const dir = tempDir(t, 'guardian-registry-');
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = dir;
+  t.after(() => { if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous; });
+  return syntheticMountRegistryRoot();
+}
+
+async function holdLock(t: test.TestContext, registry: string) {
+  mkdirSync(registry, { recursive: true });
+  const child = spawn('/usr/bin/flock', ['--exclusive', join(registry, 'lock'), '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  await once(child.stdout, 'data');
+  const closed = once(child, 'close');
+  const release = async () => { child.stdin.end(); await closed; };
+  t.after(release);
+  return release;
+}
+
+test('held registry locks respect cancellation and deadlines before executing, then recover', bubblewrap, async t => {
+  const cwd = tempDir(t), registry = isolatedRegistry(t), marker = join(cwd, 'executed');
+  for (const abort of [true, false]) {
+    const release = await holdLock(t, registry);
+    const controller = new AbortController();
+    const timer = abort ? setTimeout(() => controller.abort(), 50) : undefined;
+    const started = Date.now();
+    const result = await runStarted(signal => sandbox!.spawn(['/bin/sh', '-c', 'printf executed > executed'], workspace(), {
+      cwd, env: process.env, stdin: 'pipe', signal,
+    }), { cwd, signal: controller.signal, timeoutMs: abort ? 1000 : 80, maxBytes: 1000 });
+    clearTimeout(timer);
+    assert.equal(result.aborted, abort);
+    assert.equal(result.timedOut, !abort);
+    assert.equal(result.spawnError, undefined);
+    assert.ok(Date.now() - started < 500);
+    assert.equal(existsSync(marker), false);
+    await release();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(existsSync(marker), false, 'a cancelled preparation cannot launch when the lock becomes available');
+  }
+  const recovered = await run(['/bin/true'], workspace(), cwd);
+  assert.equal(recovered.exitCode, 0);
+  assert.equal(existsSync(join(cwd, '.codex')), false);
+});
+
+test('completion settles under cleanup contention and reconciles without removing another sandbox placeholder', bubblewrap, async t => {
+  const cwd = tempDir(t), registry = isolatedRegistry(t);
+  const started = await sandbox!.spawn(['/bin/sh', '-c', 'printf ready; read -r done'], workspace(), { cwd, env: process.env, stdin: 'pipe' });
+  await once(started.child.stdout, 'data');
+  const release = await holdLock(t, registry);
+  const foreignPath = join(cwd, '.aws'), foreignMarker = join(registry, hashPath(foreignPath), '1');
+  writeFileSync(foreignMarker, 'synthetic\n');
+  started.child.stdin?.end('done\n');
+  const settled = await Promise.race([started.finished.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 2800))]);
+  assert.equal(settled, true, 'cleanup contention cannot hold finished forever');
+  assert.equal(existsSync(join(cwd, '.codex')), true);
+  assert.equal(readFileSync(join(registry, hashPath(join(cwd, '.codex')), String(process.pid)), 'utf8'), 'synthetic\n');
+  await release();
+  for (let attempt = 0; attempt < 100 && existsSync(join(cwd, '.codex')); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(existsSync(join(cwd, '.codex')), false);
+  assert.equal(existsSync(foreignPath), true);
+  assert.equal(readFileSync(foreignMarker, 'utf8'), 'synthetic\n');
+});
+
+test('synchronous launch failure releases registrations and every preparation descriptor', bubblewrap, async t => {
+  const cwd = tempDir(t), registry = isolatedRegistry(t);
+  const before = readdirSync('/proc/self/fd').length;
+  await assert.rejects(sandbox!.spawn(['/bin/true'], workspace(), { cwd, env: { ...process.env, GUARDIAN_INVALID: '\0' }, stdin: 'pipe' }), /null bytes/);
+  assert.deepEqual(readdirSync(registry), ['lock']);
+  assert.ok(readdirSync('/proc/self/fd').length <= before);
+  assert.equal((await run(['/bin/true'], workspace(), cwd)).exitCode, 0);
+});
+
+
+test('a caller can cancel a shared proc preflight without launching its command', bubblewrap, async t => {
+  const cwd = tempDir(t), launcherDir = tempDir(t), registry = isolatedRegistry(t), pidFile = join(launcherDir, 'probe.pid');
+  const launcher = join(launcherDir, 'bwrap');
+  writeFileSync(launcher, `#!/bin/sh
+if [ "$1" = "--help" ]; then printf '%s\n' --as-pid-1 --perms; exit 0; fi
+echo $$ > '${pidFile}'
+exec /bin/sleep 30
+`);
+  chmodSync(launcher, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = launcherDir;
+  let probePid: number | undefined;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (probePid) { try { process.kill(-probePid, 'SIGKILL'); } catch {} }
+  });
+  const fixture = bubblewrapSandbox({ program: launcher, source: 'system' });
+  const startedAt = Date.now();
+  const result = await runStarted(signal => fixture.spawn(['/bin/sh', '-c', 'touch executed'], workspace(), {
+    cwd, env: process.env, stdin: 'pipe', signal,
+  }), { cwd, timeoutMs: 100, maxBytes: 1000 });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.spawnError, undefined);
+  assert.ok(Date.now() - startedAt < 500);
+  assert.equal(existsSync(join(cwd, 'executed')), false);
+  assert.equal(existsSync(registry), false, 'cancelled preflight does not enter registration');
+  probePid = Number(readFileSync(pidFile, 'utf8'));
+  process.kill(-probePid, 'SIGKILL');
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { process.kill(probePid, 0); } catch { probePid = undefined; break; }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(probePid, undefined, 'the fixture probe is reaped during teardown');
 });

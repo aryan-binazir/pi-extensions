@@ -3,7 +3,6 @@
 // (Apache-2.0); see docs/licenses/README.md. Sandboxed commands are spawned directly as
 // `sandbox-exec -- <shell> -c <command>` or `bwrap ... -- <shell> -c <command>`, so no unsandboxed shell runs first.
 // Scripts are evaluated as `bash -lc <command>`, the form Codex parses into command segments.
-import { constants as osConstants } from 'node:os';
 import { type BashOperations, type BashToolDetails, createBashToolDefinition, getShellConfig, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './approvals.ts';
@@ -13,7 +12,7 @@ import { persistableAmendment } from './policies.ts';
 import { DATABASE_FORBIDDEN_REASON, databaseDecision } from './database.ts';
 import { RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
 import type { Policy } from './rules.ts';
-import { killProcessGroup, waitForChildProcess } from './review/process.ts';
+import { runStarted } from './review/process.ts';
 import { isLikelySandboxDenied, type PlatformSandbox } from './sandbox.ts';
 import type { SandboxPolicy } from './seatbelt.ts';
 import type { Shell } from './shell.ts';
@@ -57,27 +56,13 @@ function sandboxedOperations(sandbox: PlatformSandbox, policy: SandboxPolicy, sh
       const shell = getShellConfig(shellPath);
       const argv = [shell.shell, ...shell.args, command];
       if (argv.some(argument => argument.includes('\0'))) throw new Error('This command cannot be run in the sandbox: it contains a NUL byte.');
-      const { child, finished } = await sandbox.spawn(argv, policy, { cwd, env: env ?? process.env, stdin: 'ignore' });
-      return new Promise((settled, reject) => {
-        let timedOut = false;
-        const onAbort = () => killProcessGroup(child);
-        const timer = timeout !== undefined && timeout > 0 ? setTimeout(() => { timedOut = true; killProcessGroup(child); }, timeout * 1000) : undefined;
-        signal?.addEventListener('abort', onAbort, { once: true });
-        child.stdout.on('data', onData);
-        child.stderr.on('data', onData);
-        const finish = (complete: () => void) => {
-          if (timer) clearTimeout(timer);
-          signal?.removeEventListener('abort', onAbort);
-          void finished.then(complete);
-        };
-        if (signal?.aborted) onAbort();
-        waitForChildProcess(child).then(() => finish(() => {
-          if (signal?.aborted) return reject(new Error('aborted'));
-          if (timedOut) return reject(new Error(`timeout:${timeout}`));
-          const { exitCode: code, signalCode } = child;
-          settled({ exitCode: code ?? (signalCode ? 128 + (osConstants.signals[signalCode] ?? 0) : null) });
-        }), error => finish(() => reject(error)));
+      const result = await runStarted(signal => sandbox.spawn(argv, policy, { cwd, env: env ?? process.env, stdin: 'ignore', signal }), {
+        cwd, signal, timeoutMs: timeout !== undefined && timeout > 0 ? timeout * 1000 : Infinity, maxBytes: 0, onData,
       });
+      if (result.aborted) throw new Error('aborted');
+      if (result.timedOut) throw new Error(`timeout:${timeout}`);
+      if (result.spawnError) throw new Error(result.spawnError);
+      return { exitCode: result.exitCode };
     },
   };
 }

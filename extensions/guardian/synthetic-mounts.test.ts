@@ -1,6 +1,8 @@
 // Ported from openai/codex codex-rs/linux-sandbox/src/linux_run_main_tests.rs @ ce0323f (Apache-2.0); see
 // docs/licenses/README.md. Each test uses its own registry root instead of the shared one.
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -127,4 +129,96 @@ test('a symlinked registry root is rejected', t => {
   mkdirSync(join(dir, 'elsewhere'));
   symlinkSync(join(dir, 'elsewhere'), root);
   assert.throws(() => syntheticMountRegistryRoot({ TMPDIR: dir }), /must not be a symlink/);
+});
+
+async function holdRegistryLock(t: test.TestContext, registry: string) {
+  mkdirSync(registry, { recursive: true });
+  const child = spawn('/usr/bin/flock', ['--exclusive', join(registry, 'lock'), '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  await once(child.stdout, 'data');
+  const closed = once(child, 'close');
+  const release = async () => { child.stdin.end(); await closed; };
+  t.after(release);
+  return release;
+}
+
+test('held-lock deadlines and queued cancellation settle without entering registration, then recover', async t => {
+  const dir = tempDir(t), registry = join(dir, 'registry');
+  const before = readdirSync('/proc/self/fd').length;
+  const release = await holdRegistryLock(t, registry);
+  const target = missingTarget(join(dir, '.codex'), 'empty-directory');
+  const controller = new AbortController();
+  const first = registerSyntheticMountTargets([target], registry, { signal: AbortSignal.timeout(80) });
+  const queued = registerSyntheticMountTargets([target], registry, { signal: controller.signal });
+  const checks = Promise.all([assert.rejects(first, /deadline|timeout|aborted/i), assert.rejects(queued, /abort/)]);
+  controller.abort();
+  const outcome = await Promise.race([checks.then(() => 'bounded'), new Promise<string>(resolve => setTimeout(() => resolve('hung'), 400))]);
+  await release();
+  await checks;
+  assert.equal(outcome, 'bounded');
+  assert.deepEqual(readdirSync(registry), ['lock'], 'cancelled operations never register after acquisition');
+  const recovered = await registerSyntheticMountTargets([target], registry);
+  await cleanupSyntheticMountTargets(recovered, registry);
+  assert.ok(readdirSync('/proc/self/fd').length <= before, 'all abandoned lock descriptors are closed');
+});
+
+test('cleanup is idempotent and cannot consume another registration ownership', async t => {
+  const dir = tempDir(t), registry = join(dir, 'registry'), path = join(dir, '.codex');
+  const first = await registerSyntheticMountTargets([missingTarget(path, 'empty-directory')], registry);
+  mkdirSync(path);
+  const second = await registerSyntheticMountTargets([existingTarget(path, 'empty-directory', lstatSync(path, { bigint: true }))], registry);
+  await cleanupSyntheticMountTargets(first, registry);
+  await cleanupSyntheticMountTargets(first, registry);
+  assert.equal(existsSync(path), true);
+  await cleanupSyntheticMountTargets(second, registry);
+  assert.equal(existsSync(path), false);
+  mkdirSync(path);
+  await cleanupSyntheticMountTargets(first, registry);
+  assert.equal(existsSync(path), true, 'a repeated cleanup cannot remove a replacement');
+});
+
+test('contended cleanup retains ownership and another sandbox until locked reconciliation', async t => {
+  const dir = tempDir(t), registry = join(dir, 'registry'), path = join(dir, '.codex'), shared = join(dir, '.agents');
+  const registrations = await registerSyntheticMountTargets([
+    missingTarget(path, 'empty-directory'), missingTarget(shared, 'empty-directory'),
+  ], registry);
+  mkdirSync(path);
+  mkdirSync(shared);
+  const foreignMarker = join(registrations[1].markerDir, '1');
+  writeFileSync(foreignMarker, 'synthetic\n');
+  const release = await holdRegistryLock(t, registry);
+  let complete = false;
+  const cleanup = cleanupSyntheticMountTargets(registrations, registry).then(() => { complete = true; });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(complete, false);
+  assert.equal(readFileSync(registrations[0].markerFile, 'utf8'), 'synthetic\n');
+  assert.equal(existsSync(path), true);
+  await release();
+  await cleanup;
+  assert.equal(existsSync(path), false);
+  assert.equal(existsSync(shared), true);
+  assert.equal(readFileSync(foreignMarker, 'utf8'), 'synthetic\n');
+});
+
+test('abort and lock-acquisition races neither leak descriptors nor leave cancelled markers', async t => {
+  const dir = tempDir(t), registry = join(dir, 'registry'), path = join(dir, '.codex');
+  const before = readdirSync('/proc/self/fd').length;
+  let acquired = 0, cancelled = 0;
+  for (let index = 0; index < 30; index++) {
+    const release = await holdRegistryLock(t, registry);
+    const controller = new AbortController();
+    const pending = registerSyntheticMountTargets([missingTarget(path, 'empty-directory')], registry, { signal: controller.signal });
+    const result = pending.then(registrations => ({ registrations }), () => ({ registrations: undefined }));
+    const released = release();
+    if (index % 3) await new Promise(resolve => setTimeout(resolve, index % 3 === 2 ? 40 : 1));
+    controller.abort();
+    await released;
+    const { registrations } = await result;
+    if (registrations) { acquired++; await cleanupSyntheticMountTargets(registrations, registry); }
+    else { cancelled++; assert.equal(existsSync(join(registry, hashPath(path), String(process.pid))), false); }
+  }
+  const recovered = await registerSyntheticMountTargets([missingTarget(path, 'empty-directory')], registry);
+  await cleanupSyntheticMountTargets(recovered, registry);
+  assert.ok(readdirSync('/proc/self/fd').length <= before);
+  assert.equal(readFileSync(`/proc/self/task/${process.pid}/children`, 'utf8').trim(), '', 'all lock helpers have been reaped');
+  assert.ok(acquired > 0 && cancelled > 0, 'exercise both sides of the acquisition race');
 });

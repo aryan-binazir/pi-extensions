@@ -1,4 +1,3 @@
-// Runs reviewer subprocesses with bounded output and whole-process-group cleanup.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
 import type { SandboxedProcess } from '../sandbox.ts';
@@ -56,9 +55,9 @@ export interface BoundedRunOptions {
   timeoutMs: number;
   /** Bytes kept per stream: half from the start, half from the end. */
   maxBytes: number;
+  onData?: (chunk: Buffer) => void;
 }
 
-/** Keeps the first and last halves of a stream so a runaway command cannot exhaust memory. */
 class HeadTail {
   private head = Buffer.alloc(0);
   private tail: Buffer[] = [];
@@ -68,6 +67,7 @@ class HeadTail {
   constructor(private readonly half: number) {}
 
   push(chunk: Buffer): void {
+    if (this.half <= 0) return;
     if (this.head.length < this.half) {
       const take = Math.min(this.half - this.head.length, chunk.length);
       this.head = Buffer.concat([this.head, chunk.subarray(0, take)]);
@@ -101,33 +101,66 @@ export function runBounded(command: string, args: readonly string[], options: Bo
   }, options);
 }
 
-/** Like runBounded, for a process started in its own group with piped stdio, such as a sandboxed one. */
-export async function runStarted(start: () => Promise<SandboxedProcess>, options: Omit<BoundedRunOptions, 'env'>): Promise<BoundedRun> {
-  let started: SandboxedProcess;
+export function raceAbort<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => { signal.removeEventListener('abort', onAbort); reject(signal.reason); };
+    value.then(result => { signal.removeEventListener('abort', onAbort); resolve(result); },
+      error => { signal.removeEventListener('abort', onAbort); reject(error); });
+    if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** One timer-backed deadline covers preparation, execution, and completion cleanup. */
+export async function runStarted(start: (signal: AbortSignal) => Promise<SandboxedProcess>, options: Omit<BoundedRunOptions, 'env'>): Promise<BoundedRun> {
+  const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  const stdout = new HeadTail(options.maxBytes / 2), stderr = new HeadTail(options.maxBytes / 2);
+  let timedOut = false, spawnError: string | undefined, exitCode: number | null = null;
+  let started: SandboxedProcess | undefined;
+  const timer = Number.isFinite(options.timeoutMs)
+    ? setTimeout(() => { timedOut = true; controller.abort(new Error('command deadline exceeded')); }, Math.max(0, options.timeoutMs))
+    : undefined;
+  const starting = Promise.resolve().then(() => { signal.throwIfAborted(); return start(signal); });
+  const stop = () => {
+    if (!started) return;
+    killProcessGroup(started.child);
+    started.child.stdin?.destroy();
+    started.child.stdout.destroy();
+    started.child.stderr.destroy();
+  };
+  signal.addEventListener('abort', stop, { once: true });
   try {
-    started = await start();
-  } catch (error) {
-    return { exitCode: null, stdout: '', stderr: '', timedOut: false, aborted: false, spawnError: (error as Error).message };
-  }
-  const { child, finished } = started;
-  return new Promise(resolve => {
-    const stdout = new HeadTail(options.maxBytes / 2), stderr = new HeadTail(options.maxBytes / 2);
-    let timedOut = false, aborted = false, settled = false;
-    const finish = (exitCode: number | null, spawnError?: string) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      options.signal?.removeEventListener('abort', onAbort);
-      void finished.then(() => resolve({ exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut, aborted, ...(spawnError ? { spawnError } : {}) }));
-    };
-    const onAbort = () => { aborted = true; killProcessGroup(child); };
-    const timer = setTimeout(() => { timedOut = true; killProcessGroup(child); }, Math.max(0, options.timeoutMs));
-    if (options.signal?.aborted) onAbort(); else options.signal?.addEventListener('abort', onAbort, { once: true });
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    started = await raceAbort(starting, signal);
+    const { child, finished } = started;
+    child.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); options.onData?.(chunk); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); options.onData?.(chunk); });
     child.stdin?.on('error', () => {});
     child.stdin?.end(options.stdin ?? '');
-    waitForChildProcess(child).then(() => finish(child.exitCode ?? (child.signalCode ? 128 + (osConstants.signals[child.signalCode] ?? 0) : null)),
-      error => finish(null, (error as Error).message));
-  });
+    const reaped = waitForChildProcess(child);
+    try {
+      if (signal.aborted) stop();
+      await raceAbort(reaped, signal);
+    } finally {
+      if (signal.aborted) { stop(); await reaped.catch(() => {}); }
+      exitCode = child.exitCode ?? (child.signalCode ? 128 + (osConstants.signals[child.signalCode] ?? 0) : null);
+    }
+    await raceAbort(finished, signal);
+  } catch (error) {
+    if (!signal.aborted) spawnError = (error as Error).message;
+    if (!started) {
+      void starting.then(late => {
+        const reaped = waitForChildProcess(late.child).catch(() => {});
+        killProcessGroup(late.child);
+        late.child.stdin?.destroy();
+        late.child.stdout.destroy();
+        late.child.stderr.destroy();
+        void reaped;
+        void late.finished.catch(() => {});
+      }, () => {});
+    }
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', stop);
+  }
+  return { exitCode, stdout: stdout.text(), stderr: stderr.text(), timedOut, aborted: options.signal?.aborted ?? false, ...(spawnError ? { spawnError } : {}) };
 }

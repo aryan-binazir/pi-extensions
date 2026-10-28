@@ -119,7 +119,7 @@ function linkReason(path: string, resolved: string): string | undefined {
  */
 export async function sandboxedWrite(path: string, content: string, config: GuardianConfig, cwd: string, sandbox: PlatformSandbox): Promise<void> {
   const script = 'mkdir -p "$1" && cat > "$2"';
-  const run = await runStarted(() => sandbox.spawn(['/bin/sh', '-c', script, 'sh', dirname(path), path], sandboxPolicyFor(config), { cwd, env: process.env, stdin: 'pipe' }), {
+  const run = await runStarted(signal => sandbox.spawn(['/bin/sh', '-c', script, 'sh', dirname(path), path], sandboxPolicyFor(config), { cwd, env: process.env, stdin: 'pipe', signal }), {
     cwd, stdin: content, timeoutMs: SANDBOXED_WRITE_TIMEOUT_MS, maxBytes: 16 * 1024,
   });
   if (run.spawnError) throw new Error(`Could not write ${path} in the sandbox: ${run.spawnError}`);

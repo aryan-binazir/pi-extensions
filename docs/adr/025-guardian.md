@@ -50,7 +50,9 @@ registry rather than a catalog entry.
   each fails. Guardian treats that as having no sandbox and reviews every command.
 - Codex probes `/proc` mounting before every command; Guardian probes once per bubblewrap and network
   mode. Codex locks its placeholder registry with flock(2); Guardian shares that registry and lock
-  through util-linux's flock(1), serializing its own registrations in-process.
+  through nonblocking util-linux flock(1) attempts; the open file description holds the lock through each
+  synchronous registration or cleanup. Cancellation and the command deadline cover preparation as well as
+  execution; contended cleanup retains its markers and continues after a bounded caller wait.
 - Not ported on Linux: WSL interop masks, deny-read globs, Codex's app-server socket masks, the
   proxy-routed network mode, and the legacy Landlock pipeline.
 - Network is all or nothing; there is no managed proxy or per-host approval.

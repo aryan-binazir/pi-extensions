@@ -100,7 +100,7 @@ test('failed mutation retains its unknown-outcome warning when transport close r
   } finally { await session.close(); }
 });
 
-for (const ending of ['timeout', 'exited wrapper', 'abort', 'shutdown', 'escaped descendant', 'stderr descendant', 'shell environment'] as const) test(`native ${ending} releases inherited pipes, queued work and close`, { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+for (const ending of ['timeout', 'exited wrapper', 'abort', 'shutdown', 'escaped descendant', 'stderr descendant'] as const) test(`native ${ending} releases inherited pipes, queued work and close`, { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
   const runtime = await mkdtemp(join(tmpdir(), 'pi-native-timeout-'));
   const pidFile = join(runtime, 'pids');
   const descendant = join(runtime, 'descendant.cjs');
@@ -118,8 +118,7 @@ require('node:fs').appendFileSync(${JSON.stringify(pidFile)}, process.pid + '\\n
 require('node:child_process').spawn(process.execPath, [${JSON.stringify(descendant)}], {stdio:${JSON.stringify(stdio)}, detached:${ending === 'escaped descendant'}});
 ${lifetime}
 `, { mode: 0o755 });
-  const inherited = ending === 'shell environment' ? { SHELLOPTS: 'monitor:errexit:xtrace', TMOUT: '1', 'BASH_FUNC_read%%': '() { return 1; }', 'BASH_FUNC_kill%%': '() { return 0; }', 'BASH_FUNC_printf%%': '() { return 0; }' } : {};
-  const session = new DesktopSession(() => new LinuxDesktop({ PATH: runtime, WAYLAND_DISPLAY: '/synthetic-unused', ...inherited }), 1000);
+  const session = new DesktopSession(() => new LinuxDesktop({ PATH: runtime, WAYLAND_DISPLAY: '/synthetic-unused' }), 1000);
   const pids: number[] = [];
   const controller = new AbortController();
   const operation = assert.rejects(session.run({ action: 'type', text: 'synthetic input' }, controller.signal), /outcome may be partial or unknown/);
@@ -218,16 +217,26 @@ test('native consecutive commands preserve unrelated owned descriptors', { skip:
   }
 });
 
-test('native normal completion ignores shell reader timeouts and exported functions', { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
-  const runtime = await mkdtemp(join(tmpdir(), 'pi-native-environment-'));
-  const marker = join(runtime, 'overridden');
-  const exported = `() { /bin/echo overridden >> ${marker}; return 0; }`;
-  const session = new DesktopSession(() => new LinuxDesktop({ PATH: runtime, WAYLAND_DISPLAY: '/synthetic-unused', SHELLOPTS: 'monitor:errexit:xtrace', TMOUT: '1', 'BASH_FUNC_read%%': exported, 'BASH_FUNC_kill%%': exported, 'BASH_FUNC_printf%%': exported }), 5000);
+for (const noisy of [false, true]) test(`native commands preserve cwd and environment without loading ${noisy ? 'noisy' : 'silent'} project configuration`, { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+  const runtime = await mkdtemp(join(tmpdir(), 'pi-native-config-'));
+  const marker = join(runtime, 'preloaded'), resultFile = join(runtime, 'result');
+  const originalCwd = process.cwd();
+  const inherited = { SHELLOPTS: 'monitor:errexit:xtrace', TMOUT: '1', 'BASH_FUNC_read%%': '() { return 1; }', 'BASH_FUNC_kill%%': '() { return 0; }', 'BASH_FUNC_printf%%': '() { return 0; }' };
+  const session = new DesktopSession(() => new LinuxDesktop({ PATH: runtime, WAYLAND_DISPLAY: '/synthetic-unused', ...inherited }), 5000);
   try {
-    await writeFile(join(runtime, 'wtype'), `#!${fixtureNode}\nprocess.stdin.resume(); setTimeout(() => {}, 1200);`, { mode: 0o755 });
+    await writeFile(join(runtime, 'bunfig.toml'), 'preload = ["./preload.cjs"]\n');
+    await writeFile(join(runtime, '.env'), 'PI_NATIVE_CONFIG_INJECTED=repo-controlled\n');
+    await writeFile(join(runtime, 'preload.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran'); ${noisy ? "process.stderr.write('repo preload\\n');" : ''}`);
+    await writeFile(join(runtime, 'wtype'), `#!${fixtureNode}
+require('node:fs').writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify({ cwd: process.cwd(), injected: process.env.PI_NATIVE_CONFIG_INJECTED, env: Object.fromEntries(${JSON.stringify(Object.keys(inherited))}.map(key => [key, process.env[key]])) }));
+process.stdin.resume();
+`, { mode: 0o755 });
+    process.chdir(runtime);
     assert.equal((await bounded(session.run({ action: 'type', text: 'owned input' }))).dispatched, true);
+    assert.deepEqual(JSON.parse(await readFile(resultFile, 'utf8')), { cwd: runtime, env: inherited });
     await assert.rejects(readFile(marker), { code: 'ENOENT' });
   } finally {
+    process.chdir(originalCwd);
     try { await bounded(session.close()); }
     finally { await rm(runtime, { recursive: true, force: true }); }
   }

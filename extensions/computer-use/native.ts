@@ -19,10 +19,10 @@ const receive = chunk => {
   const end = request.indexOf('\n');
   if (end < 0) return;
   process.stdin.removeListener('data', receive);
-  const { command, args, input, bun } = JSON.parse(request.slice(0, end));
+  const { command, args, input, bun, cwd } = JSON.parse(request.slice(0, end));
   if (bun === null) delete process.env.BUN_BE_BUN;
   else process.env.BUN_BE_BUN = bun;
-  const child = spawn(command, args, { stdio: 'pipe' });
+  const child = spawn(command, args, { cwd, stdio: 'pipe' });
   let error;
   child.on('error', failure => { error = { message: failure.message, code: failure.code, errno: failure.errno, syscall: failure.syscall, path: failure.path, spawnargs: failure.spawnargs }; });
   child.stdout.on('data', chunk => { for (let offset = 0; offset < chunk.length;) offset += writeSync(1, chunk, offset, chunk.length - offset); });
@@ -55,7 +55,7 @@ export class LinuxDesktop implements DesktopBackend {
     signal.throwIfAborted();
     return new Promise((resolve, reject) => {
       const env = this.environment();
-      const child = spawn(process.execPath, ['-e', commandOwner], { env: { ...env, BUN_BE_BUN: '1' }, detached: true, stdio: 'pipe' });
+      const child = spawn(process.execPath, ['-e', commandOwner], { cwd: '/', env: { ...env, BUN_BE_BUN: '1' }, detached: true, stdio: 'pipe' });
       const chunks: Buffer[] = []; let size = 0; let failure: Error | undefined;
       let drain: NodeJS.Timeout | undefined;
       let reaped!: () => void;
@@ -87,7 +87,7 @@ export class LinuxDesktop implements DesktopBackend {
         else if (!result || result.code !== 0) reject(new Error(`Desktop runtime ${command} failed (${result?.code ?? null}); check compositor support and session permissions`));
         else resolve(Buffer.concat(chunks));
       });
-      child.stdin.write(JSON.stringify({ command, args, input, bun: env.BUN_BE_BUN ?? null }) + '\n');
+      child.stdin.write(JSON.stringify({ command, args, input, bun: env.BUN_BE_BUN ?? null, cwd: process.cwd() }) + '\n');
       if (signal.aborted) abort();
     });
   }

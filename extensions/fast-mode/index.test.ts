@@ -305,10 +305,10 @@ test('a resumed session restores the saved fast alias even when the command line
  assert.equal(selected,'gpt-5.5~fast');
 });
 
-test('/fast on a model outside the OpenAI Responses paths reports unavailable and changes nothing',async()=>{
+test('/fast on an unsupported provider path reports unavailable and changes nothing',async()=>{
  const runtime=await ModelRuntime.create({modelsPath:null,credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
  const registry=new ModelRegistry(runtime);
- const base=registry.getAll().find(model=>model.provider==='anthropic')!;
+ const base=registry.getAll().find(model=>model.provider==='google')!;
  let selections=0;const notices:[string,string][]=[];let command:any;
  const ctx:any={model:base,modelRegistry:registry,ui:{notify:(message:string,level:string)=>notices.push([message,level])}};
  fastMode({registerProvider:(provider:any)=>runtime.registerNativeProvider(provider),on(){},registerCommand:(_name:string,entry:any)=>{command=entry;},getThinkingLevel:()=>'low',setThinkingLevel(){},setModel:async()=>{selections++;return true;}} as any);

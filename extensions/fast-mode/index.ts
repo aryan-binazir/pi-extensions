@@ -8,7 +8,7 @@ type ModelChange=Extract<BranchEntry,{type:'model_change'}>;
 const same=(a:{provider:string;id:string},b?:{provider:string;id:string})=>a.provider===b?.provider&&a.id===b.id;
 export default function fastMode(pi:ExtensionAPI):void {
  const install=(ctx:ExtensionContext)=>{
-  for(const id of ['openai','openai-codex']) {
+  for(const id of ['openai','openai-codex','anthropic']) {
    // Native registration replaces legacy config, including another extension's endpoint and auth.
    if(ctx.modelRegistry.getRegisteredProviderConfig(id))continue;
    const view=ctx.modelRegistry.getProvider(id);
@@ -51,7 +51,7 @@ export default function fastMode(pi:ExtensionAPI):void {
   if(await pi.setModel(restored))pi.setThinkingLevel(effort);
  });
  pi.registerCommand('fast',{
-  description:'Toggle priority processing on supported OpenAI models; entitlement and speed are not guaranteed',
+  description:'Request fast processing on direct OpenAI or Anthropic models; availability depends on the provider',
   async handler(args,ctx){
    if(args.trim() && !['on','off'].includes(args.trim())){ctx.ui.notify('Usage: /fast [on|off]','error');return;}
    install(ctx);

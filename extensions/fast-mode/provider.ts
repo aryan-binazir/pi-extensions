@@ -1,5 +1,45 @@
-import { lazyStream, type Api, type Model, type Provider } from '@earendil-works/pi-ai';
+import { lazyStream, type Api, type Model, type Provider, type StreamOptions } from '@earendil-works/pi-ai';
 type SimpleOptions=Parameters<Provider['streamSimple']>[2];
+function anthropicFast(original:Provider,model:Model<Api>,context:Parameters<Provider['stream']>[1],options:StreamOptions|undefined,simple:boolean) {
+ let fast=true;
+ return lazyStream(model,async()=>{
+  const source=original[simple?'streamSimple':'stream'](model,context,{
+   ...options,
+   async onPayload(payload,current) {
+    const request:Record<string,unknown>={...payload as Record<string,unknown>,speed:'fast'};
+    if(/^claude-opus-(?:4-8|5)(?:-\d{8})?$/.test(model.id)) {
+     const betas=Array.isArray(request.betas)?request.betas:[];
+     request.betas=[...new Set([...betas,'fast-mode-2026-02-01'])];
+    }
+    const replacement=await options?.onPayload?.(request,current);
+    const effective=replacement===undefined?request:replacement;
+    fast=!!effective && typeof effective==='object' && 'speed' in effective && effective.speed==='fast';
+    return effective;
+   },
+   async onProviderStreamEvent(data,current) {
+    if(data && typeof data==='object') {
+     const message='message' in data?data.message:data;
+     const usage=message && typeof message==='object' && 'usage' in message?message.usage:undefined;
+     if(usage && typeof usage==='object' && 'speed' in usage) {
+      if(usage.speed==='fast'||usage.speed==='standard')fast=usage.speed==='fast';
+     }
+    }
+    await options?.onProviderStreamEvent?.(data,current);
+   },
+  });
+  return {
+   async *[Symbol.asyncIterator]() {
+    for await(const event of source) {
+     if(fast && (event.type==='done'||event.type==='error')) {
+      const cost=(event.type==='done'?event.message:event.error).usage.cost;
+      for(const key of ['input','output','cacheRead','cacheWrite','total'] as const)cost[key]*=2;
+     }
+     yield event;
+    }
+   },
+  };
+ });
+}
 function prioritySimple(original:Provider,model:Model<Api>,context:Parameters<Provider['streamSimple']>[1],options:SimpleOptions) {
  let reportedTier=false;
  return lazyStream(model,async()=>{
@@ -41,7 +81,8 @@ function eligibility(model:Model<Api>):boolean {
  try {
   const origin=new URL(model.baseUrl).origin;
   return (model.provider==='openai' && model.api==='openai-responses' && origin==='https://api.openai.com') ||
-   (model.provider==='openai-codex' && model.api==='openai-codex-responses' && origin==='https://chatgpt.com');
+   (model.provider==='openai-codex' && model.api==='openai-codex-responses' && origin==='https://chatgpt.com') ||
+   (model.provider==='anthropic' && model.api==='anthropic-messages' && origin==='https://api.anthropic.com' && model.id.startsWith('claude-'));
  } catch {return false;}
 }
 const supportedCache=new WeakMap<Model<Api>,boolean>();
@@ -89,10 +130,15 @@ export function withFastModels(original:Provider,view:Provider=original):Catalog
    const withoutAliases=models.filter(model=>!model.id.endsWith(FAST_SUFFIX));
    return aliases(original.filterModels!(withoutAliases,credential));
   }:undefined,
-  stream(model,context,options){const resolved=resolve(model);return original.stream(resolved.model,context,resolved.fast?{...options,serviceTier:'priority'}:options);},
+  stream(model,context,options){
+   const resolved=resolve(model);
+   if(resolved.fast && resolved.model.api==='anthropic-messages')return anthropicFast(original,resolved.model,context,options,false);
+   return original.stream(resolved.model,context,resolved.fast?{...options,serviceTier:'priority'}:options);
+  },
   streamSimple(model,context,options){
    const resolved=resolve(model);
    if(!resolved.fast)return original.streamSimple(model,context,options);
+   if(resolved.model.api==='anthropic-messages')return anthropicFast(original,resolved.model,context,options,true);
    return prioritySimple(original,resolved.model,context,options);
   },
  };

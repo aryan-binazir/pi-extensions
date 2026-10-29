@@ -41,7 +41,6 @@ export interface GuardianConfig {
   sandbox: { mode: SandboxMode; networkAccess: boolean; writableRoots: string[]; excludeTmpdirEnvVar: boolean; excludeSlashTmp: boolean };
 }
 
-/** Host execution reviewed by Luna at low effort. */
 export const DEFAULT_GUARDIAN_CONFIG: GuardianConfig = {
   enabled: true,
   approvalPolicy: 'on-request',
@@ -181,7 +180,6 @@ export function reviewerLabel(reviewer: Pick<ReviewerModel, 'provider' | 'model'
 /** The footer's top-right indicator. */
 export function guardianStatusText(config: GuardianConfig, sandboxAvailable: boolean): string {
   if (!config.enabled) return 'Auto: off';
-  // Codex sends only on-request approvals to the reviewer model; `untrusted` asks you, and `never` asks no one.
   const reviewer = config.approvalPolicy === 'never' ? 'no approvals'
     : config.approvalsReviewer === 'user' || config.approvalPolicy !== 'on-request' ? 'you review'
       : `${reviewerLabel(config.reviewer)} ${sanitizeTerminalLabel(config.reviewer.reasoning)}`;

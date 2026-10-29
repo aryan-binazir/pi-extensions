@@ -85,7 +85,6 @@ test('the boundary holds through the bash tool in every mode, before any review'
   const { Policy, PolicyParser } = await import('./rules.ts');
   const cwd = mkdtempSync(join(tmpdir(), 'guardian-railway-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
-  // An allow rule for railway, the most permissive user configuration possible.
   const parser = new PolicyParser();
   parser.parse('user.rules', 'prefix_rule(pattern=["railway"], decision="allow")\nprefix_rule(pattern=["npx"], decision="allow")');
   const policy = parser.build();

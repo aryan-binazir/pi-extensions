@@ -128,8 +128,6 @@ export async function prepareTask(spec: TaskSpec, selectTools: (task: TaskSpec) 
     if (!(await stat(canonical)).isFile()) throw new Error('Extension must be a file');
     extensions.push(canonical);
   }
-  // Children must carry the parent's protections: hooks block configured calls, and Guardian, when the parent runs
-  // it, keeps their commands and file changes under the same execution mode, rules and review.
   const mandatory = async (path: string, name: string) => {
     try {
       const resolved = await realpath(path);

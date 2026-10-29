@@ -45,7 +45,6 @@ function setup(t: test.TestContext, options: { rules?: string; config?: Partial<
   const decisions = [...(options.decisions ?? [])];
   const config: GuardianConfig = {
     ...WORKSPACE_CONFIG, ...options.config,
-    // Keep the scratch directory outside the sandbox's writable roots.
     sandbox: { ...WORKSPACE_CONFIG.sandbox, excludeSlashTmp: true, excludeTmpdirEnvVar: true, ...options.config?.sandbox },
   };
   const runtime: BashRuntime = {

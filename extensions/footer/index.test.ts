@@ -19,7 +19,6 @@ const guardian = (path = GUARDIAN_INDEX): ReturnType<ExtensionAPI['getCommands']
   sourceInfo: { path, source: 'local', scope: 'user', origin: 'top-level' } }];
 const off = { enabled: false };
 
-/** A temporary agent directory holding Guardian's config; `on` is the status its defaults render on this machine. */
 async function fixture(t: TestContext, initial?: object) {
   const agentDir = await mkdtemp(join(tmpdir(), 'pi-guardian-status-'));
   const previous = process.env.PI_CODING_AGENT_DIR;

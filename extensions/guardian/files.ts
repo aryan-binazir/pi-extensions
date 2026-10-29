@@ -137,10 +137,6 @@ export interface FileRuntime {
   approvals: { request(request: ApprovalRequest, ctx: ApprovalContext, signal?: AbortSignal): Promise<ApprovalDecision> };
 }
 
-/**
- * Assesses every mutation of one tool call, and asks you at most once: a tool call is one logical change, so
- * creating the parent directory and writing the file share a decision, as one Codex patch does.
- */
 function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, cwd: string, ctx: ApprovalContext, signal: AbortSignal | undefined): Gate {
   let approval: Promise<void> | undefined;
   return async (path: string): Promise<Mutation> => {
@@ -158,7 +154,6 @@ function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, 
         if (decision.type !== 'approved') throw new Error(decision.message);
       })());
     }
-    // Approval can take a while; a call cancelled meanwhile must not mutate anything.
     if (signal?.aborted) throw new Error('Operation aborted');
     if (safety === 'ask_user' && canonicalTarget(resolved) !== resolved) throw new Error('File target changed during approval; retry the change');
     const sandbox = safety === 'auto_approve' && config.enabled && config.sandbox.mode !== 'danger-full-access' ? runtime.sandbox : undefined;

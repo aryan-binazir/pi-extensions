@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { LinuxDesktop } from './native.ts';
 import { DesktopSession } from './desktop.ts';
 
 const fixture = async () => {
-  const runtime = await mkdtemp('/tmp/pi-paste-');
+  const runtime = await mkdtemp(join(tmpdir(), 'pi-paste-'));
   for (const name of ['wtype', 'wl-copy', 'wl-paste']) await symlink(resolve('tests/fixtures/isolated-desktop.mjs'), join(runtime, name));
   const env = { PATH: `${runtime}:${process.env.PATH}`, XDG_RUNTIME_DIR: runtime, WAYLAND_DISPLAY: join(runtime, 'private-wayland') };
   return { runtime, env, read: async (name: string) => JSON.parse(await readFile(join(runtime, name), 'utf8')) };
@@ -94,7 +95,7 @@ for (const failure of ['wl-clear-fail', 'wl-copy-fail', 'wl-paste-fail', 'wtype-
     await writeFile(join(f.runtime, failure), 'fail');
     await assert.rejects(session.run({ action: 'type', text: 'once' }), /outcome may be partial or unknown.*runtime .* failed/);
     if (failure !== 'wl-clear-fail') await eventually(async () => alive((await f.read('clipboard-started.json')).pid), value => !value);
-    if (failure !== 'clipboard-exit-fail') await assert.rejects(f.read('typed.json'), { code: 'ENOENT' });
+    await assert.rejects(f.read('typed.json'), { code: 'ENOENT' });
     assert.equal((await session.run({ action: 'accessibility' })).available, false);
   } finally { await session.close(); await rm(f.runtime, { recursive: true, force: true }); }
 });

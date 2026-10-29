@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
@@ -21,7 +21,7 @@ test('invalid browser URLs spawn nothing and preserve host selection', { skip: p
   try {
     for (const params of [
       {}, { url: 'file:///tmp/a' }, { url: 'https://user:pass@example.com' },
-      { url: 'https://example.com/\n' }, { url: 'https://example.com/%00' }, { url: 'https://example.com/\u0085' },
+      { url: 'https://example.com/\n' }, { url: 'https://example.com/\u202e' }, { url: 'https://example.com/\u0085' },
       { url: 'https://example.com/' + 'a'.repeat(2048) },
       { url: 'https://example.com', argv: ['--no-sandbox'] },
     ]) await assert.rejects(pi.call('computer_open', params), /Invalid browser URL/);
@@ -73,10 +73,11 @@ const fixture = async () => {
 test('open routes screenshots and input to a private ready output without host session environment', { skip: namespaceSkip, timeout: 10000 }, async () => {
   const pi = await fixture();
   try {
-    const url = "https://example.com/path;param?q=$HOME&name=O'Reilly&literal=$(id)";
+    const url = "HTTPS://example.com/path with space;param?q=$HOME&name=O'Reilly&literal=$(id)&line=%0A%09";
     const opened = await pi.call('computer_open', { url });
     assert.equal(opened.details.target, 'isolated');
     assert.equal(opened.details.output, 'PRIVATE-1');
+    assert.equal(opened.details.url, new URL(url).href);
     const dirs = (await readdir(pi.dir)).filter(name => name.startsWith('pi-cu-'));
     assert.equal(dirs.length, 1);
     const runtime = join(pi.dir, dirs[0]);
@@ -89,11 +90,12 @@ test('open routes screenshots and input to a private ready output without host s
     assert.ok(browser.args.includes(`--user-data-dir=${join(runtime, 'profile')}`));
     assert.ok(browser.args.includes('--ozone-platform=wayland'));
     assert.ok(!browser.args.includes('--no-sandbox'));
-    assert.deepEqual(browser.args.slice(-2), ['--', url]);
+    assert.deepEqual(browser.args.slice(-2), ['--', new URL(url).href]);
     const shot = await pi.call('computer_screenshot');
     assert.equal(shot.details.target, 'isolated');
     assert.equal(shot.details.output, 'PRIVATE-1');
     assert.equal(shot.details.width, 1);
+    assert.equal(JSON.parse(await readFile(join(runtime, 'grim.json'), 'utf8')).env.WAYLAND_DISPLAY, join(runtime, 'wayland-fixture'));
     await pi.call('computer_click', { output: 'PRIVATE-1', x: 0.25, y: 0.5 });
     await pi.call('computer_scroll', { output: 'PRIVATE-1', dx: 0, dy: 20 });
     await pi.call('computer_type', { text: 'literal $HOME; `hello`' });
@@ -116,6 +118,39 @@ test('open routes screenshots and input to a private ready output without host s
     assert.equal((await pi.call('computer_accessibility')).details.target, 'isolated');
     assert.equal((await pi.call('computer_close')).details.target, 'isolated');
     await assert.rejects(lstat(runtime), { code: 'ENOENT' });
+  } finally { await pi.close(); }
+});
+
+for (const closing of ['computer_close', 'session_start']) test(`a repaired ${closing} cleanup failure can be retried without losing ownership`, { skip: namespaceSkip || process.getuid?.() === 0, timeout: 10000 }, async () => {
+  const pi = await fixture();
+  let blocked: string | undefined;
+  try {
+    await pi.call('computer_open', { url: 'https://example.com' });
+    const runtime = await privateDirectory(pi.dir);
+    blocked = join(runtime, 'blocked');
+    await mkdir(blocked); await writeFile(join(blocked, 'file'), 'synthetic'); await chmod(blocked, 0);
+    await assert.rejects(closing === 'computer_close' ? pi.call(closing) : pi.handlers.get(closing)!(), /EACCES|EPERM/);
+    if (closing === 'computer_close') await assertStopped(pi);
+    else await assert.rejects(pi.call('computer_accessibility'), /session closed/i);
+    assert.equal(pi.hostConnections, 0);
+    await chmod(blocked, 0o700); blocked = undefined;
+    if (closing === 'computer_close') assert.equal((await pi.call('computer_open', { url: 'https://example.com/recovered' })).details.target, 'isolated');
+    await pi.handlers.get('session_start')!();
+    await assert.rejects(lstat(runtime), { code: 'ENOENT' });
+    assert.equal((await pi.call('computer_accessibility')).details.target, 'host');
+  } finally {
+    if (blocked) await chmod(blocked, 0o700).catch(() => {});
+    await pi.close();
+  }
+});
+
+test('a valid already-cancelled first open selects stopped isolation without contacting the host', { skip: namespaceSkip, timeout: 10000 }, async () => {
+  const pi = await fixture();
+  try {
+    assert.equal((await pi.call('computer_accessibility')).details.target, 'host');
+    await assert.rejects(pi.call('computer_open', { url: 'https://example.com' }, AbortSignal.abort()), /abort/i);
+    await assertStopped(pi);
+    assert.equal(pi.hostConnections, 0);
   } finally { await pi.close(); }
 });
 
@@ -225,6 +260,7 @@ test('replacement, close, and browser crash terminate setsid descendants before 
         await writeFile(join(runtime, 'crash'), 'exit');
         await eventually(async () => { try { await lstat(runtime); return false; } catch { return true; } });
         await assertStopped(pi);
+        await assert.rejects(pi.call('computer_screenshot'), /fixture desktop crashed/);
       }
       assert.deepEqual(await descendantPids(runtime), []);
       await assert.rejects(lstat(runtime), { code: 'ENOENT' });
@@ -332,15 +368,16 @@ test('inspection reconnects after a grim failure without replacing the browser',
   } finally { await pi.close(); }
 });
 
-test('missing isolated prerequisites report the binary and leave sticky stopped selection', { skip: process.platform !== 'linux' }, async () => {
+for (const missing of ['sway', 'grim', 'wtype']) test(`missing ${missing} reports the prerequisite and leaves sticky stopped selection`, { skip: process.platform !== 'linux' }, async () => {
   const dir = await mkdtemp('/tmp/pi-nosway-'), saved = process.env.PATH;
-  await writeFile(join(dir, 'bwrap'), '#!/bin/sh\nexit 99\n', { mode: 0o755 });
+  const installed = ['bwrap', 'sway', 'swaymsg', 'chromium', 'wl-copy', 'wl-paste', 'grim', 'wtype'].filter(name => name !== missing);
+  for (const name of installed) await writeFile(join(dir, name), '#!/bin/sh\nexit 99\n', { mode: 0o755 });
   process.env.PATH = dir;
   const pi = register();
   try {
-    await assert.rejects(pi.call('computer_open', { url: 'https://example.com' }), /prerequisite sway unavailable.*reload/i);
+    await assert.rejects(pi.call('computer_open', { url: 'https://example.com' }), new RegExp(`prerequisite ${missing} unavailable.*reload`, 'i'));
     await assertStopped(pi);
-    assert.deepEqual(await readdir(dir), ['bwrap']);
+    assert.deepEqual((await readdir(dir)).sort(), installed.sort());
   } finally {
     await pi.handlers.get('session_shutdown')!();
     if (saved === undefined) delete process.env.PATH; else process.env.PATH = saved;

@@ -8,6 +8,7 @@ import { WaylandPointer } from './wayland.ts';
 export interface IsolatedDesktop {
   readonly env: NodeJS.ProcessEnv;
   readonly stopped: boolean;
+  readonly diagnostic: string;
   readonly exited: Promise<void>;
   readonly output: string;
   close(): Promise<void>;
@@ -17,7 +18,7 @@ export async function startIsolatedDesktop(url: string, signal: AbortSignal, hos
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
   deadline.throwIfAborted();
   const path = (host.PATH ?? '/usr/local/bin:/usr/bin:/bin').split(':').filter(isAbsolute).join(':');
-  for (const binary of ['bwrap', 'sway', 'swaymsg', 'chromium', 'wl-copy', 'wl-paste']) {
+  for (const binary of ['bwrap', 'sway', 'swaymsg', 'chromium', 'wl-copy', 'wl-paste', 'grim', 'wtype']) {
     let found = false;
     for (const directory of path.split(':')) {
       try { await access(join(directory, binary), constants.X_OK); found = true; break; } catch {}
@@ -68,7 +69,8 @@ export async function startIsolatedDesktop(url: string, signal: AbortSignal, hos
     });
     const reaped = new Promise<void>(resolve => child.once('close', () => { stopped = true; resolve(); }));
     const stop = () => { if (!stopped) child.kill('SIGKILL'); };
-    const finished = reaped.then(async () => {
+    const remove = async () => {
+      await reaped;
       if (namespace) {
         const until = Date.now() + 3000;
         for (;;) {
@@ -88,9 +90,14 @@ export async function startIsolatedDesktop(url: string, signal: AbortSignal, hos
         }
       }
       await rm(directory, { recursive: true, force: true });
-    });
-    void finished.catch(() => {});
-    cleanup = async () => { pointer?.close(); stop(); await finished; };
+    };
+    let finishing: Promise<void> | undefined;
+    const finish = () => {
+      if (!finishing) finishing = remove().catch(error => { finishing = undefined; throw error; });
+      return finishing;
+    };
+    void reaped.then(finish).catch(() => {});
+    cleanup = async () => { pointer?.close(); stop(); await finish(); };
     const abort = () => stop();
     deadline.addEventListener('abort', abort, { once: true });
     try {
@@ -124,7 +131,7 @@ export async function startIsolatedDesktop(url: string, signal: AbortSignal, hos
       const readyOutput = await Promise.race([ready(), exited.then(() => { throw new Error(`Isolated desktop startup failed: ${failure?.message ?? (stderr.trim() || 'process exited')}`); })]);
       deadline.throwIfAborted();
       if (stopped) throw new Error('Isolated desktop stopped during startup');
-      return { env: Object.freeze({ ...env, WAYLAND_DISPLAY: readyOutput.socket }), output: readyOutput.output, exited, get stopped() { return stopped; }, close: cleanup };
+      return { env: Object.freeze({ ...env, WAYLAND_DISPLAY: readyOutput.socket }), output: readyOutput.output, exited, get stopped() { return stopped; }, get diagnostic() { return failure?.message ?? stderr.trim(); }, close: cleanup };
     } finally {
       deadline.removeEventListener('abort', abort);
     }

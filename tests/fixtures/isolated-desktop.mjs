@@ -23,7 +23,6 @@ if (process.argv[2] === '--descendant') {
   if (args.includes('v')) {
     if (existsSync(join(runtime, 'wtype-fail'))) process.exit(7);
     text = JSON.parse(readFileSync(join(runtime, 'clipboard.json'), 'utf8')).text;
-    record('clipboard-consumed', {});
   }
   record('typed.json', { text, args, env: process.env });
 } else if (command === 'wl-copy' || command === 'wl-paste') {
@@ -41,8 +40,7 @@ if (process.argv[2] === '--descendant') {
     process.stdout.write('text/plain;charset=utf-8\ntext/plain\n');
   } else if (args.includes('--clear')) {
     if (existsSync(join(runtime, 'wl-clear-fail'))) process.exit(7);
-    for (const name of ['clipboard.json', 'clipboard-consumed', 'clipboard-probed']) if (existsSync(join(runtime, name))) unlinkSync(join(runtime, name));
-    record('clipboard-cleared', {});
+    for (const name of ['clipboard.json', 'clipboard-probed']) if (existsSync(join(runtime, name))) unlinkSync(join(runtime, name));
   } else {
     let text = '';
     for await (const chunk of process.stdin) text += chunk;
@@ -52,9 +50,7 @@ if (process.argv[2] === '--descendant') {
     while (!existsSync(join(runtime, 'clipboard-probed'))) await delay(5);
     while (existsSync(join(runtime, 'clipboard-wait'))) await delay(5);
     record('clipboard.json', { text });
-    while (!existsSync(join(runtime, 'clipboard-consumed'))) await delay(5);
-    while (existsSync(join(runtime, 'clipboard-hold'))) await delay(5);
-    if (!args.includes('--paste-once')) await new Promise(() => setInterval(() => {}, 1000));
+    await new Promise(() => setInterval(() => {}, 1000));
   }
 } else if (command === 'grim') {
   if (existsSync(join(runtime, 'grim-fail'))) { unlinkSync(join(runtime, 'grim-fail')); process.exit(1); }
@@ -69,7 +65,7 @@ if (process.argv[2] === '--descendant') {
   if (mode === 'fail') { process.stderr.write('fixture sway failed\n'); process.exit(23); }
   record('sway.json', { args: process.argv.slice(2), env: process.env });
   setInterval(() => {
-    try { readFileSync(join(runtime, 'crash')); process.exit(31); } catch {}
+    try { readFileSync(join(runtime, 'crash')); process.stderr.write('fixture desktop crashed\n', () => process.exit(31)); } catch {}
   }, 20);
   const browser = spawn('/bin/sh', [join(runtime, 'browser.sh')], { stdio: 'inherit' });
   browser.once('exit', code => process.exit(code ?? 1));

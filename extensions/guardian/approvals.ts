@@ -190,10 +190,10 @@ export class Approvals {
       ? { decider: 'auto_review', verdict: outcome.assessment.outcome === 'allow' ? 'approved' : 'rejected', rationale: outcome.assessment.rationale, assessment: outcome.assessment }
       : { decider: 'auto_review', verdict: outcome.error.type === 'cancelled' ? 'aborted' : 'error', rationale: completion.warning ?? REVIEW_CANCELLED, failureKind: outcome.error.type };
     if (outcome.contextHashes) automatic.contextHashes = outcome.contextHashes;
+    if (completion.assessmentOutcome === 'deny') ctx.ui.notify(completion.warning!, 'warning');
     if (ownsTurn() && !cancelled()) {
       if (completion.assessmentOutcome === 'deny') {
         this.denied = request.audit ? undefined : { action: { summary: request.summary, actionJson }, audit };
-        ctx.ui.notify(completion.warning!, 'warning');
         const interrupt = this.denials.recordDenial(turnId);
         if (interrupt) {
           ctx.ui.notify(interrupt, 'warning');

@@ -984,6 +984,68 @@ for (const order of ['escape first', 'escape last'] as const) for (const key of 
     }
   });
 
+for (const key of ['\x1b', '\x1b[13;5u', '\x07']) test(`${JSON.stringify(key)} second interrupt during pre-delivery compaction retains the pending queue`, { timeout: 5000 }, async t => {
+  const compacting = deferred(), releaseCompaction = deferred(), settled = deferred();
+  let compactionSignal: AbortSignal | undefined;
+  t.after(() => releaseCompaction.resolve());
+  const h = await fixture(t, [pi => pi.on('session_before_compact', async event => {
+    assert.equal(event.reason, 'threshold');
+    compactionSignal = event.signal;
+    compacting.resolve();
+    await releaseCompaction.promise;
+    return { cancel: true };
+  })]);
+  if (key === '\x07') h.app.editor.keybindings = new KeybindingsManager({ 'app.interrupt': 'ctrl+g' });
+  retryUI(t, h);
+  const ui = h.session.extensionRunner!.getUIContext(), setStatus = ui.setStatus;
+  ui.setStatus = (key: string, text: string | undefined) => {
+    setStatus(key, text);
+    if (key === 'escape-continue' && text === undefined) settled.resolve();
+  };
+  const first = deferred();
+  await h.session.setModel({ ...h.provider.getModel(), contextWindow: 8192 });
+  h.provider.setResponses([fauxAssistantMessage('Seed ' + 'x'.repeat(32000)), h.blocked(first), fauxAssistantMessage('Must not start')]);
+  await h.session.prompt('Seed');
+  const running = h.session.prompt('Original');
+  try {
+    await first.promise;
+    h.settingsManager.applyOverrides({ compaction: { enabled: true, reserveTokens: 1024, keepRecentTokens: 1 } });
+    const image = { type: 'image' as const, mimeType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC' };
+    const custom: Message = { role: 'custom', customType: 'retained', content: 'Keep this context', display: false, timestamp: Date.now() };
+    h.session.agent.steer(custom);
+    await h.session.followUp('Next', [image]);
+    await h.session.followUp('Tail');
+    const queued = h.session.agent.peekQueuedMessages();
+    h.app.editor.setText('Keep my draft');
+    h.app.editor.handleInput(key);
+    await compacting.promise;
+    assert.equal(h.session.isCompacting, true);
+    assert.equal(h.provider.state.callCount, 2);
+    assert.deepEqual(h.users(), ['Seed', 'Original']);
+    assert.deepEqual(h.session.agent.peekQueuedMessages(), [], 'the promotion holds the queue until compaction finishes');
+    h.app.editor.handleInput(key);
+    assert.equal(compactionSignal?.aborted, true, 'the second interrupt also cancels compaction');
+    const stopped = h.notices.some(message => /Escape Continue stopped/.test(message));
+    h.settingsManager.setCompactionEnabled(false);
+    releaseCompaction.resolve();
+    await settled.promise;
+    await running;
+    await h.session.waitForIdle();
+    assert.deepEqual(h.users(), ['Seed', 'Original']);
+    assert.equal(h.provider.state.callCount, 2);
+    assert.deepEqual(h.session.agent.peekQueuedMessages(), queued);
+    assert.deepEqual(h.session.getFollowUpMessages(), ['Next', 'Tail']);
+    assert.equal(h.app.editor.getText(), 'Keep my draft');
+    assert.equal(h.session.isCompacting, false);
+    assert.equal(stopped, true);
+  } finally {
+    h.settingsManager.setCompactionEnabled(false);
+    releaseCompaction.resolve();
+    await h.session.abort();
+    await running;
+  }
+});
+
 for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} cancels automatic compaction after retry promotion`, { timeout: 5000 }, async t => {
   const compacting = deferred();
   const h = await fixture(t, [pi => pi.on('session_before_compact', async event => {

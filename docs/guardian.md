@@ -77,6 +77,8 @@ the hook settles, but Pi exposes only the parent operation signal to the hook: a
 may continue across parent turns until completion or timeout. A late rejection blocks
 that action without aborting a newer parent turn. Child denials count toward the
 denial breaker only while their originating parent turn remains current.
+Before another parent turn starts, a background rejection can still abort a
+parent retry, compaction or branch summary.
 Session shutdown cancels pending Guardian reviews and approval dialogs, including
 background requests started while the parent was idle.
 

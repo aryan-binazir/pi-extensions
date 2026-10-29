@@ -225,7 +225,11 @@ function sessionPort(session: AgentSession, state: Adapter): SessionPort | undef
 function interrupt(host: Host, original: () => void, state: Adapter): void {
   const session = host.session;
   const registration = state.active.get(session.sessionManager);
-  if (registration?.pending) return registration.pending.cancel();
+  if (registration?.pending) {
+    registration.pending.cancel();
+    if (session.isCompacting) session.abortCompaction();
+    return;
+  }
   if (!state.supported || !registration || !session.isStreaming || session.isCompacting) return original();
   const port = sessionPort(session, state);
   if (!port) { warn(registration, state); return original(); }
@@ -272,7 +276,7 @@ export function install(): Adapter {
             event.message.stopReason === 'aborted' && shared.quietAborts.has(this.session))
           shared.quietMessages.add(event.message);
         await handleEvent.call(this, event);
-        if (event.type === 'auto_retry_start') shared.attach(this, shared);
+        if (event.type === 'auto_retry_start' || event.type === 'compaction_start') shared.attach(this, shared);
       };
       Object.defineProperty(handle, wrapped, { value: true });
       prototype.handleEvent = handle;

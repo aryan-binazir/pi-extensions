@@ -542,6 +542,8 @@ test('a late background denial cannot interrupt a new turn after two old-turn de
   approvals.clearDenied();
   finish(deny);
   assert.equal((await old).type, 'rejected');
+  assert.equal(h.notices.length, 3, 'the late background denial still notifies the user');
+  assert.deepEqual(h.notices.at(-1), ['warning', 'Automatic approval review denied (risk: high, authorization: low): Pushes to main.']);
   assert.equal(h.aborted(), 0);
   assert.equal(approvals.takeDenied(h.ctx), undefined);
 });

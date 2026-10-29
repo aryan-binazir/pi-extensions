@@ -104,12 +104,14 @@ or quit retires the promotion before asynchronous teardown; a cancelled replacem
 leaves it eligible to continue. Accepted reload retires the promotion before its
 first yield; a rejected TUI reload leaves it eligible to continue.
 
-Autocomplete and dialogs keep their own Escape handling. During compaction or
-branch summarization, a second interrupt stops a pending promotion and preserves
-its queue. Vi mode keeps insert/visual-mode Escape; only a clean normal-mode
-Escape reaches the interrupt handler. Programmatic `ctx.abort()` and stock dequeue
+Autocomplete and dialogs keep their own Escape handling. During automatic
+compaction before the queued message is delivered, a second interrupt stops the
+pending promotion and preserves its queue. Vi mode keeps insert/visual-mode Escape;
+only a clean normal-mode Escape reaches the interrupt handler. Programmatic `ctx.abort()` and stock dequeue
 cancel a held promotion and restore its queued text using Pi's normal editor behavior;
 this is text-only, unlike second-Escape retention of attachments and custom messages.
+Branch summarization keeps Pi's Escape handler: it cancels the summary but may
+leave a separately pending promotion eligible to continue.
 Direct `session.abort()` stops the promotion without dequeuing it. The extension is
 inert in RPC, JSON and print modes.
 

@@ -129,7 +129,7 @@ export async function prepareTask(spec: TaskSpec, selectTools: (task: TaskSpec) 
     extensions.push(canonical);
   }
   // Children must carry the parent's protections: hooks block configured calls, and Guardian, when the parent runs
-  // it, keeps their commands and file changes under the same sandbox, rules and review.
+  // it, keeps their commands and file changes under the same execution mode, rules and review.
   const mandatory = async (path: string, name: string) => {
     try {
       const resolved = await realpath(path);

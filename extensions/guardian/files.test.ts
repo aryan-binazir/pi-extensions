@@ -288,3 +288,23 @@ for (const tool of ['write', 'edit'] as const) test(`aborting a sandboxed ${tool
     }
   });
 });
+
+for (const swapped of ['file', 'parent'] as const) test(`host write rejects an approved target redirected during review (${swapped})`, async t => {
+  const { cwd, outside } = workspace(t);
+  const parent = join(cwd, 'approved');
+  mkdirSync(parent);
+  const target = join(parent, 'file');
+  const victim = join(outside, 'file');
+  writeFileSync(target, 'original');
+  writeFileSync(victim, 'keep');
+  const [write] = createGuardianFileTools({ config: () => DEFAULT_GUARDIAN_CONFIG, sandbox: detected,
+    approvals: { request: async () => {
+      rmSync(swapped === 'file' ? target : parent, { recursive: true });
+      symlinkSync(swapped === 'file' ? victim : outside, swapped === 'file' ? target : parent);
+      return { type: 'approved' };
+    } },
+  }, cwd);
+  const ctx = { cwd, hasUI: false, abort: () => {}, ui: { notify: () => {}, select: async () => undefined } };
+  await assert.rejects((write.execute as (...args: unknown[]) => Promise<unknown>)('swap', { path: target, content: 'changed' }, undefined, undefined, ctx), /target changed during approval/);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep');
+});

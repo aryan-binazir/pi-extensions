@@ -55,7 +55,7 @@ test('escalations go to the configured reviewer model with Codex policy, Railway
     },
     context => { requests.main.push(contextText(context)); return fauxAssistantMessage('Stopped.'); },
   ], configure: ({ agentDir }, provider) => {
-    writeConfig(agentDir, { reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
+    writeConfig(agentDir, { sandbox: { mode: 'workspace-write' }, reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
     return { model: provider.getModel() };
   } }, async ({ session }) => {
     await session.prompt('Please prepare the outside file.');
@@ -83,7 +83,7 @@ test('an approved escalation runs outside the sandbox', sandboxed, async t => {
     fauxAssistantMessage('{"outcome":"allow"}'),
     fauxAssistantMessage('Done.'),
   ], configure: ({ agentDir }, provider) => {
-    writeConfig(agentDir, { reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
+    writeConfig(agentDir, { sandbox: { mode: 'workspace-write' }, reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
     return { model: provider.getModel() };
   } }, async ({ session }) => {
     await session.prompt('Write it.');
@@ -241,7 +241,7 @@ test('a write into protected project metadata is reviewed even inside the worksp
     fauxAssistantMessage('{"outcome":"deny","rationale":"Project extensions run as host code."}'),
     fauxAssistantMessage('Stopped.'),
   ], configure: ({ agentDir }, provider) => {
-    writeConfig(agentDir, { reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
+    writeConfig(agentDir, { sandbox: { mode: 'workspace-write' }, reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
     return { model: provider.getModel() };
   } }, async ({ session, cwd }) => {
     await session.prompt('Add a project extension.');

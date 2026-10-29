@@ -16,7 +16,8 @@ and [ADR 029](adr/029-guardian-host-execution.md).
 
 1. Hard Railway and database boundaries apply first, followed by command rules. A `forbidden`
    rule rejects the command. A `prompt` rule requires approval. Every parsed command segment must
-   match an `allow` rule to skip review.
+   match an `allow` rule to skip review. Only plain-word scripts split into rule-matched segments;
+   the strictest segment decision wins. Unsupported shell syntax goes to the approval policy.
 2. In the default `host` mode, commands not decided by a rule and all file changes go to Guardian's
    configured reviewer before execution. Call the tools normally; sandbox escalation parameters are
    unnecessary. Approved actions run through Pi's normal host tools. A rejection or cancellation
@@ -32,8 +33,8 @@ its separate read-only, network-disabled inspection sandbox. Without a usable sa
 inspection commands are unavailable; approved host actions still run normally.
 
 File approvals name the absolute path Pi resolved, including `@` and `file://` forms. Leaf symlinks
-are resolved before review, and approved writes target that resolved file. Parent directories are
-created only after approval.
+are resolved before review; a redirected resolved target is rejected after approval. Parent directories
+are created only after approval. Host writes are not isolated from concurrent filesystem changes.
 
 ## Optional sandbox execution
 
@@ -135,7 +136,8 @@ filesystem isolation and seccomp for network restrictions.
   help lists `--as-pid-1` and `--perms` (bubblewrap 0.8 or newer). Otherwise it uses the bubblewrap
   bundled with the Codex install on `PATH` (npm, pnpm, bun or the standalone installer). Explicit sandbox
   modes warn at session start about fallback or unavailable sandboxing. With no usable sandbox, those
-  modes require approval for every command. WSL1 is not supported; WSL2 is.
+  modes require approval for every command. Host mode reports the warning for reviewer inspections;
+  approved host actions are unaffected. WSL1 is not supported; WSL2 is.
 - Where the host forbids mounting a fresh `/proc`, as some containers do, commands run without one.
 - When Pi starts without `SHLVL` in its environment (from a desktop launcher rather than a terminal),
   bash inside the network-isolated sandbox sources `~/.bashrc` instead of `BASH_ENV`. Codex's filter
@@ -183,7 +185,7 @@ settings are errors.
 
 | Setting | Codex equivalent | Values |
 | --- | --- | --- |
-| `approvalPolicy` | `approval_policy` | `on-request` (default): host actions are reviewed automatically; in sandbox modes the agent requests escalation when needed. `untrusted` (Codex's value; `unless-trusted` also works): everything not allowed by a rule needs your approval, and a sandbox failure is retried outside the sandbox. `never`: nothing is approved; escalations are rejected. |
+| `approvalPolicy` | `approval_policy` | `on-request` (default): host actions are reviewed automatically; in sandbox modes the agent requests escalation when needed. `untrusted` (`unless-trusted` also works): actions not allowed by a rule need your approval; sandbox-mode failures may retry on the host. `never`: no approvals; host mode permits only explicitly allowed commands and blocks file changes. |
 | `approvalsReviewer` | `approvals_reviewer` | `auto_review` (default): the reviewer model decides on-request approvals. `user`: you decide every approval. |
 | `reviewer` | (model catalog) | Any model in Pi's registry, for example `{"provider": "openai-codex", "model": "gpt-6.1-sol", "reasoning": "medium"}`. For Claude, use `{"provider": "claude-cli", "model": "claude-opus-5-5", "reasoning": "high"}`, which reviews through `claude -p` with `--safe-mode` and read-only tools. `reasoning` is a Pi thinking level. |
 | `autoReview.policy` / `policyFile` | `[auto_review] policy` | Replaces the built-in tenant policy (Codex's `policy.md`). |
@@ -318,7 +320,7 @@ still sits after Fast mode in `package.json` so the alias resolves when both are
 
 The footer's top-right indicator shows `Auto: on · Luna low`, `Auto: on · Opus high`,
 `Auto: on · you review` or `Auto: off` (also while `/guardian off` is in effect), and adds
-`· host` for reviewed host execution, or `· network` / `· no sandbox` for the legacy modes when they apply.
+`· host` for reviewed host execution, or `· network` / `· no sandbox` for explicit sandbox or unrestricted modes when they apply.
 While a review runs, the status line shows "Reviewing approval request…".
 
 Guardian replaces Auto Permissions. If both are loaded, commands are reviewed twice and Guardian
@@ -347,7 +349,7 @@ errors; this history covers approval requests, including their internal policy r
 
 The session ID and leaf entry identify the conversation when the approval request
 started, including when `/guardian approve` later approves a denied action. Automatic reviews save
-separate SHA-256 hashes for the system policy, AGENTS instructions, planned action and retained
+separate SHA-256 hashes for the system policy, AGENTS instructions with parent execution permissions, planned action and retained
 transcript with trusted answers. These hashes omit the session ID, date and timezone, so the components
 can be compared across sessions. Later read-only tool results are not hashed. Identical hashes do not
 make model verdicts deterministic. Compare the recorded rationale and transcript before attributing

@@ -147,7 +147,6 @@ function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, 
     const config = runtime.config();
     const safety = assessFileChange(path, { config, cwd, sandboxAvailable: runtime.sandbox !== undefined });
     if (typeof safety === 'object') throw new Error(safety.reason);
-    // Resolved once, so the file that was approved is the file that is written, even if a link changes meanwhile.
     const resolved = canonicalTarget(path);
     if (safety === 'ask_user') {
       await (approval ??= (async () => {
@@ -161,6 +160,7 @@ function createGate(runtime: FileRuntime, tool: 'write' | 'edit', input: Input, 
     }
     // Approval can take a while; a call cancelled meanwhile must not mutate anything.
     if (signal?.aborted) throw new Error('Operation aborted');
+    if (safety === 'ask_user' && canonicalTarget(resolved) !== resolved) throw new Error('File target changed during approval; retry the change');
     const sandbox = safety === 'auto_approve' && config.enabled && config.sandbox.mode !== 'danger-full-access' ? runtime.sandbox : undefined;
     return sandbox
       ? { write: (target, content) => sandboxedWrite(target, content, config, cwd, sandbox, signal) }

@@ -224,7 +224,8 @@ load, commands are reviewed twice and Guardian warns at session start.
 
 Completion: Guardian is selected from the footer's stable checkout, bubblewrap is
 usable on Linux, the reviewer is the required one, no other approval package is
-installed, and Ar has run `/reload`. The footer then shows `Auto: on · Luna low · host` with the default execution mode.
+installed, and Ar has run `/reload`. Check `/guardian status` for the reviewer sandbox. The footer
+shows `Auto: on · Luna low · host` with the default execution mode.
 
 ## Footer
 

@@ -117,3 +117,73 @@ test('a rejected ordinary host command never executes', async () => {
     assert.equal(result?.role === 'toolResult' && result.isError, true);
   });
 });
+
+for (const mode of ['workspace-write', 'read-only', 'danger-full-access'] as const) {
+  test(`reviewer gets factual parent execution context for ${mode}`, async () => {
+    let parent = '';
+    await withPi({ extensions: [guardian], responses: [
+      fauxAssistantMessage(fauxToolCall('bash', { command: 'rm -f review-only-missing', sandbox_permissions: 'require_escalated' })),
+      context => {
+        parent = JSON.stringify(context.messages).split('>>> PARENT TURN PERMISSION CONTEXT START')[1]?.split('>>> PARENT TURN PERMISSION CONTEXT END')[0] ?? '';
+        return fauxAssistantMessage('{"outcome":"allow"}');
+      },
+      fauxAssistantMessage('Done.'),
+    ], configure: ({ agentDir }, provider) => {
+      mkdirSync(join(agentDir, 'guardian'), { recursive: true });
+      writeFileSync(join(agentDir, 'guardian', 'config.json'), JSON.stringify({
+        sandbox: { mode }, reviewer: { provider: provider.getModel().provider, model: provider.getModel().id },
+      }));
+      return { model: provider.getModel() };
+    } }, async ({ session }) => {
+      await session.prompt('Run the reviewed command.');
+      assert.ok(parent);
+      assert.doesNotMatch(parent, /To request approval|How to request escalation|The harness will require user approval/);
+      assert.match(parent, /Approval policy: on-request; reviewer: auto_review/);
+      if (mode === 'danger-full-access') {
+        assert.doesNotMatch(parent, /Network access is restricted/);
+        assert.match(parent, /network access/);
+      } else {
+        assert.match(parent, /Approved escalations and file changes run on the host/);
+      }
+    });
+  });
+}
+
+test('host status reports reviewer confinement and whether execution is reviewed', async () => {
+  const notices: string[] = [];
+  await withPi({ extensions: [guardian], bind: session => ({ mode: 'tui', uiContext: {
+    ...session.extensionRunner.createContext().ui, notify: message => { notices.push(message); },
+  } }) }, async ({ session }) => {
+    await session.prompt('/guardian status');
+    assert.match(notices.at(-1)!, /Execution: host with approval checks/);
+    assert.match(notices.at(-1)!, /Reviewer sandbox:/);
+    await session.prompt('/guardian off');
+    await session.prompt('/guardian status');
+    assert.match(notices.at(-1)!, /Execution: host without approval checks/);
+  });
+});
+
+test('approval context hash changes when parent execution permissions change', async () => {
+  let configPath = '';
+  let reviewer = {};
+  await withPi({ extensions: [guardian], responses: [
+    fauxAssistantMessage(fauxToolCall('bash', { command: 'printf reviewed' })),
+    fauxAssistantMessage('{"outcome":"allow"}'), fauxAssistantMessage('Done.'),
+    fauxAssistantMessage(fauxToolCall('bash', { command: 'printf reviewed', sandbox_permissions: 'require_escalated' })),
+    fauxAssistantMessage('{"outcome":"allow"}'), fauxAssistantMessage('Done.'),
+  ], configure: ({ agentDir }, provider) => {
+    configPath = join(agentDir, 'guardian', 'config.json');
+    reviewer = { provider: provider.getModel().provider, model: provider.getModel().id };
+    mkdirSync(join(agentDir, 'guardian'), { recursive: true });
+    writeFileSync(configPath, JSON.stringify({ reviewer }));
+    return { model: provider.getModel() };
+  } }, async ({ session }) => {
+    await session.prompt('Run it.');
+    writeFileSync(configPath, JSON.stringify({ reviewer, sandbox: { mode: 'read-only' } }));
+    await session.prompt('Run it again.');
+    const records = session.sessionManager.getBranch().flatMap(entry => entry.type === 'custom' && entry.customType === APPROVAL_AUDIT_ENTRY_TYPE
+      ? [entry.data as ApprovalAuditEntry] : []);
+    assert.equal(records.length, 2);
+    assert.notEqual(records[0].contextHashes?.instructions, records[1].contextHashes?.instructions);
+  });
+});

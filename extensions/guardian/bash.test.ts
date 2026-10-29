@@ -341,15 +341,15 @@ test('bundled Railway rules apply everywhere a literal command can hide, even wi
 });
 
 test('a destructive database statement with an unresolved target is refused before review, in every mode', async t => {
-  for (const config of [{}, { enabled: false }, { approvalsReviewer: 'user' as const }, { approvalPolicy: 'unless-trusted' as const }]) {
+  for (const config of [{}, { sandbox: DEFAULT_GUARDIAN_CONFIG.sandbox }, { enabled: false }, { approvalsReviewer: 'user' as const }, { approvalPolicy: 'unless-trusted' as const }]) {
     const { run, requests } = setup(t, { config, decisions: [{ type: 'approved' }] });
     await assert.rejects(run({ command: `psql "$GUARDIAN_TEST_UNSET_URL" -c 'DROP TABLE customers'` }), /destructive database operations are refused unless their target is provably local/);
     assert.deepEqual(requests, [], JSON.stringify(config));
   }
 });
 
-test('Railway commands that reach databases need review', async t => {
-  const { run, requests } = setup(t, { decisions: [{ type: 'rejected', message: 'denied' }] });
+for (const mode of ['workspace-write', 'host'] as const) test(`Railway commands that reach databases need review (${mode})`, async t => {
+  const { run, requests } = setup(t, { config: { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode } }, decisions: [{ type: 'rejected', message: 'denied' }] });
   await assert.rejects(run({ command: 'railway connect postgres' }), /denied/);
   assert.match(requests[0].reason ?? '', /Railway commands that can reach databases or storage are reviewed/);
 });

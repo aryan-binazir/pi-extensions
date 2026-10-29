@@ -81,11 +81,11 @@ const parameters = Type.Object({
   timeout: Type.Optional(Type.Number({ description: 'Timeout in seconds (optional, no default timeout)' })),
   sandbox_permissions: Type.Optional(Type.String({
     enum: ['use_default', 'require_escalated'],
-    description: 'Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.',
+    description: 'Override for sandbox modes: `require_escalated` requests host execution. Host mode needs no override.',
   })),
-  justification: Type.Optional(Type.String({ description: 'User-facing approval question for `require_escalated`; omit otherwise.' })),
+  justification: Type.Optional(Type.String({ description: 'Optional explanation for Guardian or the user reviewing this command.' })),
   prefix_rule: Type.Optional(Type.Array(Type.String(), {
-    description: 'Reusable approval prefix for `command`, only with `sandbox_permissions: "require_escalated"`; for example ["git", "pull"].',
+    description: 'Proposed reusable approval prefix, for example ["git", "pull"]. In sandbox modes, requires `sandbox_permissions: "require_escalated"`.',
   })),
 });
 
@@ -137,8 +137,9 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       });
       if (requirement.type === 'forbidden') throw new Error(requirement.reason);
       // A Railway command that can reach data is reviewed even when rules or settings would skip it.
-      const effective = requirement.type === 'skip' && railway === 'prompt'
-        ? { type: 'needs_approval' as const, reason: RAILWAY_REVIEW_REASON, proposedExecpolicyAmendment: undefined }
+      const effective = railway === 'prompt'
+        ? { type: 'needs_approval' as const, reason: RAILWAY_REVIEW_REASON,
+          proposedExecpolicyAmendment: requirement.type === 'needs_approval' ? requirement.proposedExecpolicyAmendment : undefined }
         : requirement;
 
       const approvalContext = ctx as unknown as ApprovalContext;

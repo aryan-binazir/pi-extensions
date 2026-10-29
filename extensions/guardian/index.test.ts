@@ -3,6 +3,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after } from 'node:test';
+import { clearTimeout, setTimeout } from 'node:timers';
+import { Type } from 'typebox';
+import type { ExtensionFactory, ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 import type { createGuardianBashTool } from './bash.ts';
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
 import { withPi } from '../../tests/pi-session.ts';
@@ -380,20 +383,21 @@ test('a late human decision cannot append an old audit into the current Pi sessi
     return { model: provider.getModel() };
   }, bind: session => ({ mode: 'tui', uiContext: { ...session.extensionRunner.createContext().ui,
     select: () => new Promise(resolve => { choose = resolve; shown(); }),
-  } }) }, async ({ session, runner, cwd }) => {
+  } }) }, async fixture => {
+    const { session, runner, cwd } = fixture;
     const ctx = runner.createToolContext('old-call', undefined);
     let aborted = 0;
     const execution = bash.execute('old-call', { command: 'echo stale > stale-marker', sandbox_permissions: 'require_escalated' }, undefined, undefined,
       { ...ctx, abort: () => { aborted++; } });
     await visible;
     const oldSessionId = session.sessionManager.getSessionId();
-    session.sessionManager.newSession();
-    assert.notEqual(session.sessionManager.getSessionId(), oldSessionId);
+    await fixture.runtime.newSession();
+    assert.notEqual(fixture.session.sessionManager.getSessionId(), oldSessionId);
     choose('Yes, proceed');
-    await assert.rejects(execution, /cancelled|audit.*session/i);
+    await assert.rejects(execution, { message: 'Cannot record approval audit in a different or closed session' });
     assert.equal(aborted, 0);
     assert.equal(existsSync(join(cwd, 'stale-marker')), false);
-    const audit = session.sessionManager.getEntries().filter(entry => entry.type === 'custom' && entry.customType === APPROVAL_AUDIT_ENTRY_TYPE);
+    const audit = fixture.session.sessionManager.getEntries().filter(entry => entry.type === 'custom' && entry.customType === APPROVAL_AUDIT_ENTRY_TYPE);
     assert.deepEqual(audit, [], 'pi.appendEntry must not receive the old decision in the new session');
   });
 });
@@ -404,7 +408,7 @@ function gate() {
   return { promise, resolve };
 }
 
-for (const replacement of ['review', 'turn', 'session'] as const) test(`an older review cannot clear a newer review status (${replacement})`, async () => {
+for (const replacement of ['review', 'turn'] as const) test(`an older review cannot clear a newer review status (${replacement})`, async () => {
   let bash!: ReturnType<typeof createGuardianBashTool>;
   const entered = [gate(), gate()];
   const released = [gate(), gate()];
@@ -425,24 +429,27 @@ for (const replacement of ['review', 'turn', 'session'] as const) test(`an older
     notify: message => { notices.push(message); },
   } }) }, async ({ session, runner, cwd }) => {
     await runner.emit({ type: 'agent_start' });
-    const old = bash.execute('old', { command: 'echo old > old-marker', sandbox_permissions: 'require_escalated' }, undefined, undefined, runner.createToolContext('review-call', undefined));
+    const controller = new AbortController();
+    const old = bash.execute('old', { command: 'echo old > old-marker', sandbox_permissions: 'require_escalated' }, controller.signal, undefined, runner.createToolContext('review-call', controller.signal));
+    const oldRejected = assert.rejects(old, replacement === 'turn' ? /cancelled/ : /unacceptable risk/);
     try {
       await entered[0].promise;
-      if (replacement === 'session') session.sessionManager.newSession();
-      if (replacement !== 'review') await runner.emit({ type: 'agent_start' });
+      if (replacement === 'turn') {
+        controller.abort();
+        await runner.emit({ type: 'agent_start' });
+      }
       const fresh = bash.execute('fresh', { command: 'echo fresh > fresh-marker', sandbox_permissions: 'require_escalated' }, undefined, undefined, runner.createToolContext('review-call', undefined));
       try {
         await entered[1].promise;
         assert.equal(status, 'Reviewing approval request…');
         released[0].resolve();
-        await assert.rejects(old, replacement === 'session' ? /audit.*session/ : replacement === 'turn' ? /cancelled/ : /unacceptable risk/);
+        await oldRejected;
         assert.equal(status, 'Reviewing approval request…', 'old completion must not erase the new status');
         if (replacement !== 'review') {
           await session.prompt('/guardian approve');
           assert.match(notices.at(-1)!, /No replayable denied action/);
           assert.ok(!notices.some(message => message.includes('obsolete denial')));
         }
-        if (replacement === 'session') assert.ok(!session.sessionManager.getEntries().some(entry => entry.type === 'custom' && entry.customType === APPROVAL_AUDIT_ENTRY_TYPE));
         assert.equal(existsSync(join(cwd, 'old-marker')), false);
       } finally {
         released[1].resolve();
@@ -488,3 +495,125 @@ test('a review that fails before showing status does not take status ownership',
     assert.equal(status, undefined, 'the displayed review must still be able to clear its own status');
   });
 });
+
+for (const approvalsReviewer of ['auto_review', 'user'] as const) {
+  for (const transition of ['turn', 'newSession', 'switchSession'] as const) {
+    test(`background connector ${approvalsReviewer} approval across ${transition}`, { timeout: 20_000 }, async () => {
+      const start = gate(), entered = gate(), released = gate();
+      let effects = 0;
+      let nested!: ReturnType<ExtensionToolContext['executeTool']>;
+      let dialogSignal: AbortSignal | undefined;
+      let dialogClosed = false;
+      const bridge = new AbortController();
+      const mutation = 'mcp__guardian_fixture__update';
+      const delegate: ExtensionFactory = pi => pi.registerTool({ name: 'fixture_delegate', label: 'delegate', description: 'Start synthetic background work', parameters: Type.Object({}),
+        async execute(_id, _args, _signal, _update, ctx) {
+          nested = start.promise.then(() => ctx.executeTool(mutation, {}, { signal: bridge.signal }));
+          return { content: [{ type: 'text', text: 'Started in background.' }], details: {} };
+        },
+      });
+      let parentCalls = 0;
+      const respond = async (context: TranscriptContext) => {
+        if (contextText(context).includes('planned coding-agent action')) {
+          entered.resolve();
+          await released.promise;
+          return fauxAssistantMessage('{"outcome":"allow","rationale":"Synthetic allow."}');
+        }
+        return ++parentCalls === 1 ? fauxAssistantMessage(fauxToolCall('fixture_delegate', {})) : fauxAssistantMessage('Parent finished.');
+      };
+      await withPi({ settings: { extensions: ['builtin:mcp'] }, extensions: [guardian, delegate,
+        { name: 'mcp', builtin: true, factory: pi => pi.registerTool({ name: mutation, label: mutation, description: 'Synthetic mutation', parameters: Type.Object({}),
+          async execute() { effects++; return { content: [{ type: 'text', text: 'Executed.' }], details: {} }; },
+        }) }], responses: Array.from({ length: 8 }, () => respond), configure: ({ agentDir }, provider) => {
+        writeConfig(agentDir, { approvalsReviewer, reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
+        return { model: provider.getModel() };
+      }, bind: session => ({ mode: 'tui', uiContext: { ...session.extensionRunner.createContext().ui,
+        select: (_title, options, opts) => new Promise(resolve => {
+          dialogSignal = opts?.signal;
+          const close = (choice?: string) => {
+            dialogSignal?.removeEventListener('abort', cancel);
+            dialogClosed = true;
+            resolve(choice);
+          };
+          const cancel = () => close();
+          dialogSignal?.addEventListener('abort', cancel, { once: true });
+          void released.promise.then(() => close(options[0]));
+          entered.resolve();
+        }),
+      } }) }, async fixture => {
+        await fixture.session.prompt('Start delegated background work.');
+        assert.equal(fixture.session.isStreaming, false);
+        assert.equal(fixture.runner.createContext().signal, undefined, 'background approvals begin without a parent run signal');
+        start.resolve();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await entered.promise;
+          const previous = fixture.session;
+          if (transition === 'turn') {
+            await fixture.session.prompt('An unrelated parent turn.');
+            released.resolve();
+            const outcome = await nested;
+            assert.equal(outcome.isError, false, JSON.stringify(outcome.result.content));
+            assert.equal(effects, 1);
+          } else {
+            if (transition === 'newSession') await fixture.runtime.newSession();
+            else await fixture.runtime.switchSession(previous.sessionFile!);
+            assert.notEqual(fixture.session, previous, 'the runtime actually replaced its session');
+            const outcome = await Promise.race([nested, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 1_000); })]);
+            assert.ok(outcome, 'shutdown must settle background approval before the reviewer or human responds');
+            assert.equal(outcome.isError, true);
+            assert.match(JSON.stringify(outcome.result.content), /Cannot record approval audit in a different or closed session/);
+            assert.equal(effects, 0);
+            if (approvalsReviewer === 'user') {
+              assert.equal(dialogSignal?.aborted, true);
+              assert.equal(dialogClosed, true);
+            }
+            assert.ok(!fixture.session.sessionManager.getEntries().some(entry => entry.type === 'custom' && entry.customType === APPROVAL_AUDIT_ENTRY_TYPE));
+          }
+        } finally {
+          clearTimeout(timer);
+          released.resolve();
+          bridge.abort();
+          await nested;
+        }
+      });
+    });
+  }
+
+  test(`foreground connector ${approvalsReviewer} approval stops on real session abort`, { timeout: 20_000 }, async () => {
+    const entered = gate(), released = gate();
+    let effects = 0;
+    const mutation = 'mcp__guardian_fixture__update';
+    await withPi({ settings: { extensions: ['builtin:mcp'] }, extensions: [guardian,
+      { name: 'mcp', builtin: true, factory: pi => pi.registerTool({ name: mutation, label: mutation, description: 'Synthetic mutation', parameters: Type.Object({}),
+        async execute() { effects++; return { content: [{ type: 'text', text: 'Executed.' }], details: {} }; },
+      }) }], responses: [fauxAssistantMessage(fauxToolCall(mutation, {})), async () => {
+      entered.resolve();
+      await released.promise;
+      return fauxAssistantMessage('{"outcome":"allow"}');
+    }, fauxAssistantMessage('Done.')], configure: ({ agentDir }, provider) => {
+      writeConfig(agentDir, { approvalsReviewer, reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
+      return { model: provider.getModel() };
+    }, bind: session => ({ mode: 'tui', uiContext: { ...session.extensionRunner.createContext().ui,
+      select: (_title, _options, opts) => new Promise(resolve => {
+        assert.ok(opts?.signal);
+        opts.signal.addEventListener('abort', () => resolve(undefined), { once: true });
+        entered.resolve();
+      }),
+    } }) }, async ({ session }) => {
+      const running = session.prompt('Run the connector.');
+      try {
+        await entered.promise;
+        await session.abort();
+        await running;
+        assert.equal(effects, 0);
+        const records = session.sessionManager.getEntries().flatMap(entry => entry.type === 'custom' && entry.customType === APPROVAL_AUDIT_ENTRY_TYPE ? [entry.data as ApprovalAuditEntry] : []);
+        assert.equal(records.at(-1)?.verdict, 'aborted');
+        assert.equal(records.at(-1)?.userChoice, undefined);
+      } finally {
+        released.resolve();
+        await running;
+      }
+    });
+  });
+}

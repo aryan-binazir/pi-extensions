@@ -164,7 +164,6 @@ function decorate(host: Host, state: Adapter): void {
       return {
         key(data) {
           if (!current()) return false;
-          if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+enter')) state.attach(host, state);
           if (!matchesKey(data, 'ctrl+enter')) return false;
           if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
             (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
@@ -267,12 +266,13 @@ export function install(): Adapter {
   else {
     const shared = state;
     if (!marked(handleEvent, wrapped)) {
-      const handle = function (this: Host, event: AgentSessionEvent) {
+      const handle = async function (this: Host, event: AgentSessionEvent) {
         if (event.type === 'agent_start' || event.type === 'agent_end') shared.quietAborts.delete(this.session);
         if ((event.type === 'message_update' || event.type === 'message_end') && event.message.role === 'assistant' &&
             event.message.stopReason === 'aborted' && shared.quietAborts.has(this.session))
           shared.quietMessages.add(event.message);
-        return handleEvent.call(this, event);
+        await handleEvent.call(this, event);
+        if (event.type === 'auto_retry_start') shared.attach(this, shared);
       };
       Object.defineProperty(handle, wrapped, { value: true });
       prototype.handleEvent = handle;

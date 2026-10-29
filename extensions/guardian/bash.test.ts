@@ -460,3 +460,26 @@ test('rule persistence commits on entry and late cancellation stops bash without
     assert.equal(existsSync(join(cwd, 'marker')), !cancelAfterEntry);
   }
 });
+
+test('a real human rejection retains its decision when ctx.abort synchronously aborts the tool signal', async t => {
+  for (const fallback of [false, true]) {
+    const { cwd } = setup(t);
+    const controller = new AbortController();
+    const records: ApprovalAuditEntry[] = [];
+    const config = { ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: fallback ? 'auto_review' as const : 'user' as const };
+    const approvals = new Approvals({ config: () => config, turnId: () => 't',
+      review: async () => ({ type: 'error', error: { type: 'timeout' } }), record: entry => { records.push(entry); },
+    });
+    const tool = createGuardianBashTool({ config: () => config, policy: () => Policy.empty(), shellSettings: () => ({}), shell, sandbox: undefined, approvals,
+      persistAmendment: async () => { assert.fail('rejection cannot persist a rule'); },
+    }, cwd);
+    const ctx = { cwd, hasUI: true, sessionManager: { getSessionId: () => 's', getLeafId: () => 'l', getSessionFile: () => undefined },
+      abort: () => controller.abort(), ui: { notify: () => {}, select: async (_title: string, options: string[]) => options.at(-1) },
+    };
+    await assert.rejects(tool.execute('call', { command: 'echo effect > marker', sandbox_permissions: 'require_escalated', prefix_rule: ['echo'] },
+      controller.signal, undefined, ctx as never), { message: 'rejected by user' });
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(existsSync(join(cwd, 'marker')), false);
+    assert.equal(records.at(-1)?.userChoice, 'reject');
+  }
+});

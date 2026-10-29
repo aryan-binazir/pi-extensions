@@ -152,8 +152,8 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
           ...(reason === undefined ? {} : { reason }),
           ...(amendment ? { amendment } : {}),
         }, approvalContext, signal);
-        if (signal?.aborted) throw new Error('Operation aborted');
         if (decision.type !== 'approved') throw new Error(decision.message);
+        if (signal?.aborted) throw new Error('Operation aborted');
         if (!decision.persist) return;
         // The command is approved either way; a rule that could not be saved only means you are asked again.
         try {

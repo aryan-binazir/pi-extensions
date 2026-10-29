@@ -788,8 +788,9 @@ function retryUI(t: TestContext, h: Awaited<ReturnType<typeof fixture>>) {
   return retrying.promise;
 }
 
-for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} retry cancellation sends Next without resending Original`, { timeout: 5000 }, async t => {
+for (const key of ['\x1b', '\x1b[13;5u', '\x07']) test(`${JSON.stringify(key)} retry cancellation sends Next without resending Original`, { timeout: 5000 }, async t => {
   const h = await fixture(t);
+  if (key === '\x07') h.app.editor.keybindings = new KeybindingsManager({ 'app.interrupt': 'ctrl+g' });
   const retrying = retryUI(t, h);
   const requests: string[][] = [];
   const promoted = deferred();
@@ -814,8 +815,9 @@ for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} retry can
   assert.equal(h.app.editor.getText(), 'draft');
 });
 
-for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} retry cancellation with no queue restores normal interruption`, { timeout: 5000 }, async t => {
+for (const key of ['\x1b', '\x1b[13;5u', '\x07']) test(`${JSON.stringify(key)} retry cancellation with no queue restores normal interruption`, { timeout: 5000 }, async t => {
   const h = await fixture(t);
+  if (key === '\x07') h.app.editor.keybindings = new KeybindingsManager({ 'app.interrupt': 'ctrl+g' });
   retryUI(t, h);
   h.provider.setResponses([
     fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' }),
@@ -905,8 +907,9 @@ for (const mode of ['steer', 'followUp'] as const) for (const key of ['\x1b', '\
     await running;
   });
 
-for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} repeated retry interruption keeps the queued attachment`, { timeout: 5000 }, async t => {
+for (const key of ['\x1b', '\x1b[13;5u', '\x07']) test(`${JSON.stringify(key)} repeated retry interruption keeps the queued attachment`, { timeout: 5000 }, async t => {
   const h = await fixture(t);
+  if (key === '\x07') h.app.editor.keybindings = new KeybindingsManager({ 'app.interrupt': 'ctrl+g' });
   const retrying = retryUI(t, h);
   h.provider.setResponses([fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' })]);
   const running = h.session.prompt('Original');

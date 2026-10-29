@@ -62,6 +62,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   let turn = 0;
   let reviewStatusOwner: object | undefined;
   let auditSession: ExtensionContext['sessionManager'] | undefined;
+  const sessionCancellation = new AbortController();
   let cached: { stamp: string; config: GuardianConfig; error?: string } | undefined;
   let lastValid: GuardianConfig | undefined;
   let reportedError: string | undefined;
@@ -101,9 +102,8 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     const ctx = approvalContext as unknown as ExtensionContext;
     const settings = config();
     const sessionId = ctx.sessionManager.getSessionId();
-    const reviewTurn = turn;
     const statusOwner = {};
-    const current = () => turn === reviewTurn && auditSession?.getSessionId() === sessionId;
+    const current = () => auditSession?.getSessionId() === sessionId;
     const claudeCli = settings.reviewer.provider === CLAUDE_CLI_PROVIDER;
     const reviewer = claudeCli ? undefined : resolveReviewer(ctx.modelRegistry, settings.reviewer, `guardian-${sessionId}`);
     if (reviewer && !reviewer.ok) return { type: 'error', error: { type: 'prompt_build', message: reviewer.message } };
@@ -125,7 +125,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
       policy: hash(prompt.systemPrompt), instructions: hash(contextFiles), action: hash(plannedAction),
       transcript: hash({ transcript, trustedUserAnswers: evidence.trustedUserAnswers }),
     };
-    if (signal?.aborted || !current()) return { type: 'error', error: { type: 'cancelled' } };
+    if (signal?.aborted || !current()) return { type: 'error', error: { type: 'cancelled' }, contextHashes };
     if (ctx.hasUI) {
       reviewStatusOwner = statusOwner;
       ctx.ui.setStatus(REVIEW_STATUS_KEY, 'Reviewing approval request…');
@@ -141,7 +141,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     }
   };
   const approvals = new Approvals({
-    config, review, turnId: () => String(turn),
+    config, review, sessionSignal: sessionCancellation.signal, turnId: () => String(turn),
     record: entry => {
       if (auditSession?.getSessionId() !== entry.sessionId) throw new Error('Cannot record approval audit in a different or closed session');
       pi.appendEntry(APPROVAL_AUDIT_ENTRY_TYPE, entry);
@@ -180,6 +180,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     }
   });
   pi.on('session_shutdown', (_event, ctx) => {
+    sessionCancellation.abort();
     reviewStatusOwner = undefined;
     if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
     auditSession = undefined;

@@ -79,8 +79,10 @@ Ctrl+Enter invokes the live interrupt handler
 directly in the main editor without leaving Vi insert mode. Agent-run
 interruptions preserve the cursor and draft.
 It interrupts immediately even when autocomplete is open, leaving the popup
-alone. Bash commands, retry backoff and compaction use Pi's current Escape
-handling. With no active run, promotion, Bash command, retry or compaction, the
+alone. During retry backoff, either shortcut cancels the retry and promotes queued
+user input. With no queued user message, it only cancels the retry. Bash commands
+and compaction use Pi's current Escape handling when no promotion is pending.
+With no active run, promotion, Bash command, retry or compaction, the
 shortcut does nothing; it does not open the session tree or clear a Bash draft.
 A second Ctrl+Enter stops a pending promotion just as a second Escape does.
 
@@ -102,8 +104,9 @@ or quit retires the promotion before asynchronous teardown; a cancelled replacem
 leaves it eligible to continue. Accepted reload retires the promotion before its
 first yield; a rejected TUI reload leaves it eligible to continue.
 
-Autocomplete, dialogs, compaction and retry backoff keep their own Escape
-handling. Vi mode keeps insert/visual-mode Escape; only a clean normal-mode
+Autocomplete and dialogs keep their own Escape handling. During compaction or
+branch summarization, a second interrupt stops a pending promotion and preserves
+its queue. Vi mode keeps insert/visual-mode Escape; only a clean normal-mode
 Escape reaches the interrupt handler. Programmatic `ctx.abort()` and stock dequeue
 cancel a held promotion and restore its queued text using Pi's normal editor behavior;
 this is text-only, unlike second-Escape retention of attachments and custom messages.

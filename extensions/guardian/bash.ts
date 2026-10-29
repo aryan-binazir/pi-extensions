@@ -37,6 +37,7 @@ export interface BashRuntime {
   /** Undefined when this platform has no usable sandbox, and every command is reviewed instead. */
   sandbox: PlatformSandbox | undefined;
   approvals: { request(request: ApprovalRequest, ctx: ApprovalContext, signal?: AbortSignal): Promise<ApprovalDecision> };
+  /** Entry commits an authorized rule write; later cancellation does not roll it back. */
   persistAmendment(prefix: string[]): Promise<void>;
 }
 
@@ -152,6 +153,7 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
           ...(amendment ? { amendment } : {}),
         }, approvalContext, signal);
         if (decision.type !== 'approved') throw new Error(decision.message);
+        if (signal?.aborted) throw new Error('Operation aborted');
         if (!decision.persist) return;
         // The command is approved either way; a rule that could not be saved only means you are asked again.
         try {

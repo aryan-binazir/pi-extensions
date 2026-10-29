@@ -163,7 +163,8 @@ function decorate(host: Host, state: Adapter): void {
       registration.input = { editor, reset: () => unregister() };
       return {
         key(data) {
-          if (!current() || !matchesKey(data, 'ctrl+enter')) return false;
+          if (!current()) return false;
+          if (!matchesKey(data, 'ctrl+enter')) return false;
           if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
             (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
           return true;
@@ -224,7 +225,11 @@ function sessionPort(session: AgentSession, state: Adapter): SessionPort | undef
 function interrupt(host: Host, original: () => void, state: Adapter): void {
   const session = host.session;
   const registration = state.active.get(session.sessionManager);
-  if (registration?.pending) return registration.pending.cancel();
+  if (registration?.pending) {
+    registration.pending.cancel();
+    if (session.isCompacting) session.abortCompaction();
+    return;
+  }
   if (!state.supported || !registration || !session.isStreaming || session.isCompacting) return original();
   const port = sessionPort(session, state);
   if (!port) { warn(registration, state); return original(); }
@@ -265,12 +270,13 @@ export function install(): Adapter {
   else {
     const shared = state;
     if (!marked(handleEvent, wrapped)) {
-      const handle = function (this: Host, event: AgentSessionEvent) {
+      const handle = async function (this: Host, event: AgentSessionEvent) {
         if (event.type === 'agent_start' || event.type === 'agent_end') shared.quietAborts.delete(this.session);
         if ((event.type === 'message_update' || event.type === 'message_end') && event.message.role === 'assistant' &&
             event.message.stopReason === 'aborted' && shared.quietAborts.has(this.session))
           shared.quietMessages.add(event.message);
-        return handleEvent.call(this, event);
+        await handleEvent.call(this, event);
+        if (event.type === 'auto_retry_start' || event.type === 'compaction_start') shared.attach(this, shared);
       };
       Object.defineProperty(handle, wrapped, { value: true });
       prototype.handleEvent = handle;

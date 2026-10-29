@@ -14,6 +14,7 @@ const MAX_APPROVAL_REASON_TOKENS = 512;
 export const MAX_REVIEWED_ACTION_BYTES = 256 * 1024;
 const NO_INTERACTIVE_USER = 'approval required, but no interactive user is available to approve it';
 const USER_REJECTED = 'rejected by user';
+const APPROVAL_CANCELLED = 'approval request was cancelled';
 const REVIEW_CANCELLED = 'automatic approval review was cancelled';
 const YES = 'Yes, proceed';
 const NO = 'No, and tell the agent what to do differently';
@@ -65,7 +66,7 @@ export interface ApprovalAuditEntry {
 }
 
 type AuditDecision = Pick<ApprovalAuditEntry, 'decider' | 'verdict' | 'rationale' | 'assessment' | 'contextHashes' | 'userChoice' | 'requestedRule'> & { failureKind?: ReviewError['type'] | 'no_interactive_user' };
-type AuditRequest = Omit<ApprovalAuditEntry, keyof AuditDecision | 'version' | 'timestamp' | 'durationMs' | 'reviewer' | 'sessionId' | 'sessionLeafId'>;
+type AuditRequest = Omit<ApprovalAuditEntry, keyof AuditDecision | 'version' | 'timestamp' | 'durationMs' | 'reviewer'>;
 
 export interface ReviewInput {
   actionJson: string;
@@ -78,12 +79,13 @@ export interface ApprovalContext {
   abort(): void;
   ui: {
     notify(message: string, type?: 'info' | 'warning' | 'error'): void;
-    select(title: string, options: string[]): Promise<string | undefined>;
+    select: ExtensionContext['ui']['select'];
   };
 }
 
 export interface ApprovalDeps {
   config(): GuardianConfig;
+  sessionSignal?: AbortSignal;
   review(input: ReviewInput, ctx: ApprovalContext, signal: AbortSignal | undefined): Promise<ReviewOutcome>;
   /** Identifies the agent turn for the denial circuit breaker. */
   turnId(): string;
@@ -118,7 +120,11 @@ export class Approvals {
     const started = performance.now();
     const denied = this.denied;
     if (!denied) return undefined;
-    this.record(denied.audit, { decider: 'user', verdict: 'approved', rationale: 'Approved with /guardian approve.', userChoice: 'manual' }, ctx, performance.now() - started, this.deps.config());
+    if (denied.audit.sessionId !== ctx.sessionManager.getSessionId()) {
+      this.clearDenied();
+      return undefined;
+    }
+    this.record(denied.audit, { decider: 'user', verdict: 'approved', rationale: 'Approved with /guardian approve.', userChoice: 'manual' }, performance.now() - started, this.deps.config());
     this.denied = undefined;
     return denied.action;
   }
@@ -132,12 +138,18 @@ export class Approvals {
   }
 
   async request(request: ApprovalRequest, ctx: ApprovalContext, signal?: AbortSignal): Promise<ApprovalDecision> {
+    if (this.deps.sessionSignal) signal = signal ? AbortSignal.any([signal, this.deps.sessionSignal]) : this.deps.sessionSignal;
     const config = this.deps.config();
+    const sessionId = ctx.sessionManager.getSessionId();
+    const sessionLeafId = ctx.sessionManager.getLeafId();
+    const turnId = this.deps.turnId();
+    const cancelled = () => Boolean(signal?.aborted || ctx.sessionManager.getSessionId() !== sessionId);
+    const ownsTurn = () => this.deps.turnId() === turnId;
     if (request.audit) this.clearDenied();
     const actionJson = formatActionPretty(request.action);
     const actionBytes = Buffer.byteLength(actionJson);
     const audit: AuditRequest = {
-      requestId: randomUUID(), actionJson: request.audit ? formatActionPretty(request.audit.action) : truncateText(actionJson, MAX_REVIEWED_ACTION_BYTES / 4), actionBytes,
+      requestId: randomUUID(), sessionId, sessionLeafId, actionJson: request.audit ? formatActionPretty(request.audit.action) : truncateText(actionJson, MAX_REVIEWED_ACTION_BYTES / 4), actionBytes,
       ...(request.audit ? { actionRedacted: true } : {}),
       actionTruncated: actionBytes > MAX_REVIEWED_ACTION_BYTES, summary: truncateText(request.audit?.summary ?? request.summary, MAX_APPROVAL_REASON_TOKENS), approvalPolicy: config.approvalPolicy,
       ...(request.audit || request.reason === undefined ? {} : { requestReason: truncateText(request.reason, MAX_APPROVAL_REASON_TOKENS) }),
@@ -150,10 +162,14 @@ export class Approvals {
       this.record(audit, request.audit ? {
         decider: decision.decider, verdict: decision.verdict, rationale: `Connector action ${decision.verdict}${failureKind ? ` (${failureKind})` : ''}.`,
         ...(decision.userChoice ? { userChoice: decision.userChoice } : {}),
-      } : persistedDecision, ctx, now - started, config);
+      } : persistedDecision, now - started, config);
       started = now;
     };
-    if (config.approvalsReviewer !== 'auto_review' || config.approvalPolicy !== 'on-request') return this.askUser(request, ctx, record);
+    if (cancelled()) {
+      record({ decider: 'policy', verdict: 'aborted', rationale: APPROVAL_CANCELLED });
+      return { type: 'aborted', message: APPROVAL_CANCELLED };
+    }
+    if (config.approvalsReviewer !== 'auto_review' || config.approvalPolicy !== 'on-request') return this.askUser(request, ctx, record, cancelled, ownsTurn, signal);
     if (actionBytes > MAX_REVIEWED_ACTION_BYTES) {
       const message = `This action is too large to review completely (${actionBytes} bytes, limit ${MAX_REVIEWED_ACTION_BYTES}). Split it into smaller changes and retry.`;
       record({ decider: 'policy', verdict: 'rejected', rationale: message });
@@ -168,22 +184,24 @@ export class Approvals {
       outcome = signal?.aborted ? { type: 'error', error: { type: 'cancelled' } }
         : { type: 'error', error: { type: 'session', message: error instanceof Error ? error.message : String(error), transient: false } };
     }
+    if (cancelled()) outcome = { type: 'error', error: { type: 'cancelled' }, ...(outcome.contextHashes ? { contextHashes: outcome.contextHashes } : {}) };
     const completion = completeReview(outcome);
     const automatic: AuditDecision = outcome.type === 'completed'
       ? { decider: 'auto_review', verdict: outcome.assessment.outcome === 'allow' ? 'approved' : 'rejected', rationale: outcome.assessment.rationale, assessment: outcome.assessment }
       : { decider: 'auto_review', verdict: outcome.error.type === 'cancelled' ? 'aborted' : 'error', rationale: completion.warning ?? REVIEW_CANCELLED, failureKind: outcome.error.type };
     if (outcome.contextHashes) automatic.contextHashes = outcome.contextHashes;
-    const turnId = this.deps.turnId();
-    if (completion.assessmentOutcome === 'deny') {
-      this.denied = request.audit ? undefined : { action: { summary: request.summary, actionJson }, audit };
-      ctx.ui.notify(completion.warning!, 'warning');
-      const interrupt = this.denials.recordDenial(turnId);
-      if (interrupt) {
-        ctx.ui.notify(interrupt, 'warning');
-        ctx.abort();
+    if (completion.assessmentOutcome === 'deny') ctx.ui.notify(completion.warning!, 'warning');
+    if (ownsTurn() && !cancelled()) {
+      if (completion.assessmentOutcome === 'deny') {
+        this.denied = request.audit ? undefined : { action: { summary: request.summary, actionJson }, audit };
+        const interrupt = this.denials.recordDenial(turnId);
+        if (interrupt) {
+          ctx.ui.notify(interrupt, 'warning');
+          ctx.abort();
+        }
+      } else {
+        this.denials.recordNonDenial(turnId);
       }
-    } else {
-      this.denials.recordNonDenial(turnId);
     }
     record(automatic);
     const { decision } = completion;
@@ -194,7 +212,7 @@ export class Approvals {
         if (completion.assessmentOutcome === 'deny') return { type: 'rejected', message: decision.message };
         if (config.autoReview.failureFallback === 'user' && ctx.hasUI) {
           ctx.ui.notify(`${completion.warning}; asking you instead.`, 'warning');
-          return this.askUser(request, ctx, record);
+          return this.askUser(request, ctx, record, cancelled, ownsTurn, signal);
         }
         record({ decider: 'policy', verdict: 'rejected', rationale: decision.message, ...(automatic.failureKind ? { failureKind: automatic.failureKind } : {}) });
         return { type: 'rejected', message: decision.message };
@@ -202,15 +220,18 @@ export class Approvals {
     }
   }
 
-  private record(audit: AuditRequest, decision: AuditDecision, ctx: ApprovalContext, durationMs: number, config: GuardianConfig): void {
+  private record(audit: AuditRequest, decision: AuditDecision, durationMs: number, config: GuardianConfig): void {
     this.deps.record({
       ...audit, ...decision, version: 1, timestamp: new Date().toISOString(), durationMs: Math.max(0, Math.round(durationMs)),
-      sessionId: ctx.sessionManager.getSessionId(), sessionLeafId: ctx.sessionManager.getLeafId(),
       ...(decision.decider === 'auto_review' ? { reviewer: { ...config.reviewer } } : {}),
     });
   }
 
-  private async askUser(request: ApprovalRequest, ctx: ApprovalContext, record: (decision: AuditDecision) => void): Promise<ApprovalDecision> {
+  private async askUser(request: ApprovalRequest, ctx: ApprovalContext, record: (decision: AuditDecision) => void, cancelled: () => boolean, ownsTurn: () => boolean, signal?: AbortSignal): Promise<ApprovalDecision> {
+    if (cancelled()) {
+      record({ decider: 'policy', verdict: 'aborted', rationale: APPROVAL_CANCELLED });
+      return { type: 'aborted', message: APPROVAL_CANCELLED };
+    }
     if (!ctx.hasUI) {
       record({ decider: 'policy', verdict: 'rejected', rationale: NO_INTERACTIVE_USER, failureKind: 'no_interactive_user' });
       return { type: 'rejected', message: NO_INTERACTIVE_USER };
@@ -224,7 +245,11 @@ export class Approvals {
     });
     const title = [request.justification ?? 'Allow this action?', request.summary,
       ...(actionJson ? [`Complete action (${Buffer.byteLength(actionJson)} bytes):`, actionDisplay, request.summary] : []), request.reason].filter(Boolean).join('\n');
-    const choice = await ctx.ui.select(title, options);
+    const choice = await ctx.ui.select(title, options, { signal });
+    if (cancelled()) {
+      record({ decider: 'user', verdict: 'aborted', rationale: APPROVAL_CANCELLED });
+      return { type: 'aborted', message: APPROVAL_CANCELLED };
+    }
     const approved = choice === YES || Boolean(always && choice === always);
     try {
       record({ decider: 'user', verdict: approved ? 'approved' : 'aborted', rationale: choice ?? 'Approval prompt dismissed.',
@@ -232,7 +257,7 @@ export class Approvals {
         ...(always && choice === always ? { requestedRule: request.amendment } : {}),
       });
     } finally {
-      if (!approved) ctx.abort();
+      if (!approved && !cancelled() && ownsTurn()) ctx.abort();
     }
     if (choice === YES) return { type: 'approved' };
     if (always && choice === always) return { type: 'approved', persist: request.amendment };

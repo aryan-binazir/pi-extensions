@@ -74,8 +74,13 @@ review-required connector calls clear older replayable shell/file denials before
 A delegation grant grants capability only. The child bridge proxy forwards to one approval at the
 actual parent leaf, without reviewing twice. Independent child cancellation prevents execution after
 the hook settles, but Pi exposes only the parent operation signal to the hook: an idle-parent review
-may continue until completion or timeout. Rejecting an interactive background approval can abort the current parent operation, including
-a turn, retry, compaction or branch summary. Child denials count toward the parent turn's denial breaker.
+may continue across parent turns until completion or timeout. A late rejection blocks
+that action without aborting a newer parent turn. Child denials count toward the
+denial breaker only while their originating parent turn remains current.
+Before another parent turn starts, a background rejection can still abort a
+parent retry, compaction or branch summary.
+Session shutdown cancels pending Guardian reviews and approval dialogs, including
+background requests started while the parent was idle.
 
 Each mutation adds review latency (up to the review timeout, including retries). In a parallel tool
 batch Pi prepares hooks serially before executing approved calls; a later model denial can precede an
@@ -324,7 +329,8 @@ view bounds command and reason previews and reports when older entries were omit
 remain in the session file. Hard policy refusals before an approval request still appear as tool
 errors; this history covers approval requests, including their internal policy rejections.
 
-The session ID and leaf entry identify the conversation at the decision. Automatic reviews save
+The session ID and leaf entry identify the conversation when the approval request
+started, including when `/guardian approve` later approves a denied action. Automatic reviews save
 separate SHA-256 hashes for the system policy, AGENTS instructions, planned action and retained
 transcript with trusted answers. These hashes omit the session ID, date and timezone, so the components
 can be compared across sessions. Later read-only tool results are not hashed. Identical hashes do not

@@ -307,3 +307,262 @@ test('connector metadata audits retain safe failure categories without model err
   await human.approvals.request({ action: { tool: 'connector' }, summary: 'Connector call', audit: { action: { tool: 'connector' }, summary: 'Connector call' } }, human.ctx);
   assert.match(human.records[0].rationale, /no_interactive_user/);
 });
+
+test('cancellation wins when a human choice resolves before the awaiting continuation', async () => {
+  for (const fallback of [false, true]) for (const choice of [0, 1, 2]) {
+    const controller = new AbortController();
+    const h = harness(fallback ? [{ type: 'error', error: { type: 'timeout' } }] : [], fallback ? {} : { approvalsReviewer: 'user' });
+    h.ctx.ui.select = (_title, options) => new Promise(resolve => {
+      resolve(options[choice]);
+      controller.abort();
+    });
+    const decision = await h.approvals.request({ ...request, amendment: ['git', 'push'] }, h.ctx, controller.signal);
+    assert.equal(decision.type, 'aborted');
+    assert.equal(h.aborted(), 0, 'signal cancellation must not abort a newer run');
+    const human = h.records.filter(entry => entry.decider === 'user');
+    assert.equal(human.length, 1);
+    assert.equal(human[0].verdict, 'aborted');
+    assert.equal(human[0].userChoice, undefined, 'a cancelled selection is not a user rejection or approval');
+    assert.equal(human[0].requestedRule, undefined);
+    assert.doesNotMatch(JSON.stringify(decision), /persist|rejected by user/);
+  }
+});
+
+test('pre-aborted requests never enter the selector or reviewer', async () => {
+  for (const approvalsReviewer of ['user', 'auto_review'] as const) {
+    const controller = new AbortController();
+    controller.abort();
+    const h = harness([allow], { approvalsReviewer }, { choice: 'Yes, proceed' });
+    assert.equal((await h.approvals.request(request, h.ctx, controller.signal)).type, 'aborted');
+    assert.deepEqual(h.prompts, []);
+    assert.deepEqual(h.reviews, []);
+    assert.equal(h.aborted(), 0);
+    assert.deepEqual(h.records.map(entry => entry.verdict), ['aborted']);
+  }
+});
+
+test('late human rejection keeps its original audit identity and cannot abort a new turn', async () => {
+  const h = harness([], { approvalsReviewer: 'user' });
+  let session = 'old-session', leaf = 'old-leaf';
+  h.ctx.sessionManager = { getSessionId: () => session, getLeafId: () => leaf };
+  let choose!: (choice: string) => void;
+  h.ctx.ui.select = () => new Promise(resolve => { choose = resolve; });
+  const pending = h.approvals.request(request, h.ctx);
+  session = 'new-session';
+  leaf = 'new-leaf';
+  choose('No, and tell the agent what to do differently');
+  assert.equal((await pending).type, 'aborted');
+  assert.equal(h.aborted(), 0);
+  assert.equal(h.records[0].sessionId, 'old-session');
+  assert.equal(h.records[0].sessionLeafId, 'old-leaf');
+  assert.equal(h.records[0].userChoice, undefined);
+});
+
+test('cancelled automatic results cannot authorize or replace a newer turns denial and circuit breaker', async () => {
+  for (const outcome of [allow, deny, { type: 'error', error: { type: 'timeout' } } as ReviewOutcome]) {
+    const h = harness([]);
+    let turn = 'old';
+    let finish!: (outcome: ReviewOutcome) => void;
+    let pending = true;
+    const approvals = new Approvals({ config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => turn,
+      review: (): Promise<ReviewOutcome> => pending ? new Promise(resolve => { finish = resolve; }) : Promise.resolve(deny),
+      record: entry => { h.records.push(entry); },
+    });
+    const controller = new AbortController();
+    const old = approvals.request(request, h.ctx, controller.signal);
+    controller.abort();
+    turn = 'new';
+    pending = false;
+    const fresh = { ...request, summary: 'fresh denied action' };
+    await approvals.request(fresh, h.ctx);
+    await approvals.request(fresh, h.ctx);
+    finish(outcome);
+    assert.equal((await old).type, 'aborted');
+    assert.equal(h.aborted(), 0, 'the late denial must not count toward the new turn');
+    assert.equal(approvals.takeDenied(h.ctx)?.summary, fresh.summary);
+    assert.deepEqual(h.prompts, [], 'late failure must not open a fallback prompt');
+    await approvals.request(fresh, h.ctx);
+    assert.equal(h.aborted(), 1, 'the late allow must not reset the new turn breaker');
+    assert.equal(h.records[2].verdict, 'aborted');
+  }
+});
+
+test('manual approval cannot replay a denial in a different session', async () => {
+  const h = harness([deny]);
+  await h.approvals.request(request, h.ctx);
+  h.ctx.sessionManager = { getSessionId: () => 'new-session', getLeafId: () => 'new-leaf' };
+  assert.equal(h.approvals.takeDenied(h.ctx), undefined);
+  assert.equal(h.records.length, 1);
+});
+
+test('eight fake selectors honor a shared signal without cancelling independent owners', async () => {
+  for (const fallback of [false, true]) {
+    const shared = new AbortController(), independent = new AbortController(), external = new AbortController();
+    const h = harness(Array.from({ length: 9 }, () => ({ type: 'error', error: { type: 'timeout' } })), fallback ? {} : { approvalsReviewer: 'user' });
+    const visible = new Map<AbortSignal, Set<(choice: string | undefined) => void>>();
+    h.ctx.ui.select = (_title, _options, opts) => new Promise(resolve => {
+      assert.ok(opts?.signal, 'the public selector receives the owning signal');
+      const signal = opts.signal;
+      const dialogs = visible.get(signal) ?? new Set();
+      visible.set(signal, dialogs);
+      const close = (choice: string | undefined) => {
+        signal.removeEventListener('abort', cancel);
+        dialogs.delete(close);
+        resolve(choice);
+      };
+      const cancel = () => close(undefined);
+      dialogs.add(close);
+      signal.addEventListener('abort', cancel, { once: true });
+    });
+    const pending = Array.from({ length: 8 }, () => h.approvals.request(request, h.ctx, shared.signal));
+    const other = h.approvals.request(request, h.ctx, independent.signal);
+    const externalDialog = h.ctx.ui.select('Another extension', ['Keep open'], { signal: external.signal });
+    await Promise.resolve();
+    assert.equal(visible.get(shared.signal)?.size, 8);
+    assert.equal(visible.get(independent.signal)?.size, 1);
+    shared.abort();
+    assert.deepEqual((await Promise.all(pending)).map(decision => decision.type), Array(8).fill('aborted'));
+    assert.equal(visible.get(shared.signal)?.size, 0);
+    assert.equal(visible.get(independent.signal)?.size, 1);
+    assert.equal(h.aborted(), 0);
+    assert.equal(visible.get(external.signal)?.size, 1);
+    for (const close of visible.get(external.signal)!) close('Keep open');
+    assert.equal(await externalDialog, 'Keep open');
+    for (const close of visible.get(independent.signal)!) close('Yes, proceed');
+    assert.deepEqual(await other, { type: 'approved' });
+    assert.equal(visible.get(independent.signal)?.size, 0);
+    assert.equal(h.records.filter(entry => entry.decider === 'user' && entry.verdict === 'aborted').length, 8);
+  }
+});
+
+test('a signal cancelled during automatic review overrides late allow and deny results', async () => {
+  for (const outcome of [allow, deny]) {
+    const h = harness([]);
+    const controller = new AbortController();
+    const approvals = new Approvals({ config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => 't',
+      review: async () => { controller.abort(); return outcome; }, record: entry => { h.records.push(entry); },
+    });
+    assert.equal((await approvals.request(request, h.ctx, controller.signal)).type, 'aborted');
+    assert.equal(approvals.takeDenied(h.ctx), undefined);
+    assert.deepEqual(h.notices, []);
+    assert.deepEqual(h.prompts, []);
+    assert.equal(h.aborted(), 0);
+    assert.deepEqual(h.records.map(entry => entry.verdict), ['aborted']);
+  }
+});
+
+test('cancellation while recording a review failure prevents fallback UI', async () => {
+  const h = harness([]);
+  const controller = new AbortController();
+  const approvals = new Approvals({ config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => 't',
+    review: async () => ({ type: 'error', error: { type: 'timeout' } }),
+    record: entry => { h.records.push(entry); controller.abort(); },
+  });
+  assert.equal((await approvals.request(request, h.ctx, controller.signal)).type, 'aborted');
+  assert.deepEqual(h.prompts, []);
+  assert.equal(h.aborted(), 0);
+  assert.deepEqual(h.records.map(entry => [entry.decider, entry.verdict]), [['auto_review', 'error'], ['policy', 'aborted']]);
+});
+
+test('a late background human rejection is audited without aborting a newer turn', async () => {
+  const h = harness([]);
+  let turn = 'old';
+  const approvals = new Approvals({ config: () => ({ ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: 'user' }),
+    turnId: () => turn, review: async () => allow, record: entry => { h.records.push(entry); },
+  });
+  h.ctx.ui.select = async () => { turn = 'new'; return 'No, and tell the agent what to do differently'; };
+  assert.equal((await approvals.request(request, h.ctx)).type, 'aborted');
+  assert.equal(h.aborted(), 0);
+  assert.equal(h.records[0].userChoice, 'reject');
+});
+
+test('a cancellation audit failure never aborts another run or permits execution', async () => {
+  const controller = new AbortController();
+  const h = harness([]);
+  const approvals = new Approvals({ config: () => ({ ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: 'user' }),
+    turnId: () => 't', review: async () => allow, record: () => { throw new Error('audit disk full'); },
+  });
+  h.ctx.ui.select = async () => { controller.abort(); return 'Yes, proceed'; };
+  await assert.rejects(approvals.request(request, h.ctx, controller.signal), /audit disk full/);
+  assert.equal(h.aborted(), 0);
+});
+
+for (const choice of [0, 1]) test(`background human approval survives a parent turn change (choice ${choice})`, async () => {
+  const h = harness([]);
+  let turn = 'old';
+  const approvals = new Approvals({ config: () => ({ ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: 'user' }),
+    turnId: () => turn, review: async () => allow, record: entry => { h.records.push(entry); },
+  });
+  h.ctx.ui.select = async (_title, options) => { turn = 'new'; return options[choice]; };
+  assert.deepEqual(await approvals.request({ ...request, amendment: ['git', 'push'] }, h.ctx),
+    choice === 0 ? { type: 'approved' } : { type: 'approved', persist: ['git', 'push'] });
+  assert.equal(h.aborted(), 0);
+  assert.equal(h.records[0].verdict, 'approved');
+});
+
+test('background automatic results preserve the newer turns denial and circuit breaker', async () => {
+  for (const outcome of [allow, deny, { type: 'error', error: { type: 'timeout' } } as ReviewOutcome]) {
+    const h = harness([], {}, { choice: 'Yes, proceed' });
+    let turn = 'old';
+    let finish!: (outcome: ReviewOutcome) => void;
+    let background = true;
+    const approvals = new Approvals({ config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => turn,
+      review: (): Promise<ReviewOutcome> => background ? new Promise(resolve => { finish = resolve; }) : Promise.resolve(deny),
+      record: entry => { h.records.push(entry); },
+    });
+    const old = approvals.request(request, h.ctx);
+    turn = 'new';
+    background = false;
+    const fresh = { ...request, summary: 'fresh denied action' };
+    await approvals.request(fresh, h.ctx);
+    await approvals.request(fresh, h.ctx);
+    finish(outcome);
+    assert.equal((await old).type, outcome === deny ? 'rejected' : 'approved');
+    assert.equal(h.aborted(), 0);
+    assert.equal(approvals.takeDenied(h.ctx)?.summary, fresh.summary);
+    await approvals.request(fresh, h.ctx);
+    assert.equal(h.aborted(), 1, 'old denial cannot count toward, or non-denial reset, the newer breaker');
+  }
+});
+
+test('a late background denial cannot interrupt a new turn after two old-turn denials', async () => {
+  const h = harness([]);
+  let turn = 'old';
+  let background = false;
+  let finish!: (outcome: ReviewOutcome) => void;
+  const approvals = new Approvals({ config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => turn,
+    review: (): Promise<ReviewOutcome> => background ? new Promise(resolve => { finish = resolve; }) : Promise.resolve(deny),
+    record: entry => { h.records.push(entry); },
+  });
+  await approvals.request(request, h.ctx);
+  await approvals.request(request, h.ctx);
+  background = true;
+  const old = approvals.request(request, h.ctx);
+  turn = 'new';
+  approvals.clearDenied();
+  finish(deny);
+  assert.equal((await old).type, 'rejected');
+  assert.equal(h.notices.length, 3, 'the late background denial still notifies the user');
+  assert.deepEqual(h.notices.at(-1), ['warning', 'Automatic approval review denied (risk: high, authorization: low): Pushes to main.']);
+  assert.equal(h.aborted(), 0);
+  assert.equal(approvals.takeDenied(h.ctx), undefined);
+});
+
+test('cancelled review audits keep context hashes and safe connector failure categories', async () => {
+  const contextHashes = { policy: 'p', instructions: 'i', action: 'a', transcript: 't' };
+  for (const connector of [false, true]) {
+    const controller = new AbortController();
+    const h = harness([]);
+    const approvals = new Approvals({ config: () => DEFAULT_GUARDIAN_CONFIG, turnId: () => 't',
+      review: async (): Promise<ReviewOutcome> => { controller.abort(); return { ...allow, contextHashes }; }, record: entry => { h.records.push(entry); },
+    });
+    const audit = connector ? { action: { tool: 'connector' }, summary: 'Connector call' } : undefined;
+    assert.equal((await approvals.request({ ...request, ...(audit ? { audit } : {}) }, h.ctx, controller.signal)).type, 'aborted');
+    assert.equal(h.records[0].decider, 'auto_review');
+    assert.equal(h.records[0].verdict, 'aborted');
+    if (connector) {
+      assert.equal(h.records[0].rationale, 'Connector action aborted (cancelled).');
+      assert.equal(h.records[0].contextHashes, undefined, 'connector audits still redact hashes');
+    } else assert.deepEqual(h.records[0].contextHashes, contextHashes);
+  }
+});

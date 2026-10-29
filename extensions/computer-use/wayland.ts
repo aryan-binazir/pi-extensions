@@ -94,6 +94,9 @@ export class WaylandPointer {
       return [...this.outputIds.values()].filter(Boolean);
     });
   }
+  preparePointer(output: string, signal: AbortSignal) {
+    return this.withSignal(signal, async () => { await this.pointer(output); });
+  }
   private async pointer(output: string) {
     const existing = this.pointers.get(output); if (existing) return existing;
     if (!this.manager || this.managerVersion < 2) throw new Error('Compositor lacks virtual-pointer v2; pointer control unavailable');

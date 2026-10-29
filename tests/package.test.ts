@@ -20,7 +20,7 @@ const expected = new Map<string, { tools: string[]; commands: string[]; shortcut
   ['prompt-stash', {tools: [], commands: [], shortcuts: []}],
   ['escape-continue', {tools: [], commands: [], shortcuts: []}],
   ['subagents', {tools: ['subagent', 'subagent_cancel', 'subagent_status', 'workflow'], commands: ['subagents'], shortcuts: ['alt+r']}],
-  ['computer-use', {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []}],
+  ['computer-use', {tools: process.platform === 'darwin' ? ['computer_accessibility', 'computer_apps', 'computer_click', 'computer_key', 'computer_screenshot', 'computer_scroll', 'computer_type'] : ['computer_accessibility', 'computer_click', 'computer_close', 'computer_open', 'computer_screenshot', 'computer_scroll', 'computer_type'], commands: [], shortcuts: []}],
   ['fast-mode', {tools: [], commands: ['fast'], shortcuts: []}],
   ['auto-caffeinate', {tools: [], commands: [], shortcuts: []}],
   ['guardian', {tools: ['bash', 'edit', 'write'], commands: ['guardian'], shortcuts: []}],

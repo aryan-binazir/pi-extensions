@@ -23,9 +23,9 @@ test('every registered desktop tool is sequential and closed to unknown paramete
   assert.ok(tools.every(tool => tool.parameters.additionalProperties === false));
 });
 
-test('Linux registers five desktop tools and keeps click coordinates normalized', { skip: process.platform === 'darwin' }, () => {
+test('Linux registers seven desktop tools and keeps click coordinates normalized', { skip: process.platform === 'darwin' }, () => {
   const { tools } = register();
-  assert.deepEqual(tools.map(tool => tool.name), ['computer_screenshot', 'computer_accessibility', 'computer_click', 'computer_type', 'computer_scroll']);
+  assert.deepEqual(tools.map(tool => tool.name), ['computer_open', 'computer_close', 'computer_screenshot', 'computer_accessibility', 'computer_click', 'computer_type', 'computer_scroll']);
   assert.equal(tools.find(tool => tool.name === 'computer_click').parameters.properties.x.maximum, 1);
 });
 

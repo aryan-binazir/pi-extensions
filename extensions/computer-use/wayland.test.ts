@@ -41,6 +41,9 @@ test('real Unix wire transport discovers output, binds pointer to it, clicks and
   const pointer = new WaylandPointer(socket);
   try {
     assert.deepEqual(await pointer.outputs(new AbortController().signal), ['HEADLESS-1']);
+    await pointer.preparePointer('HEADLESS-1', new AbortController().signal);
+    assert.ok(requests.some(r => r.op === 2 && r.body.length === 12 && r.body.readUInt32LE(0) === 0));
+    assert.ok(!requests.some(r => r.id > 2 && (r.op === 1 || r.op === 3)), 'preparation emits no pointer input');
     await pointer.click('HEADLESS-1', .25, .5, 'left', new AbortController().signal);
     await pointer.scroll('HEADLESS-1', 0, -2, new AbortController().signal);
     await pointer.click('HEADLESS-1', 1, 1, 'left', new AbortController().signal);

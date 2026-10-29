@@ -5,6 +5,18 @@ import { linuxSessionEnvironment } from './linux-session.ts';
 import type { DesktopAction, DesktopBackend, DesktopResult } from './desktop.ts';
 
 const maxBytes = 16 * 1024 * 1024;
+const waitForClipboard = String.raw`
+set -eu
+while :; do
+  types=$(wl-paste --list-types 2>&1) || [ "$types" = 'Nothing is copied' ]
+  case "
+$types
+" in *"
+text/plain;charset=utf-8
+"*) exit 0;; esac
+  sleep 0.01
+done
+`;
 const commandOwner = String.raw`
 const { spawn } = require('node:child_process');
 const { writeSync } = require('node:fs');
@@ -42,7 +54,8 @@ export class LinuxDesktop implements DesktopBackend {
   private pointer?: WaylandPointer;
   private children = new Set<{ stop(): void; settled: Promise<void> }>();
   private sessionEnv?: NodeJS.ProcessEnv;
-  constructor(private readonly env: NodeJS.ProcessEnv = process.env) {}
+  private clipboard?: { stop(): void; settled: Promise<void> };
+  constructor(private readonly env: NodeJS.ProcessEnv = process.env, private readonly textEntry: 'type' | 'paste' = 'type') {}
   private environment() { return this.sessionEnv ??= linuxSessionEnvironment(this.env); }
   private wayland() {
     if (!this.pointer) {
@@ -91,9 +104,33 @@ export class LinuxDesktop implements DesktopBackend {
       if (signal.aborted) abort();
     });
   }
+  private async paste(text: string, signal: AbortSignal) {
+    this.clipboard?.stop(); await this.clipboard?.settled;
+    await this.command('wl-copy', ['--clear'], signal);
+    const control = new AbortController();
+    const active = AbortSignal.any([signal, control.signal]);
+    let ended = false, failure: unknown;
+    const copying = this.command('wl-copy', ['--foreground', '--type', 'text/plain;charset=utf-8'], control.signal, text);
+    const settled = copying.then(() => { ended = true; }, error => { ended = true; failure = error; });
+    this.clipboard = { stop: () => control.abort(), settled };
+    const abort = () => control.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    const stopped = () => { throw failure ?? new Error('Isolated clipboard stopped'); };
+    try {
+      signal.throwIfAborted();
+      await Promise.race([this.command('/bin/sh', ['-c', waitForClipboard], active), settled.then(stopped)]);
+      await this.command('wtype', ['-s', '200', '-M', 'ctrl', '-k', 'v', '-m', 'ctrl', '-s', '100'], active);
+      if (ended) stopped();
+    } catch (error) { control.abort(); await settled; throw error; }
+    finally { signal.removeEventListener('abort', abort); }
+  }
   async run(action: DesktopAction, signal: AbortSignal): Promise<DesktopResult> {
     if (action.action === 'accessibility') return { available: false, kind: 'accessibility', reason: 'Linux element accessibility is unavailable in this backend. Use screenshots; no accessibility tree is fabricated.' };
-    if (action.action === 'type') { await this.command('wtype', ['-'], signal, action.text); return { dispatched: true, applicationOutcome: 'Inspect to verify text insertion' }; }
+    if (action.action === 'type') {
+      if (this.textEntry === 'paste') { if (action.text) await this.paste(action.text, signal); }
+      else await this.command('wtype', ['-'], signal, action.text);
+      return { dispatched: true, applicationOutcome: 'Inspect to verify text insertion' };
+    }
     if (action.action === 'screenshot') {
       const outputs = await this.wayland().outputs(signal), output = action.output ?? outputs[0];
       if (!output || !outputs.includes(output)) throw new Error('Named Wayland output unavailable; wl_output v4 is required');
@@ -106,6 +143,7 @@ export class LinuxDesktop implements DesktopBackend {
   async close() {
     this.pointer?.close(); this.pointer = undefined;
     await Promise.all([...this.children].map(child => { child.stop(); return child.settled; }));
+    this.clipboard = undefined;
   }
 }
 

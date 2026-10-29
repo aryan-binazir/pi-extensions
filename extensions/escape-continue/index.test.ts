@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AssistantMessageComponent, type AgentSession, AgentSessionRuntime, createAgentSession, type CreateAgentSessionRuntimeFactory, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type FauxResponseFactory } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type FauxResponseFactory, type ImageContent } from '@earendil-works/pi-ai';
 import { CombinedAutocompleteProvider, Container, Input, setKittyProtocolActive } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import viMode from '../vi-mode/index.ts';
@@ -14,6 +14,7 @@ import { KeybindingsManager } from '../../node_modules/@earendil-works/pi-coding
 import { initTheme } from '../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';
 import escapeContinue from './index.ts';
 import { install } from './adapter.ts';
+import type { Message } from './promotion.ts';
 
 initTheme('dark', false);
 
@@ -147,6 +148,57 @@ function renderAssistantUI(t: TestContext, h: Awaited<ReturnType<typeof fixture>
   t.after(async () => { unsubscribe(); await Promise.all(renders); });
   return () => h.app.chatContainer.render(100).join('\n') as string;
 }
+
+for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} promotion consumes only its interrupted prompt's AbortError`, async t => {
+  const h = await fixture(t);
+  const first = deferred(), promoted = deferred();
+  h.provider.setResponses([h.blocked(first), h.blocked(promoted)]);
+  const prompt = h.session.agent.prompt.bind(h.session.agent);
+  const cancellation = new DOMException('This operation was aborted', 'AbortError');
+  let calls = 0;
+  h.session.agent.prompt = async (input: string | Message | Message[], images?: ImageContent[]) => {
+    const call = ++calls;
+    await (typeof input === 'string' ? prompt(input, images) : prompt(input));
+    if (call === 1) throw cancellation;
+  };
+  const errors: unknown[] = [];
+  const running = h.session.prompt('Original').catch(error => { errors.push(error); });
+  await first.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput(key);
+  await promoted.promise;
+  await running;
+  assert.deepEqual(errors, []);
+  assert.deepEqual(h.users(), ['Original', 'Next']);
+  h.app.editor.handleInput(key);
+  await h.session.waitForIdle();
+  h.session.agent.prompt = async () => { throw cancellation; };
+  await assert.rejects(h.session.prompt('Unrelated abort'), error => error === cancellation);
+});
+
+for (const queued of [false, true]) test(`prompt failures remain visible with queued=${queued}`, async t => {
+  const h = await fixture(t);
+  const first = deferred(), promoted = deferred();
+  h.provider.setResponses([h.blocked(first), h.blocked(promoted)]);
+  const prompt = h.session.agent.prompt.bind(h.session.agent);
+  const failure = queued ? new Error('This operation was aborted') : new DOMException('This operation was aborted', 'AbortError');
+  let calls = 0;
+  h.session.agent.prompt = async (input: string | Message | Message[], images?: ImageContent[]) => {
+    const call = ++calls;
+    await (typeof input === 'string' ? prompt(input, images) : prompt(input));
+    if (call === 1) throw failure;
+  };
+  const rejected = assert.rejects(h.session.prompt('Original'), error => error === failure);
+  await first.promise;
+  if (queued) await h.session.followUp('Next');
+  h.app.editor.handleInput('\x1b');
+  await rejected;
+  if (queued) {
+    await promoted.promise;
+    h.app.editor.handleInput('\x1b');
+    await h.session.waitForIdle();
+  }
+});
 
 for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} promotion hides only its intentional assistant abort notice`, async t => {
   const h = await fixture(t);

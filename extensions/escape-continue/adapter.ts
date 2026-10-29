@@ -14,6 +14,7 @@ type Adapter = {
   rawAborts: WeakMap<AgentSession, () => Promise<void>>;
   quietAborts: WeakMap<AgentSession, object>;
   quietMessages: WeakSet<object>;
+  prompts: WeakMap<AgentSession, Set<{ interrupted: boolean }>>;
   warnedSessions: WeakSet<ExtensionContext['sessionManager']>;
   supported: boolean;
   attach(host: Host, state: Adapter): void;
@@ -59,11 +60,27 @@ function abortRun(session: AgentSession, state: Adapter): Promise<void> {
 async function abortForPromotion(session: AgentSession, state: Adapter): Promise<void> {
   const scope = {};
   state.quietAborts.set(session, scope);
+  for (const prompt of state.prompts.get(session) ?? []) prompt.interrupted = true;
   try { await abortRun(session, state); }
   finally { if (state.quietAborts.get(session) === scope) state.quietAborts.delete(session); }
 }
 
 function wireSession(session: AgentSession, layout: QueueLayout, state: Adapter): void {
+  if (!marked(session.prompt, intercepted)) {
+    const prompt = session.prompt.bind(session);
+    const active = new Set<{ interrupted: boolean }>();
+    state.prompts.set(session, active);
+    const guarded: AgentSession['prompt'] = async (...args) => {
+      const call = { interrupted: false };
+      active.add(call);
+      try { await prompt(...args); }
+      catch (error) {
+        if (!call.interrupted || !(error instanceof Error) || error.name !== 'AbortError') throw error;
+      } finally { active.delete(call); }
+    };
+    Object.defineProperty(guarded, intercepted, { value: true });
+    session.prompt = guarded;
+  }
   if (!state.rawAborts.has(session)) {
     const abort = session.abort.bind(session);
     const clear = session.clearQueue.bind(session);
@@ -231,7 +248,7 @@ export function install(): Adapter {
   let state = prototype[installed];
   if (!state) {
     const bind = prototype.bindCurrentSessionExtensions;
-    state = { active: new WeakMap(), hosts: new WeakMap(), checkpoints: new AsyncLocalStorage(), rawAborts: new WeakMap(), quietAborts: new WeakMap(), quietMessages: new WeakSet(), warnedSessions: new WeakSet(), supported: typeof bind === 'function', attach, decorate, interrupt };
+    state = { active: new WeakMap(), hosts: new WeakMap(), checkpoints: new AsyncLocalStorage(), rawAborts: new WeakMap(), quietAborts: new WeakMap(), quietMessages: new WeakSet(), prompts: new WeakMap(), warnedSessions: new WeakSet(), supported: typeof bind === 'function', attach, decorate, interrupt };
     const shared = state;
     if (shared.supported) prototype.bindCurrentSessionExtensions = async function () {
       await bind.call(this);
@@ -241,6 +258,7 @@ export function install(): Adapter {
   }
   state.quietAborts ??= new WeakMap();
   state.quietMessages ??= new WeakSet();
+  state.prompts ??= new WeakMap();
   const handleEvent = prototype.handleEvent;
   const updateContent = AssistantMessageComponent.prototype.updateContent;
   if (typeof handleEvent !== 'function' || typeof updateContent !== 'function') state.supported = false;

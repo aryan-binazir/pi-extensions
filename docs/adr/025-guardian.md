@@ -1,6 +1,6 @@
 # 025: Guardian, a port of Codex's approval stack
 
-Status: accepted.
+Status: accepted. Default execution superseded by [ADR 029](029-guardian-host-execution.md).
 
 ## Context
 

@@ -263,6 +263,7 @@ export interface ReviewRequestInput {
   trustedUserAnswers: string[];
   environmentId: string;
   plannedAction: PlannedAction;
+  permissionContext?: string;
 }
 
 /** The reviewer's user content in Codex's synchronous full-review section order. */
@@ -275,6 +276,7 @@ export function composeReviewRequest(input: ReviewRequestInput): string[] {
   if (input.transcript.omissionNote) items.push(`\n${input.transcript.omissionNote}\n`);
   items.push('\n>>> PARENT TURN PERMISSION CONTEXT START\n',
     `The active permission profile for environment ${JSON.stringify(input.environmentId)} has no explicit denied-read paths/globs.\n`,
+    ...(input.permissionContext === undefined ? [] : [input.permissionContext]),
     '>>> PARENT TURN PERMISSION CONTEXT END\n',
     ...renderPlannedAction(input.plannedAction));
   return items;

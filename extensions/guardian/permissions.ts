@@ -1,5 +1,5 @@
 // Ported from openai/codex codex-rs/prompts/src/permissions_instructions.rs and format_allow_prefixes in
-// codex-rs/protocol/src/models.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md. Templates are verbatim copies.
+// codex-rs/protocol/src/models.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md. Host instructions are Pi-specific.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -8,6 +8,7 @@ const APPROVAL_POLICY_NEVER = template('never.md');
 const APPROVAL_POLICY_UNLESS_TRUSTED = template('unless_trusted.md');
 const APPROVAL_POLICY_ON_REQUEST = template('on_request.md');
 const SANDBOX_TEMPLATES = {
+  host: template('host.md').trimEnd(),
   'danger-full-access': template('danger_full_access.md').trimEnd(),
   'workspace-write': template('workspace_write.md').trimEnd(),
   'read-only': template('read_only.md').trimEnd(),
@@ -78,6 +79,15 @@ function appendSection(text: string, section: string): string {
 
 /** The body Codex places between `<permissions instructions>` markers. */
 export function permissionsInstructions(context: PermissionsRenderContext): string {
+  if (context.sandboxMode === 'host') {
+    const approval = context.approvalPolicy === 'never'
+      ? 'Approval policy is never: only commands allowed by an explicit rule may run; file changes are blocked.'
+      : context.reviewer === 'auto_review' && context.approvalPolicy === 'on-request'
+        ? '`approvals_reviewer` is `auto_review`: Guardian sends commands and file changes to its reviewer automatically unless a command rule decides them.'
+        : 'Commands and file changes require user approval unless a command rule decides them.';
+    const prefixes = formatAllowPrefixes(context.approvedCommandPrefixes);
+    return `\n${sandboxText('host', 'enabled')}\n${approval}\nCall tools normally; omit sandbox_permissions. Do not bypass a rejected action. Continue independent authorized work while addressing the rejection.\n${prefixes ? `${APPROVED_PREFIXES}${prefixes}\n` : ''}`;
+  }
   let remainingPathBytes = MAX_PERMISSION_PATH_BYTES - OMITTED_PERMISSION_PATHS.length - 1;
   let pathsOmitted = false;
   // Reserve up to ten bytes for each entry's label, quoting, and separator.

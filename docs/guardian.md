@@ -2,42 +2,59 @@
 
 [Back to README](../README.md)
 
-Guardian ports Codex's approval stack to Pi: exec-policy rules, the Seatbelt sandbox on macOS and
-the bubblewrap and seccomp sandbox on Linux, permission instructions for the agent, and the Guardian
-auto-reviewer. Our inspiration from this code comes from there. The source is
+Guardian reviews `bash`, `write`, `edit`, and connector leaf calls. Commands and file changes
+run on the host by default, using Pi's environment, credentials and network access. `gh`, Git writes,
+and local test servers work with the same access as ordinary Pi tools. Guardian adds no OS containment
+to approved host actions.
+
+The approval engine and optional sandbox backends are adapted from
 [openai/codex](https://github.com/openai/codex/tree/ce0323f2f2d3b25e82806cd555237da3db4e1897)
-(Apache-2.0; see [third-party notices](licenses/README.md)). [ADR 025](adr/025-guardian.md)
-records where it departs from Codex.
+under Apache-2.0; see [third-party notices](licenses/README.md), [ADR 025](adr/025-guardian.md),
+and [ADR 029](adr/029-guardian-host-execution.md).
 
-## How a command is decided
+## How an action is decided
 
-Guardian replaces Pi's `bash` tool and gates `write`, `edit`, and connector leaf calls.
+1. Hard Railway and database boundaries apply first, followed by command rules. A `forbidden`
+   rule rejects the command. A `prompt` rule requires approval. Every parsed command segment must
+   match an `allow` rule to skip review. Only plain-word scripts split into rule-matched segments;
+   the strictest segment decision wins. Unsupported shell syntax goes to the approval policy.
+2. In the default `host` mode, commands not decided by a rule and all file changes go to Guardian's
+   configured reviewer before execution. Call the tools normally; sandbox escalation parameters are
+   unnecessary. Approved actions run through Pi's normal host tools. A rejection or cancellation
+   prevents the action from starting.
+3. The default reviewer is Luna. `approvalsReviewer: "user"` or `approvalPolicy: "untrusted"` sends
+   approvals to you. With `approvalPolicy: "never"`, only commands covered by explicit allow rules
+   can run in host mode; file changes are blocked.
 
-1. Rules decide first. A script is split into command segments when it contains only plain words
-   joined by `&&`, `||`, `;` or `|`. Each segment is matched against `.rules` prefixes, and the
-   strictest decision wins: `forbidden`, then `prompt`, then `allow`.
-2. A `forbidden` match is rejected before anything runs. A `prompt` match needs approval.
-3. Unmatched commands run inside the sandbox without review, unless they force-remove files
-   (`rm -f`, including inside `sudo`, `env`, `trap` and nested shells) or ask to leave the sandbox. A
-   destructive database operation whose target is not provably local is refused outright (see
-   [Shared rules: Railway](#shared-rules-railway)).
-4. The sandbox lets commands read anywhere and write only in the working directory, `/tmp`,
-   `$TMPDIR` and configured roots. `.git`, `.agents`, `.codex`, `.pi` and `.aws` stay read-only, and
-   network access is off. `sandbox-exec` on macOS, or `bwrap` on Linux, is the first process, so no
-   shell runs unsandboxed before it.
-   A failure is returned to the agent, which can retry with
-   `sandbox_permissions: "require_escalated"` and a `justification`.
-5. Approval requests go to the reviewer model, or to you. An approved escalation runs outside the
-   sandbox. Commands whose every segment matches an `allow` rule also run outside it.
+Each reviewed action adds model latency. File review sends the full proposed content or edits to the
+reviewer and records action details in the local approval audit. Automatic review rejects actions
+larger than 256 KiB, including workspace writes; split those into smaller changes. The reviewer keeps
+its separate read-only, network-disabled inspection sandbox. Without a usable sandbox, those
+inspection commands are unavailable; approved host actions still run normally.
 
-Guardian also replaces `write` and `edit`, and checks each mutation at the absolute path Pi resolved,
-so `@`-prefixed and `file://` paths are judged as what they actually write. Writes inside the writable
-roots are approved automatically; other paths need approval. A leaf symlink is followed even when its
-target is missing, a file with more than one hard link is never written automatically, and parent
-directories are created only after the change is allowed. Writes that are approved automatically run
-inside the sandbox, so a link swapped in after the check cannot redirect them. Without a usable sandbox,
-every command and file change needs approval, except commands an `allow` rule of yours covers: as in
-Codex, an allow rule runs its command outside the sandbox on every platform.
+File approvals name the absolute path Pi resolved, including `@` and `file://` forms. Leaf symlinks
+are resolved before review; a redirected resolved target is rejected after approval. Parent directories
+are created only after approval. Host writes are not isolated from concurrent filesystem changes.
+
+## Optional sandbox execution
+
+Set `sandbox.mode` to `workspace-write` or `read-only` to use the OS sandbox. Existing configurations
+with a `sandbox` object but no `mode` retain `workspace-write`; a missing `sandbox` object uses `host`.
+To switch an existing sandbox configuration, set `"mode": "host"`. Network and writable-root settings
+apply only to sandboxed execution.
+
+In `workspace-write`, unmatched commands run without review inside the sandbox, except forced removals
+such as `rm -f`. It permits reads everywhere and writes in the working directory, `/tmp`, `$TMPDIR`
+and configured roots. `.git`, `.agents`, `.codex`, `.pi` and `.aws` remain read-only. Network access is
+off by default. The agent can request `sandbox_permissions: "require_escalated"` to review and run an
+action on the host. Explicit allow rules also run their commands on the host.
+
+Workspace file changes that pass the path checks run inside the sandbox without review. Other paths
+and files with multiple hard links require approval. Without a usable sandbox, every command and file
+change requires approval except commands covered by allow rules.
+
+`danger-full-access` preserves the legacy mode with no sandbox and no automatic review of ordinary
+commands or file writes. Use `host` for unsandboxed execution with approval checks.
 
 ## Connector approvals
 
@@ -98,8 +115,8 @@ host-privileged extension; a later `tool_call` handler can also change arguments
 
 ## Linux
 
-On Linux, Guardian runs Codex's sandbox: bubblewrap builds the filesystem view and a seccomp filter
-limits the network.
+On Linux, the optional execution sandbox and the reviewer's read-only checks use bubblewrap for
+filesystem isolation and seccomp for network restrictions.
 
 - The filesystem is mounted read-only, the writable roots are bound back writable, and `.git`,
   `.agents`, `.codex`, `.pi` and `.aws` under each of them are bound read-only. A missing one is
@@ -117,9 +134,10 @@ limits the network.
   access, the filter still denies VM sockets and io_uring.
 - Guardian takes the first `bwrap` on `PATH` that the sandbox could not replace, and uses it when its
   help lists `--as-pid-1` and `--perms` (bubblewrap 0.8 or newer). Otherwise it uses the bubblewrap
-  bundled with the Codex install on `PATH` (npm, pnpm, bun or the standalone installer) and warns at
-  session start. With neither, or when bubblewrap cannot create user namespaces, Guardian warns and
-  every command needs approval. WSL1 is not supported; WSL2 is.
+  bundled with the Codex install on `PATH` (npm, pnpm, bun or the standalone installer). Explicit sandbox
+  modes warn at session start about fallback or unavailable sandboxing. With no usable sandbox, those
+  modes require approval for every command. Host mode reports the warning for reviewer inspections;
+  approved host actions are unaffected. WSL1 is not supported; WSL2 is.
 - Where the host forbids mounting a fresh `/proc`, as some containers do, commands run without one.
 - When Pi starts without `SHLVL` in its environment (from a desktop launcher rather than a terminal),
   bash inside the network-isolated sandbox sources `~/.bashrc` instead of `BASH_ENV`. Codex's filter
@@ -156,7 +174,7 @@ settings are errors.
     "failureFallback": "user"
   },
   "sandbox": {
-    "mode": "workspace-write",
+    "mode": "host",
     "networkAccess": false,
     "writableRoots": [],
     "excludeTmpdirEnvVar": false,
@@ -167,14 +185,14 @@ settings are errors.
 
 | Setting | Codex equivalent | Values |
 | --- | --- | --- |
-| `approvalPolicy` | `approval_policy` | `on-request` (default): the agent asks when it needs to leave the sandbox. `untrusted` (Codex's value; `unless-trusted` also works): everything not allowed by a rule needs your approval, and a sandbox failure is retried outside the sandbox. `never`: nothing is approved; escalations are rejected. |
+| `approvalPolicy` | `approval_policy` | `on-request` (default): host actions are reviewed automatically; in sandbox modes the agent requests escalation when needed. `untrusted` (`unless-trusted` also works): actions not allowed by a rule need your approval; sandbox-mode failures may retry on the host. `never`: no approvals; host mode permits only explicitly allowed commands and blocks file changes. |
 | `approvalsReviewer` | `approvals_reviewer` | `auto_review` (default): the reviewer model decides on-request approvals. `user`: you decide every approval. |
 | `reviewer` | (model catalog) | Any model in Pi's registry, for example `{"provider": "openai-codex", "model": "gpt-6.1-sol", "reasoning": "medium"}`. For Claude, use `{"provider": "claude-cli", "model": "claude-opus-5-5", "reasoning": "high"}`, which reviews through `claude -p` with `--safe-mode` and read-only tools. `reasoning` is a Pi thinking level. |
 | `autoReview.policy` / `policyFile` | `[auto_review] policy` | Replaces the built-in tenant policy (Codex's `policy.md`). |
 | `autoReview.extraPolicy` / `extraPolicyFile` | `[auto_review] extra_policy` | Your additional rules, inserted into the policy template's `{{ extra_policy }}` slot. |
 | `autoReview.failureFallback` | (none) | `user` (default): when a review times out or fails, you are asked; without a UI it is rejected. `reject`: rejected to the agent, as Codex does. A failed review never approves. |
-| `sandbox.mode` | `sandbox_mode` | `workspace-write` (default), `read-only`, or `danger-full-access` (no sandbox). |
-| `sandbox.networkAccess` | `[sandbox_workspace_write] network_access` | Network inside the sandbox. |
+| `sandbox.mode` | `sandbox_mode` | `host` (default): reviewed host execution. `workspace-write` and `read-only`: OS sandboxing. `danger-full-access`: legacy unrestricted execution. |
+| `sandbox.networkAccess` | `[sandbox_workspace_write] network_access` | Network inside an opt-in sandbox; ignored in host mode. |
 | `sandbox.writableRoots` | `[sandbox_workspace_write] writable_roots` | Extra absolute paths the sandbox may write. |
 | `sandbox.excludeTmpdirEnvVar` / `excludeSlashTmp` | `[sandbox_workspace_write] exclude_tmpdir_env_var` / `exclude_slash_tmp` | Drop `$TMPDIR` or `/tmp` from the writable roots. |
 
@@ -302,7 +320,7 @@ still sits after Fast mode in `package.json` so the alias resolves when both are
 
 The footer's top-right indicator shows `Auto: on · Luna low`, `Auto: on · Opus high`,
 `Auto: on · you review` or `Auto: off` (also while `/guardian off` is in effect), and adds
-`· network` or `· no sandbox` when they apply.
+`· host` for reviewed host execution, or `· network` / `· no sandbox` for explicit sandbox or unrestricted modes when they apply.
 While a review runs, the status line shows "Reviewing approval request…".
 
 Guardian replaces Auto Permissions. If both are loaded, commands are reviewed twice and Guardian
@@ -331,7 +349,7 @@ errors; this history covers approval requests, including their internal policy r
 
 The session ID and leaf entry identify the conversation when the approval request
 started, including when `/guardian approve` later approves a denied action. Automatic reviews save
-separate SHA-256 hashes for the system policy, AGENTS instructions, planned action and retained
+separate SHA-256 hashes for the system policy, AGENTS instructions with parent execution permissions, planned action and retained
 transcript with trusted answers. These hashes omit the session ID, date and timezone, so the components
 can be compared across sessions. Later read-only tool results are not hashed. Identical hashes do not
 make model verdicts deterministic. Compare the recorded rationale and transcript before attributing
@@ -406,8 +424,8 @@ the sandbox caused the error, and it does not change approval or retry decisions
 
 An ignored scratch directory may contain user work, so being ignored does not bypass review.
 
-Git writes such as `add`, `fetch`, `checkout` and `commit` need escalation under the default policy
-because `.git` is read-only. Keeping only hooks and config read-only would broaden the existing
+Git writes such as `add`, `fetch`, `checkout` and `commit` need escalation
+in `workspace-write` because `.git` is read-only. Host mode reviews Git actions and runs them normally. Keeping only hooks and config read-only would broaden the existing
 metadata boundary; this implementation retains it. An `allow` command rule is not a confined Git
 exception: it runs the matching command outside the sandbox.
 Reducing approval traffic safely needs an operation-specific Git runner that also confines hooks,

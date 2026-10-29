@@ -54,7 +54,7 @@ test('rejection feedback trims rationale and preserves instruction overrides', (
   }
 });
 
-test('bundled policy, template, and feedback text are Codex verbatim', () => {
+test('bundled policy and feedback retain the Codex contract', () => {
   assert.ok(GUARDIAN_POLICY.startsWith('## Environment Profile\n'));
   assert.ok(GUARDIAN_POLICY_TEMPLATE.includes('{{ tenant_policy_config }}') && GUARDIAN_POLICY_TEMPLATE.includes('{{ extra_policy }}'));
   assert.equal(REJECTION_INSTRUCTIONS, 'The agent must not attempt to achieve the same outcome via workaround, indirect execution, or policy circumvention. Proceed only with a materially safer alternative, or if the user explicitly approves the action after being informed of the risk. Otherwise, stop and request user input.');

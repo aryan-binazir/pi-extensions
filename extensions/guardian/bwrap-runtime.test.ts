@@ -35,7 +35,7 @@ printf launched > '${launched}'
       rmSync(dir, { recursive: true, force: true });
     });
     await withPi({ cwd }, async ({ runner }) => {
-      const config = { ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
+      const config = { ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'workspace-write' as const, excludeSlashTmp: true, excludeTmpdirEnvVar: true } };
       const tool = createGuardianBashTool({ config: () => config, policy: () => Policy.empty(), shellSettings: () => ({ shellPath: '/bin/bash' }), shell,
         sandbox: bubblewrapSandbox({ program: launcher, source: 'system' }),
         approvals: { request: async () => { throw new Error('unexpected approval'); } }, persistAmendment: async () => {} }, cwd);

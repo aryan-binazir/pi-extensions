@@ -8,7 +8,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-ai';
 /** Codex's `AskForApproval`; its config value for `unless-trusted` is `untrusted`, which is accepted too. */
 export type ApprovalPolicy = 'on-request' | 'never' | 'unless-trusted';
 export type ApprovalsReviewer = 'auto_review' | 'user';
-export type SandboxMode = 'workspace-write' | 'read-only' | 'danger-full-access';
+export type SandboxMode = 'host' | 'workspace-write' | 'read-only' | 'danger-full-access';
 
 /** Reviews with Claude Code's `claude -p` instead of a model in Pi's registry. */
 export const CLAUDE_CLI_PROVIDER = 'claude-cli';
@@ -41,7 +41,6 @@ export interface GuardianConfig {
   sandbox: { mode: SandboxMode; networkAccess: boolean; writableRoots: string[]; excludeTmpdirEnvVar: boolean; excludeSlashTmp: boolean };
 }
 
-/** Codex's `on-request` + `auto_review` + workspace-write defaults, reviewed by Luna at low effort. */
 export const DEFAULT_GUARDIAN_CONFIG: GuardianConfig = {
   enabled: true,
   approvalPolicy: 'on-request',
@@ -49,7 +48,7 @@ export const DEFAULT_GUARDIAN_CONFIG: GuardianConfig = {
   connectors: { readOnly: [], alwaysReview: [] },
   reviewer: { provider: 'openai-codex', model: 'gpt-6-luna~fast', reasoning: 'low' },
   autoReview: { policy: undefined, extraPolicy: undefined, failureFallback: 'user' },
-  sandbox: { mode: 'workspace-write', networkAccess: false, writableRoots: [], excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+  sandbox: { mode: 'host', networkAccess: false, writableRoots: [], excludeTmpdirEnvVar: false, excludeSlashTmp: false },
 };
 
 /**
@@ -158,7 +157,8 @@ export function loadGuardianConfig(path: string): GuardianConfig {
       failureFallback: oneOf(autoReview.failureFallback, ['user', 'reject'], 'autoReview.failureFallback', defaults.autoReview.failureFallback),
     },
     sandbox: {
-      mode: oneOf(sandbox.mode, ['workspace-write', 'read-only', 'danger-full-access'], 'sandbox.mode', defaults.sandbox.mode),
+      mode: oneOf(sandbox.mode, ['host', 'workspace-write', 'read-only', 'danger-full-access'], 'sandbox.mode',
+        config.sandbox === undefined ? defaults.sandbox.mode : 'workspace-write'),
       networkAccess: boolean(sandbox.networkAccess, 'sandbox.networkAccess', defaults.sandbox.networkAccess),
       writableRoots: writableRoots as string[],
       excludeTmpdirEnvVar: boolean(sandbox.excludeTmpdirEnvVar, 'sandbox.excludeTmpdirEnvVar', defaults.sandbox.excludeTmpdirEnvVar),
@@ -180,10 +180,10 @@ export function reviewerLabel(reviewer: Pick<ReviewerModel, 'provider' | 'model'
 /** The footer's top-right indicator. */
 export function guardianStatusText(config: GuardianConfig, sandboxAvailable: boolean): string {
   if (!config.enabled) return 'Auto: off';
-  // Codex sends only on-request approvals to the reviewer model; `untrusted` asks you, and `never` asks no one.
   const reviewer = config.approvalPolicy === 'never' ? 'no approvals'
     : config.approvalsReviewer === 'user' || config.approvalPolicy !== 'on-request' ? 'you review'
       : `${reviewerLabel(config.reviewer)} ${sanitizeTerminalLabel(config.reviewer.reasoning)}`;
-  const sandbox = config.sandbox.mode === 'danger-full-access' || !sandboxAvailable ? ' · no sandbox' : config.sandbox.networkAccess ? ' · network' : '';
+  const sandbox = config.sandbox.mode === 'host' ? ' · host'
+    : config.sandbox.mode === 'danger-full-access' || !sandboxAvailable ? ' · no sandbox' : config.sandbox.networkAccess ? ' · network' : '';
   return `Auto: on · ${reviewer}${sandbox}`;
 }

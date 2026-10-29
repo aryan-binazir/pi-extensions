@@ -81,11 +81,11 @@ const parameters = Type.Object({
   timeout: Type.Optional(Type.Number({ description: 'Timeout in seconds (optional, no default timeout)' })),
   sandbox_permissions: Type.Optional(Type.String({
     enum: ['use_default', 'require_escalated'],
-    description: 'Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.',
+    description: 'Override for sandbox modes: `require_escalated` requests host execution. Host mode needs no override.',
   })),
-  justification: Type.Optional(Type.String({ description: 'User-facing approval question for `require_escalated`; omit otherwise.' })),
+  justification: Type.Optional(Type.String({ description: 'Optional explanation for Guardian or the user reviewing this command.' })),
   prefix_rule: Type.Optional(Type.Array(Type.String(), {
-    description: 'Reusable approval prefix for `command`, only with `sandbox_permissions: "require_escalated"`; for example ["git", "pull"].',
+    description: 'Proposed reusable approval prefix, for example ["git", "pull"]. In sandbox modes, requires `sandbox_permissions: "require_escalated"`.',
   })),
 });
 
@@ -107,18 +107,17 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       // Strict tool schemas make optional fields nullable, so null means unset.
       const plain = { command: params.command, ...(params.timeout == null ? {} : { timeout: validTimeout(params.timeout) }) };
       const sandbox = sandboxPolicyFor(config);
-      const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed && runtime.sandbox
-        ? { ...shellOptions, operations: sandboxedOperations(runtime.sandbox, sandbox, settings.shellPath) }
+      const platform = config.sandbox.mode === 'host' ? undefined : runtime.sandbox;
+      const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed && platform
+        ? { ...shellOptions, operations: sandboxedOperations(platform, sandbox, settings.shellPath) }
         : shellOptions).execute(toolCallId, plain, signal, onUpdate, ctx);
 
       // Pi prepends the configured prefix, so rules and review judge the script that actually runs.
       const script = settings.commandPrefix ? `${settings.commandPrefix}\n${params.command}` : params.command;
       const command = ['bash', '-lc', script];
       const unrestricted = config.sandbox.mode === 'danger-full-access';
-      // The Railway boundary binds before rules, settings and review, and even when Guardian is disabled.
       const railway = railwayDecision(runtime.shell, command);
       if (railway === 'forbidden') throw new Error(`\`${params.command}\` rejected: ${RAILWAY_FORBIDDEN_REASON}`);
-      // A destructive database command whose target may be a Railway database is held to the same boundary.
       if (databaseDecision(runtime.shell, command) === 'forbidden') throw new Error(`\`${params.command}\` rejected: ${DATABASE_FORBIDDEN_REASON}`);
       if (!config.enabled) {
         if (railway === 'prompt') throw new Error(`\`${params.command}\` rejected: ${RAILWAY_REVIEW_REASON}, and Guardian is disabled`);
@@ -128,25 +127,22 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       const requested = (params.sandbox_permissions ?? 'use_default') as SandboxPermissions;
       if (requested !== 'use_default' && requested !== 'require_escalated') throw new Error(`unsupported sandbox_permissions: ${requested}`);
       if (requested === 'require_escalated' && config.approvalPolicy === 'never') throw new Error(NEVER_ESCALATE);
-      // Without a platform sandbox every command would run unrestricted, so each one is reviewed as an escalation.
-      const sandboxPermissions: SandboxPermissions = !unrestricted && !runtime.sandbox ? 'require_escalated' : requested;
+      const sandboxPermissions: SandboxPermissions = !unrestricted && !platform ? 'require_escalated' : requested;
       const requirement = createExecApprovalRequirement(runtime.shell, runtime.policy(), {
         command, approvalPolicy: config.approvalPolicy, fileSystem: unrestricted ? 'unrestricted' : 'restricted', sandboxPermissions,
         ...(params.prefix_rule ? { prefixRule: params.prefix_rule } : {}),
       });
       if (requirement.type === 'forbidden') throw new Error(requirement.reason);
-      // A Railway command that can reach data is reviewed even when rules or settings would skip it.
-      const effective = requirement.type === 'skip' && railway === 'prompt'
-        ? { type: 'needs_approval' as const, reason: RAILWAY_REVIEW_REASON, proposedExecpolicyAmendment: undefined }
+      const effective = railway === 'prompt'
+        ? { type: 'needs_approval' as const, reason: RAILWAY_REVIEW_REASON,
+          proposedExecpolicyAmendment: requirement.type === 'needs_approval' ? requirement.proposedExecpolicyAmendment : undefined }
         : requirement;
 
       const approvalContext = ctx as unknown as ApprovalContext;
       const approve = async (permissions: SandboxPermissions, reason: string | undefined, proposed: string[] | undefined) => {
-        // Only offer "don't ask again" for a prefix that can actually be saved.
         const amendment = proposed && persistableAmendment(runtime.shell, proposed);
         const decision = await runtime.approvals.request({
           action: { tool: 'bash', command, cwd, sandbox_permissions: permissions, ...(params.justification ? { justification: params.justification } : {}), environment_id: 'local' },
-          // The whole command, so nothing you approve is hidden past a cut-off.
           summary: params.command,
           ...(params.justification ? { justification: params.justification } : {}),
           ...(reason === undefined ? {} : { reason }),
@@ -155,7 +151,6 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
         if (decision.type !== 'approved') throw new Error(decision.message);
         if (signal?.aborted) throw new Error('Operation aborted');
         if (!decision.persist) return;
-        // The command is approved either way; a rule that could not be saved only means you are asked again.
         try {
           await runtime.persistAmendment(decision.persist);
         } catch (error) {
@@ -169,12 +164,13 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
         approved = true;
       }
       const bypass = unrestricted || (effective.type === 'skip' && effective.bypassSandbox) || (sandboxPermissions === 'require_escalated' && approved);
-      // Under `never`, an unmatched command is allowed to run in the sandbox; with no sandbox it cannot run at all.
-      if (!bypass && !runtime.sandbox) throw new Error(NEVER_WITHOUT_SANDBOX);
+      if (!bypass && !platform) throw new Error(config.sandbox.mode === 'host'
+        ? 'Host execution requires approval, but approval policy is never'
+        : NEVER_WITHOUT_SANDBOX);
       const result = await run(!bypass);
       const exitCode = (result as { structuredContent?: { exit_code?: number } }).structuredContent?.exit_code ?? 0;
       const output = result.content.map(part => part.type === 'text' ? part.text : '').join('');
-      const sandboxDenied = isLikelySandboxDenied(exitCode, output, runtime.sandbox?.kind);
+      const sandboxDenied = isLikelySandboxDenied(exitCode, output, platform?.kind);
       let hint: string | undefined;
       if (!bypass && exitCode !== 0) {
         const networkClient = runtime.shell.expandLiteralCommands(command).some(argv => NETWORK_CLIENTS.has(argv[0]?.split('/').pop() ?? ''));

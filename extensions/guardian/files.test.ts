@@ -15,6 +15,8 @@ import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import { assessFileChange, createGuardianFileTools, fileChangeAction, sandboxedWrite } from './files.ts';
 import { detectPlatformSandbox, type PlatformSandbox, type SandboxedChild } from './sandbox.ts';
 
+const WORKSPACE_CONFIG: GuardianConfig = { ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'workspace-write' } };
+
 const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-files-registry-')));
 const previousTmpdir = process.env.TMPDIR;
 process.env.TMPDIR = registryTemp;
@@ -34,8 +36,8 @@ function workspace(t: test.TestContext) {
 }
 
 const isolated = (overrides: Partial<GuardianConfig> = {}): GuardianConfig => ({
-  ...DEFAULT_GUARDIAN_CONFIG, ...overrides,
-  sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, excludeSlashTmp: true, excludeTmpdirEnvVar: true, ...overrides.sandbox },
+  ...WORKSPACE_CONFIG, ...overrides,
+  sandbox: { ...WORKSPACE_CONFIG.sandbox, excludeSlashTmp: true, excludeTmpdirEnvVar: true, ...overrides.sandbox },
 });
 
 test('writes inside writable roots auto-approve and others ask', t => {
@@ -44,7 +46,7 @@ test('writes inside writable roots auto-approve and others ask', t => {
   assert.equal(assess('src/new.ts'), 'auto_approve');
   assert.equal(assess(join(cwd, 'deep/missing/file.ts')), 'auto_approve');
   assert.equal(assess(join(outside, 'x.txt')), 'ask_user');
-  assert.equal(assess(join(outside, 'x.txt'), isolated({ sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, writableRoots: [outside] } })), 'auto_approve');
+  assert.equal(assess(join(outside, 'x.txt'), isolated({ sandbox: { ...WORKSPACE_CONFIG.sandbox, writableRoots: [outside] } })), 'auto_approve');
 });
 
 test('protected metadata stays read-only, including case variants and gitdir pointers', t => {
@@ -55,7 +57,7 @@ test('protected metadata stays read-only, including case variants and gitdir poi
   const linked = join(cwd, 'linked');
   mkdirSync(linked);
   writeFileSync(join(linked, '.git'), `gitdir: ${gitdir}\n`);
-  const config = isolated({ sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, writableRoots: [linked, outside] } });
+  const config = isolated({ sandbox: { ...WORKSPACE_CONFIG.sandbox, writableRoots: [linked, outside] } });
   // `.GIT` aliases `.git` only on a case-insensitive volume, the macOS default.
   const caseVariants = process.platform === 'darwin' ? ['.GIT/config'] : [];
   for (const path of ['.git/hooks/pre-commit', '.codex/config.toml', '.agents/x', '.aws/credentials', '.pi/settings.json', ...caseVariants, join(gitdir, 'HEAD'), join(linked, '.git')]) {
@@ -76,12 +78,21 @@ test('approval policy and sandbox mode follow Codex patch safety', t => {
   const assess = (path: string, config: GuardianConfig, sandboxAvailable = true) => assessFileChange(path, { config, cwd, sandboxAvailable });
   assert.equal(assess(inside, isolated({ approvalPolicy: 'unless-trusted' })), 'ask_user');
   assert.deepEqual(assess(elsewhere, isolated({ approvalPolicy: 'never' })), { type: 'reject', reason: 'writing outside of the project; rejected by user approval settings' });
-  assert.deepEqual(assess(inside, isolated({ approvalPolicy: 'never', sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'read-only' } })),
+  assert.deepEqual(assess(inside, isolated({ approvalPolicy: 'never', sandbox: { ...WORKSPACE_CONFIG.sandbox, mode: 'read-only' } })),
     { type: 'reject', reason: 'writing is blocked by read-only sandbox; rejected by user approval settings' });
-  assert.equal(assess(inside, isolated({ sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'read-only' } })), 'ask_user');
-  assert.equal(assess(elsewhere, isolated({ sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'danger-full-access' } })), 'auto_approve');
+  assert.equal(assess(inside, isolated({ sandbox: { ...WORKSPACE_CONFIG.sandbox, mode: 'read-only' } })), 'ask_user');
+  assert.equal(assess(elsewhere, isolated({ sandbox: { ...WORKSPACE_CONFIG.sandbox, mode: 'danger-full-access' } })), 'auto_approve');
   assert.equal(assess(inside, isolated(), false), 'ask_user');
   assert.equal(assess(elsewhere, isolated({ enabled: false })), 'auto_approve');
+});
+
+test('host mode with never policy refuses both workspace and outside writes', async t => {
+  const f = fileTools(t, { ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: 'never' });
+  for (const path of [join(f.cwd, 'blocked/new.txt'), join(f.outside, 'blocked/new.txt')]) {
+    await assert.rejects(f.run(f.write, { path, content: 'no' }), /file changes require approval in host mode.*never/);
+    assert.equal(existsSync(join(path, '..')), false);
+  }
+  assert.equal(f.requests.length, 0);
 });
 
 function fileTools(t: test.TestContext, config: GuardianConfig, decisions: ApprovalDecision[] = []) {
@@ -276,4 +287,24 @@ for (const tool of ['write', 'edit'] as const) test(`aborting a sandboxed ${tool
       await prompting;
     }
   });
+});
+
+for (const swapped of ['file', 'parent'] as const) test(`host write rejects an approved target redirected during review (${swapped})`, async t => {
+  const { cwd, outside } = workspace(t);
+  const parent = join(cwd, 'approved');
+  mkdirSync(parent);
+  const target = join(parent, 'file');
+  const victim = join(outside, 'file');
+  writeFileSync(target, 'original');
+  writeFileSync(victim, 'keep');
+  const [write] = createGuardianFileTools({ config: () => DEFAULT_GUARDIAN_CONFIG, sandbox: detected,
+    approvals: { request: async () => {
+      rmSync(swapped === 'file' ? target : parent, { recursive: true });
+      symlinkSync(swapped === 'file' ? victim : outside, swapped === 'file' ? target : parent);
+      return { type: 'approved' };
+    } },
+  }, cwd);
+  const ctx = { cwd, hasUI: false, abort: () => {}, ui: { notify: () => {}, select: async () => undefined } };
+  await assert.rejects((write.execute as (...args: unknown[]) => Promise<unknown>)('swap', { path: target, content: 'changed' }, undefined, undefined, ctx), /target changed during approval/);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep');
 });

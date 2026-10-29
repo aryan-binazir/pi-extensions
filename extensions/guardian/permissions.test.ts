@@ -67,3 +67,11 @@ test('format allow prefixes sorts by length then size then tokens and quotes as 
   const many = Array.from({ length: 101 }, (_, index) => [`cmd${String(index).padStart(3, '0')}`]);
   assert.ok(formatAllowPrefixes(many)!.endsWith('...\n[Some commands were truncated]'));
 });
+
+test('host instructions distinguish automatic, human and forbidden approvals', () => {
+  const context = { ...WORKSPACE_CONTEXT, sandboxMode: 'host' as const };
+  assert.match(permissionsInstructions({ ...context, reviewer: 'auto_review' }), /reviewer automatically/);
+  assert.match(permissionsInstructions(context), /require user approval/);
+  assert.match(permissionsInstructions({ ...context, reviewer: 'auto_review', approvalPolicy: 'unless-trusted' }), /require user approval/);
+  assert.match(permissionsInstructions({ ...context, approvalPolicy: 'never' }), /only commands allowed by an explicit rule may run; file changes are blocked/);
+});

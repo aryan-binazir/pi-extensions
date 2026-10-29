@@ -11,9 +11,10 @@ Copyright 2025 OpenAI, licensed under the [Apache License 2.0](openai-codex-APAC
 [NOTICE](openai-codex-NOTICE.txt). The license and NOTICE at that revision match the copies here.
 
 The TypeScript is a translation, and each ported file names its Codex source in a header.
-The Seatbelt `.sbpl` policies under `extensions/guardian/seatbelt/` and the prompt templates under
-`extensions/guardian/prompts/` are verbatim copies. The tests are ported from Codex's own tests.
-[ADR 025](../adr/025-guardian.md) records where Guardian departs from Codex.
+The Seatbelt `.sbpl` policies, `prompts/guardian/policy.md`, and permission templates other than
+`host.md` under `extensions/guardian/` are verbatim copies. The reviewer
+`prompts/guardian/policy_template.md` adapts execution context for Pi; `host.md` is Pi-specific. Tests include ports of Codex's tests.
+[ADR 025](../adr/025-guardian.md) and [ADR 029](../adr/029-guardian-host-execution.md) record the departures.
 
 `extensions/guardian/shlex.ts` translates the [shlex](https://crates.io/crates/shlex) crate 1.3.0, the
 version Codex uses. Copyright 2015 Nicholas Allegra (comex), dual-licensed MIT or Apache-2.0; it is

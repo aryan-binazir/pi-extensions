@@ -66,7 +66,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |
 | [Fast mode](docs/adr/006-search-fast-power.md) | `/fast` toggles supported base/fast model entries. |
 | Auto-caffeinate | Prevents idle sleep during work on confirmed AC power. |
-| [Guardian](docs/guardian.md) | Codex's approval stack ported to Pi: sandboxed `bash` (Seatbelt on macOS, bubblewrap and seccomp on Linux), `.rules` command rules, and a configurable Claude or GPT reviewer for actions that leave the sandbox. `/guardian` switches it off or on for the session. |
+| [Guardian](docs/guardian.md) | Reviews commands and file changes before running them on the host with your existing environment and credentials. Includes `.rules` command rules, a configurable Claude or GPT reviewer, and optional OS sandboxing. `/guardian` switches it off or on for the session. |
 | [Footer](docs/agent-setup.md#footer) | Replaces Pi's footer: directory, branch and clickable GitHub PR link, session, token/cost/context usage, model, Guardian status, and other extensions' statuses. |
 | [Claude artifacts](docs/claude-artifacts.md) | Optional. Publishes, updates, reads and lists claude.ai artifacts through a hidden interactive Claude Code on your claude.ai login. Publish and update need approval in Pi. |
 | [Neovim IDE](docs/nvim-ide.md) | Connects to claudecode.nvim: bounded request snapshots, reliable editor sends, editor tools, and coalesced live follow with reconnect replay. |

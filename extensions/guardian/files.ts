@@ -85,6 +85,9 @@ function canWrite(path: string, context: FileSafetyContext): boolean {
 export function assessFileChange(path: string, context: FileSafetyContext): FileSafety {
   const { config } = context;
   if (!config.enabled) return 'auto_approve';
+  if (config.sandbox.mode === 'host') return config.approvalPolicy === 'never'
+    ? { type: 'reject', reason: 'file changes require approval in host mode, but approval policy is never' }
+    : 'ask_user';
   if (config.approvalPolicy === 'unless-trusted') return 'ask_user';
   const unrestricted = config.sandbox.mode === 'danger-full-access';
   if (canWrite(path, context) && (unrestricted || context.sandboxAvailable)) return 'auto_approve';

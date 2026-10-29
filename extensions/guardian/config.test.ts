@@ -12,7 +12,7 @@ function configDir(t: test.TestContext, config?: unknown): string {
   return dir;
 }
 
-test('defaults match Codex on-request auto review with the Luna reviewer', t => {
+test('defaults use reviewed host execution with the Luna reviewer', t => {
   assert.deepEqual(loadGuardianConfig(join(configDir(t), 'config.json')), DEFAULT_GUARDIAN_CONFIG);
   assert.deepEqual(DEFAULT_GUARDIAN_CONFIG, {
     enabled: true,
@@ -21,7 +21,7 @@ test('defaults match Codex on-request auto review with the Luna reviewer', t => 
     connectors: { readOnly: [], alwaysReview: [] },
     reviewer: { provider: 'openai-codex', model: 'gpt-6-luna~fast', reasoning: 'low' },
     autoReview: { policy: undefined, extraPolicy: undefined, failureFallback: 'user' },
-    sandbox: { mode: 'workspace-write', networkAccess: false, writableRoots: [], excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+    sandbox: { mode: 'host', networkAccess: false, writableRoots: [], excludeTmpdirEnvVar: false, excludeSlashTmp: false },
   });
 });
 
@@ -44,6 +44,17 @@ test('Codex permission preferences merge over defaults', t => {
     autoReview: { policy: undefined, extraPolicy: 'Never push to main.', failureFallback: 'reject' },
     sandbox: { mode: 'workspace-write', networkAccess: true, writableRoots: ['/opt/cache'], excludeTmpdirEnvVar: false, excludeSlashTmp: true },
   });
+});
+
+test('host is explicit or implicit only when no legacy sandbox object was saved', t => {
+  const mode = (config: unknown) => loadGuardianConfig(join(configDir(t, config), 'config.json')).sandbox.mode;
+  assert.equal(mode({}), 'host');
+  assert.equal(mode({ reviewer: { reasoning: 'medium' } }), 'host');
+  assert.equal(mode({ sandbox: {} }), 'workspace-write');
+  assert.equal(mode({ sandbox: { networkAccess: false } }), 'workspace-write');
+  for (const selected of ['host', 'workspace-write', 'read-only', 'danger-full-access']) {
+    assert.equal(mode({ sandbox: { mode: selected } }), selected);
+  }
 });
 
 test('policy text can come from files relative to the config directory', t => {
@@ -90,14 +101,15 @@ test('reviewer labels name Claude and GPT families', () => {
 });
 
 test('status text names the reviewer and flags network or a missing sandbox', () => {
-  assert.equal(guardianStatusText(DEFAULT_GUARDIAN_CONFIG, true), 'Auto: on · Luna low');
+  assert.equal(guardianStatusText(DEFAULT_GUARDIAN_CONFIG, true), 'Auto: on · Luna low · host');
   assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, enabled: false }, true), 'Auto: off');
-  assert.equal(guardianStatusText(DEFAULT_GUARDIAN_CONFIG, false), 'Auto: on · Luna low · no sandbox');
-  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, networkAccess: true } }, true), 'Auto: on · Luna low · network');
-  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: 'user' }, true), 'Auto: on · you review');
-  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: 'unless-trusted' }, true), 'Auto: on · you review', 'untrusted approvals go to you');
-  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: 'never' }, true), 'Auto: on · no approvals');
-  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } }, true), 'Auto: on · Opus high');
+  assert.equal(guardianStatusText(DEFAULT_GUARDIAN_CONFIG, false), 'Auto: on · Luna low · host');
+  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'workspace-write' } }, false), 'Auto: on · Luna low · no sandbox');
+  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'workspace-write', networkAccess: true } }, true), 'Auto: on · Luna low · network');
+  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: 'user' }, true), 'Auto: on · you review · host');
+  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: 'unless-trusted' }, true), 'Auto: on · you review · host', 'untrusted approvals go to you');
+  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: 'never' }, true), 'Auto: on · no approvals · host');
+  assert.equal(guardianStatusText({ ...DEFAULT_GUARDIAN_CONFIG, reviewer: { provider: 'claude-cli', model: 'claude-opus-5-5', reasoning: 'high' } }, true), 'Auto: on · Opus high · host');
 });
 
 test('connector policy accepts exact names with force-review precedence and preserves old configs', t => {

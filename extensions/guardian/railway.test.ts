@@ -90,7 +90,7 @@ test('the boundary holds through the bash tool in every mode, before any review'
   parser.parse('user.rules', 'prefix_rule(pattern=["railway"], decision="allow")\nprefix_rule(pattern=["npx"], decision="allow")');
   const policy = parser.build();
   const requests: unknown[] = [];
-  for (const config of [{}, { enabled: false }, { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'danger-full-access' as const } },
+  for (const config of [{}, { enabled: false }, { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'workspace-write' as const } }, { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'danger-full-access' as const } },
     { approvalPolicy: 'never' as const }, { approvalPolicy: 'unless-trusted' as const }]) {
     const tool = createGuardianBashTool({
       config: () => ({ ...DEFAULT_GUARDIAN_CONFIG, ...config }), policy: () => policy, shell,

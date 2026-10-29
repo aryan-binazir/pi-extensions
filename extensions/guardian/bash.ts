@@ -107,8 +107,9 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       // Strict tool schemas make optional fields nullable, so null means unset.
       const plain = { command: params.command, ...(params.timeout == null ? {} : { timeout: validTimeout(params.timeout) }) };
       const sandbox = sandboxPolicyFor(config);
-      const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed && runtime.sandbox
-        ? { ...shellOptions, operations: sandboxedOperations(runtime.sandbox, sandbox, settings.shellPath) }
+      const platform = config.sandbox.mode === 'host' ? undefined : runtime.sandbox;
+      const run = (sandboxed: boolean): Promise<Result> => createBashToolDefinition(cwd, sandboxed && platform
+        ? { ...shellOptions, operations: sandboxedOperations(platform, sandbox, settings.shellPath) }
         : shellOptions).execute(toolCallId, plain, signal, onUpdate, ctx);
 
       // Pi prepends the configured prefix, so rules and review judge the script that actually runs.
@@ -129,7 +130,7 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       if (requested !== 'use_default' && requested !== 'require_escalated') throw new Error(`unsupported sandbox_permissions: ${requested}`);
       if (requested === 'require_escalated' && config.approvalPolicy === 'never') throw new Error(NEVER_ESCALATE);
       // Without a platform sandbox every command would run unrestricted, so each one is reviewed as an escalation.
-      const sandboxPermissions: SandboxPermissions = !unrestricted && !runtime.sandbox ? 'require_escalated' : requested;
+      const sandboxPermissions: SandboxPermissions = !unrestricted && !platform ? 'require_escalated' : requested;
       const requirement = createExecApprovalRequirement(runtime.shell, runtime.policy(), {
         command, approvalPolicy: config.approvalPolicy, fileSystem: unrestricted ? 'unrestricted' : 'restricted', sandboxPermissions,
         ...(params.prefix_rule ? { prefixRule: params.prefix_rule } : {}),
@@ -170,11 +171,13 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       }
       const bypass = unrestricted || (effective.type === 'skip' && effective.bypassSandbox) || (sandboxPermissions === 'require_escalated' && approved);
       // Under `never`, an unmatched command is allowed to run in the sandbox; with no sandbox it cannot run at all.
-      if (!bypass && !runtime.sandbox) throw new Error(NEVER_WITHOUT_SANDBOX);
+      if (!bypass && !platform) throw new Error(config.sandbox.mode === 'host'
+        ? 'Host execution requires approval, but approval policy is never'
+        : NEVER_WITHOUT_SANDBOX);
       const result = await run(!bypass);
       const exitCode = (result as { structuredContent?: { exit_code?: number } }).structuredContent?.exit_code ?? 0;
       const output = result.content.map(part => part.type === 'text' ? part.text : '').join('');
-      const sandboxDenied = isLikelySandboxDenied(exitCode, output, runtime.sandbox?.kind);
+      const sandboxDenied = isLikelySandboxDenied(exitCode, output, platform?.kind);
       let hint: string | undefined;
       if (!bypass && exitCode !== 0) {
         const networkClient = runtime.shell.expandLiteralCommands(command).some(argv => NETWORK_CLIENTS.has(argv[0]?.split('/').pop() ?? ''));

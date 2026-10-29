@@ -42,6 +42,7 @@ export function registerFailClosed(pi: Pick<ExtensionAPI, 'registerTool' | 'on' 
  * on-request asks about every command, like unless-trusted, and never runs only what your rules allow.
  */
 export function instructedPermissions(settings: GuardianConfig, sandboxAvailable: boolean): { sandboxMode: GuardianConfig['sandbox']['mode']; approvalPolicy: GuardianConfig['approvalPolicy'] } {
+  if (settings.sandbox.mode === 'host') return { sandboxMode: 'host', approvalPolicy: settings.approvalPolicy };
   if (settings.sandbox.mode === 'danger-full-access') return { sandboxMode: 'danger-full-access', approvalPolicy: settings.approvalPolicy };
   if (sandboxAvailable) return { sandboxMode: settings.sandbox.mode, approvalPolicy: settings.approvalPolicy };
   if (settings.approvalPolicy === 'never') return { sandboxMode: 'read-only', approvalPolicy: 'never' };
@@ -90,6 +91,14 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     const settings = fileConfig();
     return sessionEnabled === undefined ? settings : { ...settings, enabled: sessionEnabled };
   };
+  const agentPermissions = (settings: GuardianConfig, cwd: string) => permissionsInstructions({
+    ...instructedPermissions(settings, sandboxAvailable),
+    networkAccess: settings.sandbox.mode === 'host' || settings.sandbox.networkAccess ? 'enabled' : 'restricted',
+    reviewer: settings.approvalsReviewer,
+    approvedCommandPrefixes: policies.policy.allowedPrefixes(),
+    writableRoots: sandboxAvailable && settings.sandbox.mode === 'workspace-write'
+      ? workspaceWriteRoots(sandboxPolicyFor(settings), cwd, process.env).map(root => root.root) : [],
+  });
   const reportProblems = (ctx: ExtensionContext) => {
     config();
     const problem = cached?.error ?? policies.warning;
@@ -112,6 +121,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     const plannedAction = { json: input.actionJson, ...(input.reason === undefined ? {} : { reason: input.reason }) };
     const request = composeReviewRequest({
       transcript, sessionId, trustedUserAnswers: evidence.trustedUserAnswers, environmentId: 'local', plannedAction,
+      permissionContext: agentPermissions(settings, ctx.cwd),
     });
     const now = new Date();
     const prompt = buildReviewerPrompt({
@@ -174,7 +184,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     await reloadPolicies();
     reportedError = undefined;
     reportProblems(ctx);
-    if (sandboxWarning && ctx.hasUI && config().enabled) ctx.ui.notify(sandboxWarning, 'warning');
+    if (sandboxWarning && ctx.hasUI && config().enabled && config().sandbox.mode !== 'host') ctx.ui.notify(sandboxWarning, 'warning');
     if (ctx.hasUI && pi.getCommands().some(command => command.name.split(':')[0] === 'auto-permissions')) {
       ctx.ui.notify('Auto Permissions is also loaded, so commands are reviewed twice. Uninstall it to use Guardian alone.', 'warning');
     }
@@ -200,14 +210,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     reportProblems(ctx);
     const settings = config();
     if (!settings.enabled) return;
-    const sandboxed = settings.sandbox.mode !== 'danger-full-access' && sandboxAvailable;
-    event.systemPromptOptions.sections.permissions_instructions = permissionsInstructions({
-      ...instructedPermissions(settings, sandboxAvailable),
-      networkAccess: settings.sandbox.networkAccess ? 'enabled' : 'restricted',
-      reviewer: settings.approvalsReviewer,
-      approvedCommandPrefixes: policies.policy.allowedPrefixes(),
-      writableRoots: sandboxed && settings.sandbox.mode === 'workspace-write' ? workspaceWriteRoots(sandboxPolicyFor(settings), ctx.cwd, process.env).map(root => root.root) : [],
-    });
+    event.systemPromptOptions.sections.permissions_instructions = agentPermissions(settings, ctx.cwd);
   });
 
   pi.registerCommand('guardian', {
@@ -263,7 +266,8 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
         ...(sessionEnabled === undefined ? [] : [`Turned ${sessionEnabled ? 'on' : 'off'} for this session with /guardian; config.json is unchanged`]),
         `Config: ${guardianConfigPath()}${cached?.error ? ` (${cached.error})` : ''}`,
         `Approvals: ${settings.approvalPolicy}, reviewed by ${settings.approvalsReviewer === 'user' ? 'you' : `${settings.reviewer.provider}/${settings.reviewer.model} (${settings.reviewer.reasoning})`}`,
-        `Sandbox: ${sandbox ? `${settings.sandbox.mode} via ${sandbox.summary}` : `unavailable${sandboxWarning ? ` (${sandboxWarning})` : ' on this platform'}`}, network ${settings.sandbox.networkAccess ? 'on' : 'off'}`,
+        settings.sandbox.mode === 'host' ? 'Execution: host with approval checks; network and credentials inherited from Pi'
+          : `Sandbox: ${sandbox ? `${settings.sandbox.mode} via ${sandbox.summary}` : `unavailable${sandboxWarning ? ` (${sandboxWarning})` : ' on this platform'}`}, network ${settings.sandbox.networkAccess ? 'on' : 'off'}`,
         `Rules: ${userRulesDir()}${policies.warning ? ` (${policies.warning})` : ''}`,
       ].join('\n'), 'info');
     },

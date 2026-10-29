@@ -13,7 +13,6 @@ import { withPi } from '../../tests/pi-session.ts';
 import statusExtension from './index.ts';
 import { findConfigLoader } from './adapter.ts';
 import { GUARDIAN_ENABLED_EVENT } from '../guardian/config.ts';
-import { detectPlatformSandbox } from '../guardian/sandbox.ts';
 
 const GUARDIAN_INDEX = fileURLToPath(new URL('../guardian/index.ts', import.meta.url));
 const guardian = (path = GUARDIAN_INDEX): ReturnType<ExtensionAPI['getCommands']> => [{ name: 'guardian', source: 'extension',
@@ -32,7 +31,7 @@ async function fixture(t: TestContext, initial?: object) {
   const file = join(agentDir, 'guardian', 'config.json');
   await mkdir(dirname(file));
   if (initial) await writeFile(file, JSON.stringify(initial));
-  const on = `Auto: on · Luna low${(await detectPlatformSandbox()).sandbox ? '' : ' · no sandbox'}`;
+  const on = 'Auto: on · Luna low · host';
   return { agentDir, file, on };
 }
 function harness(list: ReturnType<ExtensionAPI['getCommands']> = [], exec?: ExtensionAPI['exec']) {
@@ -142,7 +141,7 @@ test('unavailable settles without any timer or watcher; headless mode never disc
 test('real Pi loader discovers Guardian by command provenance and dynamically loads its config', async () => {
   const footer = fileURLToPath(new URL('./index.ts', import.meta.url));
   const statuses: (string | undefined)[] = [];
-  const on = `Auto: on · Luna low${(await detectPlatformSandbox()).sandbox ? '' : ' · no sandbox'}`;
+  const on = 'Auto: on · Luna low · host';
   await withPi({ settings: { extensions: [footer, GUARDIAN_INDEX] },
     bind: session => ({ mode: 'rpc', uiContext: { ...session.extensionRunner.createContext().ui, setStatus: (_key, value) => statuses.push(value) } }),
   }, async ({ runtime }) => {

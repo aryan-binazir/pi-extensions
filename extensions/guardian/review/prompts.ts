@@ -1,6 +1,6 @@
 // Ported from openai/codex codex-rs/prompts/src/{guardian_instructions,model_messages/guardian}.rs and
 // codex-rs/guardian-context/src/transcript_record.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md.
-// `policy.md` and `policy_template.md` are verbatim copies.
+// `policy.md` is verbatim; the template uses Pi's execution context.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 

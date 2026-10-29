@@ -14,6 +14,8 @@ import { Policy, PolicyParser } from './rules.ts';
 import { detectPlatformSandbox, isLikelySandboxDenied, type PlatformSandbox } from './sandbox.ts';
 import { loadShell } from './shell.ts';
 
+const WORKSPACE_CONFIG: GuardianConfig = { ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'workspace-write' } };
+
 const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bash-registry-')));
 const previousTmpdir = process.env.TMPDIR;
 process.env.TMPDIR = registryTemp;
@@ -42,9 +44,9 @@ function setup(t: test.TestContext, options: { rules?: string; config?: Partial<
   const requests: ApprovalRequest[] = [], persisted: string[][] = [];
   const decisions = [...(options.decisions ?? [])];
   const config: GuardianConfig = {
-    ...DEFAULT_GUARDIAN_CONFIG, ...options.config,
+    ...WORKSPACE_CONFIG, ...options.config,
     // Keep the scratch directory outside the sandbox's writable roots.
-    sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, excludeSlashTmp: true, excludeTmpdirEnvVar: true, ...options.config?.sandbox },
+    sandbox: { ...WORKSPACE_CONFIG.sandbox, excludeSlashTmp: true, excludeTmpdirEnvVar: true, ...options.config?.sandbox },
   };
   const runtime: BashRuntime = {
     config: () => config,
@@ -60,13 +62,43 @@ function setup(t: test.TestContext, options: { rules?: string; config?: Partial<
   const ctx = { cwd, hasUI: true, abort: () => {}, ui: { notify: (message: string) => { notices.push(message); }, select: async () => undefined },
     sessionManager: { getSessionId: () => 's', getSessionFile: () => undefined } };
   const run = (params: Record<string, unknown>) => tool.execute('call-1', params as never, undefined, undefined, ctx as never);
-  return { cwd, outside, run, requests, persisted, notices };
+  return { cwd, outside, run, requests, persisted, notices, config };
 }
 
 const text = (result: { content: { type: string; text?: string }[] }) => result.content.map(part => part.text ?? '').join('');
 
+for (const available of [true, false]) test(`host rules and never policy hold with sandbox availability ${available}`, async t => {
+  const config = { ...DEFAULT_GUARDIAN_CONFIG, approvalPolicy: 'never' as const };
+  const blocked = setup(t, { config, sandbox: available ? detected : null });
+  await assert.rejects(blocked.run({ command: 'touch marker' }), /requires approval.*never/i);
+  assert.equal(existsSync(join(blocked.cwd, 'marker')), false);
+  assert.equal(blocked.requests.length, 0);
+  const allowed = setup(t, { config, sandbox: available ? detected : null, rules: 'prefix_rule(pattern=["touch"], decision="allow")' });
+  await allowed.run({ command: 'touch marker' });
+  assert.equal(existsSync(join(allowed.cwd, 'marker')), true);
+  assert.equal(allowed.requests.length, 0);
+  const forbidden = setup(t, { config, rules: 'prefix_rule(pattern=["touch"], decision="forbidden")' });
+  await assert.rejects(forbidden.run({ command: 'touch marker' }), /policy forbids/);
+  assert.equal(existsSync(join(forbidden.cwd, 'marker')), false);
+});
+
+test('changing host and sandbox modes takes effect on the next command', sandboxed, async t => {
+  const f = setup(t, { config: { sandbox: DEFAULT_GUARDIAN_CONFIG.sandbox }, decisions: [{ type: 'approved' }, { type: 'approved' }] });
+  const command = 'mkdir -p .git && printf proof > .git/host-proof';
+  await f.run({ command });
+  assert.equal(readFileSync(join(f.cwd, '.git/host-proof'), 'utf8'), 'proof');
+  f.config.sandbox.mode = 'workspace-write';
+  const denied = await f.run({ command });
+  assert.equal(denied.isError, true);
+  assert.match(text(denied), WRITE_DENIED);
+  assert.equal(f.requests.length, 1);
+  f.config.sandbox.mode = 'host';
+  await f.run({ command });
+  assert.equal(f.requests.length, 2);
+});
+
 test('the tool exposes Codex approval parameters', () => {
-  const tool = createGuardianBashTool({ config: () => DEFAULT_GUARDIAN_CONFIG, policy: () => Policy.empty(), shellSettings: () => ({}), shell, sandbox: detected,
+  const tool = createGuardianBashTool({ config: () => WORKSPACE_CONFIG, policy: () => Policy.empty(), shellSettings: () => ({}), shell, sandbox: detected,
     approvals: { request: async () => ({ type: 'approved' }) }, persistAmendment: async () => {} }, '/');
   const properties = (tool.parameters as { properties: Record<string, { enum?: string[]; anyOf?: { const: string }[] }> }).properties;
   assert.deepEqual(Object.keys(properties), ['command', 'timeout', 'sandbox_permissions', 'justification', 'prefix_rule']);
@@ -166,7 +198,7 @@ test('network hints cover DNS failures without blaming ordinary failures or enab
   assert.match(text(dns), /network access is disabled/i);
   const ordinary = await disabled.run({ command: 'printf "token invalid\\n" >&2; exit 1' });
   assert.doesNotMatch(text(ordinary), /network access is disabled/i);
-  const enabled = setup(t, { config: { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, networkAccess: true } } });
+  const enabled = setup(t, { config: { sandbox: { ...WORKSPACE_CONFIG.sandbox, networkAccess: true } } });
   const failed = await enabled.run({ command: 'printf "Could not resolve host: example.invalid\\n" >&2; exit 1' });
   assert.doesNotMatch(text(failed), /network access is disabled/i);
   const success = await disabled.run({ command: 'printf "Could not resolve host: example.invalid\\n"' });
@@ -298,7 +330,7 @@ test('sandboxed commands honor timeouts and Pi shell settings', sandboxed, async
 });
 
 test('bundled Railway rules apply everywhere a literal command can hide, even with Guardian off', async t => {
-  for (const config of [{}, { enabled: false }, { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'danger-full-access' as const } }]) {
+  for (const config of [{}, { enabled: false }, { sandbox: { ...WORKSPACE_CONFIG.sandbox, mode: 'danger-full-access' as const } }]) {
     const { run, requests } = setup(t, { config, rules: 'prefix_rule(pattern=["/opt/homebrew/bin/railway"], decision="allow")\nprefix_rule(pattern=["railway"], decision="allow")' });
     for (const command of ['railway delete', '/opt/homebrew/bin/railway volume delete pg', 'if true; then railway down; fi', 'echo "$(railway env rm prod)"',
       "bash -c 'railway delete'", 'sudo railway volume rm pg', 'env RAILWAY_TOKEN=x railway delete', 'cd app > /dev/null && railway delete 2>&1']) {
@@ -381,17 +413,17 @@ test('bash timeout covers sandbox preparation before any command launches', asyn
 });
 
 
-test('cancellation after approval prevents entering rule persistence or executing bash', async t => {
+for (const mode of ['workspace-write', 'host'] as const) test(`${mode}: cancellation after approval prevents rule persistence and bash execution`, async t => {
   const { cwd } = setup(t);
   const rules = join(cwd, 'cancelled.rules');
   const controller = new AbortController();
   const records: ApprovalAuditEntry[] = [];
-  const config = { ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: 'user' as const };
+  const config = { ...WORKSPACE_CONFIG, sandbox: { ...WORKSPACE_CONFIG.sandbox, mode }, approvalsReviewer: 'user' as const };
   const approvals = new Approvals({ config: () => config, turnId: () => 't',
     review: async () => { throw new Error('human approval expected'); },
     record: entry => { records.push(entry); queueMicrotask(() => controller.abort()); },
   });
-  const tool = createGuardianBashTool({ config: () => config, policy: () => Policy.empty(), shellSettings: () => ({}), shell, sandbox: undefined, approvals,
+  const tool = createGuardianBashTool({ config: () => config, policy: () => Policy.empty(), shellSettings: () => ({}), shell, sandbox: mode === 'host' ? detected : undefined, approvals,
     persistAmendment: prefix => appendAllowPrefixRule(rules, prefix),
   }, cwd);
   const ctx: ApprovalContext = { hasUI: true, sessionManager: { getSessionId: () => 's', getLeafId: () => 'l' },
@@ -410,7 +442,7 @@ test('human cancellation leaves no bash effect or persisted rule in direct and f
     const { cwd } = setup(t);
     const rules = join(cwd, 'cancelled.rules');
     const controller = new AbortController();
-    const config = { ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: fallback ? 'auto_review' as const : 'user' as const };
+    const config = { ...WORKSPACE_CONFIG, approvalsReviewer: fallback ? 'auto_review' as const : 'user' as const };
     const records: ApprovalAuditEntry[] = [];
     const approvals = new Approvals({ config: () => config, turnId: () => 't',
       review: async () => ({ type: 'error', error: { type: 'timeout' } }), record: entry => { records.push(entry); },
@@ -438,7 +470,7 @@ test('rule persistence commits on entry and late cancellation stops bash without
     const { cwd } = setup(t);
     const rules = join(cwd, 'approved.rules');
     const controller = new AbortController();
-    const config = { ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: 'user' as const };
+    const config = { ...WORKSPACE_CONFIG, approvalsReviewer: 'user' as const };
     const approvals = new Approvals({ config: () => config, turnId: () => 't',
       review: async () => { throw new Error('unexpected automatic review'); }, record: () => {},
     });
@@ -466,7 +498,7 @@ test('a real human rejection retains its decision when ctx.abort synchronously a
     const { cwd } = setup(t);
     const controller = new AbortController();
     const records: ApprovalAuditEntry[] = [];
-    const config = { ...DEFAULT_GUARDIAN_CONFIG, approvalsReviewer: fallback ? 'auto_review' as const : 'user' as const };
+    const config = { ...WORKSPACE_CONFIG, approvalsReviewer: fallback ? 'auto_review' as const : 'user' as const };
     const approvals = new Approvals({ config: () => config, turnId: () => 't',
       review: async () => ({ type: 'error', error: { type: 'timeout' } }), record: entry => { records.push(entry); },
     });

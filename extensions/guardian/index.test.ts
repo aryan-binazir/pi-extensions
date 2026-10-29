@@ -346,7 +346,7 @@ process.stdin.on('data', chunk => { stdin += chunk; }).on('end', () => {
 });
 
 test('the permission instructions describe how commands actually run', () => {
-  const with_ = (overrides: Partial<typeof DEFAULT_GUARDIAN_CONFIG>, mode = DEFAULT_GUARDIAN_CONFIG.sandbox.mode) =>
+  const with_ = (overrides: Partial<typeof DEFAULT_GUARDIAN_CONFIG>, mode: typeof DEFAULT_GUARDIAN_CONFIG.sandbox.mode = 'workspace-write') =>
     ({ ...DEFAULT_GUARDIAN_CONFIG, ...overrides, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode } });
   assert.deepEqual(instructedPermissions(with_({}), true), { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' });
   assert.deepEqual(instructedPermissions(with_({}), false), { sandboxMode: 'danger-full-access', approvalPolicy: 'unless-trusted' });

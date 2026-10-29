@@ -193,17 +193,15 @@ link. This is an explicit local setup step, not an automatic install hook.
 
 ## Guardian
 
-[Guardian](guardian.md) is the required approval engine. It sandboxes `bash`,
-gates `write` and `edit`, and sends actions that leave the sandbox to a reviewer
-model. Select it with `pi config`, or add the absolute path to
+[Guardian](guardian.md) is the required approval engine. By default it reviews commands and
+file changes, then runs approved actions on the host with Pi's environment and credentials. Select it with `pi config`, or add the absolute path to
 `extensions/guardian/index.ts` in a **stable checkout** to `extensions` in
 `~/.pi/agent/settings.json`, preserving other entries. Use the same checkout as
 the [footer](#footer), which shows Guardian's status only for its own checkout.
 
 On Linux, install bubblewrap 0.8 or newer (`sudo pacman -S bubblewrap` on Arch,
 `sudo apt install bubblewrap` on Ubuntu 24.04 and later); see
-[Guardian on Linux](guardian.md#linux). Without a usable sandbox, every command
-and file change needs approval.
+[Guardian on Linux](guardian.md#linux). Bubblewrap supports the reviewer's read-only inspections and optional sandbox modes. Host execution works without it, but reviewer inspections do not.
 
 **Reviewer.** The required reviewer is `openai-codex` / `gpt-6-luna~fast` at
 `low` reasoning, which is Guardian's default and uses the existing Codex
@@ -226,7 +224,7 @@ load, commands are reviewed twice and Guardian warns at session start.
 
 Completion: Guardian is selected from the footer's stable checkout, bubblewrap is
 usable on Linux, the reviewer is the required one, no other approval package is
-installed, and Ar has run `/reload`. The footer then shows `Auto: on · Luna low`.
+installed, and Ar has run `/reload`. The footer then shows `Auto: on · Luna low · host` with the default execution mode.
 
 ## Footer
 

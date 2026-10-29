@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after } from 'node:test';
+import type { createGuardianBashTool } from './bash.ts';
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from '@earendil-works/pi-ai';
 import { withPi } from '../../tests/pi-session.ts';
 import { DEFAULT_GUARDIAN_CONFIG, GUARDIAN_ENABLED_EVENT } from './config.ts';
@@ -363,4 +364,127 @@ test('a Guardian that cannot start still replaces bash, write and edit with tool
   const notices: string[] = [];
   for (const handler of handlers) handler({}, { hasUI: true, ui: { notify: message => { notices.push(message); } } });
   assert.match(notices.join('\n'), /Guardian could not start/);
+});
+
+
+test('a late human decision cannot append an old audit into the current Pi session', async () => {
+  let bash!: ReturnType<typeof createGuardianBashTool>;
+  let choose!: (choice: string) => void;
+  let shown!: () => void;
+  const visible = new Promise<void>(resolve => { shown = resolve; });
+  await withPi({ extensions: [pi => guardian({ ...pi, registerTool: tool => {
+    if (tool.name === 'bash') bash = tool as unknown as typeof bash;
+    pi.registerTool(tool);
+  } })], configure: ({ agentDir }, provider) => {
+    writeConfig(agentDir, { approvalsReviewer: 'user' });
+    return { model: provider.getModel() };
+  }, bind: session => ({ mode: 'tui', uiContext: { ...session.extensionRunner.createContext().ui,
+    select: () => new Promise(resolve => { choose = resolve; shown(); }),
+  } }) }, async ({ session, runner, cwd }) => {
+    const ctx = runner.createToolContext('old-call', undefined);
+    let aborted = 0;
+    const execution = bash.execute('old-call', { command: 'echo stale > stale-marker', sandbox_permissions: 'require_escalated' }, undefined, undefined,
+      { ...ctx, abort: () => { aborted++; } });
+    await visible;
+    const oldSessionId = session.sessionManager.getSessionId();
+    session.sessionManager.newSession();
+    assert.notEqual(session.sessionManager.getSessionId(), oldSessionId);
+    choose('Yes, proceed');
+    await assert.rejects(execution, /cancelled|audit.*session/i);
+    assert.equal(aborted, 0);
+    assert.equal(existsSync(join(cwd, 'stale-marker')), false);
+    const audit = session.sessionManager.getEntries().filter(entry => entry.type === 'custom' && entry.customType === APPROVAL_AUDIT_ENTRY_TYPE);
+    assert.deepEqual(audit, [], 'pi.appendEntry must not receive the old decision in the new session');
+  });
+});
+
+function gate() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const replacement of ['review', 'turn', 'session'] as const) test(`an older review cannot clear a newer review status (${replacement})`, async () => {
+  let bash!: ReturnType<typeof createGuardianBashTool>;
+  const entered = [gate(), gate()];
+  const released = [gate(), gate()];
+  let status: string | undefined;
+  const notices: string[] = [];
+  await withPi({ extensions: [pi => guardian({ ...pi, registerTool: tool => {
+    if (tool.name === 'bash') bash = tool as unknown as typeof bash;
+    pi.registerTool(tool);
+  } })], responses: entered.map((gate, index) => async () => {
+    gate.resolve();
+    await released[index].promise;
+    return fauxAssistantMessage(index === 0 ? '{"outcome":"deny","rationale":"obsolete denial"}' : '{"outcome":"allow"}');
+  }), configure: ({ agentDir }, provider) => {
+    writeConfig(agentDir, { reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' } });
+    return { model: provider.getModel() };
+  }, bind: session => ({ mode: 'tui', uiContext: { ...session.extensionRunner.createContext().ui,
+    setStatus: (key, text) => { if (key === 'guardian-review') status = text; },
+    notify: message => { notices.push(message); },
+  } }) }, async ({ session, runner, cwd }) => {
+    await runner.emit({ type: 'agent_start' });
+    const old = bash.execute('old', { command: 'echo old > old-marker', sandbox_permissions: 'require_escalated' }, undefined, undefined, runner.createToolContext('review-call', undefined));
+    try {
+      await entered[0].promise;
+      if (replacement === 'session') session.sessionManager.newSession();
+      if (replacement !== 'review') await runner.emit({ type: 'agent_start' });
+      const fresh = bash.execute('fresh', { command: 'echo fresh > fresh-marker', sandbox_permissions: 'require_escalated' }, undefined, undefined, runner.createToolContext('review-call', undefined));
+      try {
+        await entered[1].promise;
+        assert.equal(status, 'Reviewing approval request…');
+        released[0].resolve();
+        await assert.rejects(old, replacement === 'session' ? /audit.*session/ : replacement === 'turn' ? /cancelled/ : /unacceptable risk/);
+        assert.equal(status, 'Reviewing approval request…', 'old completion must not erase the new status');
+        if (replacement !== 'review') {
+          await session.prompt('/guardian approve');
+          assert.match(notices.at(-1)!, /No replayable denied action/);
+          assert.ok(!notices.some(message => message.includes('obsolete denial')));
+        }
+        if (replacement === 'session') assert.ok(!session.sessionManager.getEntries().some(entry => entry.type === 'custom' && entry.customType === APPROVAL_AUDIT_ENTRY_TYPE));
+        assert.equal(existsSync(join(cwd, 'old-marker')), false);
+      } finally {
+        released[1].resolve();
+        await fresh;
+      }
+      assert.equal(status, undefined);
+      assert.equal(readFileSync(join(cwd, 'fresh-marker'), 'utf8'), 'fresh\n');
+    } finally {
+      released[0].resolve();
+      await old.catch(() => {});
+    }
+  });
+});
+
+test('a review that fails before showing status does not take status ownership', async () => {
+  let bash!: ReturnType<typeof createGuardianBashTool>;
+  const entered = gate(), released = gate();
+  let status: string | undefined;
+  await withPi({ extensions: [pi => guardian({ ...pi, registerTool: tool => {
+    if (tool.name === 'bash') bash = tool as unknown as typeof bash;
+    pi.registerTool(tool);
+  } })], responses: [async () => {
+    entered.resolve();
+    await released.promise;
+    return fauxAssistantMessage('{"outcome":"allow"}');
+  }], configure: ({ agentDir }, provider) => {
+    writeConfig(agentDir, { reviewer: { provider: provider.getModel().provider, model: provider.getModel().id, reasoning: 'low' }, autoReview: { failureFallback: 'reject' } });
+    return { model: provider.getModel() };
+  }, bind: session => ({ mode: 'tui', uiContext: { ...session.extensionRunner.createContext().ui,
+    setStatus: (key, text) => { if (key === 'guardian-review') status = text; },
+  } }) }, async ({ runner, agentDir }) => {
+    const old = bash.execute('old', { command: 'true', sandbox_permissions: 'require_escalated' }, undefined, undefined, runner.createToolContext('old', undefined));
+    try {
+      await entered.promise;
+      writeConfig(agentDir, { reviewer: { provider: 'missing-provider', model: 'unavailable-model', reasoning: 'low' }, autoReview: { failureFallback: 'reject' } });
+      await assert.rejects(bash.execute('failed', { command: 'true', sandbox_permissions: 'require_escalated' }, undefined, undefined,
+        runner.createToolContext('failed', undefined)), /not available/);
+      assert.equal(status, 'Reviewing approval request…');
+    } finally {
+      released.resolve();
+      await old;
+    }
+    assert.equal(status, undefined, 'the displayed review must still be able to clear its own status');
+  });
 });

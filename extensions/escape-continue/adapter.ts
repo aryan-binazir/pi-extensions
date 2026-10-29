@@ -163,7 +163,9 @@ function decorate(host: Host, state: Adapter): void {
       registration.input = { editor, reset: () => unregister() };
       return {
         key(data) {
-          if (!current() || !matchesKey(data, 'ctrl+enter')) return false;
+          if (!current()) return false;
+          if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+enter')) state.attach(host, state);
+          if (!matchesKey(data, 'ctrl+enter')) return false;
           if (registration.pending || session.isStreaming || session.isCompacting || session.isRetrying || session.isBashRunning)
             (editor.onEscape ?? editor.actionHandlers?.get('app.interrupt'))?.();
           return true;

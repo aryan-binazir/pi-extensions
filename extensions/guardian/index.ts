@@ -60,6 +60,8 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   let policies = loaded;
   let contextFiles: { path: string; content: string }[] = [];
   let turn = 0;
+  let reviewStatusOwner: object | undefined;
+  let auditSession: ExtensionContext['sessionManager'] | undefined;
   let cached: { stamp: string; config: GuardianConfig; error?: string } | undefined;
   let lastValid: GuardianConfig | undefined;
   let reportedError: string | undefined;
@@ -99,6 +101,9 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     const ctx = approvalContext as unknown as ExtensionContext;
     const settings = config();
     const sessionId = ctx.sessionManager.getSessionId();
+    const reviewTurn = turn;
+    const statusOwner = {};
+    const current = () => turn === reviewTurn && auditSession?.getSessionId() === sessionId;
     const claudeCli = settings.reviewer.provider === CLAUDE_CLI_PROVIDER;
     const reviewer = claudeCli ? undefined : resolveReviewer(ctx.modelRegistry, settings.reviewer, `guardian-${sessionId}`);
     if (reviewer && !reviewer.ok) return { type: 'error', error: { type: 'prompt_build', message: reviewer.message } };
@@ -120,7 +125,11 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
       policy: hash(prompt.systemPrompt), instructions: hash(contextFiles), action: hash(plannedAction),
       transcript: hash({ transcript, trustedUserAnswers: evidence.trustedUserAnswers }),
     };
-    if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, 'Reviewing approval request…');
+    if (signal?.aborted || !current()) return { type: 'error', error: { type: 'cancelled' } };
+    if (ctx.hasUI) {
+      reviewStatusOwner = statusOwner;
+      ctx.ui.setStatus(REVIEW_STATUS_KEY, 'Reviewing approval request…');
+    }
     try {
       const outcome = await runWithRetry({ maxAttempts: MAX_REVIEW_ATTEMPTS, deadline: Date.now() + REVIEW_TIMEOUT_MS }, signal, deadline => reviewer
         ? runReviewerTurn({ ...prompt, cwd: ctx.cwd, deadline, ...(signal ? { signal } : {}), complete: reviewer.complete,
@@ -128,12 +137,15 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
         : runClaudeCliReview({ ...prompt, cwd: ctx.cwd, model: settings.reviewer.model, reasoning: settings.reviewer.reasoning, deadline, ...(signal ? { signal } : {}) }));
       return { ...outcome, contextHashes };
     } finally {
-      if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
+      if (ctx.hasUI && current() && reviewStatusOwner === statusOwner) ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
     }
   };
   const approvals = new Approvals({
     config, review, turnId: () => String(turn),
-    record: entry => { pi.appendEntry(APPROVAL_AUDIT_ENTRY_TYPE, entry); },
+    record: entry => {
+      if (auditSession?.getSessionId() !== entry.sessionId) throw new Error('Cannot record approval audit in a different or closed session');
+      pi.appendEntry(APPROVAL_AUDIT_ENTRY_TYPE, entry);
+    },
   });
 
   pi.on('tool_call', createConnectorGate({ config, approvals, tools: () => pi.getAllTools() }));
@@ -157,6 +169,8 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
   for (const tool of createGuardianFileTools({ config, sandbox, approvals }, process.cwd())) pi.registerTool(tool);
 
   pi.on('session_start', async (_event, ctx) => {
+    auditSession = ctx.sessionManager;
+    approvals.clearDenied();
     await reloadPolicies();
     reportedError = undefined;
     reportProblems(ctx);
@@ -165,7 +179,19 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
       ctx.ui.notify('Auto Permissions is also loaded, so commands are reviewed twice. Uninstall it to use Guardian alone.', 'warning');
     }
   });
-  pi.on('agent_start', () => { turn++; });
+  pi.on('session_shutdown', (_event, ctx) => {
+    reviewStatusOwner = undefined;
+    if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
+    auditSession = undefined;
+    approvals.clearDenied();
+    approvals.clearTurn(String(turn));
+    turn++;
+  });
+  pi.on('agent_start', (_event, ctx) => {
+    turn++;
+    reviewStatusOwner = undefined;
+    if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
+  });
   pi.on('agent_end', () => { approvals.clearTurn(String(turn)); });
 
   pi.on('before_agent_start', (event, ctx) => {

@@ -767,26 +767,250 @@ test('Ctrl+Enter reaches manual compaction cancellation while no agent run is st
   assert.equal(h.app.editor.getText(), 'draft');
 });
 
-test('Ctrl+Enter reaches the retry cancellation callback during actual backoff', { timeout: 5000 }, async t => {
-  const h = await fixture(t, [viMode, stash]);
+function retryUI(t: TestContext, h: Awaited<ReturnType<typeof fixture>>) {
   h.settingsManager.setRetryEnabled(true);
+  h.app.isInitialized = true;
+  h.app.options = { tuiMode: 'fullscreen' };
+  h.app.ui.terminal.setProgress = () => {};
+  h.app.chatContainer = new Container();
+  h.app.pendingTools = new Map();
+  h.app.footer = { invalidate() {} };
   const retrying = deferred();
-  h.session.subscribe(event => {
-    if (event.type === 'auto_retry_start') {
-      h.app.defaultEditor.onEscape = () => h.session.abortRetry();
-      retrying.resolve();
+  const renders: Promise<void>[] = [];
+  const unsubscribe = h.session.subscribe(event => {
+    if (event.type === 'auto_retry_start' || event.type === 'auto_retry_end' || event.type === 'agent_start' || event.type === 'compaction_start' || event.type === 'compaction_end') {
+      const rendered = h.app.handleEvent(event) as Promise<void>;
+      renders.push(rendered);
+      if (event.type === 'auto_retry_start') void rendered.then(() => retrying.resolve());
     }
   });
-  h.provider.setResponses([fauxAssistantMessage('', { stopReason: 'error', errorMessage: '429 rate limit exceeded' })]);
+  t.after(async () => { unsubscribe(); h.app.clearStatusIndicator(); await Promise.all(renders); });
+  return retrying.promise;
+}
+
+for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} retry cancellation sends Next without resending Original`, { timeout: 5000 }, async t => {
+  const h = await fixture(t);
+  const retrying = retryUI(t, h);
+  const requests: string[][] = [];
+  const promoted = deferred();
+  h.provider.setResponses(Array.from({ length: 3 }, (_, index) => context => {
+    requests.push(context.messages.filter(message => message.role === 'user').map(message =>
+      typeof message.content === 'string' ? message.content : message.content.filter(part => part.type === 'text').map(part => part.text).join('')));
+    if (index === 0) return fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' });
+    if (requests.at(-1)?.at(-1) === 'Next') promoted.resolve();
+    return fauxAssistantMessage('Completed');
+  }));
   const running = h.session.prompt('Original');
-  await retrying.promise;
-  assert.equal(h.session.isRetrying, true);
+  await retrying;
+  await h.session.followUp('Next');
   h.app.editor.setText('draft');
-  h.app.editor.handleInput('\x1b[13;5u');
+  h.app.editor.handleInput(key);
   await running;
+  await promoted.promise;
+  await h.session.waitForIdle();
+  assert.deepEqual(requests, [['Original'], ['Original', 'Next']]);
   assert.equal(h.session.isRetrying, false);
-  assert.equal(h.provider.state.callCount, 1);
+  assert.equal(h.session.pendingMessageCount, 0);
   assert.equal(h.app.editor.getText(), 'draft');
+});
+
+for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} retry cancellation with no queue restores normal interruption`, { timeout: 5000 }, async t => {
+  const h = await fixture(t);
+  retryUI(t, h);
+  h.provider.setResponses([
+    fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' }),
+    fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' }),
+  ]);
+  for (const prompt of ['Original', 'Again']) {
+    const retrying = deferred();
+    const unsubscribe = h.session.subscribe(event => { if (event.type === 'auto_retry_start') retrying.resolve(); });
+    const running = h.session.prompt(prompt);
+    await retrying.promise;
+    h.app.editor.handleInput(key);
+    await running;
+    unsubscribe();
+    assert.equal(h.session.isRetrying, false);
+  }
+  assert.equal(h.provider.state.callCount, 2);
+  const active = deferred(), promoted = deferred();
+  h.provider.appendResponses([h.blocked(active), h.blocked(promoted)]);
+  const running = h.session.prompt('Later');
+  await active.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput(key);
+  await promoted.promise;
+  assert.deepEqual(h.users(), ['Original', 'Again', 'Later', 'Next']);
+  h.app.editor.handleInput(key);
+  await h.session.waitForIdle();
+  await running;
+  assert.equal(h.provider.state.callCount, 4);
+});
+
+for (const outcome of ['success', 'failure'] as const) test(`retry expiry and ${outcome} restore queued interruption`, { timeout: 5000 }, async t => {
+  const h = await fixture(t);
+  const retrying = retryUI(t, h);
+  h.settingsManager.applyOverrides({ retry: { enabled: true, baseDelayMs: 5, maxRetries: 1 } });
+  const failure = fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' });
+  const active = deferred(), promoted = deferred();
+  h.provider.setResponses([failure, outcome === 'success' ? fauxAssistantMessage('Recovered') : failure, h.blocked(active), h.blocked(promoted)]);
+  const retry = h.session.prompt('Original');
+  await retrying;
+  await retry;
+  assert.equal(h.session.isRetrying, false);
+  assert.equal(h.provider.state.callCount, 2);
+  const running = h.session.prompt('Later');
+  await active.promise;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput('\x1b');
+  await promoted.promise;
+  assert.deepEqual(h.users(), ['Original', 'Later', 'Next']);
+  h.app.editor.handleInput('\x1b');
+  await h.session.waitForIdle();
+  await running;
+  assert.equal(h.provider.state.callCount, 4);
+});
+
+for (const mode of ['steer', 'followUp'] as const) for (const key of ['\x1b', '\x1b[13;5u'])
+  test(`${JSON.stringify(key)} retry promotes one ${mode} with attachments and preserves the tail`, { timeout: 5000 }, async t => {
+    const h = await fixture(t);
+    const retrying = retryUI(t, h);
+    const promoted = deferred();
+    const image = { type: 'image' as const, mimeType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC' };
+    let sent: unknown;
+    h.provider.setResponses([
+      fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' }),
+      (context, options, state, model) => {
+        sent = context.messages.at(-1)?.content;
+        return h.blocked(promoted)(context, options, state, model);
+      },
+    ]);
+    const running = h.session.prompt('Original');
+    await retrying;
+    await h.session[mode]('Next', [image]);
+    await h.session[mode]('Tail', [image]);
+    await h.session.followUp('Last');
+    h.app.editor.handleInput(key);
+    await promoted.promise;
+    assert.deepEqual(sent, [{ type: 'text', text: 'Next' }, image]);
+    assert.equal(h.provider.state.callCount, 2);
+    assert.deepEqual(h.users(), ['Original', 'Next']);
+    assert.deepEqual(h.session.getSteeringMessages(), mode === 'steer' ? ['Tail'] : []);
+    assert.deepEqual(h.session.getFollowUpMessages(), mode === 'followUp' ? ['Tail', 'Last'] : ['Last']);
+    const queued = h.session.agent.peekQueuedMessages()[0];
+    assert.ok(queued.role === 'user');
+    assert.deepEqual(queued.content, [{ type: 'text', text: 'Tail' }, image]);
+    h.session.clearQueue();
+    h.app.editor.handleInput(key);
+    await h.session.waitForIdle();
+    await running;
+  });
+
+for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} repeated retry interruption keeps the queued attachment`, { timeout: 5000 }, async t => {
+  const h = await fixture(t);
+  const retrying = retryUI(t, h);
+  h.provider.setResponses([fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' })]);
+  const running = h.session.prompt('Original');
+  await retrying;
+  const image = { type: 'image' as const, mimeType: 'image/png', data: 'synthetic-image-data' };
+  await h.session.followUp('Next', [image]);
+  h.app.editor.handleInput(key);
+  h.app.editor.handleInput(key);
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.users(), ['Original']);
+  assert.equal(h.provider.state.callCount, 1);
+  const queued = h.session.agent.peekQueuedMessages()[0];
+  assert.ok(queued.role === 'user');
+  assert.deepEqual(queued.content, [{ type: 'text', text: 'Next' }, image]);
+  assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
+});
+
+for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} leaves a focused dialog in control during retry`, { timeout: 5000 }, async t => {
+  const h = await fixture(t);
+  const retrying = retryUI(t, h);
+  const promoted = deferred();
+  h.provider.setResponses([fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' }), h.blocked(promoted)]);
+  const running = h.session.prompt('Original');
+  await retrying;
+  await h.session.followUp('Next');
+  const received: string[] = [];
+  const dialog = new Input();
+  dialog.handleInput = data => { received.push(data); };
+  h.app.ui.getFocusedComponent = () => dialog;
+  h.app.editor.handleInput(key);
+  assert.deepEqual(received, [key]);
+  assert.equal(h.session.isRetrying, true);
+  assert.equal(h.provider.state.callCount, 1);
+  assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
+  h.app.ui.getFocusedComponent = () => h.app.editor;
+  h.app.editor.handleInput(key);
+  await promoted.promise;
+  assert.deepEqual(h.users(), ['Original', 'Next']);
+  h.app.editor.handleInput(key);
+  await h.session.waitForIdle();
+  await running;
+});
+
+for (const order of ['escape first', 'escape last'] as const) for (const key of ['\x1b', '\x1b[13;5u'])
+  test(`${JSON.stringify(key)} retry interruption preserves Vi input with ${order}`, { timeout: 5000 }, async t => {
+    const h = await fixture(t, order === 'escape first' ? [viMode, stash] : [], true, order === 'escape last' ? [viMode, stash] : []);
+    const retrying = retryUI(t, h);
+    const promoted = deferred();
+    h.provider.setResponses([fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' }), h.blocked(promoted)]);
+    const running = h.session.prompt('Original');
+    await retrying;
+    await h.session.followUp('Next');
+    h.app.editor.setText('draft');
+    h.app.editor.handleInput(key);
+    if (key === '\x1b') {
+      assert.equal(h.session.isRetrying, true);
+      assert.equal(h.provider.state.callCount, 1);
+      assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
+      h.app.editor.handleInput(key);
+    }
+    await promoted.promise;
+    assert.equal(h.provider.state.callCount, 2);
+    assert.deepEqual(h.users(), ['Original', 'Next']);
+    assert.equal(h.app.editor.getText(), 'draft');
+    h.app.editor.handleInput(key);
+    await h.session.waitForIdle();
+    await running;
+    if (key !== '\x1b') {
+      h.app.editor.handleInput('i');
+      assert.equal(h.app.editor.getText(), 'drafti');
+    }
+  });
+
+for (const key of ['\x1b', '\x1b[13;5u']) test(`${JSON.stringify(key)} cancels automatic compaction after retry promotion`, { timeout: 5000 }, async t => {
+  const compacting = deferred();
+  const h = await fixture(t, [pi => pi.on('session_before_compact', async event => {
+    assert.equal(event.reason, 'threshold');
+    compacting.resolve();
+    await new Promise<void>(resolve => {
+      if (event.signal.aborted) resolve();
+      else event.signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+    return { cancel: true };
+  })]);
+  const retrying = retryUI(t, h);
+  h.settingsManager.applyOverrides({ compaction: { enabled: true, reserveTokens: 1024, keepRecentTokens: 1 } });
+  await h.session.setModel({ ...h.provider.getModel(), contextWindow: 8192 });
+  const large = fauxAssistantMessage('Completed ' + 'x'.repeat(32000));
+  h.provider.setResponses([fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' }), large]);
+  const running = h.session.prompt('Original');
+  await retrying;
+  await h.session.followUp('Next');
+  h.app.editor.handleInput(key);
+  await compacting.promise;
+  assert.equal(h.session.isCompacting, true);
+  assert.equal(h.provider.state.callCount, 2);
+  assert.deepEqual(h.users(), ['Original', 'Next']);
+  h.app.editor.handleInput(key);
+  await h.session.waitForIdle();
+  await running;
+  assert.equal(h.session.isCompacting, false);
+  assert.equal(h.session.pendingMessageCount, 0);
+  assert.equal(h.provider.state.callCount, 2);
 });
 
 test('a second Ctrl+Enter during slow cancellation holds the queued image and draft', async t => {
@@ -952,12 +1176,13 @@ test('an input handler consuming a promoted prompt leaves the prepared queue wai
   assert.ok(h.notices.some(message => /did not start/.test(message)));
 });
 
-test('autocomplete Escape closes suggestions without interrupting or promoting', async t => {
+for (const phase of ['streaming', 'retry'] as const) test(`autocomplete Escape closes suggestions without interrupting or promoting during ${phase}`, { timeout: 5000 }, async t => {
   const h = await fixture(t);
   const first = deferred(), promoted = deferred();
-  h.provider.setResponses([h.blocked(first), h.blocked(promoted)]);
+  const ready = phase === 'retry' ? retryUI(t, h) : first.promise;
+  h.provider.setResponses([phase === 'retry' ? fauxAssistantMessage('', { stopReason: 'error', errorMessage: '503 Service unavailable' }) : h.blocked(first), h.blocked(promoted)]);
   const running = h.session.prompt('Original');
-  await first.promise;
+  await ready;
   await h.session.followUp('Next');
   h.app.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([{ name: 'hello' }, { name: 'help' }], h.session.sessionManager.getCwd()));
   h.app.editor.setText('/he');
@@ -966,7 +1191,8 @@ test('autocomplete Escape closes suggestions without interrupting or promoting',
   assert.equal(h.app.editor.isShowingAutocomplete(), true);
   h.app.editor.handleInput('\x1b');
   assert.equal(h.app.editor.isShowingAutocomplete(), false);
-  assert.equal(h.session.agent.signal?.aborted, false);
+  assert.equal(h.provider.state.callCount, 1);
+  assert.equal(h.session.isRetrying, phase === 'retry');
   assert.deepEqual(h.session.getFollowUpMessages(), ['Next']);
   h.app.editor.handleInput('\x1b');
   await promoted.promise;

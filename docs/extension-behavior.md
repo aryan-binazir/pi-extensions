@@ -57,6 +57,27 @@ remain unsupported.
 Escape from insert mode also closes the completion popup. The exact supported vi
 command set is documented in [ADR 001](adr/001-editor.md).
 
+## Inline skills
+
+Pi lists skills and commands only for a `/` that starts the message. Inline
+skills opens Pi's skill list, in Pi's order with its descriptions, for a `/`
+anywhere else after whitespace, including at the start of later lines. It keeps
+only skills whose name matches the typed text from its start or any word (`/rev`
+finds `rocket-review`, `/backup-t` finds `hypr-backup-timestamped`), so paths
+such as `/tmp` rarely open it. Commands and
+prompt templates are omitted because Pi runs them only at the message start.
+Tab or Enter inserts `/skill:<name> ` without submitting; Escape dismisses.
+Typing whitespace, a second `/` (a path), or moving or deleting back past the `/`
+closes the list. Tab with no list open still completes paths. Pasted text and vi
+normal-mode commands do not open it.
+
+It completes text only. Pi expands `/skill:<name>` into the skill's instructions
+only at the message start; elsewhere the model loads the skill from its system
+prompt listing, which omits skills marked `disable-model-invocation`. No skills
+are listed when Pi's skill commands are disabled. It relies on the editor's
+private `tryTriggerAutocomplete`, verified on Pi 0.99.1, 1.4.0 and 1.5.0, and does
+nothing if that method is missing.
+
 ## Escape Continue
 
 In the main editor, the normal interrupt action (Escape by default) cancels the

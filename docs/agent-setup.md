@@ -16,16 +16,16 @@ changes. Resolve the agent directory from `PI_CODING_AGENT_DIR`, defaulting to
    and installed manifests to verify the repository package or intended local
    extension paths exist and selected entrypoints resolve. Preserve the user's
    selection; optional features that are neither configured nor requested are
-   skipped, not missing setup. Escape Continue, Regen, Guardian, Hooks, the footer
-   with PR links, and Claude bridge are required;
+   skipped, not missing setup. Escape Continue, Regen, Inline skills, Guardian,
+   Hooks, the footer with PR links, and Claude bridge are required;
    a missing or disabled component
    is setup drift, not a skipped optional feature.
 2. **Shared instructions:** verify `APPEND_SYSTEM.md` is a readable symlink to
    this repository's tracked file in a stable checkout. With Subagents selected,
    also check its profile catalog is available; the file link alone is insufficient.
 3. **Required and opted-in features:** follow the corresponding README step for
-   Escape Continue, Regen, Guardian, Hooks, the footer with PR links, Claude bridge,
-   and each configured or requested optional feature. For Escape Continue, compare
+   Escape Continue, Regen, Inline skills, Guardian, Hooks, the footer with PR links,
+   Claude bridge, and each configured or requested optional feature. For Escape Continue, compare
    selected entrypoints with [its configuration requirements](#escape-continue),
    read-only. For [Regen](#regen), verify its entrypoint is selected and its
    configured model (Luna 6 by default) resolves in the offline registry;
@@ -57,7 +57,8 @@ Keep the audit read-only: inspect only setup-relevant configuration, leave
 credentials untouched, and avoid installation, sign-in, model requests, or MCP
 connections. Completion is a brief report of verified steps, skipped optional
 steps, and drift or unverified items, naming the relevant file and README step.
-Ask Ar before repairs or changes to personal settings; continue unrelated work
+Ask Ar before repairs or changes to personal settings, except selecting
+[Inline skills](#inline-skills); continue unrelated work
 when a setup issue does not block it. Keep machine-specific audit results out of
 tracked instructions.
 
@@ -119,6 +120,18 @@ selection is independent of Regen.
 Completion: `extensions/regen/index.ts` exists and is selected, and the configured
 model resolves in the offline model list. Ask Ar to run `/reload`. Disk selection
 and model registration do not prove live naming behavior or provider sign-in.
+
+## Inline skills
+
+Required on every machine. When the audit finds it unselected, select it without
+asking: enable `inline-skills` with `pi config`, or for a local checkout add the
+stable checkout's absolute `extensions/inline-skills/index.ts` path to
+`extensions` in user-scoped `settings.json`. Preserve other selections and avoid
+loading a second copy from another checkout.
+
+Completion: the entrypoint exists and is selected, then ask Ar to run `/reload`.
+In the TUI, typing `hi /` should list skills. Behavior:
+[Inline skills](extension-behavior.md#inline-skills).
 
 ## Default thinking
 

@@ -1,16 +1,17 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { decodeKittyPrintable, type AutocompleteItem, type AutocompleteProvider } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, getKeybindings, type AutocompleteItem, type AutocompleteProvider } from "@earendil-works/pi-tui";
 import { installEditorInput, registerMainEditorBinding } from "../editor-input.ts";
 
 const SKILL_TOKEN = /^[\w:.-]*$/;
 const WHITESPACE = /\s/;
-const WORD = /[-_.:]/;
+const WORD_START = /(?:^|[-_.:])(?=[^-_.:])/g;
 
 /** Stricter than Pi's fuzzy match, which would turn most mid-message paths (`/tmp`) into a skill menu. */
 function startsWord(value: string, token: string): boolean {
   const query = token.toLowerCase();
   const name = value.slice("skill:".length).toLowerCase();
-  return value.toLowerCase().startsWith(query) || name.split(WORD).some(word => word.startsWith(query));
+  return value.toLowerCase().startsWith(query)
+    || [...name.matchAll(WORD_START)].some(word => name.startsWith(query, word.index + word[0].length));
 }
 
 /** Index of the `/` that starts the token ending at `col`, unless it starts the message (Pi's own menu). */
@@ -27,10 +28,12 @@ export default function inlineSkills(pi: ExtensionAPI): void {
   // Where our last menu was requested. Pi re-queries an open menu on every edit and cursor move, and a
   // request can resolve after a burst of keys; stepping off the token must close it, not list files.
   let anchor: { line: number; head: string } | undefined;
-  const leftToken = (lines: readonly string[], line: number, col: number): boolean => {
-    if (!anchor || line !== anchor.line || !lines[line]?.startsWith(`${anchor.head}/`)) return false;
+  const leftToken = (text: string, line: number, col: number, triggers: readonly string[]): boolean => {
+    if (!anchor || line !== anchor.line) return false;
     const slash = anchor.head.length;
-    return col <= slash || /^\S*\s$/.test(lines[line]!.slice(slash + 1, col));
+    if (col <= slash) return text.slice(0, col) === anchor.head.slice(0, col);
+    const typed = text.slice(slash + 1, col);
+    return text.startsWith(`${anchor.head}/`) && !["@", "#", '"', ...triggers].some(trigger => typed.includes(trigger));
   };
   installEditorInput();
 
@@ -42,7 +45,7 @@ export default function inlineSkills(pi: ExtensionAPI): void {
       async getSuggestions(lines, line, col, options) {
         const slash = options.force ? undefined : inlineSlash(lines[line] ?? "", line, col);
         if (slash === undefined) {
-          const left = !options.force && leftToken(lines, line, col);
+          const left = !options.force && leftToken(lines[line] ?? "", line, col, current.triggerCharacters ?? []);
           anchor = undefined;
           return left ? null : current.getSuggestions(lines, line, col, options);
         }
@@ -62,6 +65,7 @@ export default function inlineSkills(pi: ExtensionAPI): void {
         anchor = undefined;
         const text = lines[line] ?? "";
         const start = col - prefix.length - 1;
+        if (inlineSlash(text, line, col) !== start) return { lines: [...lines], cursorLine: line, cursorCol: col };
         const rest = text.slice(col);
         const next = [...lines];
         next[line] = `${text.slice(0, start)}/${item.value}${WHITESPACE.test(rest[0] ?? "") ? "" : " "}${rest}`;
@@ -85,11 +89,11 @@ export default function inlineSkills(pi: ExtensionAPI): void {
         const after = editor.getCursor();
         if (after.line !== before.line || editor.isShowingAutocomplete()) return true;
         const edited = editor.getLines()[before.line] ?? "";
-        const printable = decodeKittyPrintable(data) !== undefined || (data.charCodeAt(0) >= 32 && data !== "\x7f");
-        // Typed or deleted right before the cursor; vi normal-mode motions and edits are neither.
-        const changed = printable
-          ? after.col > before.col && edited === text.slice(0, before.col) + edited.slice(before.col, after.col) + text.slice(before.col)
-          : after.col < before.col && edited === text.slice(0, after.col) + text.slice(before.col);
+        // Typed or backspaced right before the cursor, as Pi's own slash menu reopens; vi normal mode does neither.
+        const changed = getKeybindings().matches(data, "tui.editor.deleteCharBackward")
+          ? after.col < before.col && edited === text.slice(0, after.col) + text.slice(before.col)
+          : (decodeKittyPrintable(data) !== undefined || data.charCodeAt(0) >= 32)
+            && after.col > before.col && edited === text.slice(0, before.col) + edited.slice(before.col, after.col) + text.slice(before.col);
         const slash = changed ? inlineSlash(edited, after.line, after.col) : undefined;
         if (slash === undefined) return true;
         anchor = { line: after.line, head: edited.slice(0, slash) };

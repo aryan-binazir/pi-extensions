@@ -62,12 +62,13 @@ command set is documented in [ADR 001](adr/001-editor.md).
 Pi lists skills and commands only for a `/` that starts the message. Inline
 skills opens Pi's skill list, in Pi's order with its descriptions, for a `/`
 anywhere else after whitespace, including at the start of later lines. It keeps
-only skills whose name, or a word in it, starts with the typed text (`/rev`
-finds `rocket-review`), so paths such as `/tmp` rarely open it. Commands and
+only skills whose name matches the typed text from its start or any word (`/rev`
+finds `rocket-review`, `/backup-t` finds `hypr-backup-timestamped`), so paths
+such as `/tmp` rarely open it. Commands and
 prompt templates are omitted because Pi runs them only at the message start.
 Tab or Enter inserts `/skill:<name> ` without submitting; Escape dismisses.
-Typing whitespace, a second `/` (a path) or moving before the `/` closes the
-list, and Tab with no list open still completes paths. Pasted text and vi
+Typing whitespace, a second `/` (a path), or moving or deleting back past the `/`
+closes the list. Tab with no list open still completes paths. Pasted text and vi
 normal-mode commands do not open it.
 
 It completes text only. Pi expands `/skill:<name>` into the skill's instructions

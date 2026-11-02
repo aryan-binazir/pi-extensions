@@ -14,7 +14,7 @@ const skills: SlashCommand[] = [
   { name: "skill:rocket", description: "Ship a task" },
   { name: "skill:roadmap", description: "Plan the roadmap" },
   { name: "skill:review", description: "Review code" },
-  { name: "skill:backup-timestamped", description: "Back up with a timestamp" },
+  { name: "skill:hypr-backup-timestamped", description: "Back up with a timestamp" },
 ];
 const commands: SlashCommand[] = [{ name: "rollback", description: "Undo a change" }, { name: "model" }];
 
@@ -136,7 +136,7 @@ for (const vi of [false, true]) {
     const h = host({ vi });
     h.editor.setText("first line\n");
     await h.type("/sk");
-    assert.deepEqual(h.menu(), ["skill:rocket", "skill:roadmap", "skill:review", "skill:backup-timestamped"]);
+    assert.deepEqual(h.menu(), ["skill:rocket", "skill:roadmap", "skill:review", "skill:hypr-backup-timestamped"]);
   });
 }
 
@@ -175,11 +175,28 @@ test("leaving the token closes the menu instead of listing files", async () => {
   assert.deepEqual(h.menu(), ["notes.md"], "Pi's own @ menu still opens right after");
 });
 
+test("backspacing over the slash closes the menu instead of listing files", async () => {
+  const h = host();
+  await h.type("use /");
+  assert.ok(h.menu().length > 0);
+  await h.press("\x7f");
+  assert.deepEqual(h.menu(), []);
+});
+
 test("a burst of keys that leaves the token shows no file list, but a following @ still completes", async () => {
   const h = host();
-  keys(h.editor, "use /ro ");
+  for (const burst of ["use /ro ", "use /ro  ", "use /ro and more "]) {
+    h.editor.setText("");
+    keys(h.editor, burst);
+    await settle();
+    assert.deepEqual(h.menu(), [], JSON.stringify(burst));
+  }
+  h.editor.setText("");
+  keys(h.editor, "use /ro and @");
   await settle();
-  assert.deepEqual(h.menu(), []);
+  assert.deepEqual(h.menu(), ["notes.md"], "Pi's own @ menu");
+  h.editor.setText("");
+  keys(h.editor, "use /ro ");
   keys(h.editor, "/ro @");
   await settle();
   assert.deepEqual(h.menu(), ["notes.md"], "Pi's own @ menu");
@@ -215,12 +232,20 @@ test("vi Escape dismisses the menu and enters normal mode; Prompt Stash still ow
 test("only skills with a word starting with the token are listed, so paths stay quiet", async () => {
   const h = host();
   await h.type("/tm");
-  assert.ok(h.menu().includes("skill:backup-timestamped"), "Pi's message-start menu matches fuzzily");
-  for (const [token, expected] of [["tm", []], ["time", ["skill:backup-timestamped"]], ["skill:back", ["skill:backup-timestamped"]], ["RO", ["skill:rocket", "skill:roadmap"]]] as const) {
+  assert.ok(h.menu().includes("skill:hypr-backup-timestamped"), "Pi's message-start menu matches fuzzily");
+  for (const [token, expected] of [["tm", []], ["time", ["skill:hypr-backup-timestamped"]], ["skill:hypr", ["skill:hypr-backup-timestamped"]], ["backup-t", ["skill:hypr-backup-timestamped"]], ["RO", ["skill:rocket", "skill:roadmap"]]] as const) {
     h.editor.setText("");
     await h.type(`see /${token}`);
     assert.deepEqual(h.menu(), expected, token);
   }
+});
+
+test("a stale menu after jumping to the line start leaves the text alone", async () => {
+  const h = host();
+  await h.type("please use /ro");
+  await h.press("\x01");
+  await h.press("\t");
+  assert.equal(h.editor.getText(), "please use /ro");
 });
 
 test("Tab after a mid-message slash still completes paths", async () => {
@@ -250,6 +275,14 @@ test("vi normal-mode commands do not open the menu", async () => {
   await h.type("a");
   await h.press("\x7f");
   assert.deepEqual(h.menu(), ["skill:rocket", "skill:roadmap"], "insert-mode backspace does");
+});
+
+test("vi normal-mode Ctrl+W does not open the menu", async () => {
+  const h = host({ vi: true });
+  await h.type("use /rocxxx");
+  await h.press("\x1b");
+  await h.press("\x17");
+  assert.deepEqual(h.menu(), []);
 });
 
 test("no skills listed when Pi's skill commands are disabled", async () => {

@@ -19,8 +19,9 @@ load; helpers and tests are not extensions.
 ## Agent setup checklist
 
 1. **Install and select extensions** using the commands above. Enable
-   [Escape Continue (required)](docs/agent-setup.md#escape-continue) and
-   [Regen (required)](docs/agent-setup.md#regen).
+   [Escape Continue (required)](docs/agent-setup.md#escape-continue),
+   [Regen (required)](docs/agent-setup.md#regen) and
+   [Inline skills (required)](docs/agent-setup.md#inline-skills).
 2. **Link the shared instructions.** Follow the guarded
    [symlink setup](docs/agent-setup.md#global-system-prompt-append-agent-setup) to link
    this checkout's [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) into
@@ -61,6 +62,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | [Regen](docs/regen.md) | Names new threads automatically; `/regen-name` regenerates a short title. Defaults to Luna 6 / low, with a project-local model override. |
 | Vi mode | Modal editor with motions, operators, registers, and undo. |
 | Prompt stash | `Ctrl+S` stashes or swaps the main editor draft. |
+| [Inline skills](docs/extension-behavior.md#inline-skills) | Typing `/` mid-message opens Pi's skill list; accepting inserts `/skill:<name>`. |
 | [Escape Continue](docs/extension-behavior.md#escape-continue) | Escape or Ctrl+Enter stops the active run and starts the next queued user message; no queued message means stop. Ctrl+Enter preserves Vi insert mode. |
 | [Subagents](docs/subagents.md) | Background workers, model profiles, approved TypeScript workflows; `alt+r` toggles the compact/full panel. |
 | [Computer use](extensions/computer-use/README.md) | Native desktop tools; macOS requires the official Codex service. |

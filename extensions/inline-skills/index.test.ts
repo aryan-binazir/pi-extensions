@@ -18,7 +18,6 @@ const skills: SlashCommand[] = [
 ];
 const commands: SlashCommand[] = [{ name: "rollback", description: "Undo a change" }, { name: "model" }];
 
-// Mirrors InteractiveMode's provider stacking, extension UI reset and session binding.
 function host({ vi = false, skillCommands = true } = {}) {
   const hooks = new Map<string, ((event: unknown, ctx: ExtensionContext) => unknown)[]>();
   const app: any = Object.create(InteractiveMode.prototype);
@@ -37,9 +36,9 @@ function host({ vi = false, skillCommands = true } = {}) {
   app.createBaseAutocompleteProvider = () => {
     const base = new CombinedAutocompleteProvider([...commands, ...(skillCommands ? skills : [])], process.cwd());
     const suggest = base.getSuggestions.bind(base);
-    // Stands in for fd-backed @ results, which need fd installed.
+    const attachmentsWithoutFd = { items: [{ value: "@notes.md", label: "notes.md" }], prefix: "@" };
     base.getSuggestions = async (lines, line, col, options) => lines[line]!.slice(0, col).endsWith(" @")
-      ? { items: [{ value: "@notes.md", label: "notes.md" }], prefix: "@" }
+      ? attachmentsWithoutFd
       : suggest(lines, line, col, options);
     return base;
   };
@@ -88,9 +87,9 @@ function host({ vi = false, skillCommands = true } = {}) {
     },
   };
 }
-// Covers Pi's 20 ms @-attachment debounce.
+const PI_ATTACHMENT_DEBOUNCE_MS = 20;
 async function settle(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 30));
+  await new Promise(resolve => setTimeout(resolve, PI_ATTACHMENT_DEBOUNCE_MS + 10));
 }
 
 for (const vi of [false, true]) {

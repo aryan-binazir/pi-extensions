@@ -300,15 +300,20 @@ shows its number in the footer.
 Installing [Eli Dickinson's pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge)
 is required for this setup. Install it separately from this repository. Only the
 `AskClaude` delegation tool is optional. The bridge uses Anthropic's Claude Agent SDK to run
-Claude Code as a Pi model provider. The reviewed release is pinned:
+Claude Code as a Pi model provider. Install it unpinned so it tracks upstream
+releases:
 
 ```sh
-pi install npm:pi-claude-bridge@0.9.2
+pi install npm:pi-claude-bridge
 ```
 
 This adds the package to `~/.pi/agent/settings.json` (or under
 `PI_CODING_AGENT_DIR`), preserving existing packages and the default model. It is
-not bundled with this repository. Review a new release before changing the pin.
+not bundled with this repository. Pi treats a source with a version, such as
+`npm:pi-claude-bridge@0.9.2`, as pinned and never updates it; if `pi list` shows
+one, replace that entry in `packages` with `npm:pi-claude-bridge`. Run
+`pi update npm:pi-claude-bridge` (or `pi update --all`) to take the latest
+release, then restart Pi.
 See the [source verification](research/pi-claude-bridge-sdk.md) for the SDK trace
 and verification limits; SDK use alone does not establish subscription billing
 or Anthropic approval.
@@ -334,13 +339,19 @@ Set the required Max plan by merging this into `~/.pi/agent/claude-bridge.json`
 
 This advertises Max-plan context limits; it does not authenticate or upgrade a plan.
 
-Completion: `pi list` includes `npm:pi-claude-bridge@0.9.2`, the model list
+Completion: `pi list` includes `npm:pi-claude-bridge` with no version, the model list
 includes the `claude-bridge` provider, and `provider.plan` is `"max"`. Ask the user to run `/reload`, then use
 `/model` to select a `claude-bridge/*` model. The bridge uses Claude Code's
 credentials and environment; complete any required sign-in in Claude Code,
 keeping credentials outside this repository. Exported `ANTHROPIC_API_KEY`,
 `ANTHROPIC_AUTH_TOKEN`, or `ANTHROPIC_BASE_URL` can override that authentication
 or endpoint; see upstream's configuration and known issues before changing them.
+
+`/fast` does not apply to `claude-bridge/*` models: fast mode only registers
+`~fast` entries for direct `anthropic` (api.anthropic.com) and OpenAI providers,
+and reports "Fast mode is unavailable for this provider path" on the bridge. For
+fast Opus, sign in to the `anthropic` provider with `/login` and select
+`anthropic/claude-opus-5-5`.
 
 ### Optional AskClaude delegation
 

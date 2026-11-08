@@ -300,20 +300,18 @@ shows its number in the footer.
 Installing [Eli Dickinson's pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge)
 is required for this setup. Install it separately from this repository. Only the
 `AskClaude` delegation tool is optional. The bridge uses Anthropic's Claude Agent SDK to run
-Claude Code as a Pi model provider. Install it unpinned so it tracks upstream
-releases:
+Claude Code as a Pi model provider. Install version 0.11.0:
 
 ```sh
-pi install npm:pi-claude-bridge
+pi install npm:pi-claude-bridge@0.11.0
 ```
 
 This adds the package to `~/.pi/agent/settings.json` (or under
 `PI_CODING_AGENT_DIR`), preserving existing packages and the default model. It is
-not bundled with this repository. Pi skips exact npm versions such as
-`npm:pi-claude-bridge@0.9.2` during updates; version ranges can still update.
-If the bridge is pinned, replace only its source in `packages` with
-`npm:pi-claude-bridge`, preserving any resource filters. Run
-`pi update npm:pi-claude-bridge` to take the latest release, then restart Pi.
+not bundled with this repository. When upgrading an existing installation,
+preserve its resource filters and verify that only one bridge entry remains,
+using `npm:pi-claude-bridge@0.11.0`. Exact pins stay fixed during `pi update`;
+change the pin explicitly for future upgrades. Restart Pi after installation.
 SDK use alone does not establish subscription billing or Anthropic approval.
 
 Verify installation and provider registration without making a model request:
@@ -339,7 +337,8 @@ Keep `provider.plan: "max"` for this setup. In 0.11.0 it enables Opus 4.6
 at 1M context; newer supported models have 1M on every plan. It does not
 authenticate, upgrade a subscription, or enable fast mode.
 
-Completion: `pi list` includes `npm:pi-claude-bridge` with no version, the model list
+Completion: `pi list` includes `npm:pi-claude-bridge@0.11.0`, the installed manifest
+reports `0.11.0`, the model list
 includes the `claude-bridge` provider, and `provider.plan` is `"max"`. Ask the user to run `/reload`, then use
 `/model` to select a `claude-bridge/*` model. The bridge uses Claude Code's
 credentials and environment; complete any required sign-in in Claude Code,

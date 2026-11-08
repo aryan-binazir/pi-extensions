@@ -51,7 +51,7 @@ export async function sideCompletion(request: SideCompletionRequest): Promise<Si
       normalizeContext({systemPrompt, messages, tools: []}), {
         apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: transportSignal,
         maxTokens: limits.tokens,
-        // Bridge 0.9.2 routes "none" through its verbatim summarizer path.
+        // The bridge routes "none" through its isolated summarizer path.
         cacheRetention: model.provider === 'claude-bridge' ? 'short' : 'none',
         ...(request.reasoning ? {reasoning: request.reasoning} : {}),
         ...(request.sessionId ? {sessionId: request.sessionId} : {}),

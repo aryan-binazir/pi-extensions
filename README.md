@@ -37,8 +37,8 @@ load; helpers and tests are not extensions.
    the GitHub CLI signed in to GitHub; see [footer setup](docs/agent-setup.md#footer).
 6. **Install Claude bridge separately (required).** Follow
    [Claude bridge setup](docs/agent-setup.md#claude-bridge-external-package) for the
-   pinned Agent SDK provider and its required Max plan setting. Only the `AskClaude`
-   delegation tool is optional.
+   Agent SDK provider and its required Max plan setting. The separate `AskClaude`
+   package is optional.
 7. **Configure the required scoped models.** Follow
    [scoped model setup](docs/agent-setup.md#required-scoped-models), preserving this
    machine's existing model connections.

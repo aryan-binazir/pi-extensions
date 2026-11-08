@@ -300,18 +300,21 @@ shows its number in the footer.
 Installing [Eli Dickinson's pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge)
 is required for this setup. Install it separately from this repository. Only the
 `AskClaude` delegation tool is optional. The bridge uses Anthropic's Claude Agent SDK to run
-Claude Code as a Pi model provider. The reviewed release is pinned:
+Claude Code as a Pi model provider. Install it unpinned so it tracks upstream
+releases:
 
 ```sh
-pi install npm:pi-claude-bridge@0.9.2
+pi install npm:pi-claude-bridge
 ```
 
 This adds the package to `~/.pi/agent/settings.json` (or under
 `PI_CODING_AGENT_DIR`), preserving existing packages and the default model. It is
-not bundled with this repository. Review a new release before changing the pin.
-See the [source verification](research/pi-claude-bridge-sdk.md) for the SDK trace
-and verification limits; SDK use alone does not establish subscription billing
-or Anthropic approval.
+not bundled with this repository. Pi skips exact npm versions such as
+`npm:pi-claude-bridge@0.9.2` during updates; version ranges can still update.
+If the bridge is pinned, replace only its source in `packages` with
+`npm:pi-claude-bridge`, preserving any resource filters. Run
+`pi update npm:pi-claude-bridge` to take the latest release, then restart Pi.
+SDK use alone does not establish subscription billing or Anthropic approval.
 
 Verify installation and provider registration without making a model request:
 
@@ -332,9 +335,11 @@ Set the required Max plan by merging this into `~/.pi/agent/claude-bridge.json`
 }
 ```
 
-This advertises Max-plan context limits; it does not authenticate or upgrade a plan.
+Keep `provider.plan: "max"` for this setup. In 0.11.0 it enables Opus 4.6
+at 1M context; newer supported models have 1M on every plan. It does not
+authenticate, upgrade a subscription, or enable fast mode.
 
-Completion: `pi list` includes `npm:pi-claude-bridge@0.9.2`, the model list
+Completion: `pi list` includes `npm:pi-claude-bridge` with no version, the model list
 includes the `claude-bridge` provider, and `provider.plan` is `"max"`. Ask the user to run `/reload`, then use
 `/model` to select a `claude-bridge/*` model. The bridge uses Claude Code's
 credentials and environment; complete any required sign-in in Claude Code,
@@ -342,23 +347,23 @@ keeping credentials outside this repository. Exported `ANTHROPIC_API_KEY`,
 `ANTHROPIC_AUTH_TOKEN`, or `ANTHROPIC_BASE_URL` can override that authentication
 or endpoint; see upstream's configuration and known issues before changing them.
 
+This repository's `/fast` registers `~fast` entries for direct `anthropic`
+(api.anthropic.com), `openai` (api.openai.com), and `openai-codex`
+(chatgpt.com) paths. It reports "Fast mode is unavailable for this provider path"
+on `claude-bridge/*` models. For fast Opus, authenticate the `anthropic` provider,
+select `anthropic/claude-opus-5-5`, then run `/fast on`. Direct Anthropic
+authentication and billing apply; availability depends on the model and account.
+
 ### Optional AskClaude delegation
 
-The provider is enabled by installation; `AskClaude` remains off by default.
-Enable it only when requested. Merge these settings into
-`~/.pi/agent/claude-bridge.json` (or under `PI_CODING_AGENT_DIR`), preserving any
-existing settings:
+Since bridge 0.11.0, `AskClaude` is a separate optional package,
+[`pi-claude-bridge-askclaude`](https://github.com/elidickinson/pi-claude-bridge/tree/main/askclaude).
+Leave it uninstalled unless requested. If requested, install it with
+`pi install npm:pi-claude-bridge-askclaude`, then restart Pi. AskClaude is
+available when using a non-bridge provider.
 
-```json
-{
-  "askClaude": {
-    "enabled": true,
-    "allowFullMode": false
-  }
-}
-```
-
-After `/reload`, `AskClaude` is available when using a different provider. Its
-default mode is read-only. It uses Claude Code's native tools rather than Pi's
-tool approvals; keep full read/write/bash mode disabled unless explicitly
-requested.
+The old `askClaude.enabled` and `allowFullMode: false` settings no longer control
+AskClaude. Its default call mode is `read`, but the calling model can choose
+`full`. Full mode writes files and runs bash through Claude Code with
+`bypassPermissions`, outside Pi's tool hooks and Guardian approvals. There is no
+setting to disable full mode alone; uninstall the package to prevent its use.

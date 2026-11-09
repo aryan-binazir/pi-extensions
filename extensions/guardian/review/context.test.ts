@@ -68,6 +68,11 @@ test('shortening an escape-heavy record keeps it parseable and within the budget
     assert.equal(item.split(/\r\n|[\n\r\u2028\u2029\u0085]/).length, 1);
     assert.ok(['developer', 'user'].includes(JSON.parse(item).author));
   }
+  assert.match(JSON.parse(prepared.items[0]).text, /^approved\n.*<truncated omitted_approx_tokens="\d+" \/>.*end$/s, 'both ends of the approval survive');
+  const [only] = prepareTranscript([entry('user', `do not touch production\n${'\u0085'.repeat(100_000)}\nonly inspect`)], 0).items;
+  assert.ok(Math.ceil(Buffer.byteLength(only) / 4) <= 64_000);
+  assert.match(JSON.parse(only).text, /^do not touch production\n[^]*\nonly inspect$/, 'escapes do not erase a message that only needs shortening');
+  assert.ok(Buffer.byteLength(only) > 200_000, 'the shortened message uses most of its budget');
 });
 
 test('transcript records keep forged roles, delimiters and line separators inside the original entry', () => {

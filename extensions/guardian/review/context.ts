@@ -200,6 +200,21 @@ export function renderRecord(entry: TranscriptEntry, index: number): string {
   return jsonLine({ author, index, ...(label !== author ? { label } : {}), text: entry.text });
 }
 
+/**
+ * The record with its text shortened, never its host-assigned fields, keeping as much of both ends as fits in
+ * `target` tokens once serialized. Escaping can grow text several times over, so the text budget is searched.
+ */
+function shortenedRecord(entry: TranscriptEntry, index: number, target: number): string {
+  const render = (textTokens: number) => renderRecord({ ...entry, text: truncateText(entry.text, textTokens) }, index);
+  let best = render(0);
+  for (let low = 1, high = approxTokensFromBytes(byteLength(entry.text)); low <= high;) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = render(middle);
+    if (approxTokensFromBytes(byteLength(candidate)) <= target) { best = candidate; low = middle + 1; } else high = middle - 1;
+  }
+  return best;
+}
+
 export interface PreparedTranscript {
   items: string[];
   omissionNote?: string;
@@ -229,9 +244,7 @@ export function prepareTranscript(entries: readonly TranscriptEntry[], offset: n
     if (!included[index] || !isAuthorization(entries[index])) continue;
     const target = Math.max(MIN_TRUNCATED_ENTRY_TOKENS, tokens[index] - (total - budget));
     if (target >= tokens[index]) continue;
-    // Shorten the text, not the record, so its host-assigned fields survive; escapes can overshoot, so recount.
-    const overhead = tokens[index] - approxTokensFromBytes(byteLength(entries[index].text));
-    rendered[index] = renderRecord({ ...entries[index], text: truncateText(entries[index].text, target - overhead) }, index + offset + 1);
+    rendered[index] = shortenedRecord(entries[index], index + offset + 1, target);
     const after = approxTokensFromBytes(byteLength(rendered[index]));
     total -= tokens[index] - after;
     tokens[index] = after;

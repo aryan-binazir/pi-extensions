@@ -223,6 +223,8 @@ interface Evaluated {
   env: Map<string, string>;
   /** Standard input comes from a pipe, file, heredoc or here-string rather than the terminal. */
   fed: boolean;
+  /** The command as written, so a refusal can name it without expanded values. */
+  text: string;
 }
 
 function unquotedWord(text: string): string {
@@ -340,7 +342,7 @@ function evaluateScript(shell: Shell, script: string, lookup: Lookup, positional
               argv.push(...argumentValues(child, lookup, positional));
             }
           }
-          commands.push({ argv, env, fed: input });
+          commands.push({ argv, env, fed: input, text: node.text });
           return;
         }
         default: throw new Unreadable();
@@ -612,6 +614,8 @@ function readsOnly(argv: readonly string[]): boolean {
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === '--') break;
+    // The legacy count, as in `head -40`, is `-n 40`.
+    if ((program === 'head' || program === 'tail') && /^-0*[1-9]\d*$/.test(arg)) continue;
     if (!arg.startsWith('-') || arg === '-') continue;
     if (program === 'printf' || program === 'man') return false;
     const equals = arg.indexOf('=');
@@ -665,16 +669,23 @@ const CLIENT_NAME = new RegExp(`(${[...Object.keys(CLIENTS), ...Object.keys(FRAM
 const involvesClient = (commands: readonly Evaluated[]) => commands.some(command =>
   command.argv.some(word => mentionsClient(word) || (word.startsWith('-') && CLIENT_NAME.test(word))) || [...command.env.values()].some(mentionsClient));
 
-/** Whether a script that involves a client must be refused. */
-function refuse(commands: readonly Evaluated[], root: Lookup, script: string): boolean {
+const companionReason = (command: Evaluated) =>
+  `\`${command.text}\` cannot share a script with a database client, because Guardian cannot judge it there; this cannot be approved. Run it as a separate command.`;
+
+/**
+ * Why a script that involves a client must be refused, if it must. A destructive or unseen client outranks a command
+ * Guardian cannot judge alongside it, so the reason names the boundary that refusing the companion alone would not clear.
+ */
+function refusal(commands: readonly Evaluated[], root: Lookup, script: string): string | undefined {
   const context: StartupContext = { root, writes: OUTPUT_REDIRECT.test(script) || commands.some(command => WRITERS.has(programOf(command.argv[0] ?? ''))) };
+  let companion: string | undefined;
   for (const command of commands) {
-    if (changesLaterCommands(command.argv)) return true;
+    if (changesLaterCommands(command.argv)) { companion ??= companionReason(command); continue; }
     const env = new Map(command.env);
     let argv = command.argv;
     let wrapped: Unwrapped | undefined = unwrap(argv, env);
     for (; wrapped && wrapped !== 'unknown'; wrapped = unwrap(argv, env)) argv = wrapped.argv;
-    if (wrapped === 'unknown') return true;
+    if (wrapped === 'unknown') { companion ??= companionReason(command); continue; }
     if (!argv.length) continue;
     // Assignments reach the command they prefix; `env -i` drops the rest.
     const lookup: Lookup = name => env.has(name) ? env.get(name) || undefined : env.has('\0cleared') ? undefined : root(name);
@@ -685,36 +696,34 @@ function refuse(commands: readonly Evaluated[], root: Lookup, script: string): b
       if (!FRAMEWORK_WIPES[programOf(argv[frameworkAt])](argv.slice(frameworkAt + 1))) continue;
       const url = lookup('DATABASE_URL');
       const targets = url === undefined ? undefined : connectionTargets(url);
-      if (!targets || targets.service || !effectiveHosts(targets).length || !effectiveHosts(targets).every(isLocalHost)) return true;
+      if (!targets || targets.service || !effectiveHosts(targets).length || !effectiveHosts(targets).every(isLocalHost)) return DATABASE_FORBIDDEN_REASON;
       continue;
     }
     const spec = CLIENTS[program];
     if (spec) {
       // A client can run another one it names, as `sqlite3 db ".shell psql …"` or mysql's `system psql …`.
-      if (argv.slice(1).some(arg => COMMAND_MENTION.test(arg))) return true;
+      if (argv.slice(1).some(arg => COMMAND_MENTION.test(arg))) return DATABASE_FORBIDDEN_REASON;
       const invocation = analyzeClient(spec, argv.slice(1), lookup, context);
-      if (!invocation.local && (invocation.destructive || invocation.hidden)) return true;
+      if (!invocation.local && (invocation.destructive || invocation.hidden)) return DATABASE_FORBIDDEN_REASON;
       continue;
     }
     if (NEUTRAL.has(program) || readsOnly(argv)) continue;
     // Any other program could run a client Guardian cannot see, so it does not share a script with one.
-    return true;
+    companion ??= companionReason(command);
   }
-  return false;
+  return companion;
 }
 
-export type DatabaseDecision = 'forbidden' | undefined;
-
 /**
- * Whether a database command must be refused: one that may run destructive or unseen SQL against a target Guardian
- * cannot prove local, or one sharing its script with a command Guardian cannot judge. Scripts that involve no
- * database client are left alone.
+ * Why a database command must be refused, if it must: it may run destructive or unseen SQL against a target Guardian
+ * cannot prove local, or it shares its script with a command Guardian cannot judge. Scripts that involve no database
+ * client are left alone.
  */
-export function databaseDecision(shell: Shell, command: readonly string[], env: NodeJS.ProcessEnv = process.env): DatabaseDecision {
+export function databaseRefusal(shell: Shell, command: readonly string[], env: NodeJS.ProcessEnv = process.env): string | undefined {
   const script = shell.extractBashCommand(command)?.[1] ?? command.join(' ');
   const root: Lookup = name => env[name];
   const commands = evaluateScript(shell, script, root, []);
-  if (!commands) return mentionsClient(script) ? 'forbidden' : undefined;
+  if (!commands) return mentionsClient(script) ? DATABASE_FORBIDDEN_REASON : undefined;
   if (!involvesClient(commands)) return undefined;
-  return refuse(commands, root, script) ? 'forbidden' : undefined;
+  return refusal(commands, root, script);
 }

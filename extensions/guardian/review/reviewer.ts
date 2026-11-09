@@ -128,7 +128,7 @@ export interface ReviewerPromptInput {
 /** System prompt and leading user content mirroring the Codex reviewer session's instructions and context. */
 export function buildReviewerPrompt(input: ReviewerPromptInput): { systemPrompt: string; userContent: string[] } {
   const policy = guardianPolicyInstructions({
-    transcriptFormat: 'line', tenantPolicyConfig: input.tenantPolicy ?? GUARDIAN_POLICY, extraPolicy: input.extraPolicy,
+    tenantPolicyConfig: input.tenantPolicy ?? GUARDIAN_POLICY, extraPolicy: input.extraPolicy,
     policyTemplate: GUARDIAN_POLICY_TEMPLATE, outputContract: GUARDIAN_OUTPUT_CONTRACT_PROMPT,
   });
   const permissions = wrapPermissionsInstructions(permissionsInstructions({

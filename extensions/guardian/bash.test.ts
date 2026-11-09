@@ -347,6 +347,16 @@ test('a destructive database statement with an unresolved target is refused befo
   }
 });
 
+test('a command sharing a script with a database client is refused with a reason that names it', async t => {
+  const { run, requests } = setup(t, { decisions: [{ type: 'approved' }] });
+  await assert.rejects(run({ command: `sqlite3 -readonly ./db.sqlite ".tables" 2>&1 | head -0` }), error => {
+    assert.match((error as Error).message, /rejected: `head -0` /);
+    assert.doesNotMatch((error as Error).message, /destructive database operations/);
+    return true;
+  });
+  assert.deepEqual(requests, []);
+});
+
 for (const mode of ['workspace-write', 'host'] as const) test(`Railway commands that reach databases need review (${mode})`, async t => {
   const { run, requests } = setup(t, { config: { sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode } }, decisions: [{ type: 'rejected', message: 'denied' }] });
   await assert.rejects(run({ command: 'railway connect postgres' }), /denied/);

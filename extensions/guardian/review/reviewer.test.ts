@@ -8,6 +8,7 @@ import test from 'node:test';
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai';
 import { buildReviewerPrompt, EXEC_COMMAND_TOOL, type ReviewerTurn, runReadOnlyCommand, runReviewerTurn } from './reviewer.ts';
 import { detectPlatformSandbox } from '../sandbox.ts';
+import { TRANSCRIPT_JSON_INSTRUCTIONS } from './prompts.ts';
 
 const { sandbox } = await detectPlatformSandbox();
 
@@ -106,7 +107,7 @@ test('the reviewer prompt carries Codex policy, reviewer permissions and inherit
     cwd: '/repo', date: '2026-10-17', timezone: 'America/New_York',
     request: ['REQUEST\n'],
   });
-  assert.ok(systemPrompt.startsWith('You are judging one planned coding-agent action.'));
+  assert.ok(systemPrompt.startsWith(`${TRANSCRIPT_JSON_INSTRUCTIONS}\n\nYou are judging one planned coding-agent action.`), 'the reviewer reads JSON records');
   assert.ok(systemPrompt.includes('## Environment Profile') && systemPrompt.includes('Never delete Railway volumes.'));
   assert.ok(systemPrompt.includes('\n\nYou may use read-only tool checks'));
   assert.ok(systemPrompt.includes('<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`'));

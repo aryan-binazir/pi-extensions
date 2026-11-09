@@ -72,7 +72,6 @@ const textOf = (content: Content) => typeof content === 'string' ? content
 interface QuestionnaireQuestion { id: string; prompt: string }
 interface QuestionnaireAnswer { id: string; value: string; label: string; wasCustom: boolean }
 
-/** Line terminators a reader may honour; JSON.stringify leaves the last three unescaped. */
 const LINE_BREAK = /\r\n|[\n\r\u0085\u2028\u2029]/;
 
 /** Labels every line with its role so content cannot impersonate another role. */
@@ -80,9 +79,11 @@ function renderRoleLines(role: 'user' | 'assistant', text: string): string {
   return text.split(LINE_BREAK).map(line => line ? `${role}: ${line}\n` : '\n').join('');
 }
 
+const RAW_JSON_LINE_BREAKS = /[\u0085\u2028\u2029]/g;
+
 /** One-line JSON: no content, however it is encoded, can start a new line, record or section. */
 export const jsonLine = (value: unknown): string =>
-  JSON.stringify(value).replace(/[\u0085\u2028\u2029]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  JSON.stringify(value).replace(RAW_JSON_LINE_BREAKS, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 /** Hosts bound verified answers before Codex collects them; the newest are kept within this budget. */
 const MAX_VERIFIED_ANSWERS_TOKENS = 8_000;
@@ -200,17 +201,13 @@ export function renderRecord(entry: TranscriptEntry, index: number): string {
   return jsonLine({ author, index, ...(label !== author ? { label } : {}), text: entry.text });
 }
 
-/**
- * The record with its text shortened, never its host-assigned fields, keeping as much of both ends as fits in
- * `target` tokens once serialized. Escaping can grow text several times over, so the text budget is searched.
- */
-function shortenedRecord(entry: TranscriptEntry, index: number, target: number): string {
+function shortenedRecord(entry: TranscriptEntry, index: number, maxTokens: number): string {
   const render = (textTokens: number) => renderRecord({ ...entry, text: truncateText(entry.text, textTokens) }, index);
   let best = render(0);
   for (let low = 1, high = approxTokensFromBytes(byteLength(entry.text)); low <= high;) {
     const middle = Math.floor((low + high) / 2);
     const candidate = render(middle);
-    if (approxTokensFromBytes(byteLength(candidate)) <= target) { best = candidate; low = middle + 1; } else high = middle - 1;
+    if (approxTokensFromBytes(byteLength(candidate)) <= maxTokens) { best = candidate; low = middle + 1; } else high = middle - 1;
   }
   return best;
 }

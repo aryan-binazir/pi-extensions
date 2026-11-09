@@ -35,7 +35,6 @@ const contextText = (context: TranscriptContext) => JSON.stringify(context.messa
 const toolResults = (messages: readonly { role: string }[]) => messages.filter(message => message.role === 'toolResult') as unknown as { toolName: string; isError: boolean; content: { text?: string }[] }[];
 
 interface TranscriptRecord { author: string; index: number; label?: string; text: string }
-/** The reviewer request's lines, split at every line terminator a model might honour, and its transcript records. */
 function reviewRequest(context: TranscriptContext) {
   const request = (context.messages as { role: string; content: string | { type: string; text?: string }[] }[]).find(message => message.role === 'user');
   const text = typeof request?.content === 'string' ? request.content : (request?.content ?? []).map(part => part.text ?? '').join('');

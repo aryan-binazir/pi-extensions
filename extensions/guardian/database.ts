@@ -223,8 +223,7 @@ interface Evaluated {
   env: Map<string, string>;
   /** Standard input comes from a pipe, file, heredoc or here-string rather than the terminal. */
   fed: boolean;
-  /** The command as written, so a refusal can name it without expanded values. */
-  text: string;
+  asWritten: string;
 }
 
 function unquotedWord(text: string): string {
@@ -342,7 +341,7 @@ function evaluateScript(shell: Shell, script: string, lookup: Lookup, positional
               argv.push(...argumentValues(child, lookup, positional));
             }
           }
-          commands.push({ argv, env, fed: input, text: node.text });
+          commands.push({ argv, env, fed: input, asWritten: node.text });
           return;
         }
         default: throw new Unreadable();
@@ -670,12 +669,8 @@ const involvesClient = (commands: readonly Evaluated[]) => commands.some(command
   command.argv.some(word => mentionsClient(word) || (word.startsWith('-') && CLIENT_NAME.test(word))) || [...command.env.values()].some(mentionsClient));
 
 const companionReason = (command: Evaluated) =>
-  `\`${command.text}\` cannot share a script with a database client, because Guardian cannot judge it there; this cannot be approved. Run it as a separate command.`;
+  `\`${command.asWritten}\` cannot share a script with a database client, because Guardian cannot judge it there; this cannot be approved. Run it as a separate command.`;
 
-/**
- * Why a script that involves a client must be refused, if it must. A destructive or unseen client outranks a command
- * Guardian cannot judge alongside it, so the reason names the boundary that refusing the companion alone would not clear.
- */
 function refusal(commands: readonly Evaluated[], root: Lookup, script: string): string | undefined {
   const context: StartupContext = { root, writes: OUTPUT_REDIRECT.test(script) || commands.some(command => WRITERS.has(programOf(command.argv[0] ?? ''))) };
   let companion: string | undefined;

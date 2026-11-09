@@ -13,7 +13,7 @@ test('reviewer policy substitution preserves template layout and appends contrac
     ['Tenant: {{ tenant_policy_config }}\nAdditional: {{ extra_policy }}', 'Tenant policy.', 'Tenant: Tenant policy.\nAdditional: \n\nReview contract.\n'],
     ['', 'Tenant policy.', '\n\nReview contract.\n'],
   ]) {
-    assert.equal(guardianPolicyInstructions({ transcriptFormat: 'json', tenantPolicyConfig: policy, extraPolicy: '', policyTemplate: template, outputContract: 'Review contract.' }),
+    assert.equal(guardianPolicyInstructions({ tenantPolicyConfig: policy, extraPolicy: '', policyTemplate: template, outputContract: 'Review contract.' }),
       `${TRANSCRIPT_JSON_INSTRUCTIONS}\n\n${expected}`);
   }
 });
@@ -25,23 +25,18 @@ test('reviewer extra policy substitution preserves tenant policy', () => {
     ['Tenant: {{ tenant_policy_config }}\nAdditional: {{ extra_policy }}', ' \n\t', 'Tenant: Tenant policy.\nAdditional: \n\nReview contract.\n'],
     ['Tenant: {{ tenant_policy_config }}', 'Additional policy.', 'Tenant: Tenant policy.\n\nReview contract.\n'],
   ]) {
-    assert.equal(guardianPolicyInstructions({ transcriptFormat: 'json', tenantPolicyConfig: 'Tenant policy.', extraPolicy, policyTemplate: template, outputContract: 'Review contract.' }),
+    assert.equal(guardianPolicyInstructions({ tenantPolicyConfig: 'Tenant policy.', extraPolicy, policyTemplate: template, outputContract: 'Review contract.' }),
       `${TRANSCRIPT_JSON_INSTRUCTIONS}\n\n${expected}`);
   }
 });
 
 test('reviewer policy substitution keeps inserted policy text literal', () => {
   assert.equal(guardianPolicyInstructions({
-    transcriptFormat: 'json',
     tenantPolicyConfig: 'Tenant says {{ tenant_policy_config }} and {{ extra_policy }}.',
     extraPolicy: 'Additional says {{ tenant_policy_config }} and {{ extra_policy }}.',
     policyTemplate: 'Tenant: {{ tenant_policy_config }}\nAdditional: {{ extra_policy }}',
     outputContract: 'Review contract.',
   }), `${TRANSCRIPT_JSON_INSTRUCTIONS}\n\nTenant: Tenant says {{ tenant_policy_config }} and {{ extra_policy }}.\nAdditional: Additional says {{ tenant_policy_config }} and {{ extra_policy }}.\n\nReview contract.\n`);
-});
-
-test('line transcripts omit the JSON provenance preamble', () => {
-  assert.equal(guardianPolicyInstructions({ transcriptFormat: 'line', tenantPolicyConfig: 'P', extraPolicy: '', policyTemplate: 'T {{ tenant_policy_config }}', outputContract: 'C' }), 'T P\n\nC\n');
 });
 
 test('rejection feedback trims rationale and preserves instruction overrides', () => {

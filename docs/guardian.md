@@ -280,9 +280,9 @@ their `.env` and `database.yml` are not read.
 A script that involves a database client may contain only commands Guardian can judge completely: client
 invocations, read-only tools used with options that keep them read-only (`rg` and `grep` without `--pre`
 or `-z`, `sed -n '1,10p'`, `git log`, `diff`, `commit` and similar without `-c` or `--exec`, `cat`,
-`head`, package installs), neutral builtins (`cd`, `set -e`), and the wrappers `sudo`, `env`, `timeout`,
-`nice`, `nohup` and `command` with their documented options. Anything else in such a script is refused,
-along with a script Guardian cannot evaluate exactly: nested shells, `eval`, `source`, `trap`, `ssh`,
+`head -n 40` or `head -40`, package installs), neutral builtins (`cd`, `set -e`), and the wrappers `sudo`,
+`env`, `timeout`, `nice`, `nohup` and `command` with their documented options. Anything else in such a
+script is refused with a reason that names it, along with a script Guardian cannot evaluate exactly: nested shells, `eval`, `source`, `trap`, `ssh`,
 `docker exec`, `doppler run`, `xargs`, control flow and substitutions. Run those as separate commands,
 name a local host explicitly, or run them yourself outside Pi.
 

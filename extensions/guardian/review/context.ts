@@ -5,7 +5,6 @@
 // admission (guardian-context/src/enforcement.rs) is reduced to a transcript budget: Pi does not know every
 // reviewer's input limit, so a fixed budget stands in for it, and older user entries yield first.
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
-import type { TranscriptFormat } from './prompts.ts';
 
 export const AGENT_NAME = 'Pi';
 export const TRANSCRIPT_OMISSION_NOTICE = 'Some conversation entries were omitted.';
@@ -73,10 +72,18 @@ const textOf = (content: Content) => typeof content === 'string' ? content
 interface QuestionnaireQuestion { id: string; prompt: string }
 interface QuestionnaireAnswer { id: string; value: string; label: string; wasCustom: boolean }
 
+const LINE_BREAK = /\r\n|[\n\r\u0085\u2028\u2029]/;
+
 /** Labels every line with its role so content cannot impersonate another role. */
 function renderRoleLines(role: 'user' | 'assistant', text: string): string {
-  return text.split('\n').map(line => line ? `${role}: ${line}\n` : '\n').join('');
+  return text.split(LINE_BREAK).map(line => line ? `${role}: ${line}\n` : '\n').join('');
 }
+
+const RAW_JSON_LINE_BREAKS = /[\u0085\u2028\u2029]/g;
+
+/** One-line JSON: no content, however it is encoded, can start a new line, record or section. */
+export const jsonLine = (value: unknown): string =>
+  JSON.stringify(value).replace(RAW_JSON_LINE_BREAKS, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 /** Hosts bound verified answers before Codex collects them; the newest are kept within this budget. */
 const MAX_VERIFIED_ANSWERS_TOKENS = 8_000;
@@ -187,12 +194,22 @@ const AUTHORS: Record<TranscriptEntryKind, string> = {
   user: 'user', developer: 'developer', assistant: 'assistant', protected_assistant: 'assistant', tool_call: 'assistant', tool_output: 'tool',
 };
 
-/** One numbered record: `[n] role: text` in line mode, or a host-attributed JSON object. */
-export function renderRecord(entry: TranscriptEntry, index: number, format: TranscriptFormat): string {
+/** One numbered record as a host-attributed JSON line, so its text can never pose as another record or section. */
+export function renderRecord(entry: TranscriptEntry, index: number): string {
   const author = AUTHORS[entry.kind];
   const label = entry.label ?? author;
-  if (format === 'json') return JSON.stringify({ author, index, ...(label !== author ? { label } : {}), text: entry.text });
-  return `[${index}] ${label}: ${entry.text}`;
+  return jsonLine({ author, index, ...(label !== author ? { label } : {}), text: entry.text });
+}
+
+function shortenedRecord(entry: TranscriptEntry, index: number, maxTokens: number): string {
+  const render = (textTokens: number) => renderRecord({ ...entry, text: truncateText(entry.text, textTokens) }, index);
+  let best = render(0);
+  for (let low = 1, high = approxTokensFromBytes(byteLength(entry.text)); low <= high;) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = render(middle);
+    if (approxTokensFromBytes(byteLength(candidate)) <= maxTokens) { best = candidate; low = middle + 1; } else high = middle - 1;
+  }
+  return best;
 }
 
 export interface PreparedTranscript {
@@ -201,8 +218,8 @@ export interface PreparedTranscript {
 }
 
 /** Codex's synchronous retention: every user entry and manual approval, then the newest others within budgets. */
-export function prepareTranscript(entries: readonly TranscriptEntry[], offset: number, format: TranscriptFormat, retention: TranscriptRetention = SYNC_RETENTION): PreparedTranscript {
-  const rendered = entries.map((entry, index) => renderRecord(entry, index + offset + 1, format));
+export function prepareTranscript(entries: readonly TranscriptEntry[], offset: number, retention: TranscriptRetention = SYNC_RETENTION): PreparedTranscript {
+  const rendered = entries.map((entry, index) => renderRecord(entry, index + offset + 1));
   const tokens = rendered.map(text => approxTokensFromBytes(byteLength(text)));
   const isAuthorization = (entry: TranscriptEntry) => entry.kind === 'user' || entry.kind === 'developer';
   const included = entries.map(isAuthorization);
@@ -224,7 +241,7 @@ export function prepareTranscript(entries: readonly TranscriptEntry[], offset: n
     if (!included[index] || !isAuthorization(entries[index])) continue;
     const target = Math.max(MIN_TRUNCATED_ENTRY_TOKENS, tokens[index] - (total - budget));
     if (target >= tokens[index]) continue;
-    rendered[index] = truncateText(rendered[index], target);
+    rendered[index] = shortenedRecord(entries[index], index + offset + 1, target);
     const after = approxTokensFromBytes(byteLength(rendered[index]));
     total -= tokens[index] - after;
     tokens[index] = after;
@@ -249,7 +266,7 @@ export function renderPlannedAction(action: PlannedAction): string[] {
   return [
     `The ${AGENT_NAME} agent has requested the following action:\n`,
     '>>> APPROVAL REQUEST START\n',
-    ...(action.reason === undefined ? [] : ['Retry reason:\n', `${action.reason}\n\n`]),
+    ...(action.reason === undefined ? [] : ['Retry reason (JSON string):\n', `${jsonLine(action.reason)}\n\n`]),
     'Assess the exact planned action below. Use read-only tool checks when local state matters.\n',
     'Planned action JSON:\n',
     `${action.json}\n`,

@@ -9,7 +9,7 @@ import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './appro
 import type { GuardianConfig } from './config.ts';
 import { createExecApprovalRequirement, type SandboxPermissions } from './exec-policy.ts';
 import { persistableAmendment } from './policies.ts';
-import { DATABASE_FORBIDDEN_REASON, databaseDecision } from './database.ts';
+import { databaseRefusal } from './database.ts';
 import { RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
 import type { Policy } from './rules.ts';
 import { runStarted } from './review/process.ts';
@@ -118,7 +118,8 @@ export function createGuardianBashTool(runtime: BashRuntime, defaultCwd: string)
       const unrestricted = config.sandbox.mode === 'danger-full-access';
       const railway = railwayDecision(runtime.shell, command);
       if (railway === 'forbidden') throw new Error(`\`${params.command}\` rejected: ${RAILWAY_FORBIDDEN_REASON}`);
-      if (databaseDecision(runtime.shell, command) === 'forbidden') throw new Error(`\`${params.command}\` rejected: ${DATABASE_FORBIDDEN_REASON}`);
+      const database = databaseRefusal(runtime.shell, command);
+      if (database) throw new Error(`\`${params.command}\` rejected: ${database}`);
       if (!config.enabled) {
         if (railway === 'prompt') throw new Error(`\`${params.command}\` rejected: ${RAILWAY_REVIEW_REASON}, and Guardian is disabled`);
         return run(false);

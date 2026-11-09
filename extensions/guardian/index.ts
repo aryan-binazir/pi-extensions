@@ -109,7 +109,7 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     const reviewer = claudeCli ? undefined : resolveReviewer(ctx.modelRegistry, settings.reviewer, `guardian-${sessionId}`);
     if (reviewer && !reviewer.ok) return { type: 'error', error: { type: 'prompt_build', message: reviewer.message } };
     const evidence = collectReviewEvidence(ctx.sessionManager.getBranch(), undefined, { delegated: process.env.PI_SUBAGENT_TIMEOUT_MS !== undefined });
-    const transcript = prepareTranscript(evidence.transcript, 0, 'line');
+    const transcript = prepareTranscript(evidence.transcript, 0);
     const plannedAction = { json: input.actionJson, ...(input.reason === undefined ? {} : { reason: input.reason }) };
     const sandboxed = sandboxAvailable && settings.sandbox.mode !== 'host' && settings.sandbox.mode !== 'danger-full-access';
     const permissionContext = [

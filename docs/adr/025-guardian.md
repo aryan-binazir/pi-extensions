@@ -61,7 +61,8 @@ registry rather than a catalog entry.
   sandbox, not a forked Codex session. It gets the full transcript on every review, with
   no session reuse or deltas. Codex's whole-request budget admission is reduced to a fixed transcript
   budget, because Pi does not know every reviewer's input limit: the oldest user entries are shortened
-  first, keeping both ends, and omitted only when that is not enough.
+  first, keeping both ends, and omitted only when that is not enough. Transcript records are always
+  Codex's JSON form, never its `[n] role: text` lines, so tool output cannot forge records or sections.
 - Pi has no developer role. Reviewer policy and permissions go in the system prompt; AGENTS.md files
   and environment context lead the user message.
 - Pi keeps the whole session branch, so earlier user messages appear in the transcript directly

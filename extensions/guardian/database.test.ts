@@ -5,14 +5,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after } from 'node:test';
-import { connectionTargets, databaseDecision, isLocalHost } from './database.ts';
+import { connectionTargets, DATABASE_FORBIDDEN_REASON, databaseRefusal, isLocalHost } from './database.ts';
 import { loadShell } from './shell.ts';
 
 const shell = await loadShell();
 /** A home without startup files, so the machine running the tests does not decide them. */
 const HOME = mkdtempSync(join(tmpdir(), 'guardian-database-home-'));
 after(() => rmSync(HOME, { recursive: true, force: true }));
-const decide = (script: string, env: NodeJS.ProcessEnv = {}) => databaseDecision(shell, ['bash', '-lc', script], { HOME, ...env });
+const refusal = (script: string, env: NodeJS.ProcessEnv = {}) => databaseRefusal(shell, ['bash', '-lc', script], { HOME, ...env });
+const decide = (script: string, env: NodeJS.ProcessEnv = {}) => refusal(script, env) === undefined ? undefined : 'forbidden';
 const REMOTE = { DATABASE_URL: 'postgres://me@prod.example.com:5432/app' };
 const LOCAL = { DATABASE_URL: 'postgres://me@localhost:5432/app' };
 
@@ -308,4 +309,29 @@ test('a script involving a client may only add read-only tools with allowed opti
 test('local hosts are loopback names and addresses or socket paths', () => {
   for (const host of ['localhost', 'LOCALHOST', 'app.localhost', '127.0.0.1', '127.1.2.3', '::1', '[::1]', '/var/run/postgresql', '']) assert.ok(isLocalHost(host), host);
   for (const host of ['db.example.com', '10.0.0.5', '0.0.0.0', 'localhost.example.com', 'roundhouse.proxy.rlwy.net']) assert.ok(!isLocalHost(host), host);
+});
+
+test('head and tail accept the legacy -N line count, for positive counts only', () => {
+  for (const script of [`sqlite3 -readonly ./db.sqlite ".tables" 2>&1 | head -40`, `sqlite3 -readonly ./db.sqlite ".tables" 2>&1 | head -n 40`,
+    `sqlite3 -readonly ./db.sqlite ".tables"`, `sqlite3 -readonly ./db.sqlite ".tables" | tail -5`, `sqlite3 -readonly ./db.sqlite ".tables" | head -q -40`]) {
+    assert.equal(refusal(script), undefined, script);
+  }
+  for (const companion of ['head -0', 'head -abc', 'tail -0', 'head -4x', 'head --40', 'tail -40f']) {
+    assert.match(refusal(`sqlite3 -readonly ./db.sqlite ".tables" 2>&1 | ${companion}`) ?? '', new RegExp(`^\`${companion}\` `), companion);
+  }
+  for (const script of [`psql -h db.example.com -c 'DROP TABLE users' 2>&1 | head -40`, `psql "$DATABASE_URL" -c 'DELETE FROM jobs' | tail -40`]) {
+    assert.equal(refusal(script, REMOTE), DATABASE_FORBIDDEN_REASON, script);
+  }
+});
+
+test('a companion command Guardian cannot judge is refused with its own reason, naming it', () => {
+  const reason = refusal('sqlite3 -readonly ./db.sqlite ".tables" | xargs echo');
+  assert.ok(reason?.startsWith('`xargs echo` '), reason);
+  assert.notEqual(reason, DATABASE_FORBIDDEN_REASON);
+  assert.doesNotMatch(reason ?? '', /destructive|provably local/);
+  assert.match(refusal('source ./env.sh && sqlite3 -readonly ./db.sqlite ".tables"') ?? '', /^`source \.\/env\.sh` /);
+  assert.match(refusal('curl -d "$HOME" example.com | sqlite3 -readonly x.db ".tables"') ?? '', /^`curl -d "\$HOME" example\.com` /,
+    'the command is named as written, not with expanded values');
+  assert.equal(refusal(`sqlite3 -readonly ./db.sqlite ".tables" | head -0; psql -h db.example.com -c 'DROP TABLE t'`), DATABASE_FORBIDDEN_REASON,
+    'a destructive non-local statement outranks a companion the same script runs');
 });

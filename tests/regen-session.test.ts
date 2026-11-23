@@ -23,8 +23,8 @@ function deferred() {
 
 function namingProvider() {
   return fauxProvider({
-    provider: 'openai-codex',
-    models: [{ id: 'gpt-6-luna', reasoning: true }],
+    provider: 'claude-bridge',
+    models: [{ id: 'claude-haiku-5-5', reasoning: true }],
     tokensPerSecond: Infinity,
   });
 }
@@ -34,7 +34,7 @@ test('real Pi lifecycle names the first message without blocking, persists it, a
   const release = deferred();
   titles.setResponses([
     async (context, options, _state, model) => {
-      assert.equal(model.id, 'gpt-6-luna');
+      assert.equal(model.id, 'claude-haiku-5-5');
       assert.equal(options?.reasoning, 'low');
       assert.ok(context.messages.some(entry => entry.role === 'user' && JSON.stringify(entry).includes('synthetic first prompt')));
       await release.promise;

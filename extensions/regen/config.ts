@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { ThinkingLevel } from '@earendil-works/pi-ai';
 
 export type RegenConfig = { model: string; thinking: ThinkingLevel | 'off' };
-export const DEFAULT_CONFIG: RegenConfig = { model: 'openai-codex/gpt-6-luna', thinking: 'low' };
+export const DEFAULT_CONFIG: RegenConfig = { model: 'claude-bridge/claude-haiku-5-5', thinking: 'low' };
 export const MAX_CONFIG_BYTES = 4096;
 const efforts = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 

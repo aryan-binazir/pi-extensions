@@ -26,7 +26,7 @@ a name changed while its request was running.
 
 ## Project-local configuration
 
-By default Regen calls **`openai-codex/gpt-6-luna`** with **low** reasoning,
+By default Regen calls **`claude-bridge/claude-haiku-5-5`** with **low** reasoning,
 using Pi's existing provider authentication. The model must be registered and
 authenticated, but **does not need to be in `/scoped-models`**.
 
@@ -34,7 +34,7 @@ Optionally create **`.pi/regen.json`** in Pi's working directory:
 
 ```json
 {
-  "model": "openai-codex/gpt-6-luna",
+  "model": "claude-bridge/claude-haiku-5-5",
   "thinking": "low"
 }
 ```

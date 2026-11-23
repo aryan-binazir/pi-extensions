@@ -59,7 +59,7 @@ extension. They are separate setup steps. See [complete setup](docs/agent-setup.
 | Todo | Compact task summary; `alt+t` toggles the full list. Session-backed progress and stale-progress reminders. |
 | Effort | `/effort` changes reasoning; `/effort new` starts a temporary model/effort session. |
 | BTW | `/btw` or `/side` opens a private, tool-free side conversation. |
-| [Regen](docs/regen.md) | Names new threads automatically; `/regen-name` regenerates a short title. Defaults to Luna 6 / low, with a project-local model override. |
+| [Regen](docs/regen.md) | Names new threads automatically; `/regen-name` regenerates a short title. Defaults to Haiku 5.5 / low, with a project-local model override. |
 | Vi mode | Modal editor with motions, operators, registers, and undo. |
 | Prompt stash | `Ctrl+S` stashes or swaps the main editor draft. |
 | [Inline skills](docs/extension-behavior.md#inline-skills) | Typing `/` mid-message opens Pi's skill list; accepting inserts `/skill:<name>`. |

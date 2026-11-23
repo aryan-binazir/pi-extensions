@@ -29,7 +29,7 @@ function harness(options: { branch?: any[]; entries?: any[]; name?: string; reas
   const calls: SideCompletionRequest[] = [];
   const pending: ReturnType<typeof deferred<SideCompletionResult>>[] = [];
   const lookups: string[] = [];
-  const model = { provider: 'openai-codex', id: 'gpt-6-luna' };
+  const model = { provider: 'claude-bridge', id: 'claude-haiku-5-5' };
   const ctx: any = {
     cwd: '/unused', isProjectTrusted: () => false,
     sessionManager: {
@@ -129,7 +129,7 @@ test('auto starts nonblocking from unpersisted first user and uses exact default
   assert.equal(h.calls.length, 1);
   assert.equal(h.calls[0].messages[0].content, 'user: Build a reliable task queue');
   assert.equal(h.calls[0].reasoning, 'low');
-  assert.deepEqual(h.lookups, ['openai-codex/gpt-6-luna']);
+  assert.deepEqual(h.lookups, ['claude-bridge/claude-haiku-5-5']);
   assert.ok(!h.calls[0].systemPrompt.includes('wrong'));
   h.emit('message_end', { message: user() });
   h.branch([entry(user())]);

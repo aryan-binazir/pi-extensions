@@ -122,8 +122,7 @@ export default function subagents(pi: ExtensionAPI): void {
   let configError: Error | undefined;
   let locationKey = '';
   const configFor = (ctx: ExtensionContext, reload = false): ProfileConfig => {
-    const cwd = realpathSync(ctx.cwd);
-    const location = {cwd, trusted: cwd === realpathSync(ctx.cwd) && ctx.isProjectTrusted?.() === true};
+    const location = {cwd: realpathSync(ctx.cwd), trusted: ctx.isProjectTrusted?.() === true};
     const key = JSON.stringify(location);
     if (reload || key !== locationKey) {
       locationKey = key; snapshot = undefined; configError = undefined;

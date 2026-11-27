@@ -4,7 +4,7 @@ import { matchesKey, type Component } from '@earendil-works/pi-tui';
 import { isUser, startPromotion, SupersededPromotion, textParts, type Message, type Promotion, type SessionPort } from './promotion.ts';
 import { installEditorInput, registerMainEditorBinding } from '../editor-input.ts';
 
-type Host = { session: AgentSession; defaultEditor?: CustomEditor; editor?: CustomEditor; ui?: { getFocusedComponent(): Component | null; requestRender(): void } };
+type Host = { session: AgentSession; defaultEditor?: CustomEditor; editor?: CustomEditor; ui?: { getFocusedComponent(): Component | null } };
 type Registration = { ctx: ExtensionContext; pending?: Promotion; warned: boolean; input?: { editor: CustomEditor; reset(): void } };
 type Checkpoint = { session: AgentSession; check(): void };
 type Adapter = {
@@ -31,7 +31,7 @@ const installed = Symbol.for('pi-interactive:escape-continue-adapter');
 const wrapped = Symbol.for('pi-interactive:escape-continue-handler');
 const checkpointed = Symbol.for('pi-interactive:escape-continue-preflight');
 const intercepted = Symbol.for('pi-interactive:escape-continue-queue');
-type Prototype = { handleEvent(this: Host, event: AgentSessionEvent): Promise<void>; bindCurrentSessionExtensions(this: Host): Promise<void>; setCustomEditorComponent(this: Host, factory: unknown): void; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; handleReloadCommand(this: Host): Promise<void>; [installed]?: Adapter };
+type Prototype = { handleEvent(this: Host, event: AgentSessionEvent): Promise<void>; bindCurrentSessionExtensions(this: Host): Promise<void>; shutdown(this: Host, options?: { fromSignal?: boolean }): Promise<void>; handleReloadCommand(this: Host): Promise<void>; [installed]?: Adapter };
 
 // Pi's extension context exposes neither prepared queue contents nor queue removal.
 function queueLayout(session: AgentSession): QueueLayout | undefined {

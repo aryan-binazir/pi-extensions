@@ -10,11 +10,11 @@ type Host = {
 };
 type Replace = (this: Host, factory: unknown) => void;
 type Show = (this: Host, factory: unknown, options?: { overlay?: boolean }) => Promise<unknown>;
-type Binding = { key(data: string): boolean; beforePaste?(): void; reset?(): void };
+type Binding = { key(data: string): boolean };
 export type EditorBinding = {
   id: string;
   priority: number;
-  create(editor: CustomEditor, forward: (data: string) => void, ready: () => boolean): Binding;
+  create(editor: CustomEditor, forward: (data: string) => void): Binding;
 };
 type Backend = { key(data: string): void; paste(data: string): void; release(): void; acquire(): void };
 type Input = {
@@ -64,13 +64,11 @@ function forward(input: Input, data: string, programmatic = false): void {
 function bindings(input: Input, state: State): Binding[] {
   const manager = input.host?.session?.sessionManager;
   const registrations = manager ? state.registrations.get(manager) : undefined;
-  for (const [spec, binding] of input.bindings) if (registrations?.get(spec.id) !== spec) {
-    binding.reset?.(); input.bindings.delete(spec);
-  }
+  for (const spec of input.bindings.keys()) if (registrations?.get(spec.id) !== spec) input.bindings.delete(spec);
   return [...registrations?.values() ?? []].sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id)).map(spec => {
     let binding = input.bindings.get(spec);
     if (!binding) {
-      binding = spec.create(input.editor as CustomEditor, data => forward(input, data), () => ready(input));
+      binding = spec.create(input.editor as CustomEditor, data => forward(input, data));
       input.bindings.set(spec, binding);
     }
     return binding;
@@ -83,12 +81,7 @@ function deliver(input: Input, frame: PasteFrame, state: State, nested: boolean,
     return;
   }
   const handlers = nested ? [] : bindings(input, state);
-  if (frame.type === "paste") {
-    const wasReady = ready(input);
-    for (const binding of handlers) binding.beforePaste?.();
-    if (input.discardPaste) { input.discardPaste = false; return; }
-    if (wasReady && !ready(input)) { deliver(input, frame, state, true, true); return; }
-  }
+  if (frame.type === "paste" && input.discardPaste) { input.discardPaste = false; return; }
   const target = focused(input);
   if (target !== undefined && target !== input.editor) {
     if (!redirect && frame.type === "paste") {
@@ -124,12 +117,7 @@ function dispatch(input: Input, data: string): void {
   }
   const nested = input.depth++ > 0;
   const startedFocused = ready(input);
-  const held = input.framer.pasting || input.framer.holdingMarker;
-  try {
-    for (const frame of input.framer.feed(data)) deliver(input, frame, state, nested, startedFocused && !ready(input));
-    if (!nested && ready(input) && !held && (input.framer.pasting || input.framer.holdingMarker))
-      for (const binding of bindings(input, state)) binding.beforePaste?.();
-  }
+  try { for (const frame of input.framer.feed(data)) deliver(input, frame, state, nested, startedFocused && !ready(input)); }
   finally { input.depth--; }
 }
 export function attachEditorInput(editor: Editor, backend?: Backend): Editor["handleInput"] {
@@ -162,7 +150,6 @@ export function retireEditorInput(editor: Editor): void {
   input.retired = true;
   input.framer.reset();
   input.discardPaste = false;
-  for (const binding of input.bindings.values()) binding.reset?.();
   input.bindings.clear();
   input.backend?.release();
 }

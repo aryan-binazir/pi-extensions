@@ -91,7 +91,7 @@ function exited(child: SandboxedChild): Promise<void> {
   });
 }
 
-export const seatbeltSandbox: PlatformSandbox = {
+const seatbeltSandbox: PlatformSandbox = {
   kind: 'seatbelt',
   summary: 'Seatbelt',
   async spawn(command, policy, { cwd, env, stdin, signal }) {

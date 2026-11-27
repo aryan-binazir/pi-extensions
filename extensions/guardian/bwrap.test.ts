@@ -2,8 +2,7 @@
 // (Apache-2.0); see docs/licenses/README.md. Cases for split policies, deny-read globs, WSL and app-server sockets are
 // omitted with those features. Argument construction is plain filesystem inspection, so these run on every platform.
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
@@ -11,14 +10,11 @@ import {
   isProcMountFailure, withAsPid1, withOptionsBeforeCommand,
 } from './bwrap.ts';
 import { type SandboxPolicy, type WritableRoot, workspaceWriteRoots } from './seatbelt.ts';
+import { canonicalTempDir } from './test-support.ts';
 
 const isolated: SandboxPolicy = { mode: 'workspace-write', networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true };
 
-function tempDir(t: test.TestContext): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bwrap-')));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
-}
+const tempDir = (t: test.TestContext) => canonicalTempDir(t, 'guardian-bwrap-');
 
 const options = (dir: string, overrides: Partial<BwrapOptions> = {}): BwrapOptions =>
   ({ mountProc: true, networkMode: 'isolated', registryRoot: join(dir, 'registry-outside-roots'), ...overrides });

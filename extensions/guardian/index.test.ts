@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test, { after } from 'node:test';
+import test from 'node:test';
 import { clearTimeout, setTimeout } from 'node:timers';
 import { Type } from 'typebox';
 import type { ExtensionFactory, ExtensionToolContext } from '@earendil-works/pi-coding-agent';
@@ -13,18 +13,10 @@ import { DEFAULT_GUARDIAN_CONFIG, GUARDIAN_ENABLED_EVENT } from './config.ts';
 import { APPROVAL_AUDIT_ENTRY_TYPE, type ApprovalAuditEntry } from './approvals.ts';
 import guardian, { instructedPermissions, registerFailClosed } from './index.ts';
 import { MANUAL_APPROVAL_DEVELOPER_PREFIX } from './review/context.ts';
-import { detectPlatformSandbox } from './sandbox.ts';
+import { canonicalTempDir, detectSandbox, isolateRegistryTmpdir } from './test-support.ts';
 
-const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-index-registry-')));
-const previousTmpdir = process.env.TMPDIR;
-process.env.TMPDIR = registryTemp;
-after(() => {
-  if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
-  rmSync(registryTemp, { recursive: true, force: true });
-});
-
-const detected = (await detectPlatformSandbox()).sandbox;
-const sandboxed = { skip: (!detected || (detected.kind === 'bubblewrap' && !['/usr/bin/flock', '/bin/flock'].some(existsSync))) && 'sandbox/flock prerequisites are unavailable' };
+isolateRegistryTmpdir('guardian-index-registry-');
+const { sandboxed } = await detectSandbox();
 
 function writeConfig(agentDir: string, config: Record<string, unknown>) {
   mkdirSync(join(agentDir, 'guardian'), { recursive: true });
@@ -43,11 +35,7 @@ function reviewRequest(context: TranscriptContext) {
   return { lines, records };
 }
 
-function outsideDir(t: test.TestContext) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-e2e-outside-')));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
-}
+const outsideDir = (t: test.TestContext) => canonicalTempDir(t, 'guardian-e2e-outside-');
 
 test('escalations go to the configured reviewer model with Codex policy, Railway deny, transcript and action', async t => {
   const outside = outsideDir(t);

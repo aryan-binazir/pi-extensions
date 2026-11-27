@@ -118,7 +118,7 @@ function fileStem(path: string): string | undefined {
 
 type ShellType = 'zsh' | 'sh' | 'cmd' | 'bash' | 'powershell';
 
-export function detectShellType(shellPath: string): ShellType | undefined {
+function detectShellType(shellPath: string): ShellType | undefined {
   switch (shellPath) {
     case 'zsh': case 'sh': case 'cmd': case 'bash': return shellPath;
     case 'pwsh': case 'powershell': return 'powershell';

@@ -2,8 +2,7 @@
 // docs/licenses/README.md. Each test uses its own registry root instead of the shared one.
 import assert from 'node:assert/strict';
 import childProcess, { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import fs, { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,15 +11,11 @@ import {
   cleanupSyntheticMountTargets, existingTarget, hashPath, missingTarget, registerSyntheticMountTargets, shouldRemoveAfterBwrap,
   syntheticMountRegistryRoot,
 } from './synthetic-mounts.ts';
+import { canonicalTempDir, FLOCK_CANDIDATES, flock, holdRegistryLock } from './test-support.ts';
 
-const flock = ['/usr/bin/flock', '/bin/flock'].find(existsSync);
 const registryTests = { skip: process.platform !== 'linux' || !flock ? 'Linux flock is required' : false };
 
-function tempDir(t: test.TestContext): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-synthetic-')));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
-}
+const tempDir = (t: test.TestContext) => canonicalTempDir(t, 'guardian-synthetic-');
 
 test('cleanup removes only empty mount targets', registryTests, async t => {
   const dir = tempDir(t), registry = join(dir, 'registry');
@@ -202,16 +197,6 @@ test('a symlinked registry root is rejected', t => {
   assert.throws(() => syntheticMountRegistryRoot({ TMPDIR: dir }), /must not be a symlink/);
 });
 
-async function holdRegistryLock(t: test.TestContext, registry: string) {
-  mkdirSync(registry, { recursive: true });
-  const child = spawn(flock!, ['--exclusive', join(registry, 'lock'), '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });
-  await once(child.stdout, 'data');
-  const closed = once(child, 'close');
-  const release = async () => { child.stdin.end(); await closed; };
-  t.after(release);
-  return release;
-}
-
 test('held-lock deadlines and queued cancellation settle without entering registration, then recover', registryTests, async t => {
   const dir = tempDir(t), registry = join(dir, 'registry');
   const before = readdirSync('/proc/self/fd').length;
@@ -318,7 +303,7 @@ test('missing flock fails closed without leaking descriptors or registering targ
   const dir = tempDir(t), registry = join(dir, 'registry');
   const original = fs.existsSync;
   const before = readdirSync('/proc/self/fd').length;
-  t.mock.method(fs, 'existsSync', (path: Parameters<typeof original>[0]) => ['/usr/bin/flock', '/bin/flock'].includes(String(path)) ? false : original(path));
+  t.mock.method(fs, 'existsSync', (path: Parameters<typeof original>[0]) => FLOCK_CANDIDATES.includes(String(path)) ? false : original(path));
   syncBuiltinESMExports();
   try {
     await assert.rejects(registerSyntheticMountTargets([missingTarget(join(dir, '.codex'), 'empty-directory')], registry), /flock is unavailable/);

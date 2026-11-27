@@ -32,12 +32,12 @@ export type HeuristicsFallback = (command: string[]) => Decision;
 
 export class RulesError extends Error {}
 
-export function parseDecision(raw: string): Decision {
+function parseDecision(raw: string): Decision {
   if (!DECISIONS.has(raw)) throw new RulesError(`invalid decision: ${raw}`);
   return raw as Decision;
 }
 
-export function strictestDecision(decisions: Iterable<Decision>): Decision | undefined {
+function strictestDecision(decisions: Iterable<Decision>): Decision | undefined {
   let strictest: Decision | undefined;
   for (const decision of decisions) if (!strictest || SEVERITY[decision] > SEVERITY[strictest]) strictest = decision;
   return strictest;

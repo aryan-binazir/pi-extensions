@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { closeSync, constants, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import test, { after } from 'node:test';
+import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { withPi } from '../../tests/pi-session.ts';
@@ -13,20 +13,11 @@ import { killProcessGroup } from './review/process.ts';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import type { ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import { assessFileChange, createGuardianFileTools, fileChangeAction, sandboxedWrite } from './files.ts';
-import { detectPlatformSandbox, type PlatformSandbox, type SandboxedChild } from './sandbox.ts';
+import type { PlatformSandbox, SandboxedChild } from './sandbox.ts';
+import { detectSandbox, isolatedConfig as isolated, isolateRegistryTmpdir, WORKSPACE_CONFIG } from './test-support.ts';
 
-const WORKSPACE_CONFIG: GuardianConfig = { ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'workspace-write' } };
-
-const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-files-registry-')));
-const previousTmpdir = process.env.TMPDIR;
-process.env.TMPDIR = registryTemp;
-after(() => {
-  if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
-  rmSync(registryTemp, { recursive: true, force: true });
-});
-
-const detected = (await detectPlatformSandbox()).sandbox;
-const sandboxed = { skip: (!detected || (detected.kind === 'bubblewrap' && !['/usr/bin/flock', '/bin/flock'].some(existsSync))) && 'sandbox/flock prerequisites are unavailable' };
+isolateRegistryTmpdir('guardian-files-registry-');
+const { detected, sandboxed } = await detectSandbox();
 
 function workspace(t: test.TestContext) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-files-')));
@@ -34,11 +25,6 @@ function workspace(t: test.TestContext) {
   t.after(() => { rmSync(cwd, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
   return { cwd, outside };
 }
-
-const isolated = (overrides: Partial<GuardianConfig> = {}): GuardianConfig => ({
-  ...WORKSPACE_CONFIG, ...overrides,
-  sandbox: { ...WORKSPACE_CONFIG.sandbox, excludeSlashTmp: true, excludeTmpdirEnvVar: true, ...overrides.sandbox },
-});
 
 test('writes inside writable roots auto-approve and others ask', t => {
   const { cwd, outside } = workspace(t);

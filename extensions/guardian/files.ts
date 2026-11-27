@@ -31,7 +31,7 @@ export interface FileSafetyContext {
  * Resolves a path for the writable-root check: existing ancestors are canonicalized and a leaf symlink is
  * followed even when its target is missing, so a dangling link cannot redirect a write out of the workspace.
  */
-export function canonicalTarget(path: string, depth = 0): string {
+function canonicalTarget(path: string, depth = 0): string {
   if (depth >= 32) return path;
   const missing: string[] = [];
   for (let current = path; ; current = dirname(current)) {

@@ -80,7 +80,7 @@ export function commandsForExecPolicy(shell: Shell, command: string[]): string[]
 }
 
 /** Returns why the approval policy refuses to surface a prompt, if it does. */
-export function promptIsRejectedByPolicy(approvalPolicy: ApprovalPolicy, promptIsRule: boolean): string | undefined {
+function promptIsRejectedByPolicy(approvalPolicy: ApprovalPolicy, promptIsRule: boolean): string | undefined {
   if (approvalPolicy === 'never') return PROMPT_CONFLICT_REASON;
   if (typeof approvalPolicy === 'string') return undefined;
   if (promptIsRule) return approvalPolicy.granular.rules ? undefined : REJECT_RULES_APPROVAL_REASON;

@@ -5,27 +5,18 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test, { after } from 'node:test';
+import test from 'node:test';
 import { Approvals, type ApprovalAuditEntry, type ApprovalContext, type ApprovalDecision, type ApprovalRequest } from './approvals.ts';
 import { appendAllowPrefixRule } from './amend.ts';
 import { type BashRuntime, createGuardianBashTool } from './bash.ts';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
 import { Policy, PolicyParser } from './rules.ts';
-import { detectPlatformSandbox, isLikelySandboxDenied, type PlatformSandbox } from './sandbox.ts';
+import { isLikelySandboxDenied, type PlatformSandbox } from './sandbox.ts';
 import { loadShell } from './shell.ts';
+import { detectSandbox, isolatedConfig, isolateRegistryTmpdir, WORKSPACE_CONFIG } from './test-support.ts';
 
-const WORKSPACE_CONFIG: GuardianConfig = { ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'workspace-write' } };
-
-const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bash-registry-')));
-const previousTmpdir = process.env.TMPDIR;
-process.env.TMPDIR = registryTemp;
-after(() => {
-  if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
-  rmSync(registryTemp, { recursive: true, force: true });
-});
-
-const detected = (await detectPlatformSandbox()).sandbox;
-const sandboxed = { skip: (!detected || (detected.kind === 'bubblewrap' && !['/usr/bin/flock', '/bin/flock'].some(existsSync))) && 'sandbox/flock prerequisites are unavailable' };
+isolateRegistryTmpdir('guardian-bash-registry-');
+const { detected, sandboxed } = await detectSandbox();
 /** The sandbox's message for a write outside the writable roots: Seatbelt's EPERM or the read-only bind's EROFS. */
 const WRITE_DENIED = /Operation not permitted|Read-only file system/;
 const shell = await loadShell();
@@ -43,10 +34,7 @@ function setup(t: test.TestContext, options: { rules?: string; config?: Partial<
   }
   const requests: ApprovalRequest[] = [], persisted: string[][] = [];
   const decisions = [...(options.decisions ?? [])];
-  const config: GuardianConfig = {
-    ...WORKSPACE_CONFIG, ...options.config,
-    sandbox: { ...WORKSPACE_CONFIG.sandbox, excludeSlashTmp: true, excludeTmpdirEnvVar: true, ...options.config?.sandbox },
-  };
+  const config = isolatedConfig(options.config);
   const runtime: BashRuntime = {
     config: () => config,
     policy: () => policy,

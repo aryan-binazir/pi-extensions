@@ -73,7 +73,7 @@ export async function withHost(options: HostOptions, run: (host: Host) => Promis
   const active = options.tools ?? ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls'];
   const ctx: any = {
     modelRegistry: fixtureModelRegistry(), cwd, model: {provider: 'test', id: 'fixture'}, thinkingLevel: 'off',
-    hasUI: true, sessionManager: {getSessionId: () => cwd},
+    hasUI: true,
     ui: {
       notify: (text: string) => uiNotices.push(text),
       setStatus: (key: string, value?: string) => { if (value === undefined) statuses.delete(key); else statuses.set(key, value); },

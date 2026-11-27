@@ -30,8 +30,7 @@ connector selections. See the
 
 A session/reload snapshot drives direct spawns, workflow spawns, generated parent
 guidance and dynamically re-registered tool descriptions. Cwd/trust transitions
-replace the snapshot. Routed cwd trust is deliberately not inferred from the
-original session; local overrides require a matching trusted Pi session cwd.
+replace the snapshot. Local overrides load only from a trusted Pi session cwd.
 Missing files are optional; invalid configuration blocks delegation until reload.
 Selected models use Pi ModelRegistry `find`/`getAvailable` with OpenAI fast aliases
 reduced to base IDs; no fuzzy or fallback model selection is performed here.

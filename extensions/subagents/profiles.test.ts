@@ -6,7 +6,7 @@ import test from 'node:test';
 import {createHash} from 'node:crypto';
 import { InMemoryCredentialStore, InMemoryModelsStore } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { assertTaskFields, loadProfiles, profileGuidance, profileLocation, resolveProfile } from './profiles.ts';
+import { assertTaskFields, loadProfiles, profileGuidance, resolveProfile } from './profiles.ts';
 import { fixtureModelRegistry } from './test-support.ts';
 
 async function fixture(run: (f: any) => Promise<void>) {
@@ -15,7 +15,7 @@ async function fixture(run: (f: any) => Promise<void>) {
   await mkdir(join(cwd, '.pi'), {recursive: true}); await mkdir(agentDir);
   const global = join(agentDir, 'subagents.json'), local = join(cwd, '.pi/subagents.local.json');
   const put = (path: string, value: unknown) => writeFile(path, JSON.stringify(value));
-  const ctx: any = {cwd, isProjectTrusted: () => true, model: {provider: 'test', id: 'selected'}, thinkingLevel: 'low', modelRegistry: fixtureModelRegistry()};
+  const ctx: any = {model: {provider: 'test', id: 'selected'}, thinkingLevel: 'low', modelRegistry: fixtureModelRegistry()};
   const load = (trusted = true) => loadProfiles(cwd, trusted, agentDir);
   try { await run({root, cwd, agentDir, global, local, put, ctx, load}); }
   finally { await rm(root, {recursive: true, force: true}); }
@@ -119,13 +119,6 @@ test('generated guidance uses effective custom descriptions and remappings, not 
   const guidance = profileGuidance(load(), ctx);
   assert.match(guidance, /Default profile \(used when profile is omitted\): local \(test\/selected \(inherit\) \/ low \(inherit\)\)/);
   assert.match(guidance, /implement: test\/fixture \/ high.*Uncertain implementation/);
-}));
-
-test('session trust is not transferred to a routed checkout', async () => fixture(async ({ctx, root, cwd}) => {
-  assert.equal(profileLocation(ctx, cwd).trusted, true);
-  assert.equal(profileLocation(ctx, root).trusted, false);
-  ctx.isProjectTrusted = () => false;
-  assert.equal(profileLocation(ctx, cwd).trusted, false);
 }));
 
 test('resolution uses real Pi ModelRegistry find/getAvailable snapshots and custom model IDs', async () => fixture(async ({cwd, agentDir, put, load}) => {

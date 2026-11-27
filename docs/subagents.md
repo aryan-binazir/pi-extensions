@@ -171,10 +171,11 @@ Initialization fails after five seconds without metadata.
 
 Without connector grants, existing profile and workflow identities remain
 compatible. Enabling or reclassifying grants, activating tools, changing profile
-settings, or switching trusted worktrees can change workflow identity. A new
-identity starts a new journal and can run completed stages again; reconcile prior
-writer results before rerunning. Settings and worktree changes also invalidate
-later connector calls from an already-running child; resubmit that child.
+settings, or starting the workflow from another workspace can change workflow
+identity. A new identity starts a new journal and can run completed stages again;
+reconcile prior writer results before rerunning. Settings or parent workspace
+changes also invalidate later connector calls from an already-running child;
+resubmit that child.
 
 Pi 0.99.1 permits calls through the captured parent context after a background
 spawn has returned. Its nested-call records can miss those late calls, usage

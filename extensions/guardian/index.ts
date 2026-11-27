@@ -5,8 +5,8 @@ import { statSync } from 'node:fs';
 import { createBashToolDefinition, createEditToolDefinition, createWriteToolDefinition, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { appendAllowPrefixRule } from './amend.ts';
 import { APPROVAL_AUDIT_ENTRY_TYPE, type ApprovalAuditEntry, type ApprovalContext, Approvals, manualApprovalMessage } from './approvals.ts';
-import { createGuardianBashTool, sandboxPolicyFor } from './bash.ts';
-import { CLAUDE_CLI_PROVIDER, FAIL_CLOSED_CONFIG, GUARDIAN_ENABLED_EVENT, type GuardianConfig, guardianStatusText, loadGuardianConfig } from './config.ts';
+import { createGuardianBashTool } from './bash.ts';
+import { CLAUDE_CLI_PROVIDER, FAIL_CLOSED_CONFIG, GUARDIAN_ENABLED_EVENT, type GuardianConfig, guardianStatusText, loadGuardianConfig, sandboxPolicyFor } from './config.ts';
 import { createGuardianFileTools } from './files.ts';
 import { createConnectorGate } from './connectors.ts';
 import { permissionsInstructions, sandboxText } from './permissions.ts';
@@ -98,6 +98,13 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     reportedError = problem;
   };
   const reloadPolicies = async () => { policies = retainPolicies(policies, await loadPolicies([userRulesDir()])); };
+  /** Whether commands run in the platform sandbox, and its writable roots when that sandbox is workspace-write. */
+  const sandboxing = (settings: GuardianConfig, cwd: string) => {
+    const sandboxed = sandboxAvailable && settings.sandbox.mode !== 'host' && settings.sandbox.mode !== 'danger-full-access';
+    const writableRoots = sandboxed && settings.sandbox.mode === 'workspace-write'
+      ? workspaceWriteRoots(sandboxPolicyFor(settings), cwd, process.env).map(root => root.root) : undefined;
+    return { sandboxed, writableRoots };
+  };
 
   const review = async (input: { actionJson: string; reason?: string }, approvalContext: ApprovalContext, signal?: AbortSignal): Promise<ReviewOutcome> => {
     const ctx = approvalContext as unknown as ExtensionContext;
@@ -111,13 +118,12 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     const evidence = collectReviewEvidence(ctx.sessionManager.getBranch(), undefined, { delegated: process.env.PI_SUBAGENT_TIMEOUT_MS !== undefined });
     const transcript = prepareTranscript(evidence.transcript, 0);
     const plannedAction = { json: input.actionJson, ...(input.reason === undefined ? {} : { reason: input.reason }) };
-    const sandboxed = sandboxAvailable && settings.sandbox.mode !== 'host' && settings.sandbox.mode !== 'danger-full-access';
+    const { sandboxed, writableRoots } = sandboxing(settings, ctx.cwd);
     const permissionContext = [
       sandboxText(sandboxed ? settings.sandbox.mode : 'host', settings.sandbox.networkAccess ? 'enabled' : 'restricted'),
       `Approval policy: ${settings.approvalPolicy}; reviewer: ${settings.approvalsReviewer}.`,
       ...(sandboxed ? ["Approved escalations and file changes run on the host with Pi's credentials and network access."] : []),
-      ...(sandboxed && settings.sandbox.mode === 'workspace-write'
-        ? [`Writable roots: ${truncateText(JSON.stringify(workspaceWriteRoots(sandboxPolicyFor(settings), ctx.cwd, process.env).map(root => root.root)), 8_000)}`] : []),
+      ...(writableRoots ? [`Writable roots: ${truncateText(JSON.stringify(writableRoots), 8_000)}`] : []),
     ].join('\n') + '\n';
     const request = composeReviewRequest({
       transcript, sessionId, trustedUserAnswers: evidence.trustedUserAnswers, environmentId: 'local', plannedAction,
@@ -211,14 +217,13 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     reportProblems(ctx);
     const settings = config();
     if (!settings.enabled) return;
-    const sandboxed = sandboxAvailable && settings.sandbox.mode !== 'host' && settings.sandbox.mode !== 'danger-full-access';
+    const { sandboxed, writableRoots } = sandboxing(settings, ctx.cwd);
     event.systemPromptOptions.sections.permissions_instructions = permissionsInstructions({
       ...instructedPermissions(settings, sandboxAvailable),
       networkAccess: !sandboxed || settings.sandbox.networkAccess ? 'enabled' : 'restricted',
       reviewer: settings.approvalsReviewer,
       approvedCommandPrefixes: policies.policy.allowedPrefixes(),
-      writableRoots: sandboxed && settings.sandbox.mode === 'workspace-write'
-        ? workspaceWriteRoots(sandboxPolicyFor(settings), ctx.cwd, process.env).map(root => root.root) : [],
+      writableRoots: writableRoots ?? [],
     });
   });
 

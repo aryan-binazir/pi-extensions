@@ -6,6 +6,9 @@ import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { withPi } from '../../tests/pi-session.ts';
 import { APPROVAL_AUDIT_ENTRY_TYPE, type ApprovalAuditEntry } from './approvals.ts';
 import guardian from './index.ts';
+import { detectPlatformSandbox } from './sandbox.ts';
+
+const sandboxAvailable = (await detectPlatformSandbox()).sandbox !== undefined;
 
 test('default bash runs on the host only after the configured model approves it', async () => {
   let target = '';
@@ -119,19 +122,24 @@ test('a rejected ordinary host command never executes', async () => {
 });
 
 for (const mode of ['workspace-write', 'read-only', 'danger-full-access'] as const) {
-  test(`reviewer gets factual parent execution context for ${mode}`, async () => {
-    let parent = '';
+  test(`reviewer and agent get factual parent execution context for ${mode}`, async () => {
+    let parent = '', main = '', extraRoot = '';
     await withPi({ extensions: [guardian], responses: [
-      fauxAssistantMessage(fauxToolCall('bash', { command: 'rm -f review-only-missing', sandbox_permissions: 'require_escalated' })),
+      context => {
+        main = JSON.stringify(context.messages).match(/<permissions_instructions>(.*?)<\/permissions_instructions>/s)?.[1] ?? '';
+        return fauxAssistantMessage(fauxToolCall('bash', { command: 'rm -f review-only-missing', sandbox_permissions: 'require_escalated' }));
+      },
       context => {
         parent = JSON.stringify(context.messages).split('>>> PARENT TURN PERMISSION CONTEXT START')[1]?.split('>>> PARENT TURN PERMISSION CONTEXT END')[0] ?? '';
         return fauxAssistantMessage('{"outcome":"allow"}');
       },
       fauxAssistantMessage('Done.'),
     ], configure: ({ agentDir }, provider) => {
+      extraRoot = join(agentDir, 'extra-writable-root');
+      mkdirSync(extraRoot, { recursive: true });
       mkdirSync(join(agentDir, 'guardian'), { recursive: true });
       writeFileSync(join(agentDir, 'guardian', 'config.json'), JSON.stringify({
-        sandbox: { mode }, reviewer: { provider: provider.getModel().provider, model: provider.getModel().id },
+        sandbox: { mode, writableRoots: [extraRoot] }, reviewer: { provider: provider.getModel().provider, model: provider.getModel().id },
       }));
       return { model: provider.getModel() };
     } }, async ({ session }) => {
@@ -145,6 +153,10 @@ for (const mode of ['workspace-write', 'read-only', 'danger-full-access'] as con
       } else {
         assert.match(parent, /Approved escalations and file changes run on the host/);
       }
+      const listsRoot = mode === 'workspace-write' && sandboxAvailable;
+      assert.equal(parent.includes('extra-writable-root'), listsRoot, 'reviewer writable roots');
+      assert.equal(main.includes('extra-writable-root'), listsRoot, 'agent writable roots');
+      assert.ok(extraRoot && main);
     });
   });
 }

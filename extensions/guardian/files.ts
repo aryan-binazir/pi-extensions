@@ -9,8 +9,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './approvals.ts';
-import type { GuardianConfig } from './config.ts';
-import { sandboxPolicyFor } from './bash.ts';
+import { type GuardianConfig, sandboxPolicyFor } from './config.ts';
 import { type PlatformSandbox, runSandboxed } from './sandbox.ts';
 import { PROTECTED_METADATA_PATH_NAMES, workspaceWriteRoots } from './seatbelt.ts';
 
@@ -71,8 +70,7 @@ function canWrite(path: string, context: FileSafetyContext): boolean {
   if (hasOtherLinks(path)) return false;
   if (config.sandbox.mode === 'danger-full-access') return true;
   const target = fold(canonicalTarget(path));
-  return workspaceWriteRoots({ mode: 'workspace-write', networkAccess: config.sandbox.networkAccess, writableRoots: config.sandbox.writableRoots,
-    excludeTmpdirEnvVar: config.sandbox.excludeTmpdirEnvVar, excludeSlashTmp: config.sandbox.excludeSlashTmp }, cwd, context.env ?? process.env)
+  return workspaceWriteRoots(sandboxPolicyFor(config), cwd, context.env ?? process.env)
     .some(({ root, readOnlySubpaths }) => {
       const canonicalRoot = fold(canonicalTarget(root));
       if (!within(target, canonicalRoot)) return false;

@@ -4,6 +4,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import type { ThinkingLevel } from '@earendil-works/pi-ai';
+import type { SandboxPolicy } from './seatbelt.ts';
 
 /** Codex's `AskForApproval`; its config value for `unless-trusted` is `untrusted`, which is accepted too. */
 export type ApprovalPolicy = 'on-request' | 'never' | 'unless-trusted';
@@ -165,6 +166,12 @@ export function loadGuardianConfig(path: string): GuardianConfig {
       excludeSlashTmp: boolean(sandbox.excludeSlashTmp, 'sandbox.excludeSlashTmp', defaults.sandbox.excludeSlashTmp),
     },
   };
+}
+
+/** The platform sandbox policy for commands and writes; `host` and `danger-full-access` never reach a sandbox. */
+export function sandboxPolicyFor(config: GuardianConfig): SandboxPolicy {
+  const { mode, networkAccess, writableRoots, excludeTmpdirEnvVar, excludeSlashTmp } = config.sandbox;
+  return { mode: mode === 'read-only' ? 'read-only' : 'workspace-write', networkAccess, writableRoots, excludeTmpdirEnvVar, excludeSlashTmp };
 }
 
 const sanitizeTerminalLabel = (value: string) => value.replace(/[^a-zA-Z0-9._:/~+-]/g, '?').slice(0, 64);

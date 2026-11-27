@@ -13,7 +13,7 @@ function parent(cwd: string, tools: string[], approve?: (request: string) => Pro
   const fixture = admissionFixture({cwd: () => cwd, tools: () => tools, ...(approve ? {approve: (_title: string, request: string) => approve(request)} : {})});
   const workflow = fixture.admission.workflow(fixture.ctx);
   return {
-    queue: (task: {cwd: string; tools: string[]}) => fixture.admission.queue({task: 'inspect', ...task}, signal),
+    queue: (task: {cwd: string; tools?: string[]}) => fixture.admission.queue({task: 'inspect', ...task}, signal),
     admit: (task: {cwd: string; tools: string[]; extensions?: string[]}) => workflow.admit({task: 'inspect', ...task}, cwd),
     replay: (task: ValidTask) => workflow.replay(task, signal),
     read: workflow.read,
@@ -33,12 +33,16 @@ async function workspace(run: (paths: {root: string; inside: string; outside: st
   } finally { await rm(base, {recursive: true, force: true}); }
 }
 
-test('delegation scope keeps only builtin tools the parent still holds', () => {
-  const tools = (held: string[]) => JSON.parse(parent('/workspace', held).identity).tools;
-  assert.deepEqual(tools([...ALL, 'subagent', 'workflow']), ALL);
-  assert.deepEqual(tools(['read', 'bash', 'subagent']), ['read', 'bash']);
-  assert.deepEqual(tools(['subagent', 'workflow']), []);
-});
+test('delegation scope keeps only builtin tools the parent still holds', async () => workspace(async ({root}) => {
+  const tools = async (held: string[]) => {
+    const scoped = JSON.parse(parent(root, held).identity).tools;
+    assert.deepEqual((await parent(root, held).queue({cwd: root})).task.tools, scoped);
+    return scoped;
+  };
+  assert.deepEqual(await tools([...ALL, 'subagent', 'workflow']), ALL);
+  assert.deepEqual(await tools(['read', 'bash', 'subagent']), ['read', 'bash']);
+  assert.deepEqual(await tools(['subagent', 'workflow']), []);
+}));
 
 test('replay identity changes with the workspace or the granted tools', () => {
   const identity = (cwd: string, tools: string[]) => parent(cwd, tools).identity;

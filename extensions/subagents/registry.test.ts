@@ -42,7 +42,7 @@ test('compiled Pi launches the parent executable while Node and generic Bun keep
 test('an explicit child model also scopes Pi model cycling', async () => {
   const entry = import.meta.resolve('@earendil-works/pi-coding-agent');
   const {parseArgs} = await import(new URL('./cli/args.js', entry).href);
-  const {task: spec} = await supervisorAdmission.queue({task: 'read', cwd: tmpdir(), tools: [], model: 'openai-codex/gpt-6-astra'}, new AbortController().signal);
+  const {task: spec} = await supervisorAdmission.queue({task: 'read', cwd: tmpdir(), model: 'openai-codex/gpt-6-astra'}, new AbortController().signal);
   const selected = parseArgs(piInvocation(spec).args.slice(2));
   assert.equal(selected.model, 'openai-codex/gpt-6-astra');
   assert.deepEqual(selected.models, ['openai-codex/gpt-6-astra']);
@@ -72,12 +72,14 @@ test('explicit task briefs remain literal messages through Pi attachment parsing
     for (const {brief, message} of cases) {
       const {task: spec} = await admissionFixture({cwd: () => cwd, tools: () => []}).admission.queue({task: brief, cwd, tools: []}, new AbortController().signal);
       assert.equal(spec.task, brief);
-      const parsed = parseArgs(piInvocation(spec).args.slice(2));
-      assert.deepEqual(parsed.fileArgs, [], brief);
-      assert.deepEqual(parsed.messages, [message], brief);
-      assert.deepEqual(parsed.tools, [], brief);
-      assert.equal(parsed.model, spec.model, brief);
-      assert.deepEqual(await processFileArguments(parsed.fileArgs), {text: '', images: []}, brief);
+      for (const selected of [spec, {...spec, model: undefined, thinking: undefined}]) {
+        const parsed = parseArgs(piInvocation(selected).args.slice(2));
+        assert.deepEqual(parsed.fileArgs, [], brief);
+        assert.deepEqual(parsed.messages, [message], brief);
+        assert.deepEqual(parsed.tools, [], brief);
+        assert.equal(parsed.model, selected.model, brief);
+        assert.deepEqual(await processFileArguments(parsed.fileArgs), {text: '', images: []}, brief);
+      }
     }
   } finally { await rm(root, {recursive: true, force: true}); }
 });

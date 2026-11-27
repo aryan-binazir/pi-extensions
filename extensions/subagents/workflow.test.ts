@@ -182,11 +182,11 @@ test('workflow retry stops after child extension approval is denied', async () =
  const extension=join(cwd,'child.ts');
  await writeFile(extension,'export default () => {}');
  let prompts=0;let launches=0;
- const parent=admissionFixture({cwd:()=>cwd,tools:()=>['read','grep','find','ls'],approve:async()=>{prompts++;return false;}}).admission;
+ const fixture=admissionFixture({cwd:()=>cwd,tools:()=>['read','grep','find','ls'],approve:async()=>{prompts++;return false;}}),parent=fixture.admission;
  try {
   await assert.rejects(runWorkflow({
    source:`return await api.retry(5,()=>api.spawn({task:'inspect',preset:'reader',extensions:[${JSON.stringify(extension)}]},'inspect'));`,
-   cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'reader',approve:async()=>true,
+   cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'reader',admission:parent.workflow(fixture.ctx),approve:async()=>true,
    spawn:async (task,signal)=>{
     await parent.queue(task,signal);
     launches++;

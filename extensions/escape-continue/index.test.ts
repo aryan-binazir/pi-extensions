@@ -73,8 +73,6 @@ const teardowns = new WeakMap<TestContext, (() => Promise<void>)[]>();
 async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [], enabled = true, before: ((pi: ExtensionAPI) => void)[] = []) {
   const app: any = Object.create(InteractiveMode.prototype);
   Object.defineProperty(app, 'session', { value: undefined, writable: true, configurable: true });
-  Object.defineProperty(app, 'sessionManager', { get: () => app.session.sessionManager });
-  Object.defineProperty(app, 'settingsManager', { get: () => app.session.settingsManager });
   app.defaultEditor = editor(CustomEditor);
   app.editor = app.defaultEditor;
   app.editorContainer = new Container();
@@ -121,13 +119,7 @@ async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [
   }, pi => { started(pi); return done.promise; });
   const pi = await Promise.race([ready, closed.then(() => ready)]);
   const session = pi.session;
-  const errors: unknown[] = [];
-  session.extensionRunner!.onError(error => errors.push(error));
-  stack.push(async () => {
-    done.resolve();
-    await closed;
-    assert.deepEqual(errors, []);
-  });
+  stack.push(() => { done.resolve(); return closed; });
   const users = () => session.messages.filter(message => message.role === 'user').map(message => typeof message.content === 'string' ? message.content : message.content.filter(part => part.type === 'text').map(part => part.text).join(''));
   const blocked = (started: ReturnType<typeof deferred>, released?: ReturnType<typeof deferred>): FauxResponseFactory => async (_context, options) => {
     started.resolve();
@@ -1533,8 +1525,10 @@ test('accepted runtime replacement retires a promotion before an earlier async s
     await replacement;
   }
   await running;
-  assert.ok(h.runtime.session !== h.session);
-  assert.deepEqual(h.runtime.session.messages, []);
+  const live = h.runtime.session;
+  assert.ok(live !== h.session && h.app.session === live);
+  await h.runtime.dispose();
+  assert.deepEqual(live.messages, []);
 });
 
 test('interactive quit retires a promotion before terminal drain or async shutdown handlers', async t => {
@@ -1565,6 +1559,7 @@ test('interactive quit retires a promotion before terminal drain or async shutdo
     try { await quitting; } finally { process.exit = exit; }
   }
   assert.equal(loads, 1, 'quit must not replace the runtime');
+  assert.ok(h.runtime.session === h.session);
 });
 
 test('accepted TUI reload cannot start a held prompt while an earlier shutdown handler waits', async t => {

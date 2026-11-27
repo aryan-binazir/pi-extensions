@@ -41,7 +41,8 @@ snapshot tests; workspaces in footer and Neovim; session managers in effort and
 fast mode; start events in startup and resume regressions; configuration in
 effort and fast mode; bindings in footer, effort and Neovim; an interactive host
 that binds each session itself, at startup and after replacement, in Escape
-Continue and editor lifecycle. Add no single-test
+Continue and editor lifecycle. The harness still records a host's extension
+errors. Add no single-test
 options or extension-specific behavior to the harness.
 
 ## Consequences

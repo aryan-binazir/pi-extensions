@@ -34,6 +34,7 @@ export interface PiFixture {
 }
 
 export async function withPi<T>(options: Options, run: (fixture: PiFixture) => Promise<T>): Promise<T> {
+  assert.ok(!(options.bind && options.host), 'bind and host are alternatives');
   const root = await mkdtemp(join(tmpdir(), 'pi-test-'));
   const cwd = options.cwd ?? root, agentDir = join(root, 'agent');
   const previous = { agent: process.env.PI_CODING_AGENT_DIR, claude: process.env.CLAUDE_CONFIG_DIR };
@@ -74,7 +75,11 @@ export async function withPi<T>(options: Options, run: (fixture: PiFixture) => P
       }
     }, { cwd, agentDir, sessionStartEvent: options.sessionStartEvent, sessionManager: typeof options.sessionManager === 'function' ? options.sessionManager(cwd) : options.sessionManager ?? SessionManager.create(cwd, join(root, 'sessions')) });
     const bind = async (session: AgentSession) => {
-      if (options.host) return options.host(session);
+      if (options.host) {
+        const bindExtensions = session.bindExtensions.bind(session);
+        session.bindExtensions = bindings => bindExtensions({ ...bindings, onError: error => { record(error); bindings.onError?.(error); } });
+        return options.host(session);
+      }
       const bindings = await options.bind?.(session);
       await session.bindExtensions({ commandContextActions: {
         newSession: options => runtime!.newSession(options), switchSession: (path, options) => runtime!.switchSession(path, options),

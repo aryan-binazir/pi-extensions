@@ -93,6 +93,15 @@ test('a host binds each session itself, once at startup and once per replacement
 });
 
 
+for (const phase of ['startup', 'reload'] as const) test(`a host keeps extension errors from ${phase} failing the fixture`, async () => {
+  await assert.rejects(withPi({ extensions: [pi => {
+    pi.on('session_start', event => { if (event.reason === phase) throw new Error(`${phase} failed`); });
+  }], host: session => session.bindExtensions({ mode: 'tui', onError() {} }) }, async ({ session }) => {
+    if (phase === 'reload') await session.reload();
+  }), new RegExp(`${phase} failed`));
+});
+
+
 for (const replacement of [false, true]) test(`${replacement ? 'replacement' : 'initial'} setup failure releases factory listeners and shuts down each session once`, async () => {
   const handoff = 'pi-interactive:effort-handoff';
   const before = process.listenerCount(handoff);

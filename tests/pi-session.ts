@@ -22,6 +22,7 @@ interface Options {
   sessionManager?: SessionManager | ((cwd: string) => SessionManager);
   configure?: (services: AgentSessionServices & { sessionManager: SessionManager }, provider: Provider) => Selection | Promise<Selection>;
   bind?: (session: AgentSession) => ExtensionBindings | Promise<ExtensionBindings>;
+  host?: (session: AgentSession) => Promise<void>;
 }
 export interface PiFixture {
   readonly session: AgentSession;
@@ -73,6 +74,7 @@ export async function withPi<T>(options: Options, run: (fixture: PiFixture) => P
       }
     }, { cwd, agentDir, sessionStartEvent: options.sessionStartEvent, sessionManager: typeof options.sessionManager === 'function' ? options.sessionManager(cwd) : options.sessionManager ?? SessionManager.create(cwd, join(root, 'sessions')) });
     const bind = async (session: AgentSession) => {
+      if (options.host) return options.host(session);
       const bindings = await options.bind?.(session);
       await session.bindExtensions({ commandContextActions: {
         newSession: options => runtime!.newSession(options), switchSession: (path, options) => runtime!.switchSession(path, options),

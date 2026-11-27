@@ -85,6 +85,6 @@ test('an allowed publish without a success or a refusal leaves the outcome unkno
   }
   const read = createPolicy(update); read.decide(artifact({ action: 'read', url }, 'toolu_read'));
   assert.equal(read.failed('toolu_read', 'socket hang up')?.step, 0); assert.equal(read.publishOutcomeUnknown(), false);
-  const stale = publishing(update); assert.equal(stale.succeeded('toolu_read'), 0); stale.failed('toolu_read', refusal); assert.equal(stale.publishOutcomeUnknown(), true);
+  const stale = publishing(update); assert.equal(stale.succeeded('toolu_read'), 0); assert.equal(stale.failed('toolu_read', refusal)?.step, 0); assert.equal(stale.publishOutcomeUnknown(), true);
   assert.equal(publishing(publish).failed('toolu_other', { toString: null }), undefined);
 });

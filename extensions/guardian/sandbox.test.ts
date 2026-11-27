@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after } from 'node:test';
 import { runStarted } from './review/process.ts';
-import { bubblewrapSandbox, detectPlatformSandbox, runSandboxed, sandboxEnv, type SandboxedProcess } from './sandbox.ts';
+import { bubblewrapSandbox, detectPlatformSandbox, type PlatformSandbox, runSandboxed, sandboxEnv, type SandboxedChild, type SandboxedProcess, type SpawnSandboxedOptions } from './sandbox.ts';
 import { hashPath, syntheticMountRegistryRoot } from './synthetic-mounts.ts';
 import { syscallNumber } from './seccomp.ts';
 import { PROTECTED_METADATA_PATH_NAMES, type SandboxPolicy } from './seatbelt.ts';
@@ -43,6 +43,24 @@ async function run(command: readonly string[], policy: SandboxPolicy, cwd: strin
   assert.equal(result.spawnError, undefined, result.spawnError);
   return result;
 }
+
+test('runSandboxed pipes given stdin, ignores missing stdin, and hands the run budget to the adapter', async () => {
+  const seen: SpawnSandboxedOptions[] = [];
+  const adapter: PlatformSandbox = {
+    kind: 'bubblewrap', summary: 'fixture',
+    async spawn(command, _policy, options) {
+      seen.push(options);
+      const child = spawn(command[0], command.slice(1), { cwd: options.cwd, env: options.env, detached: true, stdio: [options.stdin, 'pipe', 'pipe'] }) as SandboxedChild;
+      return { child, finished: once(child, 'exit').then(() => {}) };
+    },
+  };
+  const run = (stdin?: string) => runSandboxed(adapter, ['/bin/cat'], workspace(), { cwd: tmpdir(), env: process.env, stdin, timeoutMs: 5_000, maxBytes: 100 });
+  assert.equal((await run('piped')).stdout, 'piped');
+  assert.equal((await run('')).exitCode, 0);
+  assert.equal((await run()).exitCode, 0);
+  assert.deepEqual(seen.map(options => options.stdin), ['pipe', 'pipe', 'ignore']);
+  assert.ok(seen.every(options => options.signal instanceof AbortSignal));
+});
 
 test('the root filesystem is readable', bubblewrap, async t => {
   const result = await run(['ls', '-l', '/bin'], workspace(), tempDir(t));

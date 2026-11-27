@@ -50,7 +50,7 @@ export interface SandboxedRunOptions extends BoundedRunOptions {
   stdin?: string;
 }
 
-/** Runs `command` under `policy` with one deadline and abort covering preparation, execution and cleanup. */
+/** Runs `command` under `policy`; one deadline and abort bound preparation, execution and the wait for cleanup. */
 export function runSandboxed(sandbox: PlatformSandbox, command: readonly string[], policy: SandboxPolicy, { cwd, env, ...run }: SandboxedRunOptions): Promise<BoundedRun> {
   return runStarted(signal => sandbox.spawn(command, policy, { cwd, env, stdin: run.stdin === undefined ? 'ignore' : 'pipe', signal }), run);
 }

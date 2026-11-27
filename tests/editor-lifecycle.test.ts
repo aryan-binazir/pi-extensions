@@ -855,6 +855,18 @@ test('replacement from an editor without a paste registry keeps the text Pi copi
   assert.equal(h.app.editor.getExpandedText(), '[paste #1 +12 lines]');
   h.emit('session_shutdown');
 });
+test('replacement probes the outgoing registry before reading its draft', () => {
+  installEditorInput();
+  const h = host('stock');
+  const plain: any = registrylessEditor();
+  const getText = plain.getText;
+  plain.getText = () => { plain.pastes ??= new Map(); return getText(); };
+  h.app.setCustomEditorComponent(() => plain);
+  plain.setText('draft');
+  h.app.setCustomEditorComponent(undefined);
+  assert.equal(h.app.editor.getText(), 'draft');
+  h.emit('session_shutdown');
+});
 test('replacement can reuse an editor or reject its factory without losing cursor ownership', () => {
   const h = host();
   const vi = h.app.editor;

@@ -176,8 +176,9 @@ export function registerMainEditorBinding(ctx: ExtensionContext, spec: EditorBin
 }
 function replace(this: Host, original: Replace, factory: unknown): void {
   const source = this.editor;
+  const registry = hasPasteRegistry(source);
   const text = source.getText();
-  const payloads = hasPasteRegistry(source) ? readPastes(source) : undefined;
+  const payloads = registry ? readPastes(source) : undefined;
   retireEditorInput(source);
   try { original.call(this, factory); }
   finally { const state = sharedState(); state.attach(this, state); }

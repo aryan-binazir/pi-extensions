@@ -126,7 +126,7 @@ export function raceAbort<T>(value: Promise<T>, signal: AbortSignal): Promise<T>
 }
 
 /** One timer-backed deadline covers preparation, execution, and completion cleanup. */
-export async function runStarted(start: (signal: AbortSignal) => Promise<SandboxedProcess>, options: Omit<BoundedRunOptions, 'env'>): Promise<BoundedRun> {
+export async function runStarted(start: (signal: AbortSignal) => Promise<SandboxedProcess>, options: Omit<BoundedRunOptions, 'cwd' | 'env'>): Promise<BoundedRun> {
   const controller = new AbortController();
   const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
   const stdout = new HeadTail(options.maxBytes / 2), stderr = new HeadTail(options.maxBytes / 2);

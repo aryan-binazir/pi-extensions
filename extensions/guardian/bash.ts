@@ -12,8 +12,7 @@ import { persistableAmendment } from './policies.ts';
 import { databaseRefusal } from './database.ts';
 import { RAILWAY_FORBIDDEN_REASON, RAILWAY_REVIEW_REASON, railwayDecision } from './railway.ts';
 import type { Policy } from './rules.ts';
-import { runStarted } from './review/process.ts';
-import { isLikelySandboxDenied, type PlatformSandbox } from './sandbox.ts';
+import { isLikelySandboxDenied, type PlatformSandbox, runSandboxed } from './sandbox.ts';
 import type { SandboxPolicy } from './seatbelt.ts';
 import type { Shell } from './shell.ts';
 
@@ -57,8 +56,8 @@ function sandboxedOperations(sandbox: PlatformSandbox, policy: SandboxPolicy, sh
       const shell = getShellConfig(shellPath);
       const argv = [shell.shell, ...shell.args, command];
       if (argv.some(argument => argument.includes('\0'))) throw new Error('This command cannot be run in the sandbox: it contains a NUL byte.');
-      const result = await runStarted(budget => sandbox.spawn(argv, policy, { cwd, env: env ?? process.env, stdin: 'ignore', signal: budget }), {
-        cwd, signal, timeoutMs: timeout !== undefined && timeout > 0 ? timeout * 1000 : Infinity, maxBytes: 0, onData,
+      const result = await runSandboxed(sandbox, argv, policy, {
+        cwd, env: env ?? process.env, signal, timeoutMs: timeout !== undefined && timeout > 0 ? timeout * 1000 : Infinity, maxBytes: 0, onData,
       });
       if (result.aborted) throw new Error('aborted');
       if (result.timedOut) throw new Error(`timeout:${timeout}`);

@@ -6,12 +6,12 @@ import { resolve } from 'node:path';
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { permissionsInstructions, wrapPermissionsInstructions } from '../permissions.ts';
-import type { PlatformSandbox } from '../sandbox.ts';
+import { type PlatformSandbox, runSandboxed } from '../sandbox.ts';
 import type { SandboxPolicy } from '../seatbelt.ts';
 import { GUARDIAN_OUTPUT_CONTRACT_PROMPT, parseGuardianAssessment } from './assessment.ts';
 import { truncateText } from './context.ts';
 import { isTransientProviderError, type ReviewOutcome } from './outcome.ts';
-import { raceAbort, runStarted } from './process.ts';
+import { raceAbort } from './process.ts';
 import { GUARDIAN_POLICY, GUARDIAN_POLICY_TEMPLATE, guardianPolicyInstructions } from './prompts.ts';
 
 const MAX_REVIEWER_TOOL_ROUNDS = 12;
@@ -105,8 +105,8 @@ async function executeTool(call: Extract<AssistantMessage['content'][number], { 
 /** Runs `bash -c` in the read-only sandbox with no network; output is capped like a transcript tool entry. */
 export async function runReadOnlyCommand(command: string, workdir: string, signal: AbortSignal, sandbox: PlatformSandbox | undefined): Promise<string> {
   if (!sandbox) return 'Read-only command checks are unavailable: this platform has no usable sandbox.\nexit code: 1';
-  const run = await runStarted(budget => sandbox.spawn(['/bin/bash', '-c', command], READ_ONLY, { cwd: workdir, env: process.env, stdin: 'pipe', signal: budget }), {
-    cwd: workdir, signal, timeoutMs: MAX_COMMAND_MS, maxBytes: MAX_CAPTURED_BYTES,
+  const run = await runSandboxed(sandbox, ['/bin/bash', '-c', command], READ_ONLY, {
+    cwd: workdir, env: process.env, stdin: '', signal, timeoutMs: MAX_COMMAND_MS, maxBytes: MAX_CAPTURED_BYTES,
   });
   if (run.aborted) throw new Error('aborted');
   const output = truncateText(`${run.stdout}${run.stderr}`, MAX_COMMAND_OUTPUT_TOKENS);

@@ -10,9 +10,8 @@ import {
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './approvals.ts';
 import type { GuardianConfig } from './config.ts';
-import { runStarted } from './review/process.ts';
 import { sandboxPolicyFor } from './bash.ts';
-import type { PlatformSandbox } from './sandbox.ts';
+import { type PlatformSandbox, runSandboxed } from './sandbox.ts';
 import { PROTECTED_METADATA_PATH_NAMES, workspaceWriteRoots } from './seatbelt.ts';
 
 const PATCH_REJECTED_OUTSIDE_PROJECT_REASON = 'writing outside of the project; rejected by user approval settings';
@@ -122,8 +121,8 @@ function linkReason(path: string, resolved: string): string | undefined {
  */
 export async function sandboxedWrite(path: string, content: string, config: GuardianConfig, cwd: string, sandbox: PlatformSandbox, signal?: AbortSignal): Promise<void> {
   const script = 'mkdir -p "$1" && cat > "$2"';
-  const run = await runStarted(budget => sandbox.spawn(['/bin/sh', '-c', script, 'sh', dirname(path), path], sandboxPolicyFor(config), { cwd, env: process.env, stdin: 'pipe', signal: budget }), {
-    cwd, signal, stdin: content, timeoutMs: SANDBOXED_WRITE_TIMEOUT_MS, maxBytes: 16 * 1024,
+  const run = await runSandboxed(sandbox, ['/bin/sh', '-c', script, 'sh', dirname(path), path], sandboxPolicyFor(config), {
+    cwd, env: process.env, signal, stdin: content, timeoutMs: SANDBOXED_WRITE_TIMEOUT_MS, maxBytes: 16 * 1024,
   });
   if (run.aborted) throw new Error('Operation aborted');
   if (run.spawnError) throw new Error(`Could not write ${path} in the sandbox: ${run.spawnError}`);

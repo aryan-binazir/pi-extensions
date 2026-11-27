@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after } from 'node:test';
 import { runStarted } from './review/process.ts';
-import { bubblewrapSandbox, detectPlatformSandbox, sandboxEnv, type SandboxedProcess } from './sandbox.ts';
+import { bubblewrapSandbox, detectPlatformSandbox, runSandboxed, sandboxEnv, type SandboxedProcess } from './sandbox.ts';
 import { hashPath, syntheticMountRegistryRoot } from './synthetic-mounts.ts';
 import { syscallNumber } from './seccomp.ts';
 import { PROTECTED_METADATA_PATH_NAMES, type SandboxPolicy } from './seatbelt.ts';
@@ -39,7 +39,7 @@ const workspace = (overrides: Partial<SandboxPolicy> = {}): SandboxPolicy =>
   ({ mode: 'workspace-write', networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true, ...overrides });
 
 async function run(command: readonly string[], policy: SandboxPolicy, cwd: string, env: NodeJS.ProcessEnv = process.env) {
-  const result = await runStarted(() => sandbox!.spawn(command, policy, { cwd, env, stdin: 'pipe' }), { cwd, timeoutMs: 20_000, maxBytes: 64 * 1024 });
+  const result = await runSandboxed(sandbox!, command, policy, { cwd, env, stdin: '', timeoutMs: 20_000, maxBytes: 64 * 1024 });
   assert.equal(result.spawnError, undefined, result.spawnError);
   return result;
 }
@@ -145,8 +145,9 @@ test('a .codex symlink replacement attack fails before anything runs', bubblewra
   const cwd = tempDir(t);
   mkdirSync(join(cwd, 'decoy-codex'));
   symlinkSync(join(cwd, 'decoy-codex'), join(cwd, '.codex'));
-  const result = await runStarted(() => sandbox!.spawn(['bash', '-c', `echo denied > ${join(cwd, '.codex', 'config.toml')}`], workspace(), { cwd, env: process.env, stdin: 'pipe' }),
-    { cwd, timeoutMs: 20_000, maxBytes: 4_096 });
+  const result = await runSandboxed(sandbox!, ['bash', '-c', `echo denied > ${join(cwd, '.codex', 'config.toml')}`], workspace(), {
+    cwd, env: process.env, stdin: '', timeoutMs: 20_000, maxBytes: 4_096,
+  });
   assert.match(result.spawnError ?? '', /cannot enforce sandbox read-only path .*crosses writable symlink/);
   assert.equal(existsSync(join(cwd, 'decoy-codex', 'config.toml')), false);
 });
@@ -210,9 +211,7 @@ test('failed partial registration leaves no phantom owners after successful comm
   const conflict = join(registry, hashPath(join(cwd, PROTECTED_METADATA_PATH_NAMES.at(-1)!)));
   mkdirSync(registry, { recursive: true });
   writeFileSync(conflict, 'conflicting marker directory');
-  const failed = await runStarted(signal => sandbox!.spawn(['/bin/true'], workspace(), {
-    cwd, env: process.env, stdin: 'ignore', signal,
-  }), { cwd, timeoutMs: 2000, maxBytes: 1000 });
+  const failed = await runSandboxed(sandbox!, ['/bin/true'], workspace(), { cwd, env: process.env, timeoutMs: 2000, maxBytes: 1000 });
   assert.match(failed.spawnError ?? '', /EEXIST/);
 
   rmSync(conflict);
@@ -240,9 +239,9 @@ test('held registry locks respect cancellation and deadlines before executing, t
     const controller = new AbortController();
     const timer = abort ? setTimeout(() => controller.abort(), 50) : undefined;
     const started = Date.now();
-    const result = await runStarted(signal => sandbox!.spawn(['/bin/sh', '-c', 'printf executed > executed'], workspace(), {
-      cwd, env: process.env, stdin: 'pipe', signal,
-    }), { cwd, signal: controller.signal, timeoutMs: abort ? 1000 : 80, maxBytes: 1000 });
+    const result = await runSandboxed(sandbox!, ['/bin/sh', '-c', 'printf executed > executed'], workspace(), {
+      cwd, env: process.env, stdin: '', signal: controller.signal, timeoutMs: abort ? 1000 : 80, maxBytes: 1000,
+    });
     clearTimeout(timer);
     assert.equal(result.aborted, abort);
     assert.equal(result.timedOut, !abort);
@@ -304,7 +303,7 @@ test('asynchronous launch failure releases registrations even when launch races 
       controller = new AbortController();
       let launching: Promise<SandboxedProcess> | undefined;
       const result = await runStarted(signal => launching = sandbox!.spawn(['/bin/true'], workspace(), { cwd, env: process.env, stdin: 'pipe', signal }),
-        { cwd, signal: controller.signal, timeoutMs: 10_000, maxBytes: 100 });
+        { signal: controller.signal, timeoutMs: 10_000, maxBytes: 100 });
       assert.equal(result.aborted, abort);
       if (!abort) assert.match(result.spawnError ?? '', /ENOENT/);
       await (await launching!).finished;
@@ -346,9 +345,7 @@ exit 0
   });
   const fixture = bubblewrapSandbox({ program: launcher, source: 'system' });
   for (const networkAccess of [false, false, true]) {
-    const result = await runStarted(signal => fixture.spawn(['/bin/true'], { mode: 'read-only', networkAccess }, {
-      cwd, env: process.env, stdin: 'ignore', signal,
-    }), { cwd, timeoutMs: 1000, maxBytes: 4096 });
+    const result = await runSandboxed(fixture, ['/bin/true'], { mode: 'read-only', networkAccess }, { cwd, env: process.env, timeoutMs: 1000, maxBytes: 4096 });
     descendants.splice(0, descendants.length, ...readFileSync(pidFile, 'utf8').trim().split('\n').map(Number));
     assert.equal(result.timedOut, false, 'an exited probe cannot wait for its pipe-holding descendant');
     assert.equal(result.exitCode, 0, result.stderr || result.spawnError);
@@ -383,9 +380,9 @@ exit 0
     if (probePid) { try { process.kill(probePid, 'SIGKILL'); } catch {} }
   });
   const fixture = bubblewrapSandbox({ program: launcher, source: 'system' });
-  const launch = (marker: string, timeoutMs: number) => runStarted(signal => fixture.spawn(['/bin/echo', marker], { mode: 'read-only', networkAccess: false }, {
-    cwd, env: process.env, stdin: 'pipe', signal,
-  }), { cwd, timeoutMs, maxBytes: 1000 });
+  const launch = (marker: string, timeoutMs: number) => runSandboxed(fixture, ['/bin/echo', marker], { mode: 'read-only', networkAccess: false }, {
+    cwd, env: process.env, stdin: '', timeoutMs, maxBytes: 1000,
+  });
   const startedAt = Date.now();
   const cancelled = launch('cancelled', 100), surviving = launch('survivor', 2000);
   const result = await cancelled;

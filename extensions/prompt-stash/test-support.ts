@@ -9,14 +9,13 @@ import viMode from "../vi-mode/index.ts";
 type Factory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 export function stashHost(EditorClass = CustomEditor, withViMode = false) {
   const hooks = new Map<string, ((...args: any[]) => unknown)[]>();
-  let factory: Factory | undefined = EditorClass === CustomEditor ? undefined : (...args) => new EditorClass(...args);
   const e = editor(EditorClass);
   const app: any = Object.create(InteractiveMode.prototype);
   const sessionManager = {};
   Object.defineProperty(app, "session", { value: { sessionManager } });
   app.editor = e;
   app.defaultEditor = editor(CustomEditor);
-  app.editorComponentFactory = factory;
+  if (EditorClass !== CustomEditor) app.editorComponentFactory = ((...args) => new EditorClass(...args)) satisfies Factory;
   app.ui = (e as any).tui;
   app.ui.setFocus = () => {};
   app.editorContainer = new Container();
@@ -24,21 +23,13 @@ export function stashHost(EditorClass = CustomEditor, withViMode = false) {
   app.keybindings = new KeybindingsManager();
   app.disposeActiveSelector = () => {};
   let status: string | undefined;
+  app.footerDataProvider = { setExtensionStatus: (_key: string, text: string | undefined) => { status = text; } };
   let installs = 0;
-  const ctx = {
-    mode: "tui", hasUI: true, sessionManager,
-    ui: {
-      getEditorComponent: () => app.editorComponentFactory,
-      setEditorComponent: (f: Factory | undefined) => {
-        factory = f; installs++;
-        app.setCustomEditorComponent(f);
-      },
-      getEditorText: () => app.editor.getExpandedText(),
-      setEditorText: (text: string) => app.editor.setText(text),
-      pasteToEditor: (text: string) => app.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
-      setStatus: (_key: string, text: string | undefined) => { status = text; },
-    },
-  } as unknown as ExtensionContext;
+  app.setCustomEditorComponent = function (this: unknown, factory: Factory | undefined) {
+    installs++;
+    return (InteractiveMode.prototype as any).setCustomEditorComponent.call(this, factory);
+  };
+  const ctx = { mode: "tui", hasUI: true, sessionManager, ui: app.createExtensionUIContext() } as unknown as ExtensionContext;
   const pi = {
     on: (name: string, fn: (...args: any[]) => unknown) => {
       const handlers = hooks.get(name) ?? [];

@@ -42,20 +42,8 @@ function host({ vi = false, skillCommands = true } = {}) {
       : suggest(lines, line, col, options);
     return base;
   };
-  const ctx = {
-    mode: "tui", hasUI: true, sessionManager,
-    ui: {
-      addAutocompleteProvider(factory: unknown) {
-        app.autocompleteProviderWrappers.push(factory);
-        app.setupAutocompleteProvider();
-      },
-      getEditorComponent: () => app.editorComponentFactory,
-      setEditorComponent: (factory: unknown) => app.setCustomEditorComponent(factory),
-      getEditorText: () => app.editor.getExpandedText(),
-      setEditorText: (text: string) => app.editor.setText(text),
-      setStatus() {},
-    },
-  } as unknown as ExtensionContext;
+  app.footerDataProvider = { setExtensionStatus() {} };
+  const ctx = { mode: "tui", hasUI: true, sessionManager, ui: app.createExtensionUIContext() } as unknown as ExtensionContext;
   const pi = {
     on(name: string, fn: (event: unknown, ctx: ExtensionContext) => unknown) {
       hooks.set(name, [...hooks.get(name) ?? [], fn]);

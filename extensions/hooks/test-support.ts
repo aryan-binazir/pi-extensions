@@ -17,7 +17,7 @@ export async function withHooks(catalog: Hook[], yaml: string | undefined, body:
   const configPath = join(dir, 'hooks.yaml');
   const handlers: Record<string, ((event: any, ctx: any) => any)[]> = {};
   const notices: string[] = [];
-  const ctx = { cwd: dir, hasUI: true, ui: { notify: (text: string) => notices.push(text) }, sessionManager: { getSessionId: () => 'test-session' } };
+  const ctx = { cwd: dir, hasUI: true, ui: { notify: (text: string) => notices.push(text) } };
   try {
     if (yaml !== undefined) await writeFile(configPath, yaml);
     createHooks({ catalog, configPath })({ on: (name: string, handler: any) => { (handlers[name] ??= []).push(handler); } } as any);

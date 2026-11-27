@@ -16,7 +16,7 @@ test('the tracked switches parse, name only real hooks, and are the live file th
   assert.deepEqual(unknownIds(parseSwitches(text), new Set(ids)), []);
   const handlers: Record<string, any> = {};
   hooks({ on: (name: string, handler: any) => { handlers[name] = handler; } } as any);
-  const ctx = { cwd: process.cwd(), sessionManager: { getSessionId: () => 'tracked' } };
+  const ctx = { cwd: process.cwd() };
   const result = await handlers.tool_call({ type: 'tool_call', toolName: 'write', toolCallId: 'w', input: { path, content: `${text}  not-a-hook: true\n` } }, ctx);
   assert.match(result?.reason ?? '', /no hooks named: not-a-hook/, 'only the live file rejects unknown hooks');
 });

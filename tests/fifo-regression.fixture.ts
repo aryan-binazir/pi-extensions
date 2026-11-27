@@ -10,7 +10,7 @@ const cwd = await mkdtemp(join(tmpdir(), 'fifo-regression-'));
 process.env.PI_CODING_AGENT_DIR = join(cwd, 'agent');
 const tools = new Map<string, ToolDefinition>();
 const events = new Map<string, () => Promise<void> | void>();
-const ctx = {cwd, hasUI: true, sessionManager:{getSessionId:()=> 'fifo-only'}, ui:{setWidget(){},setStatus(){},editor:async (_:string,s:string)=>s,confirm:async()=>true}};
+const ctx = {cwd, hasUI: true, ui:{setWidget(){},setStatus(){},editor:async (_:string,s:string)=>s,confirm:async()=>true}};
 subagents({
   getActiveTools: () => ['read', 'workflow'],
   registerTool: (tool: ToolDefinition) => { tools.set(tool.name, tool); },

@@ -13,5 +13,4 @@ serialized OAuth operations, reloaded state before requests and coordinated
 `/mcp-forget` with refresh so stale sessions could not overwrite rotated tokens
 or recreate a forgotten identity.
 
-Third-party attribution and licenses remain in [`../licenses`](../licenses). This
-records the removed implementation, not the current adapter's guarantees.
+Third-party attribution and licenses remain in [`../licenses`](../licenses).

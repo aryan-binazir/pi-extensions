@@ -121,12 +121,15 @@ export function cancelAutocomplete(editor: Editor): void {
 }
 
 export type PasteState = { pastes: Map<number, string>; counter: number };
+export function hasPasteRegistry(editor: Editor): boolean {
+  return (editor as unknown as { pastes?: unknown }).pastes instanceof Map;
+}
 function pasteInternal(editor: Editor) {
   const internal = editor as unknown as {
     pastes: Map<number, string>;
     pasteCounter: number;
   };
-  if (!(internal.pastes instanceof Map) || typeof internal.pasteCounter !== "number")
+  if (!hasPasteRegistry(editor) || typeof internal.pasteCounter !== "number")
     throw new Error("Unsupported Pi paste registry (tested with Pi 0.85.1 and 0.99.1)");
   return internal;
 }

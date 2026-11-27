@@ -1,7 +1,7 @@
 import { InteractiveMode, type CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component, Editor } from "@earendil-works/pi-tui";
 import { PasteFramer, type PasteFrame } from "./paste-framing.ts";
-import { expandPastes, placeCursor, readPastes, restoreRawDraft, writePastes, viEditor } from "./vi-mode/adapter.ts";
+import { expandPastes, hasPasteRegistry, placeCursor, readPastes, restoreRawDraft, writePastes, viEditor } from "./vi-mode/adapter.ts";
 
 type Host = {
   editor: Editor;
@@ -176,14 +176,14 @@ export function registerMainEditorBinding(ctx: ExtensionContext, spec: EditorBin
 }
 function replace(this: Host, original: Replace, factory: unknown): void {
   const source = this.editor;
-  const registry = (source as unknown as { pastes?: unknown }).pastes instanceof Map;
+  const registry = hasPasteRegistry(source);
   const text = source.getText();
   const payloads = registry ? readPastes(source) : undefined;
   retireEditorInput(source);
   try { original.call(this, factory); }
   finally { const state = sharedState(); state.attach(this, state); }
   if (!payloads || (!(viEditor in source) && !(viEditor in this.editor) && payloads.pastes.size === 0)) return;
-  if (!((this.editor as unknown as { pastes?: unknown }).pastes instanceof Map)) {
+  if (!hasPasteRegistry(this.editor)) {
     this.editor.setText(expandPastes(source, text)); return;
   }
   if (viEditor in this.editor) restoreRawDraft(this.editor, text, payloads);

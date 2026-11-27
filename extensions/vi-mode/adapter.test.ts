@@ -13,6 +13,7 @@ import {
   clearBaseUndo,
   collapsePaste,
   expandPastes,
+  hasPasteRegistry,
   pasteMarkers,
   placeCursor,
   projectDisplay,
@@ -114,6 +115,13 @@ test("readPastes and writePastes copy the registry between editors", () => {
   writePastes(target, state);
   assert.equal(expandPastes(target, marker), PAYLOAD);
   assert.deepEqual(readPastes(target), state);
+});
+
+test("hasPasteRegistry recognises only editors with Pi's paste registry", () => {
+  assert.equal(hasPasteRegistry(editor(CustomEditor)), true);
+  assert.equal(hasPasteRegistry(editor()), true);
+  assert.equal(hasPasteRegistry({ pastes: {} } as unknown as CustomEditor), false);
+  assert.equal(hasPasteRegistry({} as unknown as CustomEditor), false);
 });
 
 test("a paste snapshot is detached from the editor it came from", () => {

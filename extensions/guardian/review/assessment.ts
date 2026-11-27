@@ -15,18 +15,6 @@ const RISK_LEVELS = ['low', 'medium', 'high', 'critical'] as const;
 const USER_AUTHORIZATIONS = ['unknown', 'low', 'medium', 'high'] as const;
 const OUTCOMES = ['allow', 'deny'] as const;
 
-export const GUARDIAN_OUTPUT_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    risk_level: { type: 'string', enum: RISK_LEVELS },
-    user_authorization: { type: 'string', enum: USER_AUTHORIZATIONS },
-    outcome: { type: 'string', enum: OUTCOMES },
-    rationale: { type: 'string' },
-  },
-  required: ['outcome'],
-};
-
 export const GUARDIAN_OUTPUT_CONTRACT_PROMPT = `You may use read-only tool checks to gather any additional context you need before deciding. When you are ready to answer, your final message must be strict JSON.
 
 For low-risk actions, give the final answer directly: {"outcome":"allow"}.

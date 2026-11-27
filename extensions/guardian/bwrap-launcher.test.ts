@@ -2,8 +2,7 @@
 // codex-rs/linux-sandbox/tests/suite/bundled_bwrap.rs @ ce0323f (Apache-2.0); see docs/licenses/README.md. Fake
 // bubblewrap scripts stand in for the real one, so these run on every Unix platform.
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
@@ -11,14 +10,11 @@ import {
   findExecutableInSearchPaths, findSystemBwrap, procVersionIndicatesWsl1,
 } from './bwrap-launcher.ts';
 import type { WritableRoot } from './seatbelt.ts';
+import { canonicalTempDir } from './test-support.ts';
 
 const HELP = "#!/bin/sh\nprintf '%s\\n' '--as-pid-1' '--perms' '--argv0'\n";
 
-function tempDir(t: test.TestContext): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-bwrap-launcher-')));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
-}
+const tempDir = (t: test.TestContext) => canonicalTempDir(t, 'guardian-bwrap-launcher-');
 
 function writeExecutable(path: string, contents = HELP): string {
   writeFileSync(path, contents);

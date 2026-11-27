@@ -14,7 +14,7 @@ export function killProcessGroup(child: ChildProcess): void {
  * Pi's `waitForChildProcess`, which it does not export: after `exit`, keep reading until both pipes end or fall idle,
  * so a tail still in the pipe is not lost, and a descendant that left the group holding them open cannot hang the call.
  */
-export function waitForChildProcess(child: ChildProcess): Promise<void> {
+function waitForChildProcess(child: ChildProcess): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false, exited = false, stdoutEnded = !child.stdout, stderrEnded = !child.stderr;
     let idle: NodeJS.Timeout | undefined;

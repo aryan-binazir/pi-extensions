@@ -4,35 +4,24 @@
 import assert from 'node:assert/strict';
 import childProcess, { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test, { after } from 'node:test';
+import test from 'node:test';
 import { runStarted } from './review/process.ts';
 import { bubblewrapSandbox, detectPlatformSandbox, type PlatformSandbox, runSandboxed, sandboxEnv, type SandboxedChild, type SandboxedProcess, type SpawnSandboxedOptions } from './sandbox.ts';
 import { hashPath, syntheticMountRegistryRoot } from './synthetic-mounts.ts';
 import { syscallNumber } from './seccomp.ts';
 import { PROTECTED_METADATA_PATH_NAMES, type SandboxPolicy } from './seatbelt.ts';
+import { canonicalTempDir, flock, holdRegistryLock, isolateRegistryTmpdir } from './test-support.ts';
 
-const registryTemp = realpathSync(mkdtempSync(join(tmpdir(), 'guardian-linux-registry-')));
-const previousTmpdir = process.env.TMPDIR;
-process.env.TMPDIR = registryTemp;
-after(() => {
-  if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
-  rmSync(registryTemp, { recursive: true, force: true });
-});
-
+isolateRegistryTmpdir('guardian-linux-registry-');
 const { sandbox } = await detectPlatformSandbox();
-const flock = ['/usr/bin/flock', '/bin/flock'].find(existsSync);
 const bubblewrap = { skip: (sandbox?.kind !== 'bubblewrap' || !flock) && 'bubblewrap/flock prerequisites are unavailable' };
 const hasProgram = (program: string) => spawnSync('sh', ['-c', `command -v ${program}`]).status === 0;
 
-function tempDir(t: test.TestContext, prefix = 'guardian-linux-'): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
-}
+const tempDir = (t: test.TestContext, prefix = 'guardian-linux-') => canonicalTempDir(t, prefix);
 
 /** Keeps every test's writes confined to the roots it names; `/tmp` and `$TMPDIR` are otherwise writable. */
 const workspace = (overrides: Partial<SandboxPolicy> = {}): SandboxPolicy =>
@@ -240,20 +229,10 @@ test('failed partial registration leaves no phantom owners after successful comm
   }
 });
 
-async function holdLock(t: test.TestContext, registry: string) {
-  mkdirSync(registry, { recursive: true });
-  const child = spawn(flock!, ['--exclusive', join(registry, 'lock'), '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });
-  await once(child.stdout, 'data');
-  const closed = once(child, 'close');
-  const release = async () => { child.stdin.end(); await closed; };
-  t.after(release);
-  return release;
-}
-
 test('held registry locks respect cancellation and deadlines before executing, then recover', bubblewrap, async t => {
   const cwd = tempDir(t), registry = isolatedRegistry(t), marker = join(cwd, 'executed');
   for (const abort of [true, false]) {
-    const release = await holdLock(t, registry);
+    const release = await holdRegistryLock(t, registry);
     const controller = new AbortController();
     const timer = abort ? setTimeout(() => controller.abort(), 50) : undefined;
     const started = Date.now();
@@ -279,7 +258,7 @@ test('completion settles under cleanup contention and reconciles without removin
   const cwd = tempDir(t), registry = isolatedRegistry(t);
   const started = await sandbox!.spawn(['/bin/sh', '-c', 'printf ready; read -r done'], workspace(), { cwd, env: process.env, stdin: 'pipe' });
   await once(started.child.stdout, 'data');
-  const release = await holdLock(t, registry);
+  const release = await holdRegistryLock(t, registry);
   const foreignPath = join(cwd, '.aws'), foreignMarker = join(registry, hashPath(foreignPath), '1');
   writeFileSync(foreignMarker, 'synthetic\n');
   started.child.stdin?.end('done\n');

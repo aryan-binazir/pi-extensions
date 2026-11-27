@@ -9,7 +9,7 @@ import { pathStartsWith, PROTECTED_METADATA_PATH_NAMES, SandboxPreparationError,
 import { existingTarget, missingTarget, type SyntheticMountTarget } from './synthetic-mounts.ts';
 
 /** Linux system paths readable by the `/proc` mount preflight's minimal filesystem view. */
-export const LINUX_PLATFORM_DEFAULT_READ_ROOTS = ['/bin', '/sbin', '/usr', '/etc', '/lib', '/lib64', '/nix/store', '/run/current-system/sw'];
+const LINUX_PLATFORM_DEFAULT_READ_ROOTS = ['/bin', '/sbin', '/usr', '/etc', '/lib', '/lib64', '/nix/store', '/run/current-system/sw'];
 
 /** The first descriptor bubblewrap reads `--ro-bind-data` contents from; each one carries an empty file. */
 export const FIRST_BIND_DATA_FD = 3;
@@ -52,7 +52,7 @@ function componentPrefixes(path: string): string[] {
 }
 
 /** The fully resolved target, only when some component of `path` is a symlink. */
-export function canonicalTargetIfSymlinkedPath(path: string): string | undefined {
+function canonicalTargetIfSymlinkedPath(path: string): string | undefined {
   for (const current of componentPrefixes(path)) {
     const stats = lstatOrUndefined(current);
     if (!stats) return undefined;

@@ -62,7 +62,7 @@ function ancestors(path: string): string[] {
 }
 
 /** Resolves a top-level alias such as `/tmp -> /private/tmp`; deeper components keep their spelling. */
-export function normalizeSystemAliases(path: string): string {
+function normalizeSystemAliases(path: string): string {
   const [, top] = path.split('/');
   if (!top) return path;
   const topLevel = `/${top}`;

@@ -15,7 +15,7 @@ export const BUNDLED_RULES_DIR = join(BUNDLED_DIR, 'rules');
 /** Reviewer policy every machine loads ahead of the user's `extraPolicy`. */
 export const BUNDLED_EXTRA_POLICY_PATH = join(BUNDLED_DIR, 'extra-policy.md');
 
-export const guardianDir = () => join(getAgentDir(), 'guardian');
+const guardianDir = () => join(getAgentDir(), 'guardian');
 export const guardianConfigPath = () => join(guardianDir(), 'config.json');
 export const userRulesDir = () => join(guardianDir(), 'rules');
 /** Codex appends approved prefix rules to `rules/default.rules`. */

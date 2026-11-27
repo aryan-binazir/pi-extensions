@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { getAgentDir, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { clampThinkingLevel } from '@earendil-works/pi-ai/compat';
@@ -147,10 +147,6 @@ export function profileGuidance(config: ProfileConfig, parent?: Pick<ExtensionCo
     `Default profile (used when profile is omitted): ${config.defaultProfile} (${selection(config.profiles[config.defaultProfile])}).`,
     ...Object.entries(config.profiles).map(([name, profile]) => `${name}: ${selection(profile)} — ${profile.description}${profile.useWhen ? `; ${profile.useWhen}` : ''}`),
   ].join('\n');
-}
-export function profileLocation(ctx: ExtensionContext, activeCwd: string) {
-  const cwd = realpathSync(activeCwd);
-  return {cwd, trusted: cwd === realpathSync(ctx.cwd) && ctx.isProjectTrusted?.() === true};
 }
 
 export function assertTaskFields(task: object): void {

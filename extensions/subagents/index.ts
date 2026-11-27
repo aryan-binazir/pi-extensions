@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { ExtensionEditorComponent, SettingsManager, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
@@ -12,7 +13,7 @@ import { clipJson, taskView } from './presentation.ts';
 import { abortable } from './cancellation.ts';
 import { SubagentTracker } from './tracker.ts';
 import { sanitizeTrackerReport, trackerFooter } from './tracker-footer.ts';
-import { loadProfiles, profileGuidance, profileLocation, type ProfileConfig } from './profiles.ts';
+import { loadProfiles, profileGuidance, type ProfileConfig } from './profiles.ts';
 
 const taskSchema = Type.Object({
   task: Type.String({ minLength: 1, maxLength: 32000 }), cwd: Type.Optional(Type.String()),
@@ -121,7 +122,7 @@ export default function subagents(pi: ExtensionAPI): void {
   let configError: Error | undefined;
   let locationKey = '';
   const configFor = (ctx: ExtensionContext, reload = false): ProfileConfig => {
-    const location = profileLocation(ctx, ctx.cwd);
+    const location = {cwd: realpathSync(ctx.cwd), trusted: ctx.isProjectTrusted?.() === true};
     const key = JSON.stringify(location);
     if (reload || key !== locationKey) {
       locationKey = key; snapshot = undefined; configError = undefined;

@@ -58,6 +58,10 @@ launch does not repeat the cwd check. Configuration identity does not always
 change when an untrusted parent changes cwd. Adding that rejection would change
 which queued tasks launch and needs a separate behavior decision. Forwarded
 calls and workflow stage admission retain their explicit cwd-change checks.
+Pi binds `ctx.cwd` to each extension runner and replaces the extension instance
+when a session enters another cwd, so session switching alone does not justify a
+queued-launch parent cwd check. Whether launch should recheck that the child
+pathname still denotes the admitted directory remains a separate decision.
 
 The cancellation/completion lifecycle, workflow journal implementation and
 nearby editor extensions remain outside this decision.

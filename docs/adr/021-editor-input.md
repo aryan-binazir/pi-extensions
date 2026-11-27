@@ -12,7 +12,8 @@ has one `PasteFramer` and one input wrapper. Vi installs its key/paste backend
 when constructed, so direct editor use still works. Stock editors receive a
 complete bracketed paste. Bindings register once with a stable ID, priority and
 per-editor factory. The host registry is keyed by `sessionManager`; an editor
-caches binding instances while looking up the live registry on every input.
+caches binding instances, looks up the live registry for each delivered frame,
+and registration changes refresh attached editors immediately.
 Escape Continue declares priority 200, stash 100 and inline skills 0. Higher
 numbers run first; stable IDs break ties. A binding consumes a key by returning
 true and may send keys to the editor through `forward`. Paste data never
@@ -60,8 +61,9 @@ necessary. This ADR centralizes replacement ownership, not personal settings.
 Tests use real editor input and `InteractiveMode` replacement with the shared
 [Pi-session harness](023-test-harness.md). They cover all six three-extension
 orders, each extension alone, both stash/Escape Continue orders without Vi,
-framing counts, binding precedence, fragmented control-byte pastes, replacement,
+framing counts, Vi/stash/Escape Continue key precedence, fragmented control-byte pastes, replacement,
 reload, latest implementations and cursor retirement/reacquisition. Existing
-Vi, stash and Escape Continue behavioral tests remain the integration contract.
+Vi, stash, Escape Continue and inline-skills behavioral tests, including stash
+precedence over inline skills, remain the integration contract.
 [ADR 001](001-editor.md) and [ADR 016](016-paste-framing.md) retain editing and
 marker-recognition policy while this module owns input lifetime.

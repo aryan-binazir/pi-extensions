@@ -28,7 +28,6 @@ export function isTransientProviderError(message: string): boolean {
   return /\b(408|429|5\d\d)\b|overload|rate.?limit|temporar|unavailable|timed? ?out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up|disconnect|fetch failed|network/i.test(message);
 }
 
-/** A reviewer's final text as an outcome: no text is a permanent failure, unparseable text a retryable one. */
 export function assessmentOutcome(text: string): ReviewOutcome {
   if (!text.trim()) return { type: 'error', error: { type: 'session', message: 'guardian review completed without an assessment payload', transient: false } };
   try {

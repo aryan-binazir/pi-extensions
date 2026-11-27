@@ -82,6 +82,9 @@ test('API errors are session errors classified for retry; bad output is a parse 
   assert.deepEqual(await runClaudeCliReview(input(unauthorized.command)), { type: 'error', error: { type: 'session', message: 'claude -p failed (exit 1): Invalid API key', transient: false } });
   const prose = fakeClaude(t, `process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: 'Looks fine.' }));`);
   assert.deepEqual(await runClaudeCliReview(input(prose.command)), { type: 'error', error: { type: 'parse', message: 'guardian assessment was not valid JSON' } });
+});
+
+test('a blank CLI result completes without an assessment payload', async t => {
   const blank = fakeClaude(t, `process.stdout.write(JSON.stringify({ type: 'result', is_error: false, result: '  \\n' }));`);
   assert.deepEqual(await runClaudeCliReview(input(blank.command)), { type: 'error', error: { type: 'session', message: 'guardian review completed without an assessment payload', transient: false } });
 });

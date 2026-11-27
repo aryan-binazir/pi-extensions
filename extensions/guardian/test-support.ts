@@ -34,7 +34,6 @@ export function canonicalTempDir(t: TestContext, prefix: string): string {
   return dir;
 }
 
-/** Holds the registry's flock(1) lock from another process until the returned release runs or the test ends. */
 export async function holdRegistryLock(t: TestContext, registry: string) {
   mkdirSync(registry, { recursive: true });
   const child = spawn(flock!, ['--exclusive', join(registry, 'lock'), '/bin/sh', '-c', 'printf ready; cat >/dev/null'], { stdio: ['pipe', 'pipe', 'pipe'] });

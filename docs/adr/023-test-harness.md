@@ -39,7 +39,10 @@ Each option supports multiple migrated tests: factories in todo and subagents;
 settings in package and fast mode; responses in todo/scripted-tool and editor
 snapshot tests; workspaces in footer and Neovim; session managers in effort and
 fast mode; start events in startup and resume regressions; configuration in
-effort and fast mode; bindings in footer, effort and Neovim. Add no single-test
+effort and fast mode; bindings in footer, effort and Neovim; an interactive host
+that binds each session itself, at startup and after replacement, in Escape
+Continue and editor lifecycle. The harness still records a host's extension
+errors. Add no single-test
 options or extension-specific behavior to the harness.
 
 ## Consequences
@@ -56,7 +59,7 @@ unit fixtures, malformed host states, legacy APIs without getSettings, and TUI
 component/timing doubles remain local. UI doubles do not replace the host in the
 real workflow settings test.
 
-Concurrent migration candidates are Escape Continue, Vi mode, prompt stash,
+Concurrent migration candidates are Vi mode, prompt stash,
 editor lifecycle, BTW, and subagent tracker/profile tests and their test-support
 module. Stock-child and delegated-child parent tests also retain their own setup
 outside this change's ownership. The delegated-child JavaScript fixture is a

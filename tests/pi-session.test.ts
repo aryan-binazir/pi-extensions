@@ -75,6 +75,33 @@ test('runtime replacement consumes the remaining faux responses and exposes the 
 }));
 
 
+test('a host binds each session itself, once at startup and once per replacement', async () => {
+  const bound: unknown[] = [];
+  let starts = 0;
+  await withPi({ extensions: [pi => { pi.on('session_start', () => { starts++; }); }], async host(session) {
+    bound.push(session);
+    await session.bindExtensions({ mode: 'tui' });
+  } }, async fixture => {
+    assert.equal(bound.length, 1);
+    assert.ok(bound[0] === fixture.session);
+    assert.equal(starts, 1);
+    await fixture.runtime.newSession();
+    assert.equal(bound.length, 2);
+    assert.ok(bound[1] === fixture.session);
+    assert.equal(starts, 2);
+  });
+});
+
+
+for (const phase of ['startup', 'reload'] as const) test(`a host keeps extension errors from ${phase} failing the fixture`, async () => {
+  await assert.rejects(withPi({ extensions: [pi => {
+    pi.on('session_start', event => { if (event.reason === phase) throw new Error(`${phase} failed`); });
+  }], host: session => session.bindExtensions({ mode: 'tui', onError() {} }) }, async ({ session }) => {
+    if (phase === 'reload') await session.reload();
+  }), new RegExp(`${phase} failed`));
+});
+
+
 for (const replacement of [false, true]) test(`${replacement ? 'replacement' : 'initial'} setup failure releases factory listeners and shuts down each session once`, async () => {
   const handoff = 'pi-interactive:effort-handoff';
   const before = process.listenerCount(handoff);

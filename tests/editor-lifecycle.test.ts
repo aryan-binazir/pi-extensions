@@ -729,7 +729,7 @@ test('Vi composes with a factory that reuses an already wired editor', () => {
 
 async function withInputEditors(extensions: Parameters<typeof withPi>[0]["extensions"], run: (app: any) => Promise<void>) {
   let app: any;
-  await withPi({ extensions, bind(session) {
+  await withPi({ extensions, async host(session) {
     app = Object.create(InteractiveMode.prototype);
     Object.defineProperty(app, 'session', { value: session });
     app.defaultEditor = editor(CustomEditor);
@@ -750,11 +750,8 @@ async function withInputEditors(extensions: Parameters<typeof withPi>[0]["extens
     };
     app.setupAutocompleteProvider = app.setupExtensionShortcuts = app.showLoadedResources = app.showStartupNoticesIfNeeded = () => {};
     app.showExtensionError = (_path: string, error: string) => assert.fail(error);
-    return { uiContext: app.createExtensionUIContext(), mode: 'tui' };
-  } }, async () => {
     await app.bindCurrentSessionExtensions();
-    await run(app);
-  });
+  } }, () => run(app));
 }
 
 test('main editor frames each raw input once with vi, stash and Escape Continue', async () => {

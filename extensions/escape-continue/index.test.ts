@@ -1,10 +1,7 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { AssistantMessageComponent, type AgentSession, AgentSessionRuntime, createAgentSession, type CreateAgentSessionRuntimeFactory, CustomEditor, DefaultResourceLoader, InteractiveMode, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type FauxResponseFactory, type ImageContent } from '@earendil-works/pi-ai';
+import { AssistantMessageComponent, type AgentSession, CustomEditor, InteractiveMode, SessionManager, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory, type ImageContent } from '@earendil-works/pi-ai';
 import { CombinedAutocompleteProvider, Container, Input, setKittyProtocolActive } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import viMode from '../vi-mode/index.ts';
@@ -15,6 +12,7 @@ import { initTheme } from '../../node_modules/@earendil-works/pi-coding-agent/di
 import escapeContinue from './index.ts';
 import { install } from './adapter.ts';
 import type { Message } from './promotion.ts';
+import { withPi, type PiFixture } from '../../tests/pi-session.ts';
 
 initTheme('dark', false);
 
@@ -70,56 +68,58 @@ function versionSession(t: TestContext, session: AgentSession, version: typeof v
   }
 }
 
+const teardowns = new WeakMap<TestContext, (() => Promise<void>)[]>();
+
 async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [], enabled = true, before: ((pi: ExtensionAPI) => void)[] = []) {
-  const cwd = await mkdtemp(join(tmpdir(), 'pi-escape-continue-'));
-  const agentDir = join(cwd, 'agent');
-  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 1 }, retry: { enabled: false }, steeringMode: 'one-at-a-time', followUpMode: 'one-at-a-time', doubleEscapeAction: 'none' });
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, extensionFactories: [...before, ...enabled ? [escapeContinue] : [], ...extra], noExtensions: true, noContextFiles: true, noSkills: true, noThemes: true, noPromptTemplates: true });
-  await resourceLoader.reload();
-  assert.deepEqual(resourceLoader.getExtensions().errors, []);
-  const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
-  const provider = fauxProvider({ provider: 'escape-continue-test', tokensPerSecond: 100000 });
-  modelRuntime.registerNativeProvider(provider.provider);
-  const { session } = await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader, modelRuntime, sessionManager: SessionManager.inMemory(cwd), model: provider.getModel(), noTools: 'builtin' });
   const app: any = Object.create(InteractiveMode.prototype);
-  Object.defineProperty(app, 'session', { value: session, writable: true, configurable: true });
-  Object.defineProperty(app, 'sessionManager', { get: () => app.session.sessionManager });
+  Object.defineProperty(app, 'session', { value: undefined, writable: true, configurable: true });
   app.defaultEditor = editor(CustomEditor);
   app.editor = app.defaultEditor;
   app.editorContainer = new Container();
   app.pendingMessagesContainer = new Container();
   app.statusContainer = new Container();
   app.compactionQueuedMessages = [];
-  Object.defineProperty(app, 'settingsManager', { value: settingsManager });
   app.keybindings = new KeybindingsManager();
   app.ui = { requestRender() {}, terminal: { write() {}, rows: 30, columns: 80 }, onDebug: undefined, setFocus() {}, getFocusedComponent: () => app.editor, getShowHardwareCursor: () => false, setShowHardwareCursor() {} };
   const notices: string[] = [];
-  const baseUI = session.extensionRunner!.createContext().ui;
-  const ui = { ...baseUI,
-    notify: (message: string) => { notices.push(message); },
-    setStatus: (_key: string, text: string | undefined) => { if (text) notices.push(text); },
-    getEditorText: () => app.editor.getExpandedText(),
-    setEditorText: (text: string) => app.editor.setText(text),
-    getEditorComponent: () => app.editorComponentFactory,
-    setEditorComponent: (factory: unknown) => app.setCustomEditorComponent(factory),
-  };
+  let ui: object | undefined;
   app.createExtensionUIContext = () => ui;
   app.setupAutocompleteProvider = app.setupExtensionShortcuts = app.showLoadedResources = app.showStartupNoticesIfNeeded = () => {};
   app.showExtensionError = (_path: string, error: string) => { notices.push(error); };
   app.setupKeyHandlers();
-  await app.bindCurrentSessionExtensions();
-  const errors: unknown[] = [];
-  session.extensionRunner!.onError(error => errors.push(error));
-  let retired = false;
-  t.after(async () => {
-    await session.abort();
-    if (!retired) {
-      await session.extensionRunner!.emit({ type: 'session_shutdown', reason: 'quit' });
-      session.dispose();
-    }
-    await rm(cwd, { recursive: true, force: true });
-    assert.deepEqual(errors, []);
-  });
+  const host = async (session: AgentSession) => {
+    ui ??= { ...session.extensionRunner!.createContext().ui,
+      notify: (message: string) => { notices.push(message); },
+      setStatus: (_key: string, text: string | undefined) => { if (text) notices.push(text); },
+      getEditorText: () => app.editor.getExpandedText(),
+      setEditorText: (text: string) => app.editor.setText(text),
+      getEditorComponent: () => app.editorComponentFactory,
+      setEditorComponent: (factory: unknown) => app.setCustomEditorComponent(factory),
+    };
+    app.session = session;
+    await app.bindCurrentSessionExtensions();
+  };
+  let stack = teardowns.get(t);
+  if (!stack) {
+    const pending: (() => Promise<void>)[] = [];
+    teardowns.set(t, stack = pending);
+    t.after(async () => {
+      const failures: unknown[] = [];
+      while (pending.length) try { await pending.pop()!(); } catch (error) { failures.push(error); }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length) throw new AggregateError(failures, 'Escape Continue fixture teardown failed');
+    });
+  }
+  let started!: (pi: PiFixture) => void;
+  const ready = new Promise<PiFixture>(resolve => { started = resolve; }), done = deferred();
+  const closed = withPi({
+    extensions: [...before, ...enabled ? [escapeContinue] : [], ...extra],
+    settings: { compaction: { enabled: false, keepRecentTokens: 1 }, retry: { enabled: false }, steeringMode: 'one-at-a-time', followUpMode: 'one-at-a-time', doubleEscapeAction: 'none' },
+    sessionManager: cwd => SessionManager.inMemory(cwd), host,
+  }, pi => { started(pi); return done.promise; });
+  const pi = await Promise.race([ready, closed.then(() => ready)]);
+  const session = pi.session;
+  stack.push(() => { done.resolve(); return closed; });
   const users = () => session.messages.filter(message => message.role === 'user').map(message => typeof message.content === 'string' ? message.content : message.content.filter(part => part.type === 'text').map(part => part.text).join(''));
   const blocked = (started: ReturnType<typeof deferred>, released?: ReturnType<typeof deferred>): FauxResponseFactory => async (_context, options) => {
     started.resolve();
@@ -127,8 +127,7 @@ async function fixture(t: TestContext, extra: ((pi: ExtensionAPI) => void)[] = [
     else if (!options?.signal?.aborted) await new Promise<void>(resolve => options?.signal?.addEventListener('abort', () => resolve(), { once: true }));
     return fauxAssistantMessage('Cancelled response');
   };
-  const services = { cwd, agentDir, settingsManager, modelRuntime, resourceLoader, diagnostics: [] };
-  return { session, provider, app, notices, users, blocked, settingsManager, services, retire: () => { retired = true; } };
+  return { session, provider: pi.provider, runtime: pi.runtime, app, notices, users, blocked, settingsManager: session.settingsManager };
 }
 
 function renderAssistantUI(t: TestContext, h: Awaited<ReturnType<typeof fixture>>) {
@@ -1507,26 +1506,13 @@ test('accepted runtime replacement retires a promotion before an earlier async s
     shutdown.resolve();
     await releaseShutdown.promise;
   })]);
-  const create: CreateAgentSessionRuntimeFactory = async options => {
-    await h.services.resourceLoader.reload();
-    const result = await createAgentSession({
-      ...h.services, sessionManager: options.sessionManager, sessionStartEvent: options.sessionStartEvent,
-      model: h.provider.getModel(), noTools: 'builtin',
-    });
-    return { ...result, services: h.services, diagnostics: [] };
-  };
-  const runtime = new AgentSessionRuntime(h.session, h.services, create);
-  runtime.setRebindSession(async session => {
-    h.app.session = session;
-    await h.app.bindCurrentSessionExtensions();
-  });
   const first = deferred(), release = deferred();
   h.provider.setResponses([h.blocked(first, release), fauxAssistantMessage('Must not start')]);
   const running = h.session.prompt('Original');
   await first.promise;
   await h.session.followUp('Next');
   h.app.editor.handleInput('\x1b');
-  const replacement = runtime.newSession();
+  const replacement = h.runtime.newSession();
   release.resolve();
   try {
     await shutdown.promise;
@@ -1537,17 +1523,17 @@ test('accepted runtime replacement retires a promotion before an earlier async s
   } finally {
     releaseShutdown.resolve();
     await replacement;
-    h.retire();
-    await runtime.dispose();
   }
   await running;
-  assert.notEqual(runtime.session, h.session);
-  assert.deepEqual(runtime.session.messages, []);
+  const live = h.runtime.session;
+  assert.ok(live !== h.session && h.app.session === live);
+  await h.runtime.dispose();
+  assert.deepEqual(live.messages, []);
 });
 
 test('interactive quit retires a promotion before terminal drain or async shutdown handlers', async t => {
-  const h = await fixture(t);
-  const runtime = new AgentSessionRuntime(h.session, h.services, async () => { throw new Error('Quit must not replace the runtime'); });
+  let loads = 0;
+  const h = await fixture(t, [() => { loads++; }]);
   const first = deferred(), release = deferred(), draining = deferred(), releaseDrain = deferred();
   h.provider.setResponses([h.blocked(first, release), fauxAssistantMessage('Must not start')]);
   const running = h.session.prompt('Original');
@@ -1557,7 +1543,7 @@ test('interactive quit retires a promotion before terminal drain or async shutdo
   h.app.themeController = { disableAutoSync() {} };
   h.app.stop = () => {};
   h.app.ui.terminal.drainInput = async () => { draining.resolve(); await releaseDrain.promise; };
-  h.app.runtimeHost = { dispose: async () => { await runtime.dispose(); h.retire(); } };
+  h.app.runtimeHost = h.runtime;
   const exit = process.exit, expectedExit = new Error('Expected interactive quit');
   process.exit = () => { throw expectedExit; };
   const quitting = h.app.shutdown().catch((error: unknown) => { assert.equal(error, expectedExit); });
@@ -1572,6 +1558,8 @@ test('interactive quit retires a promotion before terminal drain or async shutdo
     release.resolve(); releaseDrain.resolve();
     try { await quitting; } finally { process.exit = exit; }
   }
+  assert.equal(loads, 1, 'quit must not replace the runtime');
+  assert.ok(h.runtime.session === h.session);
 });
 
 test('accepted TUI reload cannot start a held prompt while an earlier shutdown handler waits', async t => {
@@ -1683,17 +1671,19 @@ test('a rejected TUI reload leaves the pending promotion eligible to continue', 
 });
 
 test('a cancelled runtime replacement leaves the held promotion eligible to continue', async t => {
-  const h = await fixture(t, [pi => pi.on('session_before_switch', () => ({ cancel: true }))]);
-  const runtime = new AgentSessionRuntime(h.session, h.services, async () => { throw new Error('Cancelled replacement must not create a runtime'); });
+  let loads = 0;
+  const h = await fixture(t, [pi => { loads++; pi.on('session_before_switch', () => ({ cancel: true })); }]);
   const first = deferred(), release = deferred(), promoted = deferred();
   h.provider.setResponses([h.blocked(first, release), h.blocked(promoted)]);
   const running = h.session.prompt('Original');
   await first.promise;
   await h.session.followUp('Next');
   h.app.editor.handleInput('\x1b');
-  const result = await runtime.newSession();
+  const result = await h.runtime.newSession();
   release.resolve();
   assert.deepEqual(result, { cancelled: true });
+  assert.equal(loads, 1, 'cancelled replacement must not create a runtime');
+  assert.ok(h.runtime.session === h.session);
   await promoted.promise;
   assert.deepEqual(h.users(), ['Original', 'Next']);
   h.app.editor.handleInput('\x1b');

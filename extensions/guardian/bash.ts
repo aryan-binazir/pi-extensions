@@ -6,7 +6,7 @@
 import { type BashOperations, type BashToolDetails, createBashToolDefinition, getShellConfig, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import type { ApprovalContext, ApprovalDecision, ApprovalRequest } from './approvals.ts';
-import type { GuardianConfig } from './config.ts';
+import { type GuardianConfig, sandboxPolicyFor } from './config.ts';
 import { createExecApprovalRequirement, type SandboxPermissions } from './exec-policy.ts';
 import { persistableAmendment } from './policies.ts';
 import { databaseRefusal } from './database.ts';
@@ -38,11 +38,6 @@ export interface BashRuntime {
   approvals: { request(request: ApprovalRequest, ctx: ApprovalContext, signal?: AbortSignal): Promise<ApprovalDecision> };
   /** Entry commits an authorized rule write; later cancellation does not roll it back. */
   persistAmendment(prefix: string[]): Promise<void>;
-}
-
-export function sandboxPolicyFor(config: GuardianConfig): SandboxPolicy {
-  const { mode, networkAccess, writableRoots, excludeTmpdirEnvVar, excludeSlashTmp } = config.sandbox;
-  return { mode: mode === 'read-only' ? 'read-only' : 'workspace-write', networkAccess, writableRoots, excludeTmpdirEnvVar, excludeSlashTmp };
 }
 
 /**

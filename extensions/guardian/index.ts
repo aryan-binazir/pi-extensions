@@ -205,6 +205,8 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     turn++;
   });
   pi.on('agent_start', (_event, ctx) => {
+    // Background reviews that settle after agent_end recreate the ended turn's denial count.
+    approvals.clearTurn(String(turn));
     turn++;
     reviewStatusOwner = undefined;
     if (ctx.hasUI) ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);

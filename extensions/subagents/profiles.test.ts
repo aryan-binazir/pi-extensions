@@ -15,7 +15,7 @@ async function fixture(run: (f: any) => Promise<void>) {
   await mkdir(join(cwd, '.pi'), {recursive: true}); await mkdir(agentDir);
   const global = join(agentDir, 'subagents.json'), local = join(cwd, '.pi/subagents.local.json');
   const put = (path: string, value: unknown) => writeFile(path, JSON.stringify(value));
-  const ctx: any = {cwd, isProjectTrusted: () => true, model: {provider: 'test', id: 'selected'}, thinkingLevel: 'low', modelRegistry: fixtureModelRegistry()};
+  const ctx: any = {model: {provider: 'test', id: 'selected'}, thinkingLevel: 'low', modelRegistry: fixtureModelRegistry()};
   const load = (trusted = true) => loadProfiles(cwd, trusted, agentDir);
   try { await run({root, cwd, agentDir, global, local, put, ctx, load}); }
   finally { await rm(root, {recursive: true, force: true}); }

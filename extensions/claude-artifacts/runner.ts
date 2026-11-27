@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { basename, dirname, join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
-import { decide, policyState, resolveStep, type Plan } from './policy.ts';
+import { ArtifactToolError, createPolicy, type Plan } from './policy.ts';
 
 const HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied', 'Stop', 'StopFailure'];
 const MIN_CLAUDE_VERSION = [2, 1, 302];
@@ -26,14 +26,6 @@ interface ConverseOptions { signal?: AbortSignal; stopAfter?: (step: number, res
 
 const helperRoot = () => join(getAgentDir(), 'claude-artifacts', 'helper');
 const verifiedPaths = new Set<string>();
-
-class ArtifactToolError extends Error {
-  readonly refused: boolean;
-  constructor(readonly step: number, readonly detail: string) {
-    super(`Claude Code's Artifact tool failed: ${detail}`);
-    this.refused = /^(Publish refused|You hadn't viewed the live version)/.test(detail);
-  }
-}
 
 export async function saveSource(name: string, text: string) {
   const dir = join(getAgentDir(), 'claude-artifacts', 'reads');
@@ -137,7 +129,7 @@ async function runSession(plan: Plan, jobDir: string, { signal, stopAfter }: Con
   signal?.throwIfAborted();
   const sessionId = randomUUID(), token = randomBytes(24).toString('hex');
   const handshake = `PIJOB ${randomBytes(16).toString('hex')}: carry out the Pi artifact job instruction supplied in the hook context for this prompt. If no such instruction is present, do nothing and reply "no job".`;
-  const policy = policyState(), responses: unknown[] = [], resolved = new Set<number>(), written: { transcript?: unknown; scratchpad?: unknown } = {};
+  const policy = createPolicy(plan), responses: unknown[] = [], written: { transcript?: unknown; scratchpad?: unknown } = {};
   let started = false, settled = false, settle!: (outcome: Settle) => void;
   const outcome = new Promise<Settle>(resolve => { settle = value => { settled = true; resolve(value); }; });
   const fail = (message: string): Settle => ({ ok: false, error: new Error(message) });
@@ -154,23 +146,21 @@ async function runSession(plan: Plan, jobDir: string, { signal, stopAfter }: Con
         return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: instruction(steps) } };
       case 'PreToolUse': {
         const toolInput = typeof input.tool_input === 'object' && input.tool_input !== null ? input.tool_input as Record<string, unknown> : {};
-        const decision = decide(plan, policy, { tool: String(input.tool_name), input: toolInput, id: String(input.tool_use_id) });
+        const decision = policy.decide({ tool: String(input.tool_name), input: toolInput, id: String(input.tool_use_id) });
         if (!decision.allow && decision.fatal) settle(fail(`Claude Code kept making calls the job does not allow: ${decision.reason}`));
         return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision.allow ? 'allow' : 'deny', permissionDecisionReason: decision.allow ? 'Approved by Pi.' : decision.reason } };
       }
       case 'PostToolUse': {
-        const id = String(input.tool_use_id), step = policy.reserved.get(id);
+        const step = policy.succeeded(String(input.tool_use_id));
         if (step === undefined) return {};
-        responses[step] = input.tool_response; resolved.add(step); resolveStep(policy, id);
+        responses[step] = input.tool_response;
         if (step < steps.length - 1 && !stopAfter?.(step, input.tool_response)) return {};
         settle({ ok: true, responses });
         return done;
       }
       case 'PostToolUseFailure': {
-        const step = policy.reserved.get(String(input.tool_use_id));
-        if (step === undefined) return {};
-        const error = new ArtifactToolError(step, String(input.error ?? 'unknown error'));
-        if (steps[step].input.action !== 'publish' || error.refused) resolved.add(step);
+        const error = policy.failed(String(input.tool_use_id), input.error);
+        if (!error) return {};
         settle({ ok: false, error });
         return done;
       }
@@ -221,8 +211,7 @@ async function runSession(plan: Plan, jobDir: string, { signal, stopAfter }: Con
     try {
       const result = await outcome;
       if (result.ok) return result.responses;
-      const pending = [...policy.reserved.values()].some(step => steps[step].input.action === 'publish' && !resolved.has(step));
-      if (pending) throw new Error(`${result.error.message} Claude Code was already allowed to publish, so the outcome is unknown: check claude_artifact_list before retrying.`);
+      if (policy.publishOutcomeUnknown()) throw new Error(`${result.error.message} Claude Code was already allowed to publish, so the outcome is unknown: check claude_artifact_list before retrying.`);
       throw result.error;
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
   } finally {

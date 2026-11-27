@@ -830,6 +830,31 @@ test('draft reset during a fragmented paste cannot expose payload controls to bi
   });
 });
 
+function registrylessEditor() {
+  let text = '';
+  return { getText: () => text, setText(value: string) { text = value; }, render: () => [], handleInput() {}, invalidate() {} };
+}
+test('replacement expands collapsed pastes into an editor without a paste registry', () => {
+  installEditorInput();
+  const h = host('stock'); paste(h.app.editor);
+  const expanded = h.app.editor.getExpandedText();
+  assert.match(h.app.editor.getText(), /^\[paste #\d+ \+101 lines\]$/);
+  const plain = registrylessEditor();
+  h.app.setCustomEditorComponent(() => plain);
+  assert.equal(plain.getText(), expanded);
+  h.emit('session_shutdown');
+});
+test('replacement from an editor without a paste registry keeps the text Pi copied', () => {
+  installEditorInput();
+  const h = host('stock');
+  const plain = registrylessEditor();
+  h.app.setCustomEditorComponent(() => plain);
+  plain.setText('[paste #1 +12 lines]');
+  h.app.setCustomEditorComponent(undefined);
+  assert.equal(h.app.editor.getText(), '[paste #1 +12 lines]');
+  assert.equal(h.app.editor.getExpandedText(), '[paste #1 +12 lines]');
+  h.emit('session_shutdown');
+});
 test('replacement can reuse an editor or reject its factory without losing cursor ownership', () => {
   const h = host();
   const vi = h.app.editor;

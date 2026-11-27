@@ -1,7 +1,7 @@
 // Ported from openai/codex codex-rs/ext/guardian-reviewer/src/{lib,outcome,retry,completion}.rs @ ce0323f (Apache-2.0);
 // see docs/licenses/README.md. Pi reports provider failures as text, so transient errors are recognized from
 // the message instead of Codex's structured error info.
-import type { GuardianAssessment, GuardianAssessmentOutcome } from './assessment.ts';
+import { type GuardianAssessment, type GuardianAssessmentOutcome, parseGuardianAssessment } from './assessment.ts';
 import { REJECTION_INSTRUCTIONS, renderGuardianRejection, REVIEW_FAILURE_INSTRUCTIONS, TIMEOUT_INSTRUCTIONS } from './prompts.ts';
 
 export const MAX_REVIEW_ATTEMPTS = 3;
@@ -26,6 +26,15 @@ export type ReviewDecision =
 /** Rate limits, overload, 408/429/5xx and dropped connections: the failures Codex retries. */
 export function isTransientProviderError(message: string): boolean {
   return /\b(408|429|5\d\d)\b|overload|rate.?limit|temporar|unavailable|timed? ?out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up|disconnect|fetch failed|network/i.test(message);
+}
+
+export function assessmentOutcome(text: string): ReviewOutcome {
+  if (!text.trim()) return { type: 'error', error: { type: 'session', message: 'guardian review completed without an assessment payload', transient: false } };
+  try {
+    return { type: 'completed', assessment: parseGuardianAssessment(text) };
+  } catch (error) {
+    return { type: 'error', error: { type: 'parse', message: (error as Error).message } };
+  }
 }
 
 export function shouldRetryReview(outcome: ReviewOutcome): boolean {

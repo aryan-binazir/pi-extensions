@@ -4,8 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ThinkingLevel } from '@earendil-works/pi-ai';
-import { parseGuardianAssessment } from './assessment.ts';
-import { isTransientProviderError, type ReviewOutcome } from './outcome.ts';
+import { assessmentOutcome, isTransientProviderError, type ReviewOutcome } from './outcome.ts';
 import { runBounded } from './process.ts';
 
 const READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob'];
@@ -64,11 +63,5 @@ async function claudeReview(review: ClaudeCliReview, stdin: string, neutralCwd: 
     const message = `claude -p failed (${status}): ${detail.slice(0, 500)}`;
     return { type: 'error', error: { type: 'session', message, transient: isTransientProviderError(message) || /overload/i.test(detail) } };
   }
-  const text = typeof result.result === 'string' ? result.result : '';
-  if (!text.trim()) return { type: 'error', error: { type: 'session', message: 'guardian review completed without an assessment payload', transient: false } };
-  try {
-    return { type: 'completed', assessment: parseGuardianAssessment(text) };
-  } catch (error) {
-    return { type: 'error', error: { type: 'parse', message: (error as Error).message } };
-  }
+  return assessmentOutcome(typeof result.result === 'string' ? result.result : '');
 }

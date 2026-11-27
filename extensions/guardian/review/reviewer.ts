@@ -8,9 +8,9 @@ import { Type } from 'typebox';
 import { permissionsInstructions, wrapPermissionsInstructions } from '../permissions.ts';
 import { type PlatformSandbox, runSandboxed } from '../sandbox.ts';
 import type { SandboxPolicy } from '../seatbelt.ts';
-import { GUARDIAN_OUTPUT_CONTRACT_PROMPT, parseGuardianAssessment } from './assessment.ts';
+import { GUARDIAN_OUTPUT_CONTRACT_PROMPT } from './assessment.ts';
 import { truncateText } from './context.ts';
-import { isTransientProviderError, type ReviewOutcome } from './outcome.ts';
+import { assessmentOutcome, isTransientProviderError, type ReviewOutcome } from './outcome.ts';
 import { raceAbort } from './process.ts';
 import { GUARDIAN_POLICY, GUARDIAN_POLICY_TEMPLATE, guardianPolicyInstructions } from './prompts.ts';
 
@@ -66,13 +66,7 @@ export async function runReviewerTurn(turn: ReviewerTurn): Promise<ReviewOutcome
       messages.push(response);
       const calls = response.content.filter(part => part.type === 'toolCall');
       if (!calls.length) {
-        const text = response.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
-        if (!text.trim()) return { type: 'error', error: { type: 'session', message: 'guardian review completed without an assessment payload', transient: false } };
-        try {
-          return { type: 'completed', assessment: parseGuardianAssessment(text) };
-        } catch (error) {
-          return { type: 'error', error: { type: 'parse', message: (error as Error).message } };
-        }
+        return assessmentOutcome(response.content.flatMap(part => part.type === 'text' ? [part.text] : []).join(''));
       }
       for (const call of calls) messages.push(await executeTool(call, turn, signal));
     }

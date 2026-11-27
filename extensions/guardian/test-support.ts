@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, type TestContext } from 'node:test';
 import { DEFAULT_GUARDIAN_CONFIG, type GuardianConfig } from './config.ts';
-import { detectPlatformSandbox } from './sandbox.ts';
 
 export const FLOCK_CANDIDATES = ['/usr/bin/flock', '/bin/flock'];
 export const flock = FLOCK_CANDIDATES.find(existsSync);
@@ -21,8 +20,9 @@ export function isolateRegistryTmpdir(prefix: string): void {
   });
 }
 
-/** Detection caches by cwd and reads `TMPDIR`, so call it after {@link isolateRegistryTmpdir}. */
+/** Detection caches by cwd and reads `TMPDIR`, so call it after {@link isolateRegistryTmpdir}. Imported lazily so registry-only suites skip the sandbox modules. */
 export async function detectSandbox() {
+  const { detectPlatformSandbox } = await import('./sandbox.ts');
   const detected = (await detectPlatformSandbox()).sandbox;
   const sandboxed = { skip: (!detected || (detected.kind === 'bubblewrap' && !flock)) && 'sandbox/flock prerequisites are unavailable' };
   return { detected, sandboxed };
@@ -47,7 +47,7 @@ export async function holdRegistryLock(t: TestContext, registry: string) {
 
 export const WORKSPACE_CONFIG: GuardianConfig = { ...DEFAULT_GUARDIAN_CONFIG, sandbox: { ...DEFAULT_GUARDIAN_CONFIG.sandbox, mode: 'workspace-write' } };
 
-/** Workspace-write with `/tmp` and `$TMPDIR` excluded, so writes stay inside the roots a test names. */
+/** Workspace-write that by default excludes `/tmp` and `$TMPDIR`, so writes stay inside the roots a test names; `overrides.sandbox` wins. */
 export const isolatedConfig = (overrides: Partial<GuardianConfig> = {}): GuardianConfig => ({
   ...WORKSPACE_CONFIG, ...overrides,
   sandbox: { ...WORKSPACE_CONFIG.sandbox, excludeSlashTmp: true, excludeTmpdirEnvVar: true, ...overrides.sandbox },

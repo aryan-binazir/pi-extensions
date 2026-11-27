@@ -30,7 +30,7 @@ test('a rationale that is not a string is rejected, as serde rejects it in Codex
   assert.equal(parseGuardianAssessment('{"outcome":"allow","rationale":null}').outcome, 'allow');
 });
 
-test('the output contract prompt names the allow shortcut and the full schema', () => {
+test('the output contract prompt offers the allow shortcut and ends with the rationale field', () => {
   assert.ok(GUARDIAN_OUTPUT_CONTRACT_PROMPT.includes('{"outcome":"allow"}'));
   assert.ok(GUARDIAN_OUTPUT_CONTRACT_PROMPT.endsWith('"rationale": string\n}'));
 });

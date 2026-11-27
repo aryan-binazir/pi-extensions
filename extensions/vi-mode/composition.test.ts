@@ -7,24 +7,19 @@ import { editor, keys } from './test-support.ts';
 class SuggestionEditor extends CustomEditor {
   suggestion = '';
   inputs: string[] = [];
-  clearCount = 0;
   override handleInput(data: string): void {
     this.inputs.push(data);
     if (data === '\t' && this.suggestion) {
       this.insertTextAtCursor(this.suggestion);
-      this.forceClearGhost();
+      this.suggestion = '';
       return;
     }
     if (data === '\x1b[C' && this.suggestion) {
       this.setText(this.getText().replace(/\w+$/, this.suggestion));
-      this.forceClearGhost();
+      this.suggestion = '';
       return;
     }
     super.handleInput(data);
-  }
-  forceClearGhost(): void {
-    this.suggestion = '';
-    this.clearCount++;
   }
   override render(width: number): string[] {
     return [...super.render(width), this.suggestion];
@@ -40,11 +35,13 @@ test('Vi composes with a custom editor without replacing its instance or insert 
   assert.equal(e.getText(), 'hello world');
   assert.ok(e instanceof SuggestionEditor);
   assert.ok(e.inputs.includes('\t'));
+  const forwarded = e.inputs.length;
   e.handleInput('\x1b');
   keys(e, 'u');
   assert.equal(e.getText(), 'hello');
   keys(e, 'u');
   assert.equal(e.getText(), '');
+  assert.equal(e.inputs.length, forwarded, 'insert Escape and Vi commands stay in Vi');
   dispose();
 });
 
@@ -77,24 +74,6 @@ test('independent Vi module copies attach once to the same editor', async () => 
   assert.equal(e.getText(), 'ello');
   keys(e, 'u');
   assert.equal(e.getText(), 'hello');
-  dispose();
-});
-
-test('Escape enters normal mode and clears custom suggestions before Vi motions', () => {
-  const e = editor(SuggestionEditor);
-  const dispose = attachViMode(e);
-  keys(e, 'alpha beta');
-  e.suggestion = ' gamma';
-  e.handleInput('\x1b');
-  assert.equal(e.suggestion, '');
-  const count = e.inputs.length;
-  keys(e, '0dw');
-  assert.equal(e.getText(), 'beta');
-  assert.equal(e.inputs.length, count);
-  e.suggestion = ' late response';
-  const screen = e.render(80).join('\n');
-  assert.doesNotMatch(screen, /late response/);
-  assert.match(screen, /NORMAL/);
   dispose();
 });
 

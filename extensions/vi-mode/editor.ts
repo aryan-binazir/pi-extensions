@@ -164,7 +164,7 @@ class ViMode {
     editor.render = this.render.bind(this);
     editor.invalidate = () => {
       this.base.invalidate();
-      // Ghost's async invalidation does not schedule a repaint in compiled Pi.
+      // Composed editors may invalidate asynchronously without scheduling a repaint.
       if (!this.disposed) this.tui.requestRender();
     };
     internal.renderBottomBorder = this.renderBottomBorder.bind(this);
@@ -174,9 +174,6 @@ class ViMode {
     this.tui.setShowHardwareCursor(true);
     this.cursorShape();
     attachEditorInput(editor, { key: data => this.handleKey(data), paste: data => this.consumePaste(data), release: () => this.releaseCursor(), acquire: () => this.acquireCursor() });
-  }
-  private clearGhost(): void {
-    (this.editor as CustomEditor & { forceClearGhost?: () => void }).forceClearGhost?.();
   }
   private resetPending(): void {
     this.op = "";
@@ -296,7 +293,6 @@ class ViMode {
       this.handlingBaseInput = true;
       try { this.base.handleInput(data); }
       finally { this.handlingBaseInput = false; }
-      if (this.mode !== "insert") this.clearGhost();
       this.draft = undefined;
       const historyReset = history !== this.undoHistory;
       if (before && !historyReset && before.text !== this.text()) {
@@ -342,7 +338,6 @@ class ViMode {
     this.resetDraft(text);
   }
   private resetDraft(text: string): void {
-    this.clearGhost();
     if (this.mode === "visual" || this.mode === "line") this.mode = "normal";
     this.anchor = 0;
     this.visualScroll = 0;
@@ -878,7 +873,7 @@ class ViMode {
       ? [a + (around ? 0 : 1), b + (around ? 1 : 0)]
       : undefined;
   }
-  dispose(): void { this.clearGhost(); retireEditorInput(this.editor); }
+  dispose(): void { retireEditorInput(this.editor); }
   private acquireCursor(): void {
     if (!this.disposed) return;
     this.disposed = false;
@@ -893,7 +888,6 @@ class ViMode {
     this.tui.terminal.write("\x1b[0 q");
   }
   private consumePaste(data: string): void {
-    this.clearGhost();
     const payload = safeDraft(data.replace(/\x1b\[(\d+);5u/g, (sequence, code: string) => {
       const cp = Number(code);
       return cp >= 97 && cp <= 122 ? String.fromCharCode(cp - 96)
@@ -917,7 +911,6 @@ class ViMode {
     this.move(p + visible.length);
   }
   private handleKey(data: string): void {
-    if (this.mode !== "insert" || matchesKey(data, "escape")) this.clearGhost();
     if (matchesKey(data, "escape")) {
       const discarded = this.discardArgument;
       this.discardArgument = false;
@@ -1282,7 +1275,6 @@ class ViMode {
     return this.base.renderBottomBorder(Math.max(0, width - visibleWidth(label)), hidden) + label;
   }
   render(width: number): string[] {
-    if (this.mode !== "insert") this.clearGhost();
     if (this.editor.focused && !this.tui.getShowHardwareCursor()) {
       this.tui.setShowHardwareCursor(true);
       this.cursorShape();

@@ -6,8 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { assertChildTask } from './scope.ts';
-import { runFixtureWorkflow as runWorkflow, workflowFixture } from './test-support.ts';
+import { admissionFixture, runFixtureWorkflow as runWorkflow, workflowFixture } from './test-support.ts';
 
 async function fakeWorkflowNode(cwd: string, options: {version?: string; beforeCompile?: string} = {}) {
  const candidate = join(cwd, 'node');
@@ -183,12 +182,13 @@ test('workflow retry stops after child extension approval is denied', async () =
  const extension=join(cwd,'child.ts');
  await writeFile(extension,'export default () => {}');
  let prompts=0;let launches=0;
+ const fixture=admissionFixture({cwd:()=>cwd,tools:()=>['read','grep','find','ls'],approve:async()=>{prompts++;return false;}}),parent=fixture.admission;
  try {
   await assert.rejects(runWorkflow({
    source:`return await api.retry(5,()=>api.spawn({task:'inspect',preset:'reader',extensions:[${JSON.stringify(extension)}]},'inspect'));`,
-   cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'reader',approve:async()=>true,
-   spawn:async task=>{
-    await assertChildTask({...task,tools:task.tools ?? []},{parent:{cwd,tools:['read','grep','find','ls']},approve:async()=>{prompts++;return false;}});
+   cwd,journalDirectory:join(cwd,'journal'),policyIdentity:'reader',admission:parent.workflow(fixture.ctx),approve:async()=>true,
+   spawn:async (task,signal)=>{
+    await parent.queue(task,signal);
     launches++;
     return 'launched';
    },

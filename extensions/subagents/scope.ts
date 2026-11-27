@@ -20,7 +20,7 @@ export function insideRoot(canonicalRoot: string, canonicalPath: string): boolea
   return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
-export function delegationScope(parent: DelegationScope) {
+function delegationScope(parent: DelegationScope) {
   const connectors = Object.entries(parent.delegatedTools ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
     .filter(([name]) => parent.tools.includes(name) && parent.callableTools?.includes(name) && !parent.builtinTools?.includes(name));
   const tools = [...ALL_TOOLS.filter(tool => parent.tools.includes(tool)), ...connectors.map(([name]) => name)];
@@ -28,7 +28,7 @@ export function delegationScope(parent: DelegationScope) {
   return {tools, readTools, replayIdentity: JSON.stringify(connectors.length ? {version: 2, cwd: parent.cwd, tools, readTools} : {version: 1, cwd: parent.cwd, tools})};
 }
 
-export function assertToolSelection(tools: string[], parent: DelegationScope): void {
+function assertToolSelection(tools: string[], parent: DelegationScope): void {
   const unavailable: string[] = [], disallowed: string[] = [], uncallable: string[] = [], denied: string[] = [], builtin: string[] = [];
   const allowed = delegationScope(parent).tools;
   for (const name of tools) {
@@ -54,13 +54,13 @@ function sensitiveComponent(name: string) {
   return ['.git', '.pi', '.agents', '.codex', 'AGENTS.md', 'CLAUDE.md', 'id_rsa', 'id_ed25519', 'auth.json', 'credentials', 'credentials.json'].includes(name) || /^\.env(?:\.|$)|^credentials(?:\.|$)/i.test(name);
 }
 
-export async function assertWorkspacePath(root: string, path: string): Promise<void> {
+async function assertWorkspacePath(root: string, path: string): Promise<void> {
   const canonicalRoot = await realpath(root), target = await realpath(path);
   if (!insideRoot(canonicalRoot, target)) throw new Error('Path is outside parent workspace');
   if (relative(canonicalRoot, target).split(sep).some(sensitiveComponent)) throw new Error('Path is sensitive or repository control data');
 }
 
-export async function assertChildTask(task: { cwd: string; tools: string[]; extensions?: string[] }, options: { parent: DelegationScope; approve?: (request: string) => Promise<boolean> }): Promise<void> {
+async function assertChildTask(task: { cwd: string; tools: string[]; extensions?: string[] }, options: { parent: DelegationScope; approve?: (request: string) => Promise<boolean> }): Promise<void> {
   await assertWorkspacePath(options.parent.cwd, task.cwd);
   assertToolSelection(task.tools, options.parent);
   if (task.extensions?.length) {
@@ -74,22 +74,22 @@ export async function assertChildTask(task: { cwd: string; tools: string[]; exte
   }
 }
 
-export async function assertWorkflowRead(parent: DelegationScope, path: string): Promise<void> {
+async function assertWorkflowRead(parent: DelegationScope, path: string): Promise<void> {
   if (!delegationScope(parent).tools.includes('read')) throw new Error('Read is outside parent permissions');
   await assertWorkspacePath(parent.cwd, path);
 }
 
-export function validateTask(spec: TaskSpec, allowedTools?: string[], readTools = READ_TOOLS, hooksExtension?: string, guardianExtension?: string | null): Promise<ValidTask> {
+function validateTask(spec: TaskSpec, allowedTools: string[], readTools: string[], guardianExtension?: string | null): Promise<ValidTask> {
   return prepareTask(spec, spec => {
-    const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS).filter(tool => !allowedTools || allowedTools.includes(tool));
+    const tools = spec.tools ?? (spec.preset === 'reader' ? READ_TOOLS : ALL_TOOLS).filter(tool => allowedTools.includes(tool));
     if (!Array.isArray(tools) || tools.some(tool => typeof tool !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(tool)) || new Set(tools).size !== tools.length) throw new Error('Invalid child tool selection; use unique exact tool names');
-    const unknown = connectorTools(tools).filter(tool => !allowedTools?.includes(tool));
+    const unknown = connectorTools(tools).filter(tool => !allowedTools.includes(tool));
     if (unknown.length) throw new Error(`Unavailable or disallowed child tools: ${unknown.join(', ')}. Configure exact connector grants in user-scoped subagents.json and activate the tools in the parent.`);
-    const denied = allowedTools && tools.filter(tool => !allowedTools.includes(tool));
-    if (denied?.length) throw new Error(`Explicit child tools exceed parent permissions: ${denied.join(', ')}`);
+    const denied = tools.filter(tool => !allowedTools.includes(tool));
+    if (denied.length) throw new Error(`Explicit child tools exceed parent permissions: ${denied.join(', ')}`);
     assertReaderSelection(spec.preset, tools, readTools);
     return tools;
-  }, hooksExtension, guardianExtension);
+  }, undefined, guardianExtension);
 }
 
 function assertReaderSelection(preset: TaskSpec['preset'], tools: string[], readTools: string[]): void {
@@ -97,7 +97,7 @@ function assertReaderSelection(preset: TaskSpec['preset'], tools: string[], read
   if (preset === 'reader' && writes.length) throw new Error(`Reader preset cannot grant write tools: ${writes.join(', ')}`);
 }
 
-export function connectorTools(tools: string[]): string[] {
+function connectorTools(tools: string[]): string[] {
   return tools.filter(name => !ALL_TOOLS.includes(name));
 }
 
@@ -188,7 +188,7 @@ export class DelegationAdmission {
       spec = this.normalize(spec, ctx);
     }
     const scope = delegationScope(this.parent());
-    const task = await validateTask(spec, scope.tools, scope.readTools, undefined, this.parent().guardian);
+    const task = await validateTask(spec, scope.tools, scope.readTools, this.parent().guardian);
     bridge = validateBridge(task, bridge);
     signal.throwIfAborted();
     const ctx = this.source.selection();
@@ -223,7 +223,7 @@ export class DelegationAdmission {
         if (Array.isArray(task.tools) && task.tools.every(name => typeof name === 'string')) assertToolSelection(task.tools, this.parent());
         task = resolveProfile(task, config, selection);
         const scope = delegationScope(this.parent());
-        const validated = await validateTask(task, scope.tools, scope.readTools, undefined, this.parent().guardian);
+        const validated = await validateTask(task, scope.tools, scope.readTools, this.parent().guardian);
         if (!insideRoot(root, validated.cwd)) throw new Error('Child cwd escapes workflow cwd');
         return validated;
       },

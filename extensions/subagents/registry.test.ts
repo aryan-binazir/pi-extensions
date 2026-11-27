@@ -8,11 +8,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { piInvocation, SubagentRegistry } from './registry.ts';
-import { assertChildTask, validateTask } from './scope.ts';
+import { piInvocation, prepareTask, SubagentRegistry } from './registry.ts';
 
 test('compiled Pi launches the parent executable while Node and generic Bun keep PATH lookup', async () => {
-  const spec = await validateTask({task: 'literal', cwd: tmpdir(), tools: []}, []);
+  const {task: spec} = await supervisorAdmission.queue({task: 'literal', cwd: tmpdir(), tools: []}, new AbortController().signal);
   const execPath = Object.getOwnPropertyDescriptor(process, 'execPath')!;
   const bun = Object.getOwnPropertyDescriptor(process.versions, 'bun');
   const entrypoint = process.argv[1];
@@ -43,7 +42,7 @@ test('compiled Pi launches the parent executable while Node and generic Bun keep
 test('an explicit child model also scopes Pi model cycling', async () => {
   const entry = import.meta.resolve('@earendil-works/pi-coding-agent');
   const {parseArgs} = await import(new URL('./cli/args.js', entry).href);
-  const spec = await validateTask({task: 'read', cwd: tmpdir(), model: 'openai-codex/gpt-6-astra'}, []);
+  const {task: spec} = await supervisorAdmission.queue({task: 'read', cwd: tmpdir(), model: 'openai-codex/gpt-6-astra'}, new AbortController().signal);
   const selected = parseArgs(piInvocation(spec).args.slice(2));
   assert.equal(selected.model, 'openai-codex/gpt-6-astra');
   assert.deepEqual(selected.models, ['openai-codex/gpt-6-astra']);
@@ -71,14 +70,16 @@ test('explicit task briefs remain literal messages through Pi attachment parsing
       {brief: '\n@already literal', message: '\n@already literal'},
     ];
     for (const {brief, message} of cases) {
-      const spec = await validateTask({task: brief, cwd, tools: []}, []);
-      await assertChildTask(spec, {parent: {cwd, tools: []}});
+      const {task: spec} = await admissionFixture({cwd: () => cwd, tools: () => []}).admission.queue({task: brief, cwd, tools: []}, new AbortController().signal);
       assert.equal(spec.task, brief);
-      const parsed = parseArgs(piInvocation(spec).args.slice(2));
-      assert.deepEqual(parsed.fileArgs, [], brief);
-      assert.deepEqual(parsed.messages, [message], brief);
-      assert.deepEqual(parsed.tools, [], brief);
-      assert.deepEqual(await processFileArguments(parsed.fileArgs), {text: '', images: []}, brief);
+      for (const selected of [spec, {...spec, model: undefined, thinking: undefined}]) {
+        const parsed = parseArgs(piInvocation(selected).args.slice(2));
+        assert.deepEqual(parsed.fileArgs, [], brief);
+        assert.deepEqual(parsed.messages, [message], brief);
+        assert.deepEqual(parsed.tools, [], brief);
+        assert.equal(parsed.model, selected.model, brief);
+        assert.deepEqual(await processFileArguments(parsed.fileArgs), {text: '', images: []}, brief);
+      }
     }
   } finally { await rm(root, {recursive: true, force: true}); }
 });
@@ -336,15 +337,20 @@ test('every child loads the hooks and Guardian extensions before any other and r
     const guardian = fileURLToPath(new URL('../guardian/index.ts', import.meta.url));
     const extra = join(cwd, 'extra.ts');
     await writeFile(extra, 'export default () => {};');
-    const spec = await validateTask({task: 'Check', cwd, tools: [], extensions: [extra, hooks, guardian]}, []);
+    const signal = new AbortController().signal;
+    const queue = (guardianPath?: string, extensions?: string[]) => admissionFixture({cwd: () => cwd, tools: () => [], approve: async () => true,
+      ...(guardianPath ? {definitions: () => [{name: 'bash', sourceInfo: {path: guardianPath}}] as any} : {})}).admission.queue({task: 'Check', cwd, tools: [], extensions}, signal);
+    const {task: spec} = await queue(undefined, [extra, hooks, guardian]);
     const args = piInvocation(spec).args;
     assert.deepEqual(args.flatMap((arg, i) => arg === '-e' ? [args[i + 1]] : []), [await realpath(hooks), await realpath(guardian), await realpath(extra)]);
     await symlink(join(cwd, 'gone.ts'), join(cwd, 'dangling.ts'));
-    for (const missing of [join(cwd, 'missing.ts'), join(cwd, 'dangling.ts')]) {
-      await assert.rejects(validateTask({task: 'Check', cwd, tools: []}, [], undefined, missing), /Subagents do not start without the hooks extension/);
-      await assert.rejects(validateTask({task: 'Check', cwd, tools: []}, [], undefined, undefined, missing), /Subagents do not start without the guardian extension/);
-    }
-    const withoutGuardian = piInvocation(await validateTask({task: 'Check', cwd, tools: []}, [], undefined, undefined, null)).args;
+    await mkdir(join(cwd, 'dangling', 'guardian'), {recursive: true});
+    await symlink(join(cwd, 'gone.ts'), join(cwd, 'dangling', 'guardian', 'index.ts'));
+    for (const missing of [join(cwd, 'missing.ts'), join(cwd, 'dangling.ts')])
+      await assert.rejects(prepareTask({task: 'Check', cwd, tools: []}, () => [], missing), /Subagents do not start without the hooks extension/);
+    for (const missing of [join(cwd, 'missing', 'guardian', 'index.ts'), join(cwd, 'dangling', 'guardian', 'index.ts')])
+      await assert.rejects(queue(missing), /Subagents do not start without the guardian extension/);
+    const withoutGuardian = piInvocation((await queue('builtin:bash')).task).args;
     assert.deepEqual(withoutGuardian.flatMap((arg, i) => arg === '-e' ? [withoutGuardian[i + 1]] : []), [await realpath(hooks)], 'a parent without Guardian adds none');
   } finally { await rm(cwd, {recursive: true, force: true}); }
 });

@@ -168,7 +168,6 @@ export function loadGuardianConfig(path: string): GuardianConfig {
   };
 }
 
-/** The platform sandbox policy for commands and writes; `host` and `danger-full-access` never reach a sandbox. */
 export function sandboxPolicyFor(config: GuardianConfig): SandboxPolicy {
   const { mode, networkAccess, writableRoots, excludeTmpdirEnvVar, excludeSlashTmp } = config.sandbox;
   return { mode: mode === 'read-only' ? 'read-only' : 'workspace-write', networkAccess, writableRoots, excludeTmpdirEnvVar, excludeSlashTmp };

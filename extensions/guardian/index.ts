@@ -98,7 +98,6 @@ export default async function guardian(pi: ExtensionAPI): Promise<void> {
     reportedError = problem;
   };
   const reloadPolicies = async () => { policies = retainPolicies(policies, await loadPolicies([userRulesDir()])); };
-  /** Whether commands run in the platform sandbox, and its writable roots when that sandbox is workspace-write. */
   const sandboxing = (settings: GuardianConfig, cwd: string) => {
     const sandboxed = sandboxAvailable && settings.sandbox.mode !== 'host' && settings.sandbox.mode !== 'danger-full-access';
     const writableRoots = sandboxed && settings.sandbox.mode === 'workspace-write'

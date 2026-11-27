@@ -150,12 +150,16 @@ for (const mode of ['workspace-write', 'read-only', 'danger-full-access'] as con
       if (mode === 'danger-full-access') {
         assert.doesNotMatch(parent, /Network access is restricted/);
         assert.match(parent, /network access/);
-      } else {
+      } else if (sandboxAvailable) {
         assert.match(parent, /Approved escalations and file changes run on the host/);
+      } else {
+        assert.match(parent, /Commands and file changes run on the host/);
       }
       const listsRoot = mode === 'workspace-write' && sandboxAvailable;
-      assert.equal(parent.includes('extra-writable-root'), listsRoot, 'reviewer writable roots');
-      assert.equal(main.includes('extra-writable-root'), listsRoot, 'agent writable roots');
+      for (const [name, prompt] of [['reviewer', parent], ['agent', main]]) {
+        assert.equal(/writable roots?\b/i.test(prompt), listsRoot, `${name} writable-roots section`);
+        assert.equal(prompt.includes('extra-writable-root'), listsRoot, `${name} configured writable root`);
+      }
       assert.ok(extraRoot && main);
     });
   });

@@ -9,7 +9,7 @@ import {
   USER_NAMESPACE_WARNING, WSL1_BWRAP_WARNING,
 } from './bwrap-launcher.ts';
 import { createBwrapCommandArgs, createProcPreflightArgs, FIRST_BIND_DATA_FD, isProcMountFailure, withAsPid1, withOptionsBeforeCommand } from './bwrap.ts';
-import { raceAbort, runBounded } from './review/process.ts';
+import { type BoundedRun, type BoundedRunOptions, raceAbort, runBounded, runStarted } from './review/process.ts';
 import { networkSeccompMode, seccompProgram, seccompSupported } from './seccomp.ts';
 import {
   createSeatbeltCommandArgs, MACOS_PATH_TO_SEATBELT_EXECUTABLE, SandboxPreparationError, type SandboxPolicy, sandboxEnv as seatbeltEnv,
@@ -42,6 +42,17 @@ export interface PlatformSandbox {
   readonly summary: string;
   /** Starts `command` in its own process group under `policy`; rejects when the policy cannot be enforced. */
   spawn(command: readonly string[], policy: SandboxPolicy, options: SpawnSandboxedOptions): Promise<SandboxedProcess>;
+}
+
+export interface SandboxedRunOptions extends BoundedRunOptions {
+  env: NodeJS.ProcessEnv;
+  /** Piped to the command; without it the command's stdin is ignored. */
+  stdin?: string;
+}
+
+/** Runs `command` under `policy`; one deadline and abort bound preparation, execution and the wait for cleanup. */
+export function runSandboxed(sandbox: PlatformSandbox, command: readonly string[], policy: SandboxPolicy, { cwd, env, ...run }: SandboxedRunOptions): Promise<BoundedRun> {
+  return runStarted(signal => sandbox.spawn(command, policy, { cwd, env, stdin: run.stdin === undefined ? 'ignore' : 'pipe', signal }), run);
 }
 
 export interface SandboxDetection {

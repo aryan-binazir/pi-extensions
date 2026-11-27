@@ -173,7 +173,7 @@ test('the deadline includes preparation and prevents launch after cancellation',
     signal?.throwIfAborted();
     launched = true;
     return { child: spawn(process.execPath, ['-e', ''], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] }), finished: Promise.resolve() };
-  }, { cwd: tmpdir(), timeoutMs: 40, maxBytes: 100 });
+  }, { timeoutMs: 40, maxBytes: 100 });
   assert.equal(run.timedOut, true);
   assert.equal(run.spawnError, undefined);
   assert.equal(launched, false);
@@ -190,7 +190,7 @@ test('cleanup waits honour cancellation without misreporting completed commands'
       const child = spawn(process.execPath, ['-e', ''], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
       if (abort) child.once('exit', () => setTimeout(() => controller.abort(), 20));
       return { child, finished: new Promise<void>(() => {}) };
-    }, { cwd: tmpdir(), signal: controller.signal, timeoutMs: abort ? 2000 : 1000, maxBytes: 100 });
+    }, { signal: controller.signal, timeoutMs: abort ? 2000 : 1000, maxBytes: 100 });
     const outcome = await Promise.race([run, new Promise<undefined>(resolve => setTimeout(resolve, 2500))]);
     assert.ok(outcome, 'completion cleanup cannot hold settlement beyond the budget');
     assert.equal(outcome.exitCode, 0);
@@ -211,7 +211,7 @@ test('cancellation after exit preserves the command result while buffered output
     child.stdout.pause();
     child.once('exit', () => { controller.abort(); child.stdout.resume(); });
     return { child, finished: new Promise<void>(() => {}) };
-  }, { cwd: tmpdir(), signal: controller.signal, timeoutMs: 10_000, maxBytes: 100 });
+  }, { signal: controller.signal, timeoutMs: 10_000, maxBytes: 100 });
   assert.equal(result.exitCode, 0);
   assert.equal(result.aborted, false);
   assert.equal(result.timedOut, false);
@@ -226,7 +226,7 @@ test('an abandoned start that resolves late is terminated and reaped', async () 
     const started = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
     child = started;
     return { child: started, finished: Promise.resolve() };
-  }, { cwd: tmpdir(), timeoutMs: 20, maxBytes: 100 });
+  }, { timeoutMs: 20, maxBytes: 100 });
   assert.equal(result.timedOut, true);
   await new Promise(resolve => setTimeout(resolve, 160));
   assert.ok(child?.pid);
